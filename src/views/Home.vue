@@ -3,7 +3,6 @@ import { ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useRouter } from 'vue-router';
-import type { SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
 const router = useRouter();

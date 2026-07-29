@@ -5,7 +5,7 @@ import { fileURLToPath, URL } from 'node:url';
 // Tauri 期望一个固定端口的 dev server（默认 1420）
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(async () => ({
+export default defineConfig(() => ({
   plugins: [vue()],
 
   // Vite 解析别名，方便 `@/` 引用 src/
@@ -42,7 +42,7 @@ export default defineConfig(async () => ({
     // Tauri 在生产模式下使用 Chromium，因此目标设为支持 Chromium 的版本
     target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari13',
     // 不最小化以便调试
-    minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,
+    minify: process.env.TAURI_ENV_DEBUG ? false : ('esbuild' as const),
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
   },
 

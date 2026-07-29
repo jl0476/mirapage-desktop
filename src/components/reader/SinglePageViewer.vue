@@ -1,0 +1,60 @@
+<script setup lang="ts">
+/**
+ * SinglePageViewer.vue
+ * 单页 OpenSeadragon 阅读器（DESIGn §8.2 示例）
+ *
+ * - props.imageUrl: 图片 URL（来自 Phase 2/3/7/8 的 read_file 接口 — Uint8Array 转 blob URL）
+ * - onMounted: 实例化 OpenSeadragon viewer
+ * - watch(imageUrl): 切换图片时 viewer.open({ type: 'image', url })
+ * - onBeforeUnmount: viewer.destroy()
+ */
+import OpenSeadragon from 'openseadragon';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+
+interface Props {
+  imageUrl: string;
+}
+const props = defineProps<Props>();
+
+const containerRef = ref<HTMLDivElement | null>(null);
+let viewer: OpenSeadragon.Viewer | null = null;
+
+onMounted(() => {
+  if (!containerRef.value) return;
+  viewer = OpenSeadragon({
+    element: containerRef.value,
+    tileSources: { type: 'image', url: props.imageUrl },
+    showNavigator: false,
+    gestureSettingsMouse: { scrollToZoom: true },
+    animationTime: 0.3,
+  });
+});
+
+watch(
+  () => props.imageUrl,
+  (url) => {
+    viewer?.open({ type: 'image', url });
+  },
+);
+
+onBeforeUnmount(() => {
+  viewer?.destroy();
+  viewer = null;
+});
+</script>
+
+<template>
+  <div
+    ref="containerRef"
+    data-test="viewer-container"
+    class="single-page-viewer"
+  />
+</template>
+
+<style scoped>
+.single-page-viewer {
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+</style>
