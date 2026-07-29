@@ -1,0 +1,17 @@
+[package]
+name = "mirapage-desktop-algorithm-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# 独立验证 Phase 1 algorithm/* 模块:源码直接包含(纯 std lib 副本),
+# 完全绕开 Tauri 全栈 build 链路(避免 schemars/indexmap 兼容性 hang)。
+#
+# 这是临时绕路:正式做法是 src-tauri 把 algorithm 拆成 sub-crate。
+# 既然 Phase 1 algorithm 模块只依赖 std,直接复制源码测即可。
+#
+# Run: cargo test --manifest-path src-tauri-algorithm-tests/Cargo.toml
+
+[lib]
+name = "mirapage_desktop_algorithm"
+path = "src/lib.rs"

@@ -13,6 +13,9 @@ dist-ssr/
 src-tauri/target/
 src-tauri/Cargo.lock
 
+# Independent algorithm test crate (Phase 1 algorithm/* test surface)
+src-tauri-algorithm-tests/target/
+
 # IDEs and editors
 .idea/
 .vscode/*

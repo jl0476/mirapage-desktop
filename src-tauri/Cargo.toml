@@ -19,8 +19,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-store = "2"
-tauri-plugin-updater = "2"
+# tauri-plugin-store（Phase 1 注释：settings 走自家 DB，不需要此 plugin）
+# tauri-plugin-store = "2"
+# tauri-plugin-updater（Phase 9 启用：自动更新）
+# tauri-plugin-updater = "2"
 
 async-trait = "0.1"
 
@@ -28,20 +30,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
-# 远程源（Phase 7-8 启用）
-smb-rs = "0.6"
+# 远程源（Phase 7-8 启用，注释：版本号 0.6 在代理下不可达，源码未 use）
+# smb-rs = "0.6"
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
 
-# 压缩包（Phase 3 启用）
-zip = "2"
-unrar = "0.7"
-sevenz-rust = "0.6"
+# 压缩包（Phase 3 启用，注释：源码未 use）
+# zip = "2"
+# unrar = "0.7"
+# sevenz-rust = "0.6"
 
 # 数据库
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# 凭据
-keyring = "3"
+# 凭据（Phase 7 启用，注释：源码未 use）
+# keyring = "3"
 
 # 错误处理
 thiserror = "1"
@@ -58,3 +60,10 @@ percent-encoding = "2"
 [features]
 # 此特性用于在生产环境构建时启用自定义协议
 custom-protocol = ["tauri/custom-protocol"]
+
+
+# ─── 算法独立测试 ──────────────────────────────────────────────────────
+# 注意：algorithm/* 模块的纯 std 测试放在同级目录 `src-tauri-algorithm-tests/`，
+# 独立 Cargo 工程绕开 Tauri 全栈 build 链路上的 schemars/indexmap 兼容性 hang。
+# 运行：
+#   cargo test --manifest-path src-tauri-algorithm-tests/Cargo.toml
