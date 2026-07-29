@@ -1,21 +1,16 @@
 <script setup lang="ts">
 import { onMounted } from 'vue';
-import { useI18n } from 'vue-i18n';
 import { useSettingsStore } from '@/stores/settings';
-import { resolveSystemLocale } from '@/locales';
+import { useLocaleSync } from '@/composables/useLocaleSync';
 
-const { locale } = useI18n();
 const settings = useSettingsStore();
 
-onMounted(async () => {
-  // 加载 settings
-  await settings.load();
+// 启动同步(把 settings.locale 写入 vue-i18n locale + watch 后续变化)
+useLocaleSync();
 
-  // 应用 locale
-  const target = settings.locale === 'system'
-    ? resolveSystemLocale(navigator.language)
-    : settings.locale;
-  locale.value = target;
+onMounted(async () => {
+  // 加载 settings（locale 已在 useLocaleSync 里被读）
+  await settings.load();
 });
 </script>
 

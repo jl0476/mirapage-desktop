@@ -1,4 +1,5 @@
-// vue-i18n 配置
+// vue-i18n 配置 + SupportedLocale 类型
+// resolveSystemLocale 与格式化 helper 拆到 ./helpers.ts（避免被 vue-i18n mock 影响）
 
 import { createI18n } from 'vue-i18n';
 import zhCN from './zh-CN';
@@ -16,8 +17,4 @@ export const i18n = createI18n({
   },
 });
 
-/** 把系统 locale 解析为 zh-CN / en-US */
-export function resolveSystemLocale(systemLocale: string): 'zh-CN' | 'en-US' {
-  if (systemLocale.toLowerCase().startsWith('zh')) return 'zh-CN';
-  return 'en-US';
-}
+export { resolveSystemLocale } from './helpers';
