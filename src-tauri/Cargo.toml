@@ -30,9 +30,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 
-# 远程源（Phase 7-8 启用，注释：版本号 0.6 在代理下不可达，源码未 use）
-# smb-rs = "0.6"
+# 远程源（Phase 7-8 启用）
+# smb-rs 重命名为 smb（afiffon/smb-rs 项目）, 0.11 是当前可用版本
+smb = "0.11"
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
+quick-xml = "0.36"   # WebDAV PROPFIND 响应 XML 解析
 
 # 压缩包（Phase 3 启用：CBZ/ZIP 已实装,RAR/7z 占位）
 zip = "2"
