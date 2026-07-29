@@ -459,24 +459,214 @@ INSERT INTO settings (key, value) VALUES
 
 ---
 
-## 7. 关键技术参考（MiraPage Android 仅作参考，不引用代码）
+## 7. MiraPage Android 参考索引（按 Phase 分组）
 
-以下 MiraPage Android 文件**只读不引用**，作为功能语义与算法逻辑参考，新仓库中用 Rust / TypeScript 重写：
+MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**只读参考**，**不引用、不复制**任何 Kotlin/Java 源文件。
+
+本节按 Phase 列出每个阶段需要查阅的 Android 文件 + 关键行号。
+
+> **使用方式**：实现 Phase X 时，打开 IDE 第二个窗口加载 Android 工程，按本节列出的文件与行号查参考。`DESIGN.md` §13 描述了算法语义；具体实现细节按本节定位。
+
+### 7.0 全局基础设施
+
+| 路径 | 用途 | 桌面端对应 |
+|---|---|---|
+| `app/src/main/java/top/racyan/MainActivity.kt` | Activity 入口 + 音量键拦截（44-84） + KeepScreenOn / Brightness Effect | **不复制**——桌面端无 Activity，删 KeepScreenOn / Brightness（macOS/Windows 替代品有限） |
+| `app/src/main/AndroidManifest.xml` | SAF / INTERNET / configChanges 声明 | **不复制**——Tauri 自动生成 `tauri.conf.json` 的 capabilities |
+| `app/src/main/java/top/racyan/SystemWindowEffects.kt` | 屏幕常亮 + 亮度调节 | **不实现**（桌面无系统级亮度控制） |
+| `app/src/main/res/values/strings.xml` + `values-zh/strings.xml` | 全部 UI 文案 + 中文翻译 | `src/locales/zh-CN.ts` + `src/locales/en-US.ts`（已建） |
+| `app/src/main/java/top/racyan/di/` | Hilt 模块（DataModule / MediaSourceModule / DatabaseModule） | **不复制**——Tauri 端用 `lib.rs::run()` 手写初始化 |
+
+### 7.1 Phase 1 —— 骨架 + MediaSource 抽象
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `data/source/MediaSource.kt:1-45` | 接口签名 | `trait_def.rs::MediaSource`（已建）镜像设计 |
+| `data/source/MediaSourceFactory.kt:1-12` | `fun interface` factory | `source/factory.rs::MediaSourceFactory`（已建） |
+| `data/source/MediaSourceResolver.kt:1-23` | `@IntoSet` multi-binding | **参考**：Tauri 端用 `HashMap<Type, Arc<dyn MediaSource>>` 等价 |
+| `data/source/LocalMediaSourceFactory.kt:1-28` | Factory 注册模式 | 参考；Tauri 端在 `factory.rs::new()` 内硬编码 4 个实例 |
+| `domain/model/SourceDescriptor.kt:1-60` | 4 个 sealed variant + `id` 计算 | `source/descriptor.rs`（已建）**字节级兼容 JSON schema** |
+| `data/local/entity/SourceDescriptorJson.kt:1-77` | JSON 编解码（org.json） | `serde_json` 重写但字段名/嵌套完全一致 |
+| `data/local/MiraPageDatabase.kt:1-77` | Room 注解 + 10 个 DAO | `db/migrations.rs`（已建）映射为 9 张 SQLite 表 |
+| `data/local/prefs/SettingsRepository.kt:45-85` | 33 个 settings key + 默认值 | `db/migrations.rs::apply_001_init`（已建）+ `stores/settings.ts`（已建） |
+| `data/local/entity/LibraryEntity.kt` 等 10 entity | 字段定义 | `db/migrations.rs`（已建）字段一一对应 |
+
+### 7.2 Phase 2 —— OpenSeadragon 阅读器 + 文件浏览器
+
+**读者核心（最高优先级）**：
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `ui/reader/ReaderViewModel.kt:374-401` | `onPageChanged` 触发 + 500ms 防抖 | `stores/reader.ts::onPageChanged` |
+| `ui/reader/ReaderViewModel.kt:200, 382-389` | `atLastPage` / `atFirstPage` 判断 | 同上 |
+| `ui/reader/ReaderViewModel.kt:734-817` | `maybeContinue(force, dir)` 跨卷触发 | Phase 5 用，Phase 2 也需要 `atLastPage` 通知 |
+| `ui/reader/ReaderViewModel.kt:312-313` | `history.record` 触发时机 | 进入 Ready 状态时一次 |
+| `ui/reader/ReaderViewModel.kt:557-570, 892-893` | `schedulePrefetch()` (AHEAD=BEHIND=3) | Phase 2 也可用（paged 模式预取前后页） |
+| `ui/reader/ReaderViewModel.kt:597-599` | `saveImmediately()` ON_STOP | 桌面端映射为 `window.onCloseRequested` |
+| `ui/reader/ReaderUiState.kt:1-100` | State 定义（Loading / Ready / Error） | `stores/reader.ts::ReaderState` 镜像 |
+| `ui/reader/ReaderViewModel.kt:251` | `withTimeout(30_000L)` 超时 | 远程源 30s 超时 |
+| `ui/reader/ReaderViewModel.kt:325, 353-372` | `Error.kind` + 重新授权按钮 | `ErrorKind` enum（已建） |
+| `ui/reader/container/SinglePageContainer.kt:36-115` | Pager + tap region + chrome 显隐 | `components/reader/SinglePageViewer.vue` |
+| `ui/reader/container/DoublePageContainer.kt:43-137` | 双页 Pager + Spread 应用 | `components/reader/DoublePageViewer.vue` |
+| `ui/reader/container/HorizontalStripContainer.kt:1-203` | LazyRow + 跨卷（**只做参考**，桌面不做） | 不实现 |
+| `ui/reader/container/VerticalWebtoonContainer.kt:1-194` | Webtoon View 系统（**只做参考**，桌面不做） | 不实现 |
+| `ui/reader/page/CoilImage.kt:1-191` | Coil 2 + Android Context | 替换为 Coil 3 + WebView URL |
+| `ui/reader/VolumeKeyBus.kt:1-24` | 键盘 / 音量键事件流 | `composables/useReaderHotkeys.ts` |
+| `ui/reader/ReaderScreen.kt:1-637` | 整体阅读器组合 + chrome 切换逻辑 | `components/reader/ReaderScreen.vue` 顶层 |
+
+**阅读器 UI 元素**：
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `ui/reader/ReaderLabels.kt` | 页码格式化 (`第 X / Y 页`) | `composables/usePageIndicator.ts` |
+| `ui/reader/BookSwapTarget.kt` | 跨卷事件 payload | Phase 5 用 |
+| `ui/reader/overlay/ReaderMainMenu.kt:78-188` | 全屏菜单栏（顶栏 / 导航组 / 阅读组 / 库与工具） | `components/reader/ReaderMainMenu.vue` |
+| `ui/reader/overlay/ReaderOverlay.kt:31-89` | `JumpPageDialog`（Slider + TextField） | `components/reader/JumpPageDialog.vue` |
+| `ui/reader/overlay/TouchRegionOverlay.kt:52-94` | 3×3 触控分区可视化 | `components/reader/TouchRegionOverlay.vue` |
+| `ui/reader/ContinueNextVolume.kt:20-94` | paged 模式跨卷手势（`PointerEventPass.Initial`） | Phase 5 重写为键盘 + 鼠标拖动 |
+| `ui/reader/container/SpreadPlanner.kt`（domain） | 已迁移到 `algorithm/spread_planner.rs`（已建） | 直接用 |
+
+**文件浏览器**：
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `ui/filebrowser/FileBrowserScreen.kt:1-798` | 完整文件浏览器（搜索 / 排序 / 面包屑 / 列表） | `components/filebrowser/FileBrowser.vue` |
+| `ui/filebrowser/FileBrowserViewModel.kt:1-843` | 列表 / 排序 / 搜索 / 选择状态机 | `stores/fileBrowser.ts` + `views/FileBrowser.vue` |
+| `ui/filebrowser/FileBrowserUiState.kt` | State 定义 | 镜像到 Pinia |
+| `ui/filebrowser/LocationSwitcherSheet.kt:45-151` | 本地根 / SMB 账户切换器 | `components/filebrowser/LocationSwitcher.vue` |
+| `ui/filebrowser/ShortcutSheet.kt:39-127` | 快捷方式面板 | `components/filebrowser/ShortcutSheet.vue` |
+| `ui/filebrowser/BrowseHistoryScreen.kt` | 历史视图 | `views/History.vue`（占位） |
+| `ui/components/OpenDocumentTreeAtInitial.kt:1-40` | SAF 自定义 Contract | **不实现**——桌面用 `tauri-plugin-dialog` |
+
+### 7.3 Phase 3 —— 压缩包（CBZ/CBR/ZIP/RAR/7z）
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `data/source/ArchiveMediaSource.kt:1-311` | libarchive 封装（mmap / 流式两种模式） | 用 `zip` / `unrar` / `sevenz-rust` crate 重写 |
+| `data/source/ArchiveMediaSource.kt:51-120` | mmap 模式（Open + Os.mmap） | 桌面端用 `tokio::fs::File` 替代（无需 mmap） |
+| `data/source/ArchiveMediaSource.kt:120-310` | 流式模式（SMB 直读） | Phase 7 远程源需要时再实现 |
+| `data/source/ArchiveCache.kt:33-120` | 压缩包缓存（LRU + SHA-256 key） | 桌面端可简化或直接复用 `PageCacheManager` |
+| `data/source/RandomAccessReader.kt:12-33` | 随机读接口 | `source/trait_def.rs::ByteRange`（已建） |
+| `data/source/SmbMediaSource.kt:228-254` | `SmbRandomAccessReader` 实现 | Phase 7 参考 |
+| `data/source/WebDavRandomAccessReader.kt:23-84` | WebDAV Range GET 实现 | Phase 8 参考 |
+| `data/source/MediaSource.kt:30-44` | `downloadTo` + `supportsRangeRead` | 桌面端不需要 downloadTo，但 `supportsRangeRead` 可保留 |
+
+### 7.4 Phase 4 —— 书签 / 喜欢 / 历史 / 书架 / 标签 / 搜索
+
+**UI 页面**：
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `ui/bookmarks/BookmarksScreen.kt` + `BookmarksViewModel.kt` | 书签列表 + 添加 / 删除 | `views/Bookmarks.vue` + `stores/bookmarks.ts` |
+| `ui/likes/LikesScreen.kt` + `LikesViewModel.kt` | 喜欢列表 + toggle | `views/Likes.vue` + `stores/likes.ts` |
+| `ui/library/LibraryScreen.kt:1-271` + `LibraryViewModel.kt` | 书架视图（收藏 + 最近阅读） | `views/Library.vue` + `stores/library.ts` |
+| `ui/library/LibraryUiState.kt` | State 定义 | 镜像到 Pinia |
+| `ui/filebrowser/BrowseHistoryScreen.kt` | 历史列表 | `views/History.vue`（已建占位） |
+| `core/util/SearchFilter.kt` | 子串过滤（substring） | `lib/search.ts::substringFilter`（fuse.js 升级为模糊） |
+
+**Repository + Entity**（镜像到 `db/` + `src-tauri/src/db/dao/`）：
 
 | 路径 | 用途 |
 |---|---|
-| `app/src/main/java/top/racyan/domain/reader/SpreadPlanner.kt` | 双页规划算法（封面独占 + 奇数末页） |
-| `app/src/main/java/top/racyan/core/util/NaturalSortComparator.kt` | 自然排序（`page2.jpg < page10.jpg`） |
-| `app/src/main/java/top/racyan/domain/usecase/FindNextDirectoryUseCase.kt` | 跨卷连续阅读：目录列表 + 自然排序 + 下一卷定位 |
-| `app/src/main/java/top/racyan/data/slideshow/SlideshowController.kt` | 幻灯片状态机（基于 Flow 定时器 + 末页处理） |
-| `app/src/main/java/top/racyan/data/local/entity/SourceDescriptorJson.kt` | `SourceDescriptor` JSON 字段格式（重写为 `serde_json`，但 schema 字节级一致） |
-| `app/src/main/java/top/racyan/data/backup/BackupJson.kt` | 备份文件 JSON schema（未来可做 Android ↔ Desktop 备份互导） |
-| `app/src/main/java/top/racyan/data/remote/smb/SmbSessionPool.kt` | SMB 会话复用思路（Desktop 单进程直接 `connect` / `disconnect`） |
-| `app/src/main/java/top/racyan/ui/library/LibraryScreen.kt` | 书架视图 UI 参考 |
-| `app/src/main/java/top/racyan/data/repository/LibraryRepository.kt` | 收藏 / 导入 / 删除的领域逻辑 |
-| `app/src/main/java/top/racyan/core/util/SearchFilter.kt` | 子串过滤（Desktop 用 fuse.js 升级为模糊搜索） |
-| `values/strings.xml` + `values-zh/strings.xml` | Android 文案 i18n 抽取模式参考 |
-| `app/src/main/java/top/racyan/ui/settings/SettingsScreen.kt` | 设置项三选一切换控件（OFF / AUTO / MANUAL）参考 |
+| `data/repository/BookmarkRepository.kt` | 书签 CRUD + 列表 |
+| `data/repository/LikeRepository.kt` | 喜欢 toggle + 列表 |
+| `data/repository/LibraryRepository.kt` | 收藏 / 导入 / 删除 + 临时合成 LibraryEntity |
+| `data/repository/BrowseHistoryRepository.kt` | 阅览记录（唯一索引 `(descriptor, relPath)` 去重 + 刷新 lastVisitedAt） |
+| `data/local/entity/BookmarkEntity.kt` | 字段映射 |
+| `data/local/entity/LikeEntity.kt` | 同上 |
+| `data/local/entity/LibraryEntity.kt` | `id` + `sourceDescriptorJson` + `isFavorite` + `pageCount` + `cover` |
+| `data/local/entity/BrowseHistoryEntity.kt` | 同上 |
+| `data/repository/ShortcutRepository.kt` + `entity/ShortcutEntity.kt` | 快捷方式（跨源） |
+| `data/local/entity/Tag.kt`（如不存在 → 自定义） | 标签 |
+| `data/repository/DirectorySortRepository.kt` + `entity/DirectorySortEntity.kt` | per-directory 排序覆盖 |
+
+### 7.5 Phase 5 —— 跨卷连续阅读 + 幻灯片
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `domain/usecase/FindNextDirectoryUseCase.kt:50-209` | 完整算法（见 §13.2） | `usecase/find_next_directory.rs` 重写 |
+| `ui/reader/ContinueNextVolume.kt:20-94` | paged 模式跨卷手势（1/3 屏阈值） | 桌面端映射为键盘 / 鼠标拖动 |
+| `ui/reader/container/HorizontalStripContainer.kt:107-149` | 横条幻灯片（animateScrollBy + loop） | **只做参考**——桌面不做横条 |
+| `ui/reader/container/VerticalWebtoonContainer.kt:138-192` | 条漫 Choreographer 帧驱动幻灯片 | **只做参考**——桌面不做条漫 |
+| `data/slideshow/SlideshowController.kt` | paged 模式 Flow 定时器 + 翻页事件 | `composables/useSlideshow.ts` |
+| `data/slideshow/SlideshowSettings.kt` | 间隔 / 方向 / 循环 | `stores/slideshow.ts` |
+| `ui/reader/ReaderViewModel.kt:404-420` | `nextPage()` 末页触发 SWIPE 二次 nudge | 同上 |
+| `ui/reader/ReaderViewModel.kt:734-817` | `maybeContinue` 完整实现（含 `bookSwapInFlight` 守卫） | `stores/reader.ts::maybeContinue` |
+
+### 7.6 Phase 6 —— i18n（中/英）
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `app/src/main/res/values/strings.xml` | **完整 UI 文案清单**（必读） | 复制到 `src/locales/zh-CN.ts` 与 `src/locales/en-US.ts` |
+| `app/src/main/res/values-zh/strings.xml` | 中文翻译 | 直接参考 |
+| `ui/theme/Theme.kt` | themeMode + colorTheme 切换逻辑 | `src/theme/` 对应实现（Phase 1 不需要，Phase 6 加） |
+| `ui/theme/Color.kt` | 4 套预设色板（BLUE/PURPLE/AMBER/NEUTRAL） | 镜像到 TS |
+
+### 7.7 Phase 7 —— SMB
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `data/source/SmbMediaSource.kt:1-254` | 完整实现（连接 / 列表 / 读 / Range） | `source/smb_impl.rs` 用 `smb-rs` crate 重写 |
+| `data/remote/smb/SmbSessionPool.kt:13-106` | 引用计数池（**只做参考**——Desktop 单进程无需池） | 直接 `connect` / `disconnect` |
+| `data/remote/smb/SmbConnectionTester.kt:1-48` | 测试连接 | `commands/accounts::test_connection` |
+| `data/security/CredentialCipher.kt:10-16` | 接口 | `credentials/cipher.rs::CredentialCipher` |
+| `data/security/AndroidKeystoreCredentialCipher.kt:1-77` | **必须重写**——AndroidKeyStore → `keyring` | macOS Keychain / Windows Credential Vault / Linux Secret Service + PBKDF2 fallback |
+| `data/repository/AccountRepository.kt` | 账户 CRUD + 凭据加解密 | `commands/accounts.rs` |
+| `data/local/entity/AccountEntity.kt` | 字段映射 | `db/migrations.rs`（已建） |
+| `ui/accounts/AccountsScreen.kt:1-383` + `AccountsViewModel.kt` | 账户管理 UI（添加 / 测试 / 编辑 / 删除） | `views/Accounts.vue` + `stores/accounts.ts` |
+| `ui/accounts/AccountsUiState.kt` | State 定义 | 镜像 |
+| `ui/accounts/AccountsViewModel.kt:130-160` | 测试连接流程（`testConnection` 调用） | Phase 7 command handler |
+| `data/local/prefs/SettingsRepository.kt:130-145` | `smb_archive_strategy` 设置 | 已建 `db/migrations.rs` |
+
+### 7.8 Phase 8 —— WebDAV
+
+| 路径 | 关键行 | 用途 |
+|---|---|---|
+| `data/source/WebDavMediaSource.kt` | 完整实现 | `source/webdav_impl.rs` 用 `reqwest` + PROPFIND 重写 |
+| `data/remote/webdav/WebDavClient.kt:1-268` | OkHttp + XmlPullParser 客户端 | 镜像为 `reqwest` + `xmlpull` |
+| `data/remote/webdav/WebDavConnectionTester.kt:18-38` | 测试连接 | 同 SMB |
+| `data/source/WebDavRandomAccessReader.kt:23-84` | Range GET 实现 | 镜像 |
+
+### 7.9 Phase 9 —— 跨平台分发
+
+| 路径 | 用途 |
+|---|---|
+| `data/backup/BackupCrypto.kt` | PBKDF2 + AES-GCM（已建，复用） |
+| `data/backup/BackupJson.kt` | 备份 JSON schema |
+| `data/backup/BackupRepository.kt` | 备份导入导出 |
+| `data/export/BrowseHistoryExporter.kt` + `HistoryExportJson.kt` + `HistoryExportData.kt` | 历史导出为 JSON |
+| `app/src/main/res/mipmap-*/` | 应用图标 | 已用 Python 生成占位（需用户本地替换为正式图标） |
+| `app/build.gradle.kts:60-67` | Tauri config 字段参考（图标尺寸、签名、bundles） | 镜像到 `tauri.conf.json`（已建） |
+
+### 7.10 关键非参考（桌面端明确不做）
+
+| Android 路径 | 不实现的原因 |
+|---|---|
+| `ui/reader/container/VerticalWebtoonContainer.kt` + `WebtoonFrame.kt` + `WebtoonRecyclerView.kt` + `WebtoonAdapter.kt` | 桌面不做条漫 |
+| `ui/reader/container/HorizontalStripContainer.kt` | 桌面不做横条 |
+| `data/download/DownloadManager.kt` + `DownloadPaths.kt` + `DownloadTaskState.kt` | 桌面不做"下载到本地" |
+| `data/local/entity/LocalRootEntity.kt` + `LocalRootDao.kt` + `LocalRootRepository.kt` | 桌面不需要 SAF tree Uri（用 `java.io.File`） |
+| `data/cache/PrefetchQueue.kt` + `WarmDecoderFactory.kt` + `WarmImageRegionDecoder.kt` + `RegionDecoderPool.kt` + `LoadingProgressTracker.kt` | 这些都是 `android.graphics.Bitmap` 专属；桌面端用 Skia/ImageIO |
+| `data/coil/SourceFetcher.kt` + `SourceImage.kt` + `SourceKeyer.kt` | Coil 2 Android 专属反射；桌面端用 Coil 3 公开 API |
+| `MainActivity.kt`（Activity 入口） + `SystemWindowEffects.kt` | 桌面无 Activity / 系统亮度 / 屏幕常亮 |
+| `data/source/SmbSessionPool.kt` | 桌面单进程无需连接池 |
+| `data/security/AndroidKeystoreCredentialCipher.kt` | Android KeyStore 专属 |
+| `app/src/main/AndroidManifest.xml` | Tauri 自动生成 capabilities |
+
+---
+
+## 7.11 实施时查阅顺序（推荐流程）
+
+1. **Phase 1**：打开 IDE 双窗口（左 Android / 右 Desktop），从 §7.1 表格对照
+2. **Phase 2**：先看 `ReaderViewModel.kt` 的状态机（最长），再看 4 个容器（单/双页 2 个要做，webtoon/strip 2 个跳过）
+3. **Phase 3**：只看 `ArchiveMediaSource.kt`，其他压缩包相关都是辅助
+4. **Phase 4**：按 §7.4 表格逐个 UI 页面 + Entity + Repository 对应实现
+5. **Phase 5**：先看 `FindNextDirectoryUseCase.kt`（核心算法），再看 `SlideshowController.kt`（paged 模式就够）
+6. **Phase 6**：复制 `strings.xml` + `values-zh/strings.xml` 到 `src/locales/`
+7. **Phase 7-8**：先看接口签名（`MediaSource.kt`），再看具体实现（`SmbMediaSource.kt` / `WebDavMediaSource.kt`）
+8. **Phase 9**：打包配置，无 Android 直接参考
+
+---
 
 ---
 
