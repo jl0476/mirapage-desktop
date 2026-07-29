@@ -1,0 +1,1306 @@
+# MiraPage Desktop — 设计文档
+
+> 桌面端漫画阅读器。基于 Tauri 2.x（Rust 后端）+ Vue 3（前端）+ OpenSeadragon（图像渲染）。
+> 新独立仓库，与 MiraPage Android 工程完全独立，不引用其代码。
+
+---
+
+## 1. 项目目标与范围
+
+### 1.1 目标
+
+打造一款跨平台（macOS / Windows / Linux）桌面漫画阅读器，对标 MiraPage Android 的核心阅读体验。
+
+### 1.2 阅读模式（本期范围）
+
+- **单页阅读**（Single Page）：1 张图 / 屏
+- **双页阅读**（Double Page）：2 张图 / 屏，封面独占、奇数末页不并排
+
+**本期不做**：条漫 webtoon（连续竖向滚动）、横条模式（LazyRow 横向滚动）、翻页动画。
+
+### 1.3 功能清单（本期必做，按实现优先级排序）
+
+**核心（前期完成）**：
+| # | 功能 | 说明 | 优先级 |
+|---|---|---|---|
+| 1 | 文件浏览器 | 本地目录浏览；面包屑导航；自然排序 | P0 |
+| 2 | 阅读器 | 单 / 双页；缩放、平移；键盘快捷键；进度持久化 | P0 |
+| 5 | 压缩包 | CBZ / CBR / ZIP / RAR / 7z 直接阅读（不解压整包） | P0 |
+| 6 | 书签 | 当前页添加书签；列表查看；跳转 | P0 |
+| 7 | 喜欢 | 标记 / 取消标记；列表查看 | P0 |
+| 8 | 阅读记录 | 进入阅读器自动记录；列表查看；点击重读 | P0 |
+| 10 | 书架收藏 | 收藏标记；书架视图；按收藏 / 最近阅读筛选 | P0 |
+| 11 | 标签 | 创建 / 删除标签；为书打标签；按标签筛选书架 | P1 |
+| 12 | 搜索 | 文件名 / 书名 / 标签模糊搜索（fuse.js） | P1 |
+| 13 | 跨卷连续阅读 | 读完一本自动跳到目录中下一本（OFF / AUTO / MANUAL） | P1 |
+| 9 | 幻灯片 | 定时自动翻页；间隔 / 方向 / 循环可配置；播放 / 暂停 | P1 |
+
+**远程源（后期完成）**：
+| # | 功能 | 说明 | 优先级 |
+|---|---|---|---|
+| 3 | SMB | 添加账户；测试连接；浏览 SMB 共享；阅读 SMB 中图片 | P2 |
+| 4 | WebDAV | 添加账户；测试连接；浏览 WebDAV 服务；阅读 WebDAV 中图片 | P2 |
+
+**横切**：
+| # | 功能 | 说明 | 优先级 |
+|---|---|---|---|
+| 14 | i18n | 简体中文 / English 两种语言；运行时切换；跟随系统 | P0 |
+
+> **设计原则**：Phase 1-2 即定义 `MediaSource` 抽象（`SourceDescriptor` + trait），LocalMediaSource 与 ArchiveMediaSource 在 P0 实现，SmbMediaSource 与 WebDavMediaSource 留接口 stub，P2 阶段填实现。**新增远程源不影响 UI 代码**。
+
+### 1.4 非范围（本期不做）
+
+- Webtoon 模式
+- 横条模式
+- 下载到本地
+- 配置备份 / 导入（与 Android `.pvbackup` 互导为未来工作）
+- 主题切换（深 / 浅 + 4 套色板）
+- 缩略图网格
+- 远程图加载进度条
+- i18n：本期仅中 / 英两种语言，其他语言为未来工作
+
+---
+
+## 2. 技术栈
+
+### 2.1 后端（Rust）
+
+| 组件 | 选型 | 版本 | 备注 |
+|---|---|---|---|
+| 框架 | Tauri | 2.x | 原生窗口 + WebView |
+| 异步运行时 | tokio | 1.x | features = ["full"] |
+| HTTP | reqwest | 0.12.x | features = ["stream", "rustls-tls"] |
+| SMB | smb-rs | 0.6.x | 异步原生客户端 |
+| ZIP / CBZ | zip | 2.x | 流式读取 |
+| RAR | unrar | 0.7.x | RAR4 / RAR5 |
+| 7z | sevenz-rust | 0.6.x | 末尾索引需整包读 |
+| 数据库 | rusqlite | 0.32.x | features = ["bundled"] |
+| 凭据 | keyring | 3.x | 系统 keystore 跨平台 |
+| 序列化 | serde / serde_json | 1.x | |
+| 错误处理 | thiserror / anyhow | 1.x | |
+| 日志 | tracing | 0.1.x | |
+
+### 2.2 前端（Vue 3 + TypeScript）
+
+| 组件 | 选型 | 版本 | 备注 |
+|---|---|---|---|
+| 框架 | Vue | 3.4+ | Composition API + `<script setup>` |
+| 构建 | Vite | 5.x | |
+| 语言 | TypeScript | 5.x | strict mode |
+| 状态管理 | Pinia | 2.x | |
+| 路由 | Vue Router | 4.x | 可选 |
+| 图像渲染 | OpenSeadragon | 5.x | MIT 开源 |
+| Tauri IPC | @tauri-apps/api | 2.x | |
+| 模糊搜索 | fuse.js | 7.x | 列表搜索 |
+
+### 2.3 系统依赖
+
+- **macOS**：Xcode Command Line Tools（rust 编译 + DMG 打包）
+- **Windows**：WebView2 Runtime（Win11 自带；Win10 需 v1803+）；MSVC Build Tools
+- **Linux**：webkit2gtk-4.1、libgtk-3-dev、libayatana-appindicator3-dev
+
+---
+
+## 3. 项目结构
+
+```
+mirapage-desktop/
+├── src-tauri/                    ← Rust 后端
+│   ├── src/
+│   │   ├── main.rs               ← Tauri 入口
+│   │   ├── commands/             ← Tauri command handlers（前端通过 IPC 调用）
+│   │   │   ├── mod.rs
+│   │   │   ├── file_browser.rs   ← 本地 / SMB / WebDAV 目录枚举
+│   │   │   ├── reader.rs         ← 文件 / 条目读取（含 Range）
+│   │   │   ├── archive.rs        ← 压缩包列表 + 条目读取
+│   │   │   ├── accounts.rs       ← 账户 CRUD + 测试连接
+│   │   │   ├── bookmarks.rs      ← 书签 CRUD
+│   │   │   ├── likes.rs          ← 喜欢 toggle
+│   │   │   ├── history.rs        ← 阅读记录 CRUD
+│   │   │   ├── progress.rs       ← 进度读写
+│   │   │   └── settings.rs       ← 设置 KV
+│   │   ├── db/                   ← rusqlite + migrations
+│   │   │   ├── mod.rs
+│   │   │   ├── migrations/       ← 001_init.sql 等
+│   │   │   └── dao/              ← 各表 DAO
+│   │   ├── smb/                  ← smb-rs 封装
+│   │   │   ├── mod.rs
+│   │   │   └── client.rs
+│   │   ├── webdav/               ← reqwest + PROPFIND
+│   │   │   ├── mod.rs
+│   │   │   └── client.rs
+│   │   ├── archive/              ← 压缩包读取（Phase 3 实现）
+│   │   │   ├── mod.rs
+│   │   │   ├── zip.rs
+│   │   │   ├── rar.rs
+│   │   │   └── sevenz.rs
+│   │   ├── source/               ← MediaSource 抽象（Phase 1 定义并贯穿全周期）
+│   │   │   ├── mod.rs
+│   │   │   ├── descriptor.rs     ← SourceDescriptor enum
+│   │   │   ├── trait.rs          ← MediaSource trait
+│   │   │   ├── factory.rs        ← MediaSourceFactory
+│   │   │   ├── local.rs          ← LocalMediaSource（Phase 1）
+│   │   │   ├── archive_impl.rs   ← ArchiveMediaSource（Phase 3）
+│   │   │   ├── smb_impl.rs       ← SmbMediaSource（Phase 1 stub，Phase 7 实现）
+│   │   │   └── webdav_impl.rs    ← WebDavMediaSource（Phase 1 stub，Phase 8 实现）
+│   │   ├── credentials/          ← 凭据加密
+│   │   │   ├── mod.rs
+│   │   │   └── keystore.rs       ← keyring + PBKDF2 fallback
+│   │   └── model/                ← 内部数据模型
+│   │       ├── mod.rs
+│   │       └── source_descriptor.rs
+│   ├── Cargo.toml
+│   └── tauri.conf.json
+├── src/                          ← Vue 前端
+│   ├── components/
+│   │   ├── reader/
+│   │   │   ├── SinglePageViewer.vue
+│   │   │   ├── DoublePageViewer.vue
+│   │   │   ├── ReaderOverlay.vue
+│   │   │   ├── SlideshowControls.vue
+│   │   │   └── ProgressBar.vue
+│   │   ├── filebrowser/
+│   │   │   ├── FileList.vue
+│   │   │   ├── Breadcrumb.vue
+│   │   │   └── LocationSwitcher.vue
+│   │   ├── library/
+│   │   │   ├── BookmarksList.vue
+│   │   │   ├── LikesList.vue
+│   │   │   └── HistoryList.vue
+│   │   ├── settings/
+│   │   │   ├── SlideshowSettings.vue
+│   │   │   └── AccountManager.vue
+│   │   └── common/               ← 按钮 / 输入框 / 列表项
+│   ├── stores/                   ← Pinia
+│   │   ├── reader.ts
+│   │   ├── slideshow.ts
+│   │   ├── settings.ts
+│   │   └── library.ts
+│   ├── composables/              ← Vue composition functions
+│   │   ├── useSlideshow.ts
+│   │   ├── useReaderHotkeys.ts
+│   │   └── useImageUrl.ts
+│   ├── lib/
+│   │   ├── tauri.ts              ← IPC 桥 + 类型定义
+│   │   ├── naturalSort.ts
+│   │   └── sourceDescriptor.ts
+│   ├── router/                   ← Vue Router 配置（可选）
+│   │   └── index.ts
+│   ├── App.vue
+│   └── main.ts
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+└── README.md
+```
+
+---
+
+## 4. 数据库 Schema（SQLite）
+
+7 张表，存于 `~/.local/share/mirapage-desktop/mirapage.db`（macOS / Linux）或 `%APPDATA%/mirapage-desktop/mirapage.db`（Windows）。
+
+```sql
+-- 核心 6 张表 + 1 张 settings KV
+
+CREATE TABLE book (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  source_descriptor TEXT NOT NULL,    -- JSON: 与 MiraPage Android SourceDescriptorJson 字节级一致
+  last_read_at INTEGER,
+  is_favorite INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE progress (
+  book_id INTEGER PRIMARY KEY,
+  page INTEGER NOT NULL DEFAULT 0,
+  reader_mode TEXT NOT NULL,          -- 'single' | 'double'
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE bookmark (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL,
+  page INTEGER NOT NULL,
+  position REAL,                      -- 缩放 / 滚动偏移
+  label TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE like (
+  book_id INTEGER PRIMARY KEY,
+  liked_at INTEGER NOT NULL
+);
+
+CREATE TABLE browse_history (
+  book_id INTEGER PRIMARY KEY,
+  source_descriptor TEXT NOT NULL,
+  last_page INTEGER,
+  last_read_at INTEGER NOT NULL
+);
+
+CREATE TABLE account (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  type TEXT NOT NULL,                 -- 'smb' | 'webdav'
+  host TEXT,
+  port INTEGER,
+  share TEXT,
+  username TEXT,
+  encrypted_password TEXT             -- keyring / PBKDF2 加密后的字符串
+);
+
+CREATE TABLE tag (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  color TEXT,                         -- 可选 hex 颜色
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE book_tag (
+  book_id INTEGER NOT NULL,
+  tag_id INTEGER NOT NULL,
+  PRIMARY KEY (book_id, tag_id)
+);
+
+CREATE TABLE settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- 初始 settings 默认值
+INSERT INTO settings (key, value) VALUES
+  ('reader_default_mode', 'single'),
+  ('slideshow_interval_ms', '3000'),
+  ('slideshow_direction', 'forward'),
+  ('slideshow_loop', '1'),
+  ('slideshow_default_on_entry', '0'),
+  ('continue_to_next_volume', 'manual'),  -- 'off' | 'auto' | 'manual'
+  ('locale', 'system'),                  -- 'zh-CN' | 'en-US' | 'system'
+  ('search_mode', 'fuzzy');              -- 'substring' | 'fuzzy'
+```
+
+---
+
+## 5. 实施阶段
+
+### Phase 1 — Tauri 骨架 + SQLite + 文件选择器（1.0 人月）
+
+**含 `MediaSource` 抽象定义（远程源预留）**
+
+- 用 `npm create tauri-app@latest` 创建 Vue + TypeScript + Vite 模板
+- 配 `tauri.conf.json`（窗口尺寸、最小尺寸、bundle 标识、应用图标）
+- 引入 `rusqlite` + migrations 系统
+- 实现 settings 表 CRUD + `get_setting` / `set_setting` Tauri command
+- 接入 `tauri-plugin-dialog` 选本地目录
+- **定义 `MediaSource` 抽象**（关键，决定后续远程源接入成本）：
+  ```rust
+  // src-tauri/src/source/mod.rs
+  pub trait MediaSource: Send + Sync {
+      async fn list_directory(&self, path: &str) -> Result<Vec<MediaEntry>, String>;
+      async fn read_file(&self, path: &str, range: Option<(u64, u64)>) -> Result<Vec<u8>, String>;
+      async fn file_count(&self, path: &str) -> Result<u64, String>;  // 压缩包页数等
+  }
+
+  pub enum SourceDescriptor {
+      Local { root_path: String },
+      Archive { archive_path: String, entry_prefix: String, format: ArchiveFormat },
+      Smb { account_id: i64, share: String, path: String },  // Phase 7 实现
+      WebDav { account_id: i64, base_url: String, path: String },  // Phase 8 实现
+  }
+
+  pub struct MediaSourceFactory {
+      local: Arc<LocalMediaSource>,
+      archive: Arc<ArchiveMediaSource>,
+      smb: Arc<SmbMediaSourceStub>,       // P2 填实现
+      webdav: Arc<WebDavMediaSourceStub>, // P2 填实现
+  }
+
+  impl MediaSourceFactory {
+      pub fn resolve(&self, desc: &SourceDescriptor) -> Arc<dyn MediaSource> {
+          match desc {
+              SourceDescriptor::Local { .. } => self.local.clone(),
+              SourceDescriptor::Archive { .. } => self.archive.clone(),
+              SourceDescriptor::Smb { .. } => self.smb.clone(),
+              SourceDescriptor::WebDav { .. } => self.webdav.clone(),
+          }
+      }
+  }
+  ```
+- 实现 `LocalMediaSource`（基于 `tokio::fs`）
+- `SmbMediaSourceStub` / `WebDavMediaSourceStub`：trait 已实现，所有方法返回 `Err("not implemented yet".into())`
+
+**交付**：能打开本地目录，列表显示文件名（占位 UI），设置能读写；`MediaSource` 抽象与所有 stub 已就位。
+
+### Phase 2 — OpenSeadragon 阅读器 + 文件浏览器（2.0 人月）
+
+- `SinglePageViewer.vue`：1 个 OpenSeadragon 实例，tile source = 单图 URL
+- `DoublePageViewer.vue`：1 个 OpenSeadragon 实例，viewport 宽 = 2 张图宽度
+- 双页规划算法（封面独占 + 奇数末页不并排）
+- `ReaderOverlay.vue`：顶栏（页码 / 模式切换）+ 底栏（缩放 / 跳页 / 翻页按钮）
+- 键盘快捷键：`←` / `→` / `Space` / `Home` / `End` / `Esc`
+- `useReaderHotkeys.ts` composable
+- 进度持久化：翻页防抖 500ms 写 `progress` 表
+- **通过 `MediaSource` 抽象读取页面**：UI 不感知 Local / Archive / Smb / WebDav 的差异
+- 加载等待：远程源图片未加载时翻页按钮禁用 + 加载指示
+
+**交付**：能本地打开漫画文件夹，单 / 双页切换，键盘翻页，进度持久化；远程源接入预留接口已 verify（stub 调用链路通）。
+
+### Phase 3 — 压缩包（CBZ / CBR / ZIP / RAR / 7z）（1.5 人月）
+
+- `source/archive/zip.rs`：`zip` crate 列条目 + 按需解压条目
+- `source/archive/rar.rs`：`unrar` crate（RAR5 部分包可能失败，记录并跳过）
+- `source/archive/sevenz.rs`：`sevenz-rust` crate（7z 末尾索引，**必须整包读**；后续 P2 阶段 SMB / WebDAV 需先下载到 `cacheDir` 再读）
+- 把 `ArchiveMediaSourceStub` 升级为 `ArchiveMediaSource`，注册到 `MediaSourceFactory`
+- UI：文件浏览器点击 `.cbz` / `.cbr` / `.zip` / `.rar` / `.7z` 时走 `SourceDescriptor::Archive` 路径
+- Tauri command `list_archive_entries` / `read_archive_entry`（可保留为 `MediaSource` 内部实现细节，UI 只调 `factory.resolve(desc).read_file(path, range)`）
+
+**交付**：能打开 CBZ / CBR / ZIP / RAR / 7z 漫画；`MediaSource::Archive` 分支实装。
+
+### Phase 4 — 书签 / 喜欢 / 阅读记录 / 书架收藏 / 标签 / 搜索（3.0 人月）
+
+- `bookmarks` 表 CRUD + UI 列表 + 添加 / 删除
+- `like` toggle
+- `browse_history`：进入 reader 时自动 upsert
+- 书架视图：`is_favorite = 1` 的书 + 按 `last_read_at` 倒序
+- 标签：`tag` + `book_tag` 表 CRUD；UI 标签选择器 + 书架标签筛选
+- 搜索：fuse.js 集成；搜索框在文件浏览器顶部 + 书架顶部；模糊匹配文件名 / 书名 / 标签
+- UI：侧边栏 4 个 tab（书签 / 喜欢 / 历史 / 书架）
+
+**交付**：书签 / 喜欢 / 历史 / 书架可查看与操作；标签可创建、打标、筛选；文件名 / 书名 / 标签可模糊搜索。
+
+### Phase 5 — 跨卷连续阅读 + 幻灯片（2.5 人月）
+
+**跨卷连续阅读**：
+- 新算法（Rust 端）：给定当前书 + 当前所在目录，按自然排序找到下一本
+- 设置 `continue_to_next_volume`：`off` / `auto` / `manual`
+  - `off`：末页停住
+  - `auto`：末页立即跳下一本
+  - `manual`：末页弹出"继续读下一本？"提示 + 跳转按钮
+- 当前 book 是压缩包 → 跳到目录中下一个 CBZ/CBR
+- 当前 book 是目录 → 跳到目录中下一个子目录
+- 当前书末页触发 → `find_next_volume` Tauri command → 返回下一本书的 `SourceDescriptor` → 跳转 reader
+
+**幻灯片**：
+- `stores/slideshow.ts`：状态 + actions
+- `composables/useSlideshow.ts`：`setInterval` + `advancePage` + 末页处理（loop / 暂停）
+- 加载等待策略：图片未加载完时跳过本 tick，下一 tick 再试
+- `SlideshowControls.vue`：顶栏播放 / 暂停按钮
+- 设置页：间隔滑块（1-30s）、方向切换、循环开关
+- 键盘 `P` 切换播放 / 暂停（OpenSeadragon 不占用 P 键）
+
+**交付**：跨卷连续阅读三种模式可配置；幻灯片完整功能。
+
+### Phase 6 — i18n（中 / 英）（1.0 人月）
+
+- 引入 `vue-i18n` 9.x
+- 配置 `zh-CN` + `en-US` 两个 locale，运行时可切换
+- 设置页加语言切换（zh-CN / en-US / 跟随系统）
+- 全文案抽取到 `src/locales/zh-CN.ts` + `src/locales/en-US.ts`
+- 抽取原则：所有用户可见字符串（含按钮、菜单、提示、错误信息、设置项、对话框标题等）必须走 `$t()`
+- 数字 / 日期 / 文件大小格式化（vue-i18n 内置）
+- **i18n 工作应在每个 Phase 同步进行**（每个新功能从一开始就用 `$t()`），本阶段只做最后清理 + locale 切换 UI + 完整翻译
+
+**交付**：两种语言完整翻译；运行时可切换；设置跟随系统默认。
+
+### Phase 7 — SMB 协议层（P2，1.5 人月）
+
+- `smb-rs` 封装：`connect` / `authenticate` / `list_directory` / `open_file` / `read_range`
+- `accounts` 表 CRUD + 凭据加密（keyring）
+- `test_connection` command（保存前连通性测试）
+- 实现 `SmbMediaSource`，替换 stub，注册到 `MediaSourceFactory`
+- `tauri.conf.json` 注册自定义 protocol `smb://`
+- 前端用 `convertFileSrc()` 拼 URL
+- **UI 无需改动**：`LocationSwitcher` 增加 SMB 账户入口即可
+
+**交付**：能添加 SMB 账户，列出 SMB 目录，打开 SMB 中图片阅读。`MediaSource::Smb` 分支实装。
+
+### Phase 8 — WebDAV 协议层（P2，1.0 人月）
+
+- reqwest + 手写 PROPFIND（Depth: 1）
+- 复用 Phase 7 的账户管理框架
+- 实现 `WebDavMediaSource`，替换 stub，注册到 `MediaSourceFactory`
+- `list_webdav_directory` / `read_webdav_file` commands（含 Range header）
+- **UI 无需改动**：`LocationSwitcher` 增加 WebDAV 账户入口即可
+
+**交付**：能连接 WebDAV 服务器并阅读。`MediaSource::WebDav` 分支实装。
+
+### Phase 9 — 跨平台分发（1.5 人月）
+
+- macOS DMG（`cargo-bundle` + Developer ID 签名 + notarization）
+- Windows MSI（SignTool + EV 证书）
+- Linux DEB + AppImage
+- 应用图标（1024×1024 主图 + 各平台尺寸）
+- `tauri-plugin-updater` 自动更新
+- CI：GitHub Actions matrix（ubuntu-latest / windows-latest / macos-latest）
+
+**交付**：三平台安装包 + 自动更新。
+
+---
+
+## 6. 工作量合计
+
+| Phase | 内容 | 优先级 | 人月 |
+|---|---|---|---|
+| 1 | Tauri 骨架 + SQLite + 文件选择器 + `MediaSource` 抽象 | P0 | 1.0 |
+| 2 | OpenSeadragon 阅读器 + 文件浏览器（走 `MediaSource`） | P0 | 2.0 |
+| 3 | 压缩包（CBZ / CBR / ZIP / RAR / 7z） | P0 | 1.5 |
+| 4 | 书签 / 喜欢 / 历史 / 书架 / 标签 / 搜索 | P0/P1 | 3.0 |
+| 5 | 跨卷连续阅读 + 幻灯片 | P1 | 2.5 |
+| 6 | i18n（中 / 英）+ 全文案清理 | P0 | 1.0 |
+| 7 | SMB（填 `MediaSource::Smb` stub） | P2 | 1.5 |
+| 8 | WebDAV（填 `MediaSource::WebDav` stub） | P2 | 1.0 |
+| 9 | 跨平台分发 | — | 1.5 |
+| **合计** | | | **15.0 人月** |
+
+乐观 11、现实 15、悲观 22 人月。
+
+**MVP 截点**：完成 Phase 1-6（含 i18n）即可发布 v0.1 核心版本，约 11 人月。SMB / WebDAV 在 v0.2 增量发布，UI 无改动。
+
+---
+
+## 7. 关键技术参考（MiraPage Android 仅作参考，不引用代码）
+
+以下 MiraPage Android 文件**只读不引用**，作为功能语义与算法逻辑参考，新仓库中用 Rust / TypeScript 重写：
+
+| 路径 | 用途 |
+|---|---|
+| `app/src/main/java/top/racyan/domain/reader/SpreadPlanner.kt` | 双页规划算法（封面独占 + 奇数末页） |
+| `app/src/main/java/top/racyan/core/util/NaturalSortComparator.kt` | 自然排序（`page2.jpg < page10.jpg`） |
+| `app/src/main/java/top/racyan/domain/usecase/FindNextDirectoryUseCase.kt` | 跨卷连续阅读：目录列表 + 自然排序 + 下一卷定位 |
+| `app/src/main/java/top/racyan/data/slideshow/SlideshowController.kt` | 幻灯片状态机（基于 Flow 定时器 + 末页处理） |
+| `app/src/main/java/top/racyan/data/local/entity/SourceDescriptorJson.kt` | `SourceDescriptor` JSON 字段格式（重写为 `serde_json`，但 schema 字节级一致） |
+| `app/src/main/java/top/racyan/data/backup/BackupJson.kt` | 备份文件 JSON schema（未来可做 Android ↔ Desktop 备份互导） |
+| `app/src/main/java/top/racyan/data/remote/smb/SmbSessionPool.kt` | SMB 会话复用思路（Desktop 单进程直接 `connect` / `disconnect`） |
+| `app/src/main/java/top/racyan/ui/library/LibraryScreen.kt` | 书架视图 UI 参考 |
+| `app/src/main/java/top/racyan/data/repository/LibraryRepository.kt` | 收藏 / 导入 / 删除的领域逻辑 |
+| `app/src/main/java/top/racyan/core/util/SearchFilter.kt` | 子串过滤（Desktop 用 fuse.js 升级为模糊搜索） |
+| `values/strings.xml` + `values-zh/strings.xml` | Android 文案 i18n 抽取模式参考 |
+| `app/src/main/java/top/racyan/ui/settings/SettingsScreen.kt` | 设置项三选一切换控件（OFF / AUTO / MANUAL）参考 |
+
+---
+
+## 8. 关键代码示例
+
+### 8.1 Tauri command 注册（Rust）
+
+```rust
+// src-tauri/src/commands/file_browser.rs
+use tauri::command;
+use crate::source::{MediaSourceFactory, SourceDescriptor};
+
+#[command]
+async fn list_directory(
+    factory: tauri::State<'_, MediaSourceFactory>,
+    descriptor: SourceDescriptor,
+    path: String,
+) -> Result<Vec<MediaEntry>, String> {
+    // UI 不感知 Local / Archive / Smb / WebDav 差异
+    let source = factory.resolve(&descriptor);
+    source.list_directory(&path).await
+}
+
+#[command]
+async fn read_file(
+    factory: tauri::State<'_, MediaSourceFactory>,
+    descriptor: SourceDescriptor,
+    path: String,
+    offset: Option<u64>,
+    length: Option<u64>,
+) -> Result<Vec<u8>, String> {
+    let source = factory.resolve(&descriptor);
+    source.read_file(&path, offset.zip(length)).await
+}
+
+// main.rs 注册
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            commands::file_browser::list_directory,
+            commands::file_browser::read_file,
+            commands::accounts::upsert_account,
+            commands::accounts::delete_account,
+            commands::accounts::test_connection,
+            commands::bookmarks::list_bookmarks,
+            commands::bookmarks::add_bookmark,
+            commands::bookmarks::delete_bookmark,
+            commands::likes::toggle_like,
+            commands::history::record_history,
+            commands::progress::save_progress,
+            commands::settings::get_setting,
+            commands::settings::set_setting,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
+```
+
+### 8.2 单页阅读器（Vue 3）
+
+```vue
+<!-- src/components/reader/SinglePageViewer.vue -->
+<script setup lang="ts">
+import OpenSeadragon from 'openseadragon';
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
+
+const props = defineProps<{ imageUrl: string }>();
+
+const containerRef = ref<HTMLDivElement | null>(null);
+let viewer: OpenSeadragon.Viewer | null = null;
+
+onMounted(() => {
+  if (!containerRef.value) return;
+  viewer = OpenSeadragon({
+    element: containerRef.value,
+    tileSources: { type: 'image', url: props.imageUrl },
+    showNavigator: false,
+    gestureSettingsMouse: { scrollToZoom: true },
+    animationTime: 0.3,
+  });
+});
+
+watch(() => props.imageUrl, (url) => {
+  viewer?.open({ type: 'image', url });
+});
+
+onBeforeUnmount(() => {
+  viewer?.destroy();
+});
+</script>
+
+<template>
+  <div ref="containerRef" class="w-full h-full" />
+</template>
+```
+
+### 8.3 幻灯片 composable（Vue 3）
+
+```typescript
+// src/composables/useSlideshow.ts
+import { ref, watch, onUnmounted } from 'vue';
+import { useSlideshowStore } from '@/stores/slideshow';
+
+export function useSlideshow(
+  currentPage: Ref<number>,
+  pageCount: Ref<number>,
+  advancePage: (next: number) => Promise<void>,
+) {
+  const slideshow = useSlideshowStore();
+  let timerId: number | null = null;
+
+  function computeNextPage(): number | null {
+    const step = slideshow.direction === 'forward' ? 1 : -1;
+    const next = currentPage.value + step;
+    if (next < 0 || next >= pageCount.value) {
+      if (slideshow.loop) {
+        return slideshow.direction === 'forward' ? 0 : pageCount.value - 1;
+      }
+      return null;
+    }
+    return next;
+  }
+
+  async function tick() {
+    const next = computeNextPage();
+    if (next === null) {
+      slideshow.pause();
+      return;
+    }
+    await advancePage(next);
+  }
+
+  watch(
+    () => slideshow.isPlaying,
+    (playing) => {
+      if (playing) {
+        timerId = window.setInterval(tick, slideshow.intervalMs);
+      } else if (timerId !== null) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+    },
+    { immediate: true },
+  );
+
+  onUnmounted(() => {
+    if (timerId !== null) clearInterval(timerId);
+  });
+}
+```
+
+### 8.4 Pinia store 示例
+
+```typescript
+// src/stores/slideshow.ts
+import { defineStore } from 'pinia';
+import { ref } from 'vue';
+
+export type SlideshowDirection = 'forward' | 'backward';
+
+export const useSlideshowStore = defineStore('slideshow', () => {
+  const isPlaying = ref(false);
+  const intervalMs = ref(3000);
+  const direction = ref<SlideshowDirection>('forward');
+  const loop = ref(true);
+
+  function start() { isPlaying.value = true; }
+  function pause() { isPlaying.value = false; }
+  function togglePlayPause() { isPlaying.value = !isPlaying.value; }
+  function setIntervalMs(ms: number) {
+    intervalMs.value = Math.max(1000, Math.min(30000, ms));
+  }
+  function setDirection(dir: SlideshowDirection) {
+    direction.value = dir;
+  }
+  function setLoop(l: boolean) { loop.value = l; }
+
+  return {
+    isPlaying, intervalMs, direction, loop,
+    start, pause, togglePlayPause,
+    setIntervalMs, setDirection, setLoop,
+  };
+});
+```
+
+### 8.5 自然排序（TypeScript）
+
+```typescript
+// src/lib/naturalSort.ts
+/**
+ * 自然排序：page2.jpg < page10.jpg（不是字典序）
+ * 参考 MiraPage Android 的 NaturalSortComparator 重写。
+ */
+export function naturalCompare(a: string, b: string): number {
+  const regex = /(\d+|\D+)/g;
+  const aParts = a.match(regex) ?? [];
+  const bParts = b.match(regex) ?? [];
+  const len = Math.min(aParts.length, bParts.length);
+
+  for (let i = 0; i < len; i++) {
+    const aPart = aParts[i];
+    const bPart = bParts[i];
+    const aNum = Number(aPart);
+    const bNum = Number(bPart);
+
+    if (!isNaN(aNum) && !isNaN(bNum)) {
+      if (aNum !== bNum) return aNum - bNum;
+    } else {
+      if (aPart !== bPart) return aPart < bPart ? -1 : 1;
+    }
+  }
+  return aParts.length - bParts.length;
+}
+
+export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
+  return [...items].sort((a, b) => naturalCompare(key(a), key(b)));
+}
+```
+
+---
+
+## 9. 关键风险与缓解
+
+| 风险 | 影响 | 缓解 |
+|---|---|---|
+| `smb-rs` 不支持 SMB3 加密 | SMB 连接失败 | 评估 `pavao` / `sambamba` 备选；或降级到 NTLM |
+| OpenSeadragon 大图（>5000px）翻页卡顿 | 用户体验 | 启用 ImageBitmap 异步解码；评估 `createImageBitmap` resize |
+| `unrar` 对 RAR5 部分包失败 | 部分 CBR 打不开 | 文档说明；评估 `unrar-rs` |
+| macOS 公证延期 | 分发受阻 | Phase 8 提前 2 周申请 Apple Developer ID |
+| Linux 无 DBus 时 keyring 失败 | 凭据保存失败 | PBKDF2 master password fallback（UI 显式提示"未启用硬件凭据存储"） |
+| Tauri 2.x 协议稳定性 | API 变动 | 锁定 minor 版本；CI 跑 `cargo update --dry-run` 告警 |
+| 双页 OpenSeadragon viewport 控制精度 | 双页对齐偏移 | 用 `viewer.viewport.imageToViewportRectangle()` + 反复调试 |
+
+---
+
+## 10. 验证（每阶段交付前必跑）
+
+### 10.1 单元测试
+
+- **Rust**：`cargo test` 覆盖 SMB / WebDAV / archive / db / naturalSort
+- **TypeScript**：`vitest` 覆盖 stores / composables / spread planner / naturalSort
+
+### 10.2 端到端手测脚本
+
+### Phase 2 完成时**：
+- [ ] 打开本地目录，显示图片列表
+- [ ] 单页阅读：滚轮缩放、拖拽平移、键盘翻页
+- [ ] 双页阅读：封面单独 / 末页奇数不并排
+- [ ] 进度持久化：关闭再打开恢复页码与模式
+- [ ] UI 通过 `MediaSource` 抽象访问文件（grep 代码无 LocalMediaSource 直接调用）
+
+**Phase 3 完成时**：
+- [ ] 打开 CBZ（ZIP 容器）压缩包
+- [ ] 打开 CBR（RAR 容器）压缩包（RAR4 + 部分 RAR5）
+- [ ] 打开独立 ZIP 文件
+- [ ] 打开 RAR / 7z 压缩包
+
+**Phase 4 完成时**：
+- [ ] 当前页添加书签，列表显示
+- [ ] 切换喜欢状态，列表显示
+- [ ] 进入 reader，历史自动记录
+- [ ] 历史点击跳转到对应页
+- [ ] 书架视图显示收藏的书
+- [ ] 创建标签，为书打标签
+- [ ] 按标签筛选书架
+- [ ] 搜索框输入模糊匹配文件名 / 书名 / 标签
+
+**Phase 5 完成时**：
+- [ ] 顶栏播放按钮可切换播放 / 暂停
+- [ ] 间隔滑块（1-30s）实时生效
+- [ ] 方向切换（forward / backward）生效
+- [ ] 循环开关：末页 loop=true 回首页、loop=false 暂停
+- [ ] 远程源图片加载慢时翻页正确等待
+- [ ] 跨卷连续阅读：`off` 模式末页停住
+- [ ] 跨卷连续阅读：`auto` 模式末页自动跳下一本
+- [ ] 跨卷连续阅读：`manual` 模式末页弹提示确认跳转
+- [ ] 跨卷连续阅读：从压缩包末页跳到目录中下一本
+- [ ] 跨卷连续阅读：从目录末页跳到父目录下一本
+
+**Phase 6 完成时**：
+- [ ] 设置页切换 zh-CN / en-US
+- [ ] 所有 UI 文案（含错误信息、对话框标题）完整翻译
+- [ ] 跟随系统 locale 默认行为正确
+- [ ] locale 切换无需重启立即生效
+
+**Phase 7 完成时**：
+- [ ] 添加 SMB 账户（含测试连接）
+- [ ] 列出 SMB 目录，含图片与非图片分类
+- [ ] 打开 SMB 中图片，进度写入
+- [ ] UI 无需改动即支持 SMB（`MediaSource` 抽象生效）
+
+**Phase 8 完成时**：
+- [ ] 添加 WebDAV 账户
+- [ ] 浏览 WebDAV 目录
+- [ ] 打开 WebDAV 中图片
+
+**Phase 9 完成时**：
+- [ ] macOS DMG 安装、启动、升级
+- [ ] Windows MSI 安装、启动、升级
+- [ ] Linux DEB / AppImage 安装、启动
+
+---
+
+## 11. 完整设置项参考（与 MiraPage Android v0.2.0 对齐）
+
+桌面端需实现全部 33 个设置项（与 Android `SettingsRepository.kt:45-85` 镜像）。持久化于 SQLite `settings` 表（key-value）。DataStore 名称 `"settings"`。
+
+| 分组 | Key | 类型 / 默认值 | 文案（中文） | UI 入口 | 控制的行为 |
+|---|---|---|---|---|---|
+| **外观** | `theme_mode` | String/Enum, `SYSTEM` | 主题（跟随系统 / 浅色 / 深色） | 设置 → 外观 | MaterialTheme 浅深（不控阅读区） |
+| 外观 | `color_theme` | String/Enum, `BLUE` | 主题配色（科技蓝 / 优雅紫 / 暖琥珀 / 中性灰） | `ColorThemeList` 色块 + Radio | 色相（与 themeMode 正交） |
+| 外观 | `brightness` | Float, `-1f` (=跟随系统) | 屏幕亮度 | `BrightnessRow` 滑块 | Tauri window `set_brightness`（仅阅读器） |
+| 外观 | `keep_screen_on` | Boolean, `true` | 阅读时保持屏幕常亮 | `SwitchRow` | 翻页器 `video.wake_lock = true` |
+| **阅读默认** | `default_reader_mode` | String/Enum, `SINGLE_PAGE` | 默认阅读模式（单 / 双） | `EnumList` | 首次开卷时初始化容器模式 |
+| 阅读默认 | `default_scale_mode` | String/Enum, `FIT_SCREEN` | 默认缩放模式 | `EnumList` | OpenSeadragon `homeFillsViewport` |
+| 阅读默认 | `default_read_direction` | String/Enum, `LEFT_TO_RIGHT` | 默认阅读方向（LTR / RTL） | `EnumList` | Pager `reverseLayout` |
+| 阅读默认 | `volume_key_paging` | Boolean, `true` | 键盘快捷键翻页（桌面端含义：保留作为全局开关） | `SwitchRow` | 监听键盘 / 鼠标侧键 |
+| **启动** | `startup_screen` | String/Enum, `FILE_BROWSER` | 启动时打开（文件浏览器 / 书架） | `EnumList` | 冷启动路由目标 |
+| **跨目录** | `continue_to_next_directory` | String/Enum, `SWIPE` | 接续下一文件夹（关闭 / 自动 / 滑过末页 / 手动） | `EnumList` | `ReaderViewModel.maybeContinue` 触发条件 |
+| **幻灯片** | `slideshow_interval_ms` | Long, `3000` (≥500) | 自动推进间隔（秒） | `SlideshowSettingsSection` 滑块 | `useSlideshow` `setInterval` |
+| 幻灯片 | `slideshow_direction` | String/Enum, `FORWARD` | 幻灯片方向（正向 / 反向） | `EnumList` | 自动翻页方向 |
+| 幻灯片 | `slideshow_loop` | Boolean, `true` | 循环播放 | `SwitchRow` | 末页行为（停止 vs 回首页） |
+| **文件浏览器** | `fb_sort_field` | String/Enum, `NAME` | 默认排序（名称 / 日期 / 大小） | `EnumList` | `compareBy` |
+| 文件浏览器 | `fb_sort_ascending` | Boolean, `true` | 升序排列 | `SwitchRow` | `NaturalSortComparator` 升降序；FB 工具栏同步 |
+| **SMB / WebDAV** | `smb_archive_strategy` | String/Enum, `DOWNLOAD` | SMB 压缩包加载（下载整包 / 流式） | `CacheSettingsSection` | `ArchiveMediaSource` 加载模式（Phase 7） |
+| SMB / WebDAV | `webdav_archive_strategy` | String/Enum, `STREAM` | WebDAV 压缩包加载 | `EnumList` | 同上（Phase 8） |
+| SMB / WebDAV | `webdav_stream_buffer_kb` | Int, `256` (64-2048) | WebDAV 流式缓冲 (KB) | `NumberInputRow` | Range GET 大小（Phase 8） |
+| SMB / WebDAV | `concurrent_downloads` | Int, `3` (1-10) | 并发下载数 | `NumberInputRow` | `PageCacheManager.setMaxConcurrentDownloads` |
+| **缓存 / 预读** | `page_cache_size_mb` | Int, `512` (100-4096) | 缓存大小（MB） | `NumberInputRow` + chips（显示磁盘占用） | `PageCacheManager.resize` |
+| 缓存 / 预读 | `prefetch_budget_mb` | Int, `8` (0-100) | 预读预算（MB） | `NumberInputRow` | `PrefetchPlanner` 总预算 |
+| 缓存 / 预读 | `archive_cache_size_mb` | Int, `2048` (512-8192) | 压缩包缓存大小（MB） | `NumberInputRow` | `ArchiveCache.resize`（LRU 淘汰） |
+| **下载** | `download_directory` | String?（绝对路径） | 下载目录 | `DownloadSettingsSection` | Phase 5+ 落盘到本地副本 |
+| 下载 | `download_directory_display_name` | String? | 下载目录显示名 | 同上 | UI 文本 |
+| 下载 | `auto_delete_after_finished` | Boolean, `false` | 全部阅读后自动删除 | `SwitchRow` | `DownloadManager` 末态清理 |
+| 下载 | `download_concurrency` | Int, `4` (1-10) | 下载并发数 | `NumberInputRow` | `DownloadManager.setConcurrency` |
+| **触控** | 9 个 `touch_{top,mid,bot}_{left,center,right}` | String/Enum | 屏幕触控分区（3×3） | `TouchSchemeSection` 3×3 cell | `touchRegion()` → `TouchAction` 映射 |
+| **i18n（新增）** | `locale` | String, `system` | 语言（zh-CN / en-US / 跟随系统） | `EnumList` | `vue-i18n` locale 切换 |
+| **搜索（新增）** | `search_mode` | String/Enum, `fuzzy` | 搜索模式（模糊 / 子串） | `EnumList` | fuse.js threshold 配置 |
+
+**触控 3×3 → 默认动作映射**（来自 `TouchScheme.kt:37-46`，桌面端映射为键盘快捷键，见 §13）：
+
+| 区域 | 默认动作 | 桌面端等价键 |
+|---|---|---|
+| 左上 (TL) | `FIT_WIDTH` | `W` |
+| 中上 (TC) | `OPEN_FILE_BROWSER` | `B` |
+| 右上 (TR) | `JUMP_LAST` | `End` |
+| 左中 (ML) | `PREV_PAGE` | `←` / `PageUp` |
+| 中中 (MC) | `OPEN_MAIN_MENU` | `Esc` / `M` |
+| 右中 (MR) | `NEXT_PAGE` | `→` / `PageDown` / `Space` |
+| 左下 (BL) | `FOLDER_PREV` | `Alt+←` |
+| 中下 (BC) | `SLIDESHOW_TOGGLE` | `P` / `F5` |
+| 右下 (BR) | `FOLDER_NEXT` | `Alt+→` |
+
+`TouchAction` 枚举完整值：`NONE`, `NEXT_PAGE`, `PREV_PAGE`, `OPEN_MAIN_MENU`, `TOGGLE_CHROME`, `JUMP_FIRST`, `JUMP_LAST`, `SLIDESHOW_TOGGLE`, `FIT_WIDTH`, `FOLDER_NEXT`, `FOLDER_PREV`, `OPEN_FILE_BROWSER`。
+
+**i18n 文案**（必须走 `$t()`）：
+- `slide.range`（间隔滑块标签）
+- `slide.direction.forward` / `reverse`
+- `slide.loop`
+- `app.theme.mode.{system,light,dark}`
+- `app.color.{blue,purple,amber,neutral}`
+- `reader.mode.{single,double}`（桌面端仅这两个）
+- `reader.dir.{ltr,rtl}`
+- `reader.scale.{fitScreen,fitWidth,fitHeight,original}`
+- `fb.sort.{name,date,size}` + `fb.sort.ascending`
+- `cache.size.{page,prefetch,archive}`
+- `cache.concurrent`
+- `account.smb.archive.{download,stream}`
+- `account.webdav.archive.{download,stream}`
+- `reader.continue.{off,auto,swipe,manual}`
+- `lang.{zh,en,system}`
+
+---
+
+## 12. 阅读器交互与状态机
+
+桌面端需复刻 Android 阅读器的所有交互语义，但**只用单页 + 双页两种模式**（不做 webtoon / 横条）。
+
+### 12.1 单页容器 (`SinglePageViewer.vue`)
+
+- **底层**：`HorizontalPager`（desktop 用一个支持键盘 + 鼠标拖拽的 pager 组件或 `swiper.js`），`reverseLayout = direction == RTL`
+- **初始页**：`initialPage = currentIndex.coerceIn(0, lastIndex)`
+- **点击**：`detectTapGestures`（Vue 改 `useMouseEvents` 或 `@click` 监听 + `touchRegion(x, y, w, h)` 映射）
+- **翻页触发**：
+  - Pager 拖动 → `pagerState.currentPage` 变化 → `watch(currentPage)` → `onPageChanged(newPage)` → ViewModel
+  - 键盘 / 鼠标侧键 → `useReaderHotkeys` 拦截 → `viewModel.nextPage()/previousPage()` → 更新 `_currentIndex` → `watch(currentIndex)` → `pagerState.scrollToPage(currentIndex)`
+  - 翻页按钮 / 触控区域 → `viewModel.nextPage()` / `previousPage()`
+- **Chrome 显隐**：paged 模式默认显示；按 `Esc` / `M` / `C` 切换；webtoon / strip 模式（不做）自动隐藏
+- **进度条**：复用 `JumpPageDialog.vue`，含 Slider + TextField 输入页码
+
+### 12.2 双页容器 (`DoublePageViewer.vue`)
+
+- **底层**：`HorizontalPager`，`pageCount = spreads.size`（注意是 spread 数，不是页数）
+- **初始页**：`initialPage = SpreadPlanner.spreadIndexForPage(currentIndex, spreads)`
+- **Spread 合并规则**（由 `SpreadPlanner.plan(pageCount, coverStandalone=true)` 重写为 TS / Rust）：
+  - `pageCount == 0` → `[]`
+  - `pageCount == 1` → `[0..0]`（单页无论 coverStandalone）
+  - `pageCount > 1 && coverStandalone` → `[0..0]` + `[1..2]` + `[3..4]` + ... + 余单页 `[i..i]`
+  - `coverStandalone == false` → 两两配对
+- **翻页策略**：一次翻 1 个 spread（= 2 页）
+- **进度以 spread 为单位报告**（同 Android）
+- **RTL**：LTR 时 N 在左 N+1 在右；RTL 时 N+1 在左 N 在右（`reverseLayout` 整体镜像）
+- **跨卷触发**：复用 `ContinueNextVolume` composable（按 spread 末尾 + 1/3 屏阈值）
+
+### 12.3 跨卷连续阅读（桌面端 4 种模式）
+
+设置 `continue_to_next_directory`（与 Android 一致，但把 SWIPE 改成 SWIPE / MANUAL 二选一）：
+
+| 模式 | 行为 |
+|---|---|
+| `OFF` | 末页停住，无任何提示 |
+| `AUTO` | 末页自动跳下一本（不等用户操作） |
+| `SWIPE` | 末页静默 arm；继续向"下一本"方向划累计 1/3 屏宽（paged）或 1/5 屏高（webtoon）→ 触发 |
+| `MANUAL` | 末页弹底部药丸"继续读下一本？" + 跳转按钮；点跳转才换书 |
+
+**算法**（由 `FindNextDirectoryUseCase` 重写为 Rust）：
+- 输入 `(descriptor, currentPath, direction)` → `Result<String?>`
+- 解析父目录 → 列 sibling → 按 `sortOptionComparator` 排序（per-dir override > 全局 default）
+- NEXT 取 `siblings.drop(idx+1)`、PREVIOUS 取 `siblings.take(idx).reversed()`
+- 跳过空目录、archive 文件直接命中（不开内容）
+- 返回 `null` 时 UI toast "无下一卷" / "无上一卷"
+
+### 12.4 阅读器核心状态机
+
+```rust
+// Tauri state machine, 简化版
+enum ReaderState {
+    Loading,
+    Ready {
+        bookId: i64,
+        pages: Vec<String>,        // page URLs
+        spreads: Vec<IntRange>,    // SpreadPlanner.plan()
+        currentSpreadIndex: usize,
+        isAtFirstPage: bool,
+        isAtLastPage: bool,
+        continueSwipePull: f32,    // 0.0-1.0 累计
+    },
+    Error {
+        kind: ErrorKind,
+        isPermissionRevoked: bool,
+        onReauthorize: Option<fn()>,
+    },
+}
+
+enum ErrorKind {
+    Unreachable,         // 网络/文件不可达
+    Timeout,             // 30s withTimeout 超时
+    PermissionRevoked,   // SAF Uri 权限丢失（桌面端映射：本地路径无权限 / 远程认证失败）
+    DecodingError,       // 图片解码失败
+    Empty,               // 目录为空
+}
+```
+
+**关键事件流**：
+
+```
+ReaderViewModel.init:
+  1. reopenBook(bookId, withTimeout(30s))
+  2. on Success:
+     - browse_history.record(descriptor, relPath)
+     - state = Ready(...)
+  3. on Failure:
+     - state = Error(kind)
+     - if PermissionRevoked → UI 提供"重新选择文件"按钮
+```
+
+```
+onPageChanged(newIndex):
+  1. _currentIndex = newIndex
+  2. pageChangeTicker.emit()  // 触发 500ms 防抖
+  3. atLastPage = (newIndex >= lastIndex)
+  4. if atLastPage && atLastPageToggledToTrue:
+     - maybeContinue(force=false, dir=NEXT)
+  5. schedulePrefetch()  // AHEAD=3, BEHIND=3, 按 prefetchBudgetMb 截断
+```
+
+```
+maybeContinue(force, dir):
+  1. if OFF → return
+  2. bookSwapInFlight guard（@Volatile）
+  3. if SWIPE && !force → _swapping = true, return（仅 arm，不查目录）
+  4. findNextDirectory(...) → null 时 toast "无下一卷" / "无上一卷"
+  5. persistProgress(writeFinished=false)
+  6. _bookSwap.emit(BookSwapTarget{descriptor, relPath, title})
+  7. bookSwapInFlight = false (finally)
+```
+
+**进度保存策略**（与 Android 一致）：
+- **500ms 防抖**：`pageChangeTicker.debounce(500ms) → persistProgress()`
+- **窗口关闭时立即保存**：`window.onCloseRequested → saveImmediately()`
+- **跨卷前 flush**：`maybeContinue` 内调 `persistProgress(writeFinished=false)`
+- **finished 语义**：`finished = (currentIndex >= lastIndex) || existing?.finished == true`（sticky，永不翻回）
+
+### 12.5 阅读器 UI 持久元素（`ReaderOverlay`）
+
+| 元素 | 位置 | 触发 | 显示条件 |
+|---|---|---|---|
+| 页码指示器 | 右下角 | — | 常驻 |
+| 预读状态 | 左下角 | — | chrome 隐藏时 |
+| 跨卷进度药丸 | 底部居中（bottom 100dp） | `continuePull > 0` | 滑动到末页继续向 NEXT 方向划 |
+| 跨卷切换 | 底部居中 | `_swapping == true` | 切换进行中 |
+| 切换 toast | 底部居中（bottom 72dp） | 模式/方向/缩放切换 | 切换后 1.5s |
+| 主菜单 | 全屏遮罩 | `Esc` / `M` / 中区点击 | 用户触发 |
+| 跳页对话框 | 全屏 | 顶栏跳页按钮 / `Ctrl+G` | 用户触发 |
+| 触控分区覆盖 | 全屏 | 主菜单"显示触控分区" | 用户触发 |
+
+---
+
+## 13. Domain 算法清单（待移植）
+
+以下算法必须从 Kotlin 1:1 移植到 Rust / TypeScript，保持语义完全一致。**纯函数部分（不依赖 IO）放 `src-tauri/src/algorithm/`；IO 边界部分（依赖 MediaSource / Repository）放 `src-tauri/src/usecase/`**。
+
+### 13.1 纯函数（直接 1:1 移植）
+
+| 算法 | 文件（参考） | 签名 | 关键语义 |
+|---|---|---|---|
+| `SpreadPlanner.plan` | `domain/reader/SpreadPlanner.kt:17` | `plan(pageCount: i32, coverStandalone: bool = true) -> Vec<IntRange>` | 双页规划；首张独占 + 奇数尾页单成 |
+| `PrefetchPlanner.plan` | `domain/reader/PrefetchPlanner.kt:23` | `plan(idx, pageCount, aheadCount, behindCount, scrollingUp) -> Vec<i32>` | 预取页序；behind 优先（向上滚时） |
+| `syntheticBookIdOf` | `domain/usecase/OpenBookUseCase.kt:164` | `(descriptor, relPath) -> i64` | `UUID.nameUUIDFromBytes(desc.toString()+"\|"+relPath)` → `-abs(mostSignificantBits)` |
+| `archiveKeyParts` | `domain/usecase/OpenBookUseCase.kt:175` | `(source, absPath) -> (SourceDescriptor, String)` | Archive 归一化到 `(origin, archiveRelPath)`；否则原样 |
+| `progressKeyForLocal` | `domain/usecase/OpenBookUseCase.kt:186` | `(localDesc, localRel, mapping) -> i64` | 本地副本进度映射到远程源 |
+| `NaturalSortComparator.compare` | `core/util/NaturalSortComparator.kt:11` | `(a, b) -> i32` | `page2.jpg < page10.jpg`；数字段长度优先 + 前导零归一 |
+| `TouchScheme.touchRegion` | `domain/reader/TouchScheme.kt:83` | `(x, y, w, h) -> TouchRegion` | 3×3 分区；`width/height` `coerceAtLeast(1.0)` 防除零 |
+| `PathUtils.{segments, normalize, join, parent, crumbs}` | `core/util/PathUtils.kt:12` | 字符串处理函数 | 反斜杠→`/`、去空段、面包屑累积 |
+| `MimeUtils.{isImage, isArchive, mimeFromName, supportedExtensions}` | `core/util/MimeUtils.kt:7` | 扩展名映射函数 | jpg/jpeg/png/gif/webp/bmp/heic/heif；压缩包 cbz/cbr/zip/rar/7z |
+
+### 13.2 IO 边界函数（需要 async + DI 重组）
+
+| 函数 | 签名 | 关键逻辑 |
+|---|---|---|
+| `FindNextDirectoryUseCase.invoke` | `async fn (descriptor, currentPath, direction, defaultSort) -> Result<Option<String>>` | parent → listDirectory → 过滤 dir/archive → natural sort → 取 next/prev（见 §12.3） |
+| `OpenBookUseCase.invoke(bookId)` | `async fn (i64) -> Result<BookOpenResult>` | 从 LibraryRepository 取书 → resolveSource → listDirectory → sort → archiveKeyParts → syntheticBookId → 读 progress |
+| `OpenBookUseCase.openTemp(descriptor, relPath, title, sort=DEFAULT)` | 同上 | **不写 LibraryEntity**；Local 时先查 downloadRepository 构 mapping → progressKeyForLocal；否则直接 archiveKeyParts + syntheticBookId；构造合成 LibraryEntity（id=负数） |
+
+### 13.3 关键重写注意事项
+
+- **`syntheticBookIdOf` 的负数语义**：必须严格保持 `-abs(msb)`，否则与 Android 端备份互导时 progressKey 会冲突
+- **`archiveKeyParts` 的归一化条件**：`source is Archive && origin != null && archiveRelPath != null` 才归一化；否则原样
+- **`progressKeyForLocal` 的 mapping**：必须在 openTemp 阶段就构好 mapping，不能到 saveProgress 阶段临时查
+- **`SortOptionComparator` 的 override 优先级**：`DirectorySortRepository.resolveSort` 必须 per-dir override > 全局 default（这是 Android 修过的 #4 bug）
+- **`TouchScheme` 默认 9 个动作值**：与 `TouchScheme.kt:37-46` 严格一致；桌面端键位映射见 §11 表
+
+---
+
+## 14. 桌面端键盘快捷键映射
+
+Android 端的触控 3×3 区域 + 音量键翻页 + 触屏手势，在桌面端映射为键盘 + 鼠标：
+
+### 14.1 通用阅读器键位（与 MiraPage Android 1:1 对齐）
+
+| 桌面输入 | 动作 | Android 等价 |
+|---|---|---|
+| `←` / `PageUp` | 上一页（PREV_PAGE） | 触控 ML 区 |
+| `→` / `PageDown` / `Space` | 下一页（NEXT_PAGE） | 触控 MR 区 |
+| `Home` | 跳到首页（JUMP_FIRST） | — |
+| `End` | 跳到末页（JUMP_LAST） | 触控 TR 区 |
+| `Esc` / `M` | 切换主菜单（OPEN_MAIN_MENU） | 触控 MC 区 |
+| `C` / `Ctrl+H` | 切换 chrome 显隐（TOGGLE_CHROME） | — |
+| `W` | 适宽缩放（FIT_WIDTH） | 触控 TL 区 |
+| `B` | 打开文件浏览器（OPEN_FILE_BROWSER） | 触控 TC 区 |
+| `Alt+→` | 下一卷（FOLDER_NEXT） | 触控 BR 区 |
+| `Alt+←` | 上一卷（FOLDER_PREV） | 触控 BL 区 |
+| `P` / `F5` | 切换幻灯片（SLIDESHOW_TOGGLE） | 触控 BC 区 |
+| `1` / `2` | 单页 / 双页模式 | — |
+| `L` | LTR / RTL 切换 | — |
+| `Ctrl+G` | 跳页对话框 | — |
+| `Ctrl+F` | 搜索 | — |
+| `F11` | 全屏切换 | — |
+
+### 14.2 鼠标映射
+
+| 鼠标输入 | 动作 |
+|---|---|
+| 左键单击左 / 右 1/3 | PREV_PAGE / NEXT_PAGE（与 Android 触控 ML / MR 一致） |
+| 左键单击中区 | OPEN_MAIN_MENU |
+| 左键单击顶 / 底 1/3 | 与对应动作一致 |
+| 左键拖动 | Pager 翻页（桌面端比触屏更精确） |
+| 滚轮上 / 下 | PREV_PAGE / NEXT_PAGE（paged）或滚动（已不做 webtoon / strip） |
+| 中键 | 打开主菜单 |
+| 右键 | 上下文菜单（暂不实现；预留接口） |
+
+### 14.3 跨卷触发（桌面端）
+
+- **paged** 模式：末页静默 arm；继续 `→` 按键累计 3 次 → 触发（与 Android 1/3 屏宽等价）
+- **manual** 模式：末页弹药丸 + `Enter` 键确认 / `Esc` 取消
+
+---
+
+## 15. 桌面端输入设备与手势映射（从 Android 触控到桌面输入）
+
+MiraPage Android 的核心交互是**触屏**（单击 / 双击 / 双指 pinch / 划动 / 长按）。桌面端没有触屏，需要把**每一种手势**映射到**鼠标 / 键盘 / 触控板**的等价操作。
+
+### 15.1 输入设备矩阵
+
+桌面端必须支持以下 4 类输入设备，按优先级排序：
+
+| 设备 | 必选 | 适配要点 |
+|---|---|---|
+| **键盘** | ✅ | 全部快捷键必须可工作；参考 §14.1 |
+| **鼠标** | ✅ | 左 / 右 / 中键 + 滚轮 + 侧键（部分鼠标 4-5 键 + 水平滚轮） |
+| **触控板** | ✅（macOS 必备） | macOS 全手势（双指滚动 / 双指捏合 / 三指滑动 / 四指切换桌面） |
+| **触屏**（Win11 2-in-1 / Surface） | ⭕ 可选 | 与 Android 触控语义最接近，可作为高级模式启用 |
+
+### 15.2 Android 手势 → 桌面操作映射
+
+| Android 手势 | 桌面等价（鼠标 / 键盘 / 触控板） | 触发逻辑 |
+|---|---|---|
+| **单击左 1/3** | 鼠标左键单击左 1/3 区域 | `@click` + 区域判定 |
+| **单击中区** | 鼠标左键单击中间 1/3 / `Esc` / `M` | 同上 |
+| **单击右 1/3** | 鼠标左键单击右 1/3 区域 | 同上 |
+| **双击** | 鼠标左键双击 | `onDblClick` → FIT_WIDTH ↔ 1:1 |
+| **双指 pinch** | `Ctrl + 滚轮`（光标处缩放） / 触控板捏合 | OpenSeadragon zoom API |
+| **双指 drag** | `Shift + 拖动` / 触控板双指拖动 | OpenSeadragon pan API |
+| **单指拖动** | 鼠标左键拖动 | Pager 翻页 |
+| **划动到边界继续划** | 末页继续向 NEXT 方向 `→` 3 次 / 拖动越界后继续拖 1/3 屏宽 | 跨卷触发 |
+| **长按** | 鼠标右键 / 长按左键 500ms | 右键菜单（暂不实现，预留接口） |
+| **3 指 / 4 指上滑** | 触控板手势（macOS） | 隐藏 chrome / 退出 reader |
+| **音量键** | `↑` / `↓` 键（替代音量键翻页） | 与 `→` / `←` 同等（可通过 `volume_key_paging` 设置开关） |
+| **触屏长按截图** | 暂不实现 | — |
+
+### 15.3 鼠标按键分配（详细）
+
+桌面端鼠标按键丰富，需充分利用：
+
+| 按键 | 默认动作 | 可自定义 |
+|---|---|---|
+| **左键单击左 1/3** | PREV_PAGE | ✅（设置 → 输入） |
+| **左键单击右 1/3** | NEXT_PAGE | ✅ |
+| **左键单击中区** | TOGGLE_CHROME | ✅ |
+| **左键单击顶 1/3** | OPEN_FILE_BROWSER | ✅ |
+| **左键单击底 1/3** | OPEN_MAIN_MENU | ✅ |
+| **左键双击** | FIT_WIDTH ↔ 1:1 | ✅ |
+| **左键拖动**（paged 模式） | Pager 翻页 | 否（内置） |
+| **左键长按** | 预留（未来上下文菜单） | — |
+| **中键** | OPEN_MAIN_MENU | ✅ |
+| **右键** | 预留（未来上下文菜单） | — |
+| **侧键 4**（前进） | NEXT_PAGE | ✅ |
+| **侧键 5**（后退） | PREV_PAGE | ✅ |
+| **滚轮上** | PREV_PAGE | ✅ |
+| **滚轮下** | NEXT_PAGE | ✅ |
+| **水平滚轮左 / 右** | 单页切换到邻页 / 横条模式（不做） | ✅ |
+
+### 15.4 触控板手势（macOS 必备，Windows precision 可选）
+
+macOS 用户**主要**通过触控板操作，必须适配：
+
+| 触控板手势 | 动作 |
+|---|---|
+| 双指滚动 | paged：PREV/NEXT_PAGE（按方向） |
+| 双指捏合（pinch in / out） | OpenSeadragon zoom |
+| 双指双击 | 智能缩放（OpenSeadragon `gestureSettingsTouch.pinchToZoom`） |
+| 三指上滑 | 隐藏 chrome |
+| 三指下滑 | 显示 chrome |
+| 四指左右滑 | 上一卷 / 下一卷（**仅** SWIPE 模式生效） |
+| 双指 force click | 预留（未来 OCR 选词等） |
+
+Windows Precision Touchpad 大部分行为与 macOS 类似，可复用同一套逻辑（通过 `PointerEvent` 类型 + `OS_IOS` 判断 platform）。
+
+### 15.5 键盘修饰符 + 多键组合
+
+Android 没有键盘，桌面端需要系统化处理：
+
+| 修饰键 | 用例 |
+|---|---|
+| `Shift` | 与翻页键组合 = 一次翻 5 页（`Shift+→` / `Shift+←`） |
+| `Ctrl` | 与滚轮组合 = 缩放；与 G 组合 = 跳页 |
+| `Alt` | 与 `→` / `←` 组合 = 跨卷（替代 SWIPE 触屏手势） |
+| `Cmd` (macOS) | 与 `Q` 组合 = 退出；与 `,` 组合 = 设置 |
+| `Meta` (Windows 键) | 暂不绑定（系统占用） |
+| `Tab` | 在 UI 焦点间切换（无障碍） |
+
+**多键组合 vs 单键**：单键无修饰符优先匹配；冲突时按"更长组合 > 更短组合"优先级（如 `Ctrl+G` 优于 `G`）。
+
+### 15.6 触屏设备（Windows 2-in-1 / Surface）— 可选高级模式
+
+桌面端若运行在触屏设备上，应**自动检测**并启用触屏语义：
+
+```rust
+// src-tauri/src/input/mod.rs
+fn detect_touch_capable() -> bool {
+    // Tauri 2.x 暂未直接暴露；可通过 webview userAgent + screen DPR + 系统设置启发
+    // 或让用户在设置页手动启用「触屏模式」
+}
+```
+
+触屏模式下：
+- 单指 = 鼠标左键单击（自动）
+- 双指 = 鼠标中键拖动（自动，OpenSeadragon pan）
+- 划动 = 鼠标左键拖动（paged 翻页）
+
+设置页提供开关「启用触屏语义」（默认关闭）。
+
+### 15.7 键位自定义（用户级配置）
+
+桌面端**必须**支持用户自定义键位，因为默认映射无法覆盖所有用户习惯。设计要点：
+
+1. **数据模型**（与 MiraPage Android 的 `TouchScheme` 对齐）：
+   ```typescript
+   // src/stores/inputBindings.ts
+   interface InputBindings {
+     // 键盘键位
+     keyboard: Record<TouchAction, string[]>;   // action → 多组快捷键
+     // 鼠标按键
+     mouseButtons: Record<MouseButton, TouchAction>;
+     // 滚轮
+     wheelUp: TouchAction;
+     wheelDown: TouchAction;
+     // 触控板手势
+     trackpad: Record<TrackpadGesture, TouchAction>;
+   }
+   ```
+
+2. **持久化**：作为 JSON 字符串存入 settings 表的 `input_bindings` key
+
+3. **设置页 UI**：分组展示「键盘快捷键 / 鼠标按键 / 触控板手势」，每项提供按键选择器 + "录制新键位"按钮 + "恢复默认"按钮
+
+4. **冲突检测**：录制新键位时检测与已绑定动作冲突，弹冲突列表
+
+5. **平台差异**：
+   - macOS 显示 `Cmd`（而非 `Ctrl`）
+   - Windows 显示 `Ctrl`
+   - 通过 `navigator.platform` 检测
+
+### 15.8 输入事件总线（架构）
+
+桌面端输入最终统一到一个命令式总线，避免每个组件重复注册：
+
+```typescript
+// src/composables/useReaderInput.ts
+import { onMounted, onBeforeUnmount } from 'vue';
+import { useReaderStore } from '@/stores/reader';
+import { useSlideshowStore } from '@/stores/slideshow';
+import { resolveAction } from '@/lib/inputBindings';
+
+export function useReaderInput() {
+  const reader = useReaderStore();
+  const slideshow = useSlideshowStore();
+  let detachHandlers: (() => void)[] = [];
+
+  function handleCommand(cmd: ReaderCommand) {
+    switch (cmd) {
+      case ReaderCommand.NextPage:
+        reader.nextPage(); break;
+      case ReaderCommand.PrevPage:
+        reader.previousPage(); break;
+      case ReaderCommand.ToggleChrome:
+        reader.toggleChrome(); break;
+      case ReaderCommand.ToggleSlideshow:
+        slideshow.togglePlayPause(); break;
+      case ReaderCommand.JumpFirst:
+        reader.jumpToPage(0); break;
+      case ReaderCommand.JumpLast:
+        reader.jumpToPage(reader.pageCount - 1); break;
+      case ReaderCommand.OpenMainMenu:
+        reader.showMainMenu = !reader.showMainMenu; break;
+      case ReaderCommand.OpenFileBrowser:
+        reader.navigateToFileBrowser(); break;
+      case ReaderCommand.FitWidth:
+        reader.fitWidth(); break;
+      case ReaderCommand.FolderNext:
+        reader.continueToNextVolume(); break;
+      case ReaderCommand.FolderPrev:
+        reader.continueToPreviousVolume(); break;
+    }
+  }
+
+  function dispatch(event: InputEvent) {
+    const bindings = useInputBindingsStore();
+    const action = resolveAction(event, bindings);
+    if (action) handleCommand(toCommand(action));
+  }
+
+  onMounted(() => {
+    // 注册键盘
+    const kbHandler = (e: KeyboardEvent) => dispatch({ kind: 'keyboard', key: e.key, modifiers: extractModifiers(e) });
+    window.addEventListener('keydown', kbHandler);
+    detachHandlers.push(() => window.removeEventListener('keydown', kbHandler));
+
+    // 注册鼠标
+    const mClickHandler = (e: MouseEvent) => dispatch({ kind: 'mouseClick', button: e.button, x: e.clientX, y: e.clientY, w: window.innerWidth, h: window.innerHeight });
+    const mWheelHandler = (e: WheelEvent) => dispatch({ kind: 'wheel', deltaX: e.deltaX, deltaY: e.deltaY, ctrlKey: e.ctrlKey });
+    window.addEventListener('mousedown', mClickHandler);
+    window.addEventListener('wheel', mWheelHandler);
+    detachHandlers.push(() => { window.removeEventListener('mousedown', mClickHandler); window.removeEventListener('wheel', mWheelHandler); });
+
+    // 注册触控板（macOS）
+    if (navigator.platform === 'MacIntel') {
+      const tHandler = (e: TouchEvent) => dispatch({ kind: 'touch', touches: e.touches.length, ...});
+      window.addEventListener('touchstart', tHandler);
+      detachHandlers.push(() => window.removeEventListener('touchstart', tHandler));
+    }
+  });
+
+  onBeforeUnmount(() => detachHandlers.forEach(fn => fn()));
+}
+```
+
+### 15.9 桌面端键盘快捷键完整映射表（与 Android 触控 1:1 对齐）
+
+| TouchAction | 桌面默认（macOS） | 桌面默认（Win/Linux） | 用户可改 |
+|---|---|---|---|
+| `NEXT_PAGE` | `→` / `PageDown` / `Space` | 同 | ✅ |
+| `PREV_PAGE` | `←` / `PageUp` | 同 | ✅ |
+| `OPEN_MAIN_MENU` | `Esc` / `M` | 同 | ✅ |
+| `TOGGLE_CHROME` | `C` / `Cmd+H` | `C` / `Ctrl+H` | ✅ |
+| `JUMP_FIRST` | `Home` / `Cmd+↑` | `Home` / `Ctrl+Home` | ✅ |
+| `JUMP_LAST` | `End` / `Cmd+↓` | `End` / `Ctrl+End` | ✅ |
+| `SLIDESHOW_TOGGLE` | `P` / `F5` | 同 | ✅ |
+| `FIT_WIDTH` | `W` | 同 | ✅ |
+| `FOLDER_NEXT` | `Alt+→` / `Cmd+] ` | `Alt+→` | ✅ |
+| `FOLDER_PREV` | `Alt+←` / `Cmd+[` | `Alt+←` | ✅ |
+| `OPEN_FILE_BROWSER` | `B` / `Cmd+Shift+O` | `B` / `Ctrl+O` | ✅ |
+
+---
+
+## 16. 后续可扩展方向（不在本期范围）
+
+- Webtoon 模式（连续竖向滚动）
+- 横条模式（连续横向滚动）
+- 下载到本地
+- 配置备份 / 导入（与 Android `.pvbackup` 互导）
+- 主题切换（深 / 浅 + 4 套色板）
+- 缩略图网格视图
+- 远程图加载进度条
+- i18n：本期仅中 / 英两种语言；其他语言（日 / 韩 / 法等）为未来工作

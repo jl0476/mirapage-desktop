@@ -1,0 +1,60 @@
+[package]
+name = "mirapage-desktop"
+version = "0.1.0"
+description = "Cross-platform desktop comic reader"
+authors = ["MiraPage Team"]
+edition = "2021"
+rust-version = "1.75"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "mirapage_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+tauri-plugin-updater = "2"
+
+async-trait = "0.1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+# 远程源（Phase 7-8 启用）
+smb-rs = "0.6"
+reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
+
+# 压缩包（Phase 3 启用）
+zip = "2"
+unrar = "0.7"
+sevenz-rust = "0.6"
+
+# 数据库
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# 凭据
+keyring = "3"
+
+# 错误处理
+thiserror = "1"
+anyhow = "1"
+
+# 日志
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# URL 处理
+url = "2"
+percent-encoding = "2"
+
+[features]
+# 此特性用于在生产环境构建时启用自定义协议
+custom-protocol = ["tauri/custom-protocol"]
