@@ -34,10 +34,14 @@ tokio = { version = "1", features = ["full"] }
 # smb-rs = "0.6"
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
 
-# 压缩包（Phase 3 启用，注释：源码未 use）
-# zip = "2"
-# unrar = "0.7"
-# sevenz-rust = "0.6"
+# 压缩包（Phase 3 启用：CBZ/ZIP 已实装,RAR/7z 占位）
+zip = "2"
+# unrar = "0.7"   # Phase 3 RAR 实装时启用
+# sevenz-rust = "0.6"  # Phase 3 7z 实装时启用
+
+[dev-dependencies]
+# Phase 3 实装测试使用 tempfile 生成临时 CBZ/ZIP 文件
+tempfile = "3"
 
 # 数据库
 rusqlite = { version = "0.32", features = ["bundled"] }

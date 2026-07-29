@@ -34,6 +34,32 @@ pub fn run() {
             commands::settings::set_setting,
             commands::file_browser::list_directory,
             commands::file_browser::read_file,
+            // Phase 3 压缩包
+            // (list_directory/read_file 通用,无需重复声明)
+            // Phase 4 业务
+            commands::bookmarks::list_bookmarks,
+            commands::bookmarks::add_bookmark,
+            commands::bookmarks::remove_bookmark,
+            commands::likes::list_likes,
+            commands::likes::toggle_like,
+            commands::history::list_history,
+            commands::history::record_history,
+            commands::library::list_library,
+            commands::library::set_favorite,
+            commands::library::create_book,
+            commands::progress::save_progress,
+            commands::tags::list_tags,
+            commands::tags::create_tag,
+            commands::tags::delete_tag,
+            commands::tags::add_book_tag,
+            commands::tags::remove_book_tag,
+            commands::search::search,
+            commands::accounts::list_accounts,
+            commands::accounts::upsert_account,
+            commands::accounts::delete_account,
+            commands::accounts::test_connection,
+            // Phase 5
+            commands::find_next_volume::find_next_volume,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
