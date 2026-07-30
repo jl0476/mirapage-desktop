@@ -27,7 +27,8 @@ npm run dev
 
 # 生产构建（先 vue-tsc 类型检查，再 Vite 出 dist/）
 npm run build
-npm run tauri:build
+npm run tauri:build                       # MSI + NSIS 安装包
+npm run tauri -- build --no-bundle        # 单 exe 自包含（portable，无安装向导）
 
 # 前端测试（Vitest + happy-dom）
 npm test                # 单次
@@ -121,6 +122,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 - **`SourceDescriptor` 字段命名**：Rust 端 `snake_case`（serde `rename_all = "lowercase"` 在 `tag` 上），TS 端 `camelCase`——Tauri 自动在 IPC 边界做转换。改 Rust 字段时检查 TS 镜像。
 - **包内 IPC**：前端禁止直接 `import { invoke } from '@tauri-apps/api'`；统一通过 `lib/tauri.ts`。
 - **新增 `MediaSource` 实现**：① 在 `source/*_impl.rs` 写 trait impl → ② 在 `source/factory.rs::MediaSourceFactory` 加 `Arc` 字段并在 `new()` 初始化 → ③ 在 `factory.rs::resolve` 加 match 分支。前端、commands、UI 不动。
+- **本地打包必须用 `tauri build`，不能用 `cargo build --release --manifest-path`**：Tauri CLI 在 Windows 上会向 WebView2 注册 `http://tauri.localhost/` 协议 handler；`cargo build` 漏掉这一步，webview 把 `tauri.localhost` 当真实 HTTP 连接，失败后显示 Edge 的 ERR_CONNECTION_REFUSED 白屏（项目首次 CI 打包踩过此坑）。`tauri build --no-bundle` 是 portable 单 exe 方案的官方做法，跳过 MSI/NSIS 但保留协议注册。
 
 ---
 
@@ -136,8 +138,10 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 6 | i18n（中/英） | ✅ TDD 双语一致性 |
 | 7 | SMB 协议层 | ❌ stub（`smb_impl.rs` 多处 `NotImplemented`，`smb = "0.11"` 依赖已加未用） |
 | 8 | WebDAV 协议层 | ✅ 真实现（`reqwest` + PROPFIND + Range GET） |
-| 9 | 跨平台分发 | ❌ 未启动（`updater` 插件占位） |
+| 9 | 跨平台分发 | 🟡 CI 自动化 ✅；代码签名 / macOS `.dmg` / Linux `.AppImage` / 自动更新 ❌（`updater` 插件占位） |
 
 **构建**：见 [`BUILD.md`](./BUILD.md)。Rust ≥ 1.96 需 `Cargo.toml` 的 `indexmap` 修复（schemars/indexmap 兼容性，详见 BUILD.md §2）。
 
-**待验证**：后端 Tauri 全栈此前从未在本地完整编译过（`algorithm` 测试拆独立工程绕开）。本次已修复 schemars/indexmap 编译阻塞（已实测推过该阶段），但完整 `cargo check` / `cargo build` 需在 Windows 原生环境（MSVC + Build Tools）下首次跑通。
+**CI 自动化**：GitHub Actions 已端到端验证打包链路——`.github/workflows/verify.yml`（push/PR 触发：前端 type-check + test + build + 后端 `cargo check`）和 `.github/workflows/release.yml`（push `v*` tag 或手动触发：完整 release 构建 + 上传 portable exe 到 GitHub Release）。3 个 Release tag 已发布：`v0.1.0-ci-test`（MSI + NSIS 安装包）、`v0.1.0-ci-portable-v2`（portable 单 exe，当前可用）。完整描述、产物路径、tag 发版命令见 [BUILD.md §5.3](./BUILD.md)。
+
+**待验证**：本地 Windows 原生环境的首次直接 `cargo check` / `cargo build` / `tauri build` 仍有待验证——CI 跑通不等于本地一定能跑（Rust 工具链版本、MSVC Build Tools 完整性、文件路径等因素都可能影响）。
