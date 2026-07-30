@@ -2,21 +2,25 @@
  * SideNav 模块 #0 单测
  * 覆盖规格 §4.7 5 项测试
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
-import { createRouter, createMemoryHistory, type Router } from 'vue-router';
+import { createRouter, createMemoryHistory, type Router, RouterLink } from 'vue-router';
 import { createI18n } from 'vue-i18n';
 import zhCN from '@/locales/zh-CN';
 import enUS from '@/locales/en-US';
 import SideNav from './SideNav.vue';
 
-// mock @/lib/tauri 三个 IPC，本任务只用 getSetting 返回 null
+/**
+ * i18n 注入策略说明：
+ * 与项目 `useLocaleSync.test.ts` 的 `vi.mock('vue-i18n')` 全局替换不同，
+ * 本测试**创建一个真实 `vue-i18n` 实例**并通过 `global.plugins` 挂入。
+ * 原因：组件模板用 `$t(item.labelKey)` 渲染 7 个中文文案，断言需命中真实翻译，
+ * 而 `vi.mock('vue-i18n')` 会把 `useI18n()`/`$t` 整体替换成桩，导致 `expect(html).toContain('文件浏览')` 失败。
+ * vitest 测试文件间的 mock 默认隔离，useLocaleSync 的全局 mock 不会污染此处。
+ */
 vi.mock('@/lib/tauri', () => ({
   getSetting: vi.fn(async () => null),
-  setSetting: vi.fn(async () => undefined),
 }));
-
-import { getSetting } from '@/lib/tauri';
 
 const i18n = createI18n({
   legacy: false,
@@ -53,13 +57,9 @@ async function mountSideNav(initialRoute = '/') {
 }
 
 describe('SideNav — 7 项导航', () => {
-  beforeEach(() => {
-    vi.mocked(getSetting).mockResolvedValue(null);
-  });
-
   it('mount 渲染 7 个 RouterLink 指向 7 条路由', async () => {
     const wrapper = await mountSideNav();
-    const links = wrapper.findAllComponents({ name: 'RouterLink' });
+    const links = wrapper.findAllComponents(RouterLink);
     expect(links.length).toBe(7);
 
     const hrefs = links.map((l) => l.props('to'));

@@ -4,9 +4,8 @@
  * 模块 #0 全局导航，左固定侧栏 + 7 项导航 + 折叠
  * 规格：docs/superpowers/specs/2026-07-30-module-0-sidenav-design.md
  */
-import { ref, watch, onMounted } from 'vue';
+import { ref } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { getSetting, setSetting } from '@/lib/tauri';
 
 interface NavItem {
   to: string;
@@ -26,23 +25,6 @@ const items: NavItem[] = [
   { to: '/accounts',  icon: '🌐', labelKey: 'nav.accounts' },
   { to: '/settings',  icon: '⚙', labelKey: 'nav.settings' },
 ];
-
-onMounted(async () => {
-  try {
-    const stored = await getSetting('sidenav_collapsed');
-    collapsed.value = stored === '1';
-  } catch {
-    // 配置回退：静默默认展开
-  }
-});
-
-watch(collapsed, async (next) => {
-  try {
-    await setSetting('sidenav_collapsed', next ? '1' : '0');
-  } catch (e) {
-    console.error('sidenav_collapsed save failed', e);
-  }
-});
 
 function onToggle() {
   collapsed.value = !collapsed.value;
