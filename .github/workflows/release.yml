@@ -22,10 +22,6 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
-      - name: Build frontend (Vite)
-        # tauri::generate_context!() 在 cargo build 时把 dist/ 嵌入二进制
-        run: npm run build
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -34,10 +30,13 @@ jobs:
         with:
           workspaces: 'src-tauri -> target'
 
-      - name: Build self-contained exe
-        # 直接 cargo build --release,不跑 tauri build(避免 MSI/NSIS 打包)
-        # tauri::generate_context!() 编译时嵌入前端 dist/,所以裸 exe 自包含
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+      - name: Build self-contained exe (via Tauri CLI)
+        # 用 tauri build --no-bundle 而不是 cargo build --release —— 关键差异：
+        # Tauri CLI 会跑完整流程（beforeBuildCommand + cargo build + 协议注册到 WebView2），
+        # 而 cargo build 单独跑漏掉 Tauri 协议注册，导致 webview 加载
+        # http://tauri.localhost/ 时 fallback 到真实 HTTP 失败（白屏 + Edge 错误页）。
+        # --no-bundle 跳过 MSI/NSIS 打包，只产裸 exe；前端由 generate_context!() 嵌入。
+        run: npm run tauri -- build --no-bundle
 
       - name: Locate built exe
         id: locate
