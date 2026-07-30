@@ -60,14 +60,15 @@ async function mountSideNav(initialRoute = '/'): Promise<{ wrapper: ReturnType<t
 }
 
 describe('SideNav — 7 项导航', () => {
-  it('mount 渲染 7 个 RouterLink 指向 7 条路由', async () => {
+  it('mount 渲染 8 个 RouterLink 指向 8 条路由', async () => {
     const { wrapper } = await mountSideNav();
     const links = wrapper.findAllComponents(RouterLink);
-    expect(links.length).toBe(7);
+    expect(links.length).toBe(8);
 
     const hrefs = links.map((l) => l.props('to'));
     expect(hrefs).toEqual([
       '/',
+      '/shortcuts',
       '/library',
       '/bookmarks',
       '/likes',
@@ -77,11 +78,12 @@ describe('SideNav — 7 项导航', () => {
     ]);
   });
 
-  it('7 个项目的 label 通过 i18n key 渲染', async () => {
+  it('8 个项目的 label 通过 i18n key 渲染', async () => {
     const { wrapper } = await mountSideNav();
     const html = wrapper.html();
     // zh-CN 默认 locale 应包含中文文案
     expect(html).toContain('文件浏览');
+    expect(html).toContain('快捷方式');
     expect(html).toContain('书架');
     expect(html).toContain('书签');
     expect(html).toContain('喜欢');
@@ -202,8 +204,8 @@ describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
       .toContain('active');
   });
 
-  it('7 个 RouterLink 逐个点击 → router.push 按顺序被调 7 次', async () => {
-    const targets = ['/', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
+  it('8 个 RouterLink 逐个点击 → router.push 按顺序被调 8 次', async () => {
+    const targets = ['/', '/shortcuts', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
     const { wrapper, router } = await mountSideNav('/');
     await new Promise((r) => setTimeout(r, 0));
 

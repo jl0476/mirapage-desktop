@@ -12,6 +12,11 @@ const router = createRouter({
       component: Home,
     },
     {
+      path: '/shortcuts',
+      name: 'shortcuts',
+      component: () => import('@/views/Shortcuts.vue'),
+    },
+    {
       path: '/library',
       name: 'library',
       component: () => import('@/views/Library.vue'),

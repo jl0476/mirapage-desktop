@@ -19,6 +19,7 @@ const collapsed = ref(false);
 
 const items: NavItem[] = [
   { to: '/',          icon: '🗂', labelKey: 'nav.fileBrowser' },
+  { to: '/shortcuts', icon: '⭐', labelKey: 'nav.shortcuts' },
   { to: '/library',   icon: '📚', labelKey: 'nav.library' },
   { to: '/bookmarks', icon: '🔖', labelKey: 'nav.bookmarks' },
   { to: '/likes',     icon: '❤', labelKey: 'nav.likes' },
