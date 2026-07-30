@@ -14,11 +14,19 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# indexmap 1.x：强制启用 std feature 并注入 build-deps 链。indexmap 1.9.3 的 build.rs 在未启
+# 用 std feature 时用 autocfg 探测 sysroot 的 std crate，该探测在 rustc 1.96 下失效，导致
+# has_std 不 emit，编译走 `IndexMap<K, V, S>`（S 无默认值）分支，使 tauri-build 间接依赖的
+# schemars 0.8.x 的 `IndexMap<K, V>` 双参数写法（依赖 S=RandomState 默认值）报 E0107。
+# indexmap 1.x 终止于 1.9.3、tauri-build 锁 schemars 0.8.x 均无升级路径。必须放在
+# [build-dependencies]：resolver v2 (edition 2021) 将 build-deps 与 normal-deps 的 feature
+# 分离解析，放在 [dependencies] 无法传到 tauri-build -> schemars -> indexmap 这条 build-deps 链。
+indexmap = { version = "1.9", features = ["std"] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-fs = "2"
-tauri-plugin-dialog = "2"
+tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-fs" }
+tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-dialog" }
 # tauri-plugin-store（Phase 1 注释：settings 走自家 DB，不需要此 plugin）
 # tauri-plugin-store = "2"
 # tauri-plugin-updater（Phase 9 启用：自动更新）
@@ -70,6 +78,8 @@ custom-protocol = ["tauri/custom-protocol"]
 
 # ─── 算法独立测试 ──────────────────────────────────────────────────────
 # 注意：algorithm/* 模块的纯 std 测试放在同级目录 `src-tauri-algorithm-tests/`，
-# 独立 Cargo 工程绕开 Tauri 全栈 build 链路上的 schemars/indexmap 兼容性 hang。
+# 独立 Cargo 工程：可秒级验证算法而无需拉起 Tauri 全栈依赖图。schemars/indexmap
+# 兼容性现已修复（见上方 [build-dependencies] 的 indexmap 与 BUILD.md §2），全栈 cargo
+# test 可用；此独立工程仍保留用于快速算法迭代。
 # 运行：
 #   cargo test --manifest-path src-tauri-algorithm-tests/Cargo.toml
