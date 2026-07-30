@@ -123,7 +123,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 - **包内 IPC**：前端禁止直接 `import { invoke } from '@tauri-apps/api'`；统一通过 `lib/tauri.ts`。
 - **新增 `MediaSource` 实现**：① 在 `source/*_impl.rs` 写 trait impl → ② 在 `source/factory.rs::MediaSourceFactory` 加 `Arc` 字段并在 `new()` 初始化 → ③ 在 `factory.rs::resolve` 加 match 分支。前端、commands、UI 不动。
 - **本地打包必须用 `tauri build`，不能用 `cargo build --release --manifest-path`**：Tauri CLI 在 Windows 上会向 WebView2 注册 `http://tauri.localhost/` 协议 handler；`cargo build` 漏掉这一步，webview 把 `tauri.localhost` 当真实 HTTP 连接，失败后显示 Edge 的 ERR_CONNECTION_REFUSED 白屏（项目首次 CI 打包踩过此坑）。`tauri build --no-bundle` 是 portable 单 exe 方案的官方做法，跳过 MSI/NSIS 但保留协议注册。
-- **git remote**：两个 remote 均可用 —— `origin`（内网 Gitea,192.168.50.168）+ `github`（GitHub,jl0476/mirapage-desktop）。默认推送目标 `git push github main`；CI 自动化（`.github/workflows/`）只对 `github` 生效。内网同步按需 `git push origin main --tags`。
+- **git remote**：两个 remote 均可用 —— `origin`（内网 Gitea）+ `github`（GitHub,jl0476/mirapage-desktop）。默认推送目标 `git push github main`；CI 自动化（`.github/workflows/`）只对 `github` 生效。内网同步按需 `git push origin main --tags`。
 
 ---
 
