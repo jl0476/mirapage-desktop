@@ -80,6 +80,8 @@ export default {
     title: '文件浏览器',
     pickDirectory: '选择目录',
     pickRoot: '选择根目录',
+    up: '上级',
+    refresh: '刷新',
     currentPath: '当前路径',
     empty: '此目录为空',
     sortBy: '排序',

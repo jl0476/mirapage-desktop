@@ -79,6 +79,8 @@ export default {
     title: 'File Browser',
     pickDirectory: 'Pick directory',
     pickRoot: 'Pick root directory',
+    up: 'Up',
+    refresh: 'Refresh',
     currentPath: 'Current path',
     empty: 'This directory is empty',
     sortBy: 'Sort by',
