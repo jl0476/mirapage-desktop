@@ -49,18 +49,19 @@ function makeRouter(): Router {
   });
 }
 
-async function mountSideNav(initialRoute = '/') {
+async function mountSideNav(initialRoute = '/'): Promise<{ wrapper: ReturnType<typeof mount>; router: Router }> {
   const router = makeRouter();
   router.push(initialRoute);
   await router.isReady();
-  return mount(SideNav, {
+  const wrapper = mount(SideNav, {
     global: { plugins: [router, i18n] },
   });
+  return { wrapper, router };
 }
 
 describe('SideNav — 7 项导航', () => {
   it('mount 渲染 7 个 RouterLink 指向 7 条路由', async () => {
-    const wrapper = await mountSideNav();
+    const { wrapper } = await mountSideNav();
     const links = wrapper.findAllComponents(RouterLink);
     expect(links.length).toBe(7);
 
@@ -77,7 +78,7 @@ describe('SideNav — 7 项导航', () => {
   });
 
   it('7 个项目的 label 通过 i18n key 渲染', async () => {
-    const wrapper = await mountSideNav();
+    const { wrapper } = await mountSideNav();
     const html = wrapper.html();
     // zh-CN 默认 locale 应包含中文文案
     expect(html).toContain('文件浏览');
@@ -93,7 +94,7 @@ describe('SideNav — 7 项导航', () => {
 describe('SideNav — mount settings 同步读', () => {
   it('mount 时同步读 sidenav_collapsed="1" → .sidenav 含 collapsed class', async () => {
     vi.mocked(getSetting).mockResolvedValueOnce('1');
-    const wrapper = await mountSideNav();
+    const { wrapper } = await mountSideNav();
     // 等 onMounted 的 promise resolve
     await new Promise((r) => setTimeout(r, 0));
 
@@ -105,7 +106,7 @@ describe('SideNav — mount settings 同步读', () => {
 
   it('mount 时 getSetting 抛错 → 默认展开（容错回退）', async () => {
     vi.mocked(getSetting).mockRejectedValueOnce(new Error('ipc fail'));
-    const wrapper = await mountSideNav();
+    const { wrapper } = await mountSideNav();
     await new Promise((r) => setTimeout(r, 0));
 
     const nav = wrapper.find('[data-test="sidenav"]');
@@ -122,7 +123,7 @@ describe('SideNav — 折叠切换', () => {
   });
 
   it('点击 toggle 按钮 → collapsed 翻转并调用 setSetting("sidenav_collapsed", "1")', async () => {
-    const wrapper = await mountSideNav();
+    const { wrapper } = await mountSideNav();
     await new Promise((r) => setTimeout(r, 0));
 
     const toggleBtn = wrapper.find('[data-test="sidenav-toggle"]');
@@ -138,7 +139,7 @@ describe('SideNav — 折叠切换', () => {
   });
 
   it('从展开状态连续切换折叠再展开 → 按顺序写入 "1" 和 "0"', async () => {
-    const wrapper = await mountSideNav();
+    const { wrapper } = await mountSideNav();
     await new Promise((r) => setTimeout(r, 0));
 
     const toggleBtn = wrapper.find('[data-test="sidenav-toggle"]');
@@ -154,7 +155,7 @@ describe('SideNav — 折叠切换', () => {
 
   it('mount 读取折叠状态不回写，点击展开后只写入 "0"', async () => {
     vi.mocked(getSetting).mockResolvedValueOnce('1');
-    const wrapper = await mountSideNav();
+    const { wrapper } = await mountSideNav();
     await new Promise((r) => setTimeout(r, 0));
 
     const nav = wrapper.find('[data-test="sidenav"]');
@@ -167,5 +168,66 @@ describe('SideNav — 折叠切换', () => {
     expect(nav.classes()).not.toContain('collapsed');
     expect(setSetting).toHaveBeenCalledTimes(1);
     expect(setSetting).toHaveBeenNthCalledWith(1, 'sidenav_collapsed', '0');
+  });
+});
+
+describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
+  beforeEach(() => {
+    vi.mocked(getSetting).mockReset();
+    vi.mocked(getSetting).mockResolvedValue(null);
+    vi.mocked(setSetting).mockReset();
+    vi.mocked(setSetting).mockResolvedValue(undefined);
+  });
+
+  it('当前路由 /library 时，/library 链接含 active + router-link-exact-active class', async () => {
+    const { wrapper } = await mountSideNav('/library');
+    await new Promise((r) => setTimeout(r, 0));
+
+    const links = wrapper.findAllComponents(RouterLink);
+    const libraryLink = links.find((l) => l.props('to') === '/library');
+    expect(libraryLink).toBeTruthy();
+    // vue-router 4 exact match → 'active' (template active-class) + 'router-link-exact-active'
+    expect(libraryLink!.classes()).toContain('active');
+    expect(libraryLink!.classes()).toContain('router-link-exact-active');
+  });
+
+  it('当前路由 /accounts 时仅 /accounts 高亮，其它无 active class', async () => {
+    const { wrapper } = await mountSideNav('/accounts');
+    await new Promise((r) => setTimeout(r, 0));
+
+    const links = wrapper.findAllComponents(RouterLink);
+    const activeCount = links.filter((l) => l.classes().includes('active')).length;
+    expect(activeCount).toBe(1);
+    expect(links.find((l) => l.props('to') === '/accounts')!.classes())
+      .toContain('active');
+  });
+
+  it('7 个 RouterLink 逐个点击 → router.push 按顺序被调 7 次', async () => {
+    const targets = ['/', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
+    const { wrapper, router } = await mountSideNav('/');
+    await new Promise((r) => setTimeout(r, 0));
+
+    const pushSpy = vi.spyOn(router, 'push');
+
+    const links = wrapper.findAllComponents(RouterLink);
+    expect(links.length).toBe(targets.length);
+
+    for (const target of targets) {
+      const link = links.find((l) => l.props('to') === target)!;
+      // 优先点击渲染后的 <a> 元素 — vue-router 4 在 happy-dom 下 a.click 触发 push
+      const a = link.find('a');
+      if (a.exists()) {
+        await a.trigger('click');
+      } else {
+        await link.trigger('click');
+      }
+      // 给 router 当前 tick 让 push resolve
+      await router.isReady();
+    }
+
+    expect(pushSpy).toHaveBeenCalledTimes(targets.length);
+    targets.forEach((t, i) => {
+      expect(pushSpy).toHaveBeenNthCalledWith(i + 1, t);
+    });
   });
 });
