@@ -28,6 +28,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 2 {
+        apply_002_shortcuts(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (2, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -157,4 +165,76 @@ fn apply_001_init(conn: &Connection) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Migration 002 — 快捷方式表 (UNIQUE root_path)
+fn apply_002_shortcuts(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE shortcut (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          root_path TEXT NOT NULL UNIQUE,
+          label TEXT,
+          created_at INTEGER NOT NULL
+        );
+        "#,
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn migration_002_creates_shortcut_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_002_shortcuts(&conn).unwrap();
+
+        // 表存在
+        let exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='shortcut'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "shortcut 表未创建");
+
+        // 列存在
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(shortcut)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(cols.contains(&"id".to_string()));
+        assert!(cols.contains(&"root_path".to_string()));
+        assert!(cols.contains(&"label".to_string()));
+        assert!(cols.contains(&"created_at".to_string()));
+
+        // UNIQUE 约束（root_path 列必须有 UNIQUE）
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='shortcut'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("UNIQUE"), "root_path 应有 UNIQUE 约束");
+
+        // UNIQUE 实际生效
+        conn.execute(
+            "INSERT INTO shortcut (root_path, created_at) VALUES ('/a', 100)",
+            [],
+        )
+        .unwrap();
+        let r = conn.execute(
+            "INSERT INTO shortcut (root_path, created_at) VALUES ('/a', 200)",
+            [],
+        );
+        assert!(r.is_err(), "重复 root_path 应违反 UNIQUE");
+    }
 }
