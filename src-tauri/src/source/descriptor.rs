@@ -49,23 +49,23 @@ impl ArchiveFormat {
 /// - Smb：SMB 网络共享（Phase 7 启用）
 /// - WebDav：WebDAV 服务器（Phase 8 启用）
 ///
-/// **字段命名约定**：Rust 默认 snake_case 字段；通过 `#[serde(rename_all = "camelCase")]`
-/// 把每个 variant 的字段名映射为 camelCase，匹配前端 TS 接口（camelCase）。
-/// Tauri 2.x IPC 不自动转换大小写；这层映射是关键契约。
+/// **字段命名约定**：variant 名 lowercase（TS 端 `type: 'local'`），字段 camelCase
+/// （TS 端 `rootPath`）。每个字段用 `#[serde(rename = "...")]` 显式映射，
+/// 匹配 TS 接口契约。Tauri 2.x IPC 不自动转换大小写。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SourceDescriptor {
     /// 本地文件系统路径
     Local {
-        #[serde(rename_all = "camelCase")]
         /// 绝对路径（如 `/Users/me/Documents/comics`）
+        #[serde(rename = "rootPath")]
         root_path: String,
     },
 
     /// 压缩包（CBZ/CBR/ZIP/RAR/7z）
     Archive {
-        #[serde(rename_all = "camelCase")]
         /// 压缩包文件的绝对路径
+        #[serde(rename = "archivePath")]
         archive_path: String,
         /// 压缩包内的子目录（可选；空 = 根条目）
         #[serde(default)]
@@ -76,18 +76,19 @@ pub enum SourceDescriptor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<Box<SourceDescriptor>>,
         /// 原始源下的压缩包相对路径（用于 history/progress key 对齐）
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "originEntryPath")]
         origin_entry_path: Option<String>,
         /// 压缩包在 origin 下的相对路径
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "archiveRelPath")]
         archive_rel_path: Option<String>,
     },
 
     /// SMB 共享（Phase 7）
     Smb {
-        #[serde(rename_all = "camelCase")]
+        #[serde(rename = "accountId")]
         account_id: i64,
         /// share 名称或 "share/folder" 深层路径
+        #[serde(rename = "initialPath")]
         initial_path: String,
         /// 当前所在路径
         path: String,
@@ -97,8 +98,9 @@ pub enum SourceDescriptor {
 
     /// WebDAV 服务器（Phase 8）
     WebDav {
-        #[serde(rename_all = "camelCase")]
+        #[serde(rename = "accountId")]
         account_id: i64,
+        #[serde(rename = "baseUrl")]
         base_url: String,
         path: String,
     },
