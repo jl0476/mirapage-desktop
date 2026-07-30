@@ -21,6 +21,7 @@ export default {
   },
   nav: {
     fileBrowser: '文件浏览器',
+    shortcuts: '快捷方式',
     library: '书架',
     bookmarks: '书签',
     likes: '喜欢',
@@ -78,6 +79,7 @@ export default {
   fileBrowser: {
     title: '文件浏览器',
     pickDirectory: '选择目录',
+    pickRoot: '选择根目录',
     currentPath: '当前路径',
     empty: '此目录为空',
     sortBy: '排序',
@@ -89,6 +91,11 @@ export default {
     sortAscending: '升序',
     sortDescending: '降序',
     search: '搜索',
+    saveAsShortcut: '保存为快捷方式',
+    shortcutLabel: '快捷方式名称（可选）',
+    shortcutSaved: '快捷方式已保存',
+    noShortcut: '未选快捷方式',
+    goShortcuts: '前往快捷方式',
   },
   library: {
     title: '书架',
@@ -148,6 +155,14 @@ export default {
     webdav: 'WebDAV',
     testedOk: '连接成功',
     testedFail: '连接失败',
+  },
+  shortcuts: {
+    title: '快捷方式',
+    empty: '还没有快捷方式',
+    add: '添加',
+    open: '打开',
+    delete: '删除',
+    confirmDelete: '删除该快捷方式？',
   },
   search: {
     placeholder: '搜索文件名 / 书名 / 标签',

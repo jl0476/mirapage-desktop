@@ -20,6 +20,7 @@ export default {
   },
   nav: {
     fileBrowser: 'File Browser',
+    shortcuts: 'Shortcuts',
     library: 'Library',
     bookmarks: 'Bookmarks',
     likes: 'Likes',
@@ -77,6 +78,7 @@ export default {
   fileBrowser: {
     title: 'File Browser',
     pickDirectory: 'Pick directory',
+    pickRoot: 'Pick root directory',
     currentPath: 'Current path',
     empty: 'This directory is empty',
     sortBy: 'Sort by',
@@ -88,6 +90,11 @@ export default {
     sortAscending: 'Ascending',
     sortDescending: 'Descending',
     search: 'Search',
+    saveAsShortcut: 'Save as shortcut',
+    shortcutLabel: 'Shortcut name (optional)',
+    shortcutSaved: 'Shortcut saved',
+    noShortcut: 'No shortcut selected',
+    goShortcuts: 'Go to shortcuts',
   },
   library: {
     title: 'Library',
@@ -147,6 +154,14 @@ export default {
     webdav: 'WebDAV',
     testedOk: 'Connection successful',
     testedFail: 'Connection failed',
+  },
+  shortcuts: {
+    title: 'Shortcuts',
+    empty: 'No shortcuts yet',
+    add: 'Add',
+    open: 'Open',
+    delete: 'Delete',
+    confirmDelete: 'Delete this shortcut?',
   },
   search: {
     placeholder: 'Search filename / title / tag',
