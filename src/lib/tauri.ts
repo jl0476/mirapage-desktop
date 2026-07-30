@@ -189,3 +189,23 @@ export async function findNextVolume(
 ): Promise<string | null> {
   return invoke<string | null>('find_next_volume', { descriptor, currentPath, direction });
 }
+
+// ─── Shortcuts (模块 #1) ───────────────────────────────────────────────
+export interface ShortcutItem {
+  id: number;
+  rootPath: string;
+  label: string | null;
+  createdAt: number;
+}
+export async function listShortcuts(): Promise<ShortcutItem[]> {
+  return invoke<ShortcutItem[]>('list_shortcuts');
+}
+export async function createShortcut(
+  rootPath: string,
+  label: string | null,
+): Promise<number> {
+  return invoke<number>('create_shortcut', { rootPath, label });
+}
+export async function deleteShortcut(id: number): Promise<void> {
+  await invoke<void>('delete_shortcut', { id });
+}
