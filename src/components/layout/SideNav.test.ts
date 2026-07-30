@@ -9,6 +9,7 @@ import { createI18n } from 'vue-i18n';
 import zhCN from '@/locales/zh-CN';
 import enUS from '@/locales/en-US';
 import SideNav from './SideNav.vue';
+import { getSetting } from '@/lib/tauri';
 
 /**
  * i18n 注入策略说明：
@@ -85,5 +86,28 @@ describe('SideNav — 7 项导航', () => {
     expect(html).toContain('阅览记录');
     expect(html).toContain('网络账户');
     expect(html).toContain('设置');
+  });
+});
+
+describe('SideNav — mount settings 同步读', () => {
+  it('mount 时同步读 sidenav_collapsed="1" → .sidenav 含 collapsed class', async () => {
+    vi.mocked(getSetting).mockResolvedValueOnce('1');
+    const wrapper = await mountSideNav();
+    // 等 onMounted 的 promise resolve
+    await new Promise((r) => setTimeout(r, 0));
+
+    const nav = wrapper.find('[data-test="sidenav"]');
+    expect(nav.classes()).toContain('collapsed');
+    // label 视觉隐藏依赖 .sidenav.collapsed .label { display: none }，
+    // CSS 渲染由浏览器层验证（happy-dom 不解析 scoped style）
+  });
+
+  it('mount 时 getSetting 抛错 → 默认展开（容错回退）', async () => {
+    vi.mocked(getSetting).mockRejectedValueOnce(new Error('ipc fail'));
+    const wrapper = await mountSideNav();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const nav = wrapper.find('[data-test="sidenav"]');
+    expect(nav.classes()).not.toContain('collapsed');
   });
 });
