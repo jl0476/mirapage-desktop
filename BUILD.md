@@ -137,14 +137,29 @@ npm run type-check             # vue-tsc
 
 ---
 
-## 5. 打包产物
+## 5. 打包进度与产物
+
+### 5.1 当前进度
+
+> **⚠️ 尚未成功产出过任何安装包。** 打包链路从未跑通。
+
+| 项 | 状态 |
+|---|---|
+| 后端完整编译（`cargo check` / `cargo build`） | 🟡 schemars/indexmap 阻塞已修（[§2](#2-依赖兼容性修复schemars--indexmap重要)），待 Windows 原生环境首次验证 |
+| `npm run tauri:dev` 开发运行 | ❌ 未验证（依赖上一项） |
+| `npm run tauri:build` 生产打包 | ❌ 未验证 |
+| Phase 9 跨平台分发（安装包签名、macOS `.dmg`、Linux `.AppImage`、自动更新） | ❌ 未启动；`tauri-plugin-updater` 在 `package.json` 占位未启用 |
+
+**历史背景**：后端 Tauri 全栈此前从未在本地完整编译过（`algorithm` 测试拆独立工程绕开，见 `Cargo.toml` 末注释），故打包链路从未跑通。本次修复（[§2](#2-依赖兼容性修复schemars--indexmap重要)）解除了编译阻塞，但完整 `cargo build` 仍需在 Windows 原生环境（[§1](#1-推荐环境windows-原生)）下首次验证后，才能进入打包验证。
+
+### 5.2 产物路径（预期）
 
 `npm run tauri:build` 在 Windows 上产出：
 
 - `src-tauri/target/release/bundle/msi/*.msi`
 - `src-tauri/target/release/bundle/nsis/*-setup.exe`
 
-（Phase 9 跨平台分发启用后，将补 macOS `.dmg` / Linux `.AppImage` 配置。）
+Phase 9 启用后将补 macOS `.dmg` / Linux `.AppImage`。
 
 ---
 
