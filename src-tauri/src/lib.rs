@@ -59,6 +59,10 @@ pub fn run() {
             commands::accounts::upsert_account,
             commands::accounts::delete_account,
             commands::accounts::test_connection,
+            // 模块 #1 快捷方式
+            commands::shortcuts::list_shortcuts,
+            commands::shortcuts::create_shortcut,
+            commands::shortcuts::delete_shortcut,
             // Phase 5
             commands::find_next_volume::find_next_volume,
         ])

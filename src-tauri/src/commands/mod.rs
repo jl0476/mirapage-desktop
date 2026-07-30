@@ -13,4 +13,5 @@ pub mod likes;
 pub mod progress;
 pub mod search;
 pub mod settings;
+pub mod shortcuts;
 pub mod tags;
