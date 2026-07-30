@@ -78,7 +78,9 @@ fn list_archive_entries(archive_bytes: &[u8], format: ArchiveFormat, prefix: &st
                 .map_err(|e| MediaSourceError::Other(format!("zip open: {e}")))?;
             let mut out = Vec::new();
             for i in 0..archive.len() {
-                let entry = archive.by_index(i).map_err(MediaSourceError::Io)?;
+                let entry = archive
+                    .by_index(i)
+                    .map_err(|e| MediaSourceError::Other(format!("zip index: {e}")))?;
                 let name = entry.name().to_string();
                 if !name.starts_with(prefix) {
                     continue;
@@ -95,11 +97,11 @@ fn list_archive_entries(archive_bytes: &[u8], format: ArchiveFormat, prefix: &st
                         .unwrap_or_else(|| name.clone())
                 };
                 let size = entry.size();
-                let modified_at = entry
-                    .last_modified()
-                    .ok()
-                    .and_then(|t| t.timestamp().ok())
-                    .map(|t| t as i64);
+                // ZIP 内 DOS timestamp 精度低（2-sec，1980-2107），且 zip 2.4.2 的
+                // DateTime 只暴露 year/month/day/... getter，无 timestamp() 方法。
+                // 漫画阅读器场景 modified_at 不展示在 UI（archive 条目是内部列表），
+                // 留 None 即可。
+                let modified_at: Option<i64> = None;
                 out.push(MediaEntry {
                     name: relative.clone(),
                     path: relative,

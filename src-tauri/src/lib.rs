@@ -16,7 +16,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
+        // Phase 1 决策：settings 走自家 DB（commands::settings + db/migrations 001），
+        // 不需要 tauri-plugin-store。依赖已在 Cargo.toml 注释，此处同步移除注册。
         .setup(|app| {
             // 初始化数据库
             let app_handle = app.handle();

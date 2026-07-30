@@ -100,15 +100,27 @@ impl MediaSource for SmbMediaSource {
                 // 简易探测:NMB 端口 139/445 TCP 握手。
                 // 真实项目应走 smb::Client::new + share connect,
                 // 现在给一个端口可用性 stub。
-                use std::net::TcpStream;
+                use std::net::{TcpStream, ToSocketAddrs};
                 let host = initial_path
                     .trim_start_matches(r"\\")
                     .split(['\\', '/'])
                     .next()
                     .unwrap_or("");
                 let addr = format!("{}:{}", host, port);
-                let stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5))
-                    .map_err(|e| MediaSourceError::Network(format!("tcp {}: {}", addr, e)))?;
+                // TcpStream::connect_timeout 只接受 &SocketAddr（不像 connect 接受
+                // ToSocketAddrs），先用 to_socket_addrs() 把 String 解析为 SocketAddr。
+                let socket_addr = addr
+                    .to_socket_addrs()
+                    .map_err(|e| MediaSourceError::Network(format!("resolve {}: {}", addr, e)))?
+                    .next()
+                    .ok_or_else(|| {
+                        MediaSourceError::Network(format!("no address for {}", addr))
+                    })?;
+                let stream = TcpStream::connect_timeout(
+                    &socket_addr,
+                    std::time::Duration::from_secs(5),
+                )
+                .map_err(|e| MediaSourceError::Network(format!("tcp {}: {}", addr, e)))?;
                 drop(stream);
                 let _ = account_id;
                 Ok(())

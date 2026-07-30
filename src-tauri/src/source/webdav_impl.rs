@@ -18,7 +18,10 @@ use crate::source::trait_def::{ByteRange, MediaSource, MediaSourceError, Result}
 use async_trait::async_trait;
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use reqwest::{header, Client, StatusCode};
+use reqwest::{
+    header::{self, HeaderName},
+    Client, StatusCode,
+};
 use std::time::Duration;
 
 pub struct WebDavMediaSource {
@@ -184,8 +187,8 @@ impl MediaSource for WebDavMediaSource {
             .build()
             .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
         let resp = client
-            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), &url)
-            .header(header::DEPTH, "1")
+            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
+            .header(HeaderName::from_static("depth"), "1")
             .header(header::CONTENT_TYPE, "application/xml")
             .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>")
             .send()
