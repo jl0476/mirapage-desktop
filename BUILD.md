@@ -137,29 +137,71 @@ npm run type-check             # vue-tsc
 
 ---
 
-## 5. 打包进度与产物
+## 5. 打包与发布
 
-### 5.1 当前进度
+### 5.1 本地打包命令
 
-> **⚠️ 尚未成功产出过任何安装包。** 打包链路从未跑通。
+项目支持两种打包方案,通过 Tauri CLI flag 切换：
 
-| 项 | 状态 |
-|---|---|
-| 后端完整编译（`cargo check` / `cargo build`） | 🟡 schemars/indexmap 阻塞已修（[§2](#2-依赖兼容性修复schemars--indexmap重要)），待 Windows 原生环境首次验证 |
-| `npm run tauri:dev` 开发运行 | ❌ 未验证（依赖上一项） |
-| `npm run tauri:build` 生产打包 | ❌ 未验证 |
-| Phase 9 跨平台分发（安装包签名、macOS `.dmg`、Linux `.AppImage`、自动更新） | ❌ 未启动；`tauri-plugin-updater` 在 `package.json` 占位未启用 |
+| 方案 | 命令 | 产物 | 适用场景 |
+|------|------|------|---------|
+| **A. 安装包** | `npm run tauri:build` | MSI + NSIS 安装程序 | 正式分发、Start Menu 集成、卸载面板 |
+| **B. Portable** | `npm run tauri -- build --no-bundle` | 单 exe 自包含（~15 MB） | 朋友试用、截图分享、绿色运行 |
 
-**历史背景**：后端 Tauri 全栈此前从未在本地完整编译过（`algorithm` 测试拆独立工程绕开，见 `Cargo.toml` 末注释），故打包链路从未跑通。本次修复（[§2](#2-依赖兼容性修复schemars--indexmap重要)）解除了编译阻塞，但完整 `cargo build` 仍需在 Windows 原生环境（[§1](#1-推荐环境windows-原生)）下首次验证后，才能进入打包验证。
+两种方案都依赖 [§1 推荐环境](#1-推荐环境windows-原生)。
 
-### 5.2 产物路径（预期）
+> **关键技术点：必须用 `tauri build`，不能用 `cargo build --release`。**
+> Tauri CLI 在 Windows 上会向 WebView2 注册 `http://tauri.localhost/` 协议 handler；
+> `cargo build` 漏掉这一步,webview 把 `tauri.localhost` 当真实 HTTP 连接,失败后
+> 显示 Edge 的 ERR_CONNECTION_REFUSED 白屏（项目首次 CI 完整打包时踩过此坑）。
 
-`npm run tauri:build` 在 Windows 上产出：
+### 5.2 产物路径
 
-- `src-tauri/target/release/bundle/msi/*.msi`
-- `src-tauri/target/release/bundle/nsis/*-setup.exe`
+```text
+src-tauri/target/release/
+├── mirapage-desktop.exe                  ← 方案 B 的单 exe
+└── bundle/                                ← 方案 A
+    ├── msi/MiraPage_0.1.0_x64_en-US.msi
+    └── nsis/MiraPage_0.1.0_x64-setup.exe
+```
 
-Phase 9 启用后将补 macOS `.dmg` / Linux `.AppImage`。
+- 前端 `dist/` 由 `tauri::generate_context!()` 在编译时嵌入二进制,**无需任何外部资源**
+- Windows 10/11 自带 WebView2 Runtime;Windows 7/8 用户需手动装（[WebView2 Evergreen Standalone](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)）
+- 未签名 exe 首次运行会弹 SmartScreen —— 右键 exe → 属性 → 勾选「解除锁定」→ 应用即可
+
+### 5.3 CI 自动打包（GitHub Actions）
+
+`.github/workflows/` 下两个 workflow：
+
+| Workflow | 触发器 | 用途 |
+|----------|--------|------|
+| `verify.yml` | push main / PR | 前端 type-check + test + build + 后端 `cargo check` 端到端验证 |
+| `release.yml` | push `v*` tag / workflow_dispatch | 完整 release 构建 + 上传 portable exe 到 GitHub Release |
+
+**手动触发 release 测试产物：**
+
+```bash
+gh workflow run release.yml -R jl0476/mirapage-desktop --ref main
+```
+
+**通过 tag 发版：**
+
+```bash
+git tag v0.1.0
+git push github v0.1.0
+```
+
+自动创建 GitHub Release,`mirapage-desktop.exe` 作为 asset 上传。
+
+**当前已发布的 Release：**
+
+| Tag | Asset | 备注 |
+|-----|-------|------|
+| `v0.1.0-ci-test` | `MiraPage_0.1.0_x64-setup.exe` + `MiraPage_0.1.0_x64_en-US.msi` | MSI + NSIS 安装包（参考） |
+| `v0.1.0-ci-portable` | `mirapage-desktop.exe` | 初版 portable,因协议注册缺失导致白屏,已废弃 |
+| `v0.1.0-ci-portable-v2` | `mirapage-desktop.exe` | 修复后 portable（用 `tauri build --no-bundle`）,当前可用 |
+
+> **当前状态**：CI 打包链路已端到端验证通过；本地 `npm run tauri:build` / `tauri build --no-bundle` 在 Windows 原生环境（[§1](#1-推荐环境windows-原生)）下的首次直接 build 仍有待验证（CI 跑通不等于本地一定能跑,因 Rust 工具链版本、MSVC Build Tools 完整性、文件路径含中文等因素都可能影响）。
 
 ---
 
