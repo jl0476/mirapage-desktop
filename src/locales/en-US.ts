@@ -26,6 +26,7 @@ export default {
     history: 'History',
     accounts: 'Accounts',
     settings: 'Settings',
+    toggleSidebar: 'Toggle sidebar',
   },
   reader: {
     mode: {

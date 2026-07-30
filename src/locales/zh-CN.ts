@@ -27,6 +27,7 @@ export default {
     history: '阅览记录',
     accounts: '网络账户',
     settings: '设置',
+    toggleSidebar: '折叠/展开 侧栏',
   },
   reader: {
     mode: {
