@@ -648,18 +648,20 @@ cd F:/WorkSpaceCollection/git/mirapage-desktop && \
 
 ## 任务 7：验证 + 手动跑
 
-- [ ] **步骤 1：完整 Vitest + type-check + Rust check**
+- [ ] **步骤 1：完整 Vitest + type-check + Rust check + 前端 build**
 
 运行：
 
 ```bash
 cd F:/WorkSpaceCollection/git/mirapage-desktop && \
-  npm run type-check && npm test && \
-  npm run tauri -- check --manifest-path src-tauri/Cargo.toml 2>/dev/null || \
-  cargo check --manifest-path src-tauri/Cargo.toml
+  npm run type-check && npm test && npm run build && \
+  cargo check --manifest-path src-tauri/Cargo.toml && \
+  cargo build --manifest-path src-tauri/Cargo.toml
 ```
 
-预期：全 PASS（TS 0 error / Vitest 全过 / Rust cargo check 无 error）
+预期：全 PASS（TS 0 error / Vitest 全过 / 前端 vite build 产 dist/ / Rust cargo check 无 error / Rust cargo build 完整编译通过）。
+
+**为什么含 cargo build**：用户流程要求"每个模块执行完后触发编译"——`cargo check` 只做语法检查不生成机器码，`cargo build` 真正过链接 + codegen，能抓 cargo check 漏的 codegen / 链接错误。
 
 - [ ] **步骤 2：手动起 tauri:dev**
 
