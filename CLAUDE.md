@@ -124,13 +124,20 @@ cargo test -p mirapage-desktop-lib natural_compare
 
 ---
 
-## 当前状态（Phase 0 — 项目骨架）
+## 当前状态（Phase 1-8 主体完成）
 
-- ✓ Tauri 骨架 + Vue 3 + Vite + Pinia + vue-i18n + Vue Router
-- ✓ `MediaSource` trait + 4 个实现骨架（`LocalMediaSource` 实装，其他 stub 返回 `NotImplemented`）
-- ✓ `MediaSourceFactory::resolve` 分发
-- ✓ `commands::settings::{get_setting, set_setting}` + `commands::file_browser::{list_directory, read_file}`
-- ✓ SQLite + 001_init 迁移（7 张表 + 默认 settings 行 + 触控 3×3 默认映射）
-- ✓ `algorithm/` 4 个纯函数模块 + 单测（`cargo test` 全过）
-- ✗ 压缩包实装 / OpenSeadragon 阅读器 / 视图业务逻辑 — 见 DESIGN.md §5 Phase 2-8
-- ✗ SMB / WebDAV 协议层
+| Phase | 内容 | 状态 |
+|---|---|---|
+| 1 | Tauri 骨架 + SQLite + `algorithm/` 纯函数 | ✅ |
+| 2 | OpenSeadragon 阅读器 + 文件浏览器 | ✅ `Single/DoublePageViewer` + `ReaderScreen` |
+| 3 | 压缩包（CBZ/ZIP） | 🟡 ZIP ✅；RAR/7z 占位（`unrar`/`sevenz-rust` 注释未启） |
+| 4 | 书签/喜欢/历史/书架/标签/搜索 | ✅ 10 个 commands + 9 个 Pinia stores |
+| 5 | 跨卷连续阅读 + 幻灯片 | ✅ `findNextDirectory` + `slideshow` store |
+| 6 | i18n（中/英） | ✅ TDD 双语一致性 |
+| 7 | SMB 协议层 | ❌ stub（`smb_impl.rs` 多处 `NotImplemented`，`smb = "0.11"` 依赖已加未用） |
+| 8 | WebDAV 协议层 | ✅ 真实现（`reqwest` + PROPFIND + Range GET） |
+| 9 | 跨平台分发 | ❌ 未启动（`updater` 插件占位） |
+
+**构建**：见 [`BUILD.md`](./BUILD.md)。Rust ≥ 1.96 需 `Cargo.toml` 的 `indexmap` 修复（schemars/indexmap 兼容性，详见 BUILD.md §2）。
+
+**待验证**：后端 Tauri 全栈此前从未在本地完整编译过（`algorithm` 测试拆独立工程绕开）。本次已修复 schemars/indexmap 编译阻塞（已实测推过该阶段），但完整 `cargo check` / `cargo build` 需在 Windows 原生环境（MSVC + Build Tools）下首次跑通。

@@ -4,9 +4,21 @@
 
 ## 状态
 
-**当前：Phase 0 — 项目骨架搭建**
+**当前进度：Phase 1-8 主体完成，Phase 7（SMB）/ Phase 9（分发）待补**
 
-完整设计文档：[`DESIGN.md`](./DESIGN.md)
+| Phase | 内容 | 状态 |
+|---|---|---|
+| 1 | 骨架 + algorithm 纯函数 | ✅ |
+| 2 | OpenSeadragon 阅读器 + 文件浏览器 | ✅ |
+| 3 | 压缩包（ZIP ✅ / RAR·7z 占位） | 🟡 |
+| 4 | 书签 / 喜欢 / 历史 / 书架 / 标签 / 搜索 | ✅ |
+| 5 | 跨卷连续阅读 + 幻灯片 | ✅ |
+| 6 | i18n（中 / 英） | ✅ |
+| 7 | SMB 协议层 | ❌ stub |
+| 8 | WebDAV 协议层 | ✅ 真实现 |
+| 9 | 跨平台分发 | ❌ |
+
+构建/打包/排错见 [`BUILD.md`](./BUILD.md)，完整设计见 [`DESIGN.md`](./DESIGN.md)。
 
 ## 技术栈
 
@@ -34,6 +46,8 @@ P1：标签、搜索、跨卷连续阅读、幻灯片
 P2：SMB、WebDAV
 
 ## 开发环境要求
+
+> 详细构建/打包/排错见 [`BUILD.md`](./BUILD.md)。
 
 - **Node.js** 18+（推荐 24+）
 - **Rust** 1.75+（[rustup.rs](https://rustup.rs)）
