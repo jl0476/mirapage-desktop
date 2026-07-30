@@ -6,7 +6,7 @@
  */
 import { ref, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { getSetting } from '@/lib/tauri';
+import { getSetting, setSetting } from '@/lib/tauri';
 
 interface NavItem {
   to: string;
@@ -36,8 +36,13 @@ onMounted(async () => {
   }
 });
 
-function onToggle() {
+async function onToggle() {
   collapsed.value = !collapsed.value;
+  try {
+    await setSetting('sidenav_collapsed', collapsed.value ? '1' : '0');
+  } catch (e) {
+    console.error('sidenav_collapsed save failed', e);
+  }
 }
 </script>
 

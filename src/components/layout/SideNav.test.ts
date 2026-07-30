@@ -1,15 +1,15 @@
 /**
  * SideNav 模块 #0 单测
- * 覆盖规格 §4.7 5 项测试
+ * 覆盖 SideNav 导航、settings 读写与折叠切换
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { createRouter, createMemoryHistory, type Router, RouterLink } from 'vue-router';
 import { createI18n } from 'vue-i18n';
 import zhCN from '@/locales/zh-CN';
 import enUS from '@/locales/en-US';
 import SideNav from './SideNav.vue';
-import { getSetting } from '@/lib/tauri';
+import { getSetting, setSetting } from '@/lib/tauri';
 
 /**
  * i18n 注入策略说明：
@@ -21,6 +21,7 @@ import { getSetting } from '@/lib/tauri';
  */
 vi.mock('@/lib/tauri', () => ({
   getSetting: vi.fn(async () => null),
+  setSetting: vi.fn(async () => undefined),
 }));
 
 const i18n = createI18n({
@@ -109,5 +110,62 @@ describe('SideNav — mount settings 同步读', () => {
 
     const nav = wrapper.find('[data-test="sidenav"]');
     expect(nav.classes()).not.toContain('collapsed');
+  });
+});
+
+describe('SideNav — 折叠切换', () => {
+  beforeEach(() => {
+    vi.mocked(getSetting).mockReset();
+    vi.mocked(getSetting).mockResolvedValue(null);
+    vi.mocked(setSetting).mockReset();
+    vi.mocked(setSetting).mockResolvedValue(undefined);
+  });
+
+  it('点击 toggle 按钮 → collapsed 翻转并调用 setSetting("sidenav_collapsed", "1")', async () => {
+    const wrapper = await mountSideNav();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const toggleBtn = wrapper.find('[data-test="sidenav-toggle"]');
+    await toggleBtn.trigger('click');
+
+    // 等异步 setSetting 完成
+    await new Promise((r) => setTimeout(r, 0));
+
+    const nav = wrapper.find('[data-test="sidenav"]');
+    expect(nav.classes()).toContain('collapsed');
+    expect(setSetting).toHaveBeenCalledTimes(1);
+    expect(setSetting).toHaveBeenNthCalledWith(1, 'sidenav_collapsed', '1');
+  });
+
+  it('从展开状态连续切换折叠再展开 → 按顺序写入 "1" 和 "0"', async () => {
+    const wrapper = await mountSideNav();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const toggleBtn = wrapper.find('[data-test="sidenav-toggle"]');
+    await toggleBtn.trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+    await toggleBtn.trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(setSetting).toHaveBeenCalledTimes(2);
+    expect(setSetting).toHaveBeenNthCalledWith(1, 'sidenav_collapsed', '1');
+    expect(setSetting).toHaveBeenNthCalledWith(2, 'sidenav_collapsed', '0');
+  });
+
+  it('mount 读取折叠状态不回写，点击展开后只写入 "0"', async () => {
+    vi.mocked(getSetting).mockResolvedValueOnce('1');
+    const wrapper = await mountSideNav();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const nav = wrapper.find('[data-test="sidenav"]');
+    expect(nav.classes()).toContain('collapsed');
+    expect(setSetting).not.toHaveBeenCalled();
+
+    await wrapper.find('[data-test="sidenav-toggle"]').trigger('click');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(nav.classes()).not.toContain('collapsed');
+    expect(setSetting).toHaveBeenCalledTimes(1);
+    expect(setSetting).toHaveBeenNthCalledWith(1, 'sidenav_collapsed', '0');
   });
 });
