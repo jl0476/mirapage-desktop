@@ -22,6 +22,10 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      - name: Build frontend (Vite)
+        # tauri::generate_context!() 在 cargo build 时把 dist/ 嵌入二进制
+        run: npm run build
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -30,22 +34,35 @@ jobs:
         with:
           workspaces: 'src-tauri -> target'
 
-      - name: Build & release (tauri-action)
-        id: tauri
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          # tag 触发 → tagName=版本号 → tauri-action 自动建 Release 并上传 MSI/NSIS
-          # 手动触发 → tagName=空字符串 → tauri-action 只构建不上传（下方 upload-artifact 接管）
-          tagName: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
-          releaseName: 'MiraPage ${{ github.ref_name }}'
-          releaseDraft: false
-          prerelease: false
+      - name: Build self-contained exe
+        # 直接 cargo build --release,不跑 tauri build(避免 MSI/NSIS 打包)
+        # tauri::generate_context!() 编译时嵌入前端 dist/,所以裸 exe 自包含
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
-      - name: Upload bundle as artifact (manual trigger only)
+      - name: Locate built exe
+        id: locate
+        # Windows 上 Tauri 默认 binary 名 = productName (PascalCase),即 MiraPage.exe
+        # 但 cargo crate name = mirapage-desktop,所以可能两种都出现;列出来兜底
+        run: |
+          $exe = Get-ChildItem src-tauri/target/release/*.exe |
+                Where-Object { $_.Name -notmatch '\.(pdb|exp)$' } |
+                Select-Object -First 1
+          if (-not $exe) { Write-Error "no exe found"; exit 1 }
+          "exe_name=$($exe.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "exe_path=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload exe as Release asset (tag trigger)
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.locate.outputs.exe_path }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+
+      - name: Upload exe as artifact (manual trigger only)
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: mirapage-windows-bundles
-          path: src-tauri/target/release/bundle/
+          name: mirapage-windows-portable
+          path: ${{ steps.locate.outputs.exe_path }}
+          if-no-files-found: error
