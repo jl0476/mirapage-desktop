@@ -35,7 +35,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "category": "Comics",
+    "category": "Entertainment",
     "shortDescription": "Cross-platform desktop comic reader",
     "longDescription": "MiraPage Desktop is an open-source comic book reader for macOS, Windows, and Linux, designed for efficient browsing of CBZ/CBR/ZIP/RAR/7z archives with a clean Tauri 2 + Vue 3 + OpenSeadragon UI.",
     "publisher": "MiraPage Team",
