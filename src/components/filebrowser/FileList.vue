@@ -60,17 +60,18 @@ function iconFor(entry: MediaEntry): string {
   <ul v-if="sorted.length === 0" data-test="empty" class="empty">
     <li>{{ $t?.('fileBrowser.empty') ?? '空目录' }}</li>
   </ul>
-  <ul v-else class="filelist" role="listbox" aria-label="Directory contents">
+  <ul v-else class="filelist" data-test="filelist" aria-label="Directory contents">
     <li
       v-for="entry in sorted"
       :key="entry.path"
-      data-test="row"
+      class="row"
       :class="{ 'is-directory': entry.isDirectory, 'is-archive': entry.isArchive }"
-      role="option"
-      :aria-selected="false"
+      data-test="row"
+      role="button"
       tabindex="0"
       @click="onClick(entry)"
       @keydown.enter="onClick(entry)"
+      @keydown.space.prevent="onClick(entry)"
     >
       <span class="icon" aria-hidden="true">{{ iconFor(entry) }}</span>
       <span class="name">{{ entry.name }}</span>

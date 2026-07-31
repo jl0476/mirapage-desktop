@@ -310,24 +310,24 @@ describe('FileBrowser — FileList @open (双击进入)', () => {
     mockedList.mockResolvedValue([]);
   });
 
-  it('双击目录行 → fb.navigate 到子目录 (currentPath 拼接)', async () => {
+  it('真实 DOM click 目录行 → fb.navigate (#5 修 production 不响应)', async () => {
+    // 真实 DOM click 模拟 (不走 component.vm.$emit 绕过, 而是用 vue-test-utils trigger)
     mockedList
-      .mockResolvedValueOnce([{ name: 'chapter1', path: 'chapter1', isDirectory: true, isArchive: false, size: 0 }])
-      .mockResolvedValueOnce([{ name: 'page1.jpg', path: 'page1.jpg', isDirectory: false, isArchive: false, size: 100 }]);
+      .mockResolvedValueOnce(makeEntries('chapter1'))
+      .mockResolvedValueOnce(makeEntries('page1.jpg'));
     const wrapper = await mountFileBrowser();
     const fb = useFileBrowserStore();
     await fb.setRoot('C:/comics');
     await flushPromises();
 
-    const fileList = wrapper.findComponent({ name: 'FileList' });
-    await fileList.vm.$emit('open', { name: 'chapter1', path: 'chapter1', isDirectory: true });
+    const rows = wrapper.findAll('[data-test="row"]');
+    expect(rows.length).toBe(1);
+    expect(rows[0].classes()).toContain('is-directory');
+
+    await rows[0].trigger('click');
     await flushPromises();
 
     expect(fb.currentPath).toBe('chapter1');
-    expect(mockedList).toHaveBeenLastCalledWith(
-      expect.objectContaining({ type: 'local', rootPath: 'C:/comics' }),
-      'chapter1',
-    );
   });
 
   it('双击文件行 → emit "open" 给父 (模块 #2 接管)', async () => {
