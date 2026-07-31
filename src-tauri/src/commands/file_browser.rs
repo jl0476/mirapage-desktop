@@ -2,6 +2,7 @@
 //!
 //! 所有 IO 通过 `MediaSourceFactory` 分派，UI 不感知 Local/Archive/SMB/WebDAV 差异。
 
+use crate::log;
 use crate::source::descriptor::{MediaEntry, SourceDescriptor};
 use crate::source::factory::MediaSourceFactory;
 use crate::source::trait_def::ByteRange;
@@ -15,12 +16,19 @@ pub async fn list_directory(
     descriptor: SourceDescriptor,
     path: String,
 ) -> Result<Vec<MediaEntry>, String> {
+    log::write_log("DEBUG", "file_browser", &format!("list_directory type={} path={}", descriptor.type_str(), path));
     debug!(target: "file_browser", "list_directory type={:?} path={:?}", descriptor.type_str(), path);
     let source = factory.resolve(&descriptor);
     let result = source.list_directory(&descriptor, &path).await;
     match &result {
-        Ok(entries) => info!(target: "file_browser", "list_directory ok: {} entries", entries.len()),
-        Err(e) => tracing::warn!(target: "file_browser", "list_directory failed: {:?}", e),
+        Ok(entries) => {
+            log::write_log("INFO", "file_browser", &format!("list_directory ok: {} entries", entries.len()));
+            info!(target: "file_browser", "list_directory ok: {} entries", entries.len());
+        }
+        Err(e) => {
+            log::write_log("WARN", "file_browser", &format!("list_directory failed: {:?}", e));
+            tracing::warn!(target: "file_browser", "list_directory failed: {:?}", e);
+        }
     }
     result.map_err(|e| e.to_string())
 }
@@ -34,6 +42,7 @@ pub async fn read_file(
     offset: Option<u64>,
     length: Option<u64>,
 ) -> Result<Vec<u8>, String> {
+    log::write_log("DEBUG", "file_browser", &format!("read_file type={} path={}", descriptor.type_str(), path));
     debug!(target: "file_browser", "read_file type={:?} path={:?} range={:?}-{:?}", descriptor.type_str(), path, offset, length);
     let source = factory.resolve(&descriptor);
     let range = match (offset, length) {
@@ -42,8 +51,14 @@ pub async fn read_file(
     };
     let result = source.read_file(&descriptor, &path, range).await;
     match &result {
-        Ok(bytes) => info!(target: "file_browser", "read_file ok: {} bytes", bytes.len()),
-        Err(e) => tracing::warn!(target: "file_browser", "read_file failed: {:?}", e),
+        Ok(bytes) => {
+            log::write_log("INFO", "file_browser", &format!("read_file ok: {} bytes", bytes.len()));
+            info!(target: "file_browser", "read_file ok: {} bytes", bytes.len());
+        }
+        Err(e) => {
+            log::write_log("WARN", "file_browser", &format!("read_file failed: {:?}", e));
+            tracing::warn!(target: "file_browser", "read_file failed: {:?}", e);
+        }
     }
     result.map_err(|e| e.to_string())
 }

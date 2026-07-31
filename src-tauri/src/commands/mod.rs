@@ -10,6 +10,7 @@ pub mod find_next_volume;
 pub mod history;
 pub mod library;
 pub mod likes;
+pub mod log;
 pub mod progress;
 pub mod search;
 pub mod settings;

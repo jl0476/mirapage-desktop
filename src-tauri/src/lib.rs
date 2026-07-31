@@ -8,6 +8,7 @@
 mod algorithm;
 mod commands;
 mod db;
+mod log;
 mod source;
 
 use tauri::Manager;
@@ -20,6 +21,9 @@ pub fn run() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with_target(false)
         .try_init();
+
+    // 写一行 startup log 到 main.log, 方便确认 exe 是否真起来
+    log::write_log("INFO", "app", "MiraPage Desktop starting");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
@@ -71,6 +75,8 @@ pub fn run() {
             commands::shortcuts::list_shortcuts,
             commands::shortcuts::create_shortcut,
             commands::shortcuts::delete_shortcut,
+            // 日志 (前端 → 文件)
+            commands::log::log_to_file,
             // Phase 5
             commands::find_next_volume::find_next_volume,
         ])
