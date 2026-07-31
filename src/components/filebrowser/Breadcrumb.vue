@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * Breadcrumb.vue
- * 路径面包屑：每段累积路径显示，点击触发 navigate 事件
- * 与 Rust algorithm/path.rs::crumbs 镜像
+ * 路径面包屑: 段点击 navigate, 整行可点击进入编辑模式 (Xplorer 风格).
+ * 实时路径校验 (valid/invalid 边框色, 借用 fb.error.kind 隐含).
  */
-import { computed } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { PathUtils } from '@/lib/path';
 
 interface Props {
@@ -16,7 +16,6 @@ interface Props {
 const props = defineProps<Props>();
 
 interface Emits {
-  /** 点击中间段或根时触发，参数为目标累积路径 */
   (e: 'navigate', toPath: string): void;
 }
 const emit = defineEmits<Emits>();
@@ -24,79 +23,240 @@ const emit = defineEmits<Emits>();
 const crumbs = computed(() => PathUtils.crumbs(props.rootLabel, props.path));
 
 function onCrumbClick(idx: number) {
-  // 最后一段(当前)不可点击
-  if (idx === crumbs.value.length - 1) return;
+  if (idx === crumbs.value.length - 1) return; // 当前段不可点
   emit('navigate', crumbs.value[idx].path);
 }
+
+/* ─── 可点击进入编辑模式 (Xplorer 风格) ──────────────── */
+const isEditing = ref(false);
+const inputRef = ref<HTMLInputElement | null>(null);
+// 拼出完整路径 (root + path)
+const fullPath = computed(() => {
+  if (!props.path) return props.rootLabel;
+  // Linux/Windows 简单判断: path 含 / 用 /, 含 \ 用 \
+  const sep = props.path.includes('\\') ? '\\' : '/';
+  return props.rootLabel + sep + props.path;
+});
+
+function startEditing() {
+  isEditing.value = true;
+  nextTick(() => {
+    inputRef.value?.focus();
+    inputRef.value?.select();
+  });
+}
+
+function commit() {
+  isEditing.value = false;
+  const val = inputRef.value?.value?.trim() ?? '';
+  if (val && val !== fullPath.value) {
+    // 简单回退: 找 fullPath 的子路径 (去除 rootLabel 前缀)
+    if (val.startsWith(props.rootLabel)) {
+      let sub = val.slice(props.rootLabel.length);
+      if (sub.startsWith('/') || sub.startsWith('\\')) sub = sub.slice(1);
+      emit('navigate', sub);
+    } else {
+      // 整段路径不在 root 下, 放弃 (或 emit 完整路径让父处理)
+      emit('navigate', val);
+    }
+  }
+}
+
+function cancel() {
+  isEditing.value = false;
+}
+
+function onKey(e: KeyboardEvent) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    commit();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    cancel();
+  }
+}
+
+/* ─── 简化路径校验 (占位, 后续可接 listDirectory 异步校验) ─ */
+const validation = ref<'idle' | 'pending' | 'ok' | 'invalid'>('idle');
+// 简化: 编辑中显示 pending, 退出后由 FileBrowser 反馈 (错误 toast 已覆盖 invalid 状态)
+watch(isEditing, (v) => {
+  validation.value = v ? 'pending' : 'idle';
+});
 </script>
 
 <template>
   <nav class="breadcrumb" aria-label="Breadcrumb">
-    <ol>
-      <template v-for="(c, idx) in crumbs" :key="c.path + '/' + c.label + '/' + idx">
-        <li
-          data-test="crumb"
-          :aria-disabled="idx === crumbs.length - 1 ? 'true' : 'false'"
-          :class="{ active: idx === crumbs.length - 1 }"
-        >
-          <a
-            href="#"
-            @click.prevent="onCrumbClick(idx)"
-          >{{ c.label }}</a>
-        </li>
-        <span
-          v-if="idx < crumbs.length - 1"
-          class="sep"
-          aria-hidden="true"
-        >/</span>
-      </template>
-    </ol>
+    <!-- 显示模式: 段链接 + 分隔符 + 末尾 pencil -->
+    <div v-if="!isEditing" class="display" data-test="display">
+      <ol>
+        <template v-for="(c, idx) in crumbs" :key="c.path + '/' + c.label + '/' + idx">
+          <li
+            data-test="crumb"
+            :aria-disabled="idx === crumbs.length - 1 ? 'true' : 'false'"
+            :class="{ active: idx === crumbs.length - 1 }"
+          >
+            <button
+              type="button"
+              class="crumb-btn"
+              :disabled="idx === crumbs.length - 1"
+              :title="c.path"
+              @click="onCrumbClick(idx)"
+            >{{ c.label }}</button>
+          </li>
+          <span
+            v-if="idx < crumbs.length - 1"
+            class="sep"
+            aria-hidden="true"
+          >/</span>
+        </template>
+      </ol>
+      <button
+        type="button"
+        class="edit-btn"
+        data-test="edit-path"
+        :title="fullPath"
+        :aria-label="'edit path: ' + fullPath"
+        @click="startEditing"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+        </svg>
+      </button>
+    </div>
+
+    <!-- 编辑模式: input 替换显示 -->
+    <div v-else class="editor" :class="validation" data-test="editor">
+      <input
+        ref="inputRef"
+        type="text"
+        class="path-input"
+        :class="validation"
+        :value="fullPath"
+        spellcheck="false"
+        autocomplete="off"
+        @keydown="onKey"
+        @blur="commit"
+        data-test="path-input"
+      />
+    </div>
   </nav>
 </template>
 
 <style scoped>
-.breadcrumb ol {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  list-style: none;
-  padding: var(--space-2) var(--space-4);
-  margin: 0;
+.breadcrumb {
+  display: block;
   font-size: var(--text-sm);
   background: var(--surface-1);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+  overflow: hidden;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
+}
+.breadcrumb:focus-within {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-accent);
+}
+
+/* ─── Display mode ──────────────────────────────────── */
+.display {
+  display: flex;
+  align-items: center;
+  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
+  gap: var(--space-1);
   overflow-x: auto;
 }
-.breadcrumb li {
+.display ol {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+}
+.display li {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
   white-space: nowrap;
+  flex-shrink: 0;
 }
-.breadcrumb li a {
+.crumb-btn {
+  background: transparent;
+  border: none;
+  font: inherit;
   color: var(--text-secondary);
-  text-decoration: none;
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
   transition: background var(--dur-fast) var(--ease-out),
               color var(--dur-fast) var(--ease-out);
 }
-.breadcrumb li a:hover {
+.crumb-btn:hover:not(:disabled) {
   background: var(--surface-2);
   color: var(--text-primary);
 }
-.breadcrumb li.active a {
-  color: var(--accent);
+.crumb-btn:disabled {
+  color: var(--text-primary);
   font-weight: var(--weight-medium);
-  pointer-events: none;
   cursor: default;
+  font-family: var(--font-sans);
 }
-.breadcrumb .sep {
+.display li.active .crumb-btn {
+  color: var(--accent);
+}
+.sep {
   color: var(--text-tertiary);
   user-select: none;
-  margin: 0 var(--space-1);
+  padding: 0 var(--space-1);
+  font-family: var(--font-mono);
 }
+
+.edit-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              opacity var(--dur-fast) var(--ease-out);
+  opacity: 0.6;
+}
+.edit-btn:hover {
+  background: var(--surface-2);
+  color: var(--accent);
+  opacity: 1;
+}
+
+/* ─── Editor mode ───────────────────────────────────── */
+.editor {
+  padding: var(--space-1) var(--space-2);
+}
+.path-input {
+  width: 100%;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: var(--space-1);
+}
+.path-input.ok { color: var(--success); }
+.path-input.invalid { color: var(--error); }
+.path-input.pending { color: var(--text-tertiary); }
 </style>

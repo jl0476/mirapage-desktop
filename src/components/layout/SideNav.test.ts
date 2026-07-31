@@ -94,16 +94,15 @@ describe('SideNav — 7 项导航', () => {
 });
 
 describe('SideNav — mount settings 同步读', () => {
-  it('mount 时同步读 sidenav_collapsed="1" → .sidenav 含 collapsed class', async () => {
+  it('mount 时同步读 sidenav_collapsed="1" → .sidenav 含 w-[60px] class (collapsed)', async () => {
     vi.mocked(getSetting).mockResolvedValueOnce('1');
     const { wrapper } = await mountSideNav();
     // 等 onMounted 的 promise resolve
     await new Promise((r) => setTimeout(r, 0));
 
     const nav = wrapper.find('[data-test="sidenav"]');
-    expect(nav.classes()).toContain('collapsed');
-    // label 视觉隐藏依赖 .sidenav.collapsed .label { display: none }，
-    // CSS 渲染由浏览器层验证（happy-dom 不解析 scoped style）
+    expect(nav.classes()).toContain('w-[60px]');
+    // label 视觉隐藏依赖 .label 元素 v-if!collapsed，CSS 不用验
   });
 
   it('mount 时 getSetting 抛错 → 默认展开（容错回退）', async () => {
@@ -112,7 +111,7 @@ describe('SideNav — mount settings 同步读', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     const nav = wrapper.find('[data-test="sidenav"]');
-    expect(nav.classes()).not.toContain('collapsed');
+    expect(nav.classes()).toContain('w-[220px]');
   });
 });
 
@@ -135,7 +134,7 @@ describe('SideNav — 折叠切换', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     const nav = wrapper.find('[data-test="sidenav"]');
-    expect(nav.classes()).toContain('collapsed');
+    expect(nav.classes()).toContain('w-[60px]');
     expect(setSetting).toHaveBeenCalledTimes(1);
     expect(setSetting).toHaveBeenNthCalledWith(1, 'sidenav_collapsed', '1');
   });
@@ -161,13 +160,13 @@ describe('SideNav — 折叠切换', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     const nav = wrapper.find('[data-test="sidenav"]');
-    expect(nav.classes()).toContain('collapsed');
+    expect(nav.classes()).toContain('w-[60px]');
     expect(setSetting).not.toHaveBeenCalled();
 
     await wrapper.find('[data-test="sidenav-toggle"]').trigger('click');
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(nav.classes()).not.toContain('collapsed');
+    expect(nav.classes()).toContain('w-[220px]');
     expect(setSetting).toHaveBeenCalledTimes(1);
     expect(setSetting).toHaveBeenNthCalledWith(1, 'sidenav_collapsed', '0');
   });

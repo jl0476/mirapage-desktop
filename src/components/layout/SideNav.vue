@@ -2,7 +2,7 @@
 /**
  * SideNav.vue
  * 模块 #0 全局导航，左固定侧栏 + 8 项导航 + 折叠
- * 规格：docs/superpowers/specs/2026-07-30-module-0-sidenav-design.md
+ * v0.1.0-module1.16+: Tailwind v4 utility class + Xplorer glassmorphism
  */
 import { ref, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -10,6 +10,7 @@ import { getSetting, setSetting } from '@/lib/tauri';
 
 interface NavItem {
   to: string;
+  /** lucide 风格线条 SVG path (12x12 viewBox 24) */
   icon: string;
   labelKey: string;
 }
@@ -18,14 +19,14 @@ const { t } = useI18n();
 const collapsed = ref(false);
 
 const items: NavItem[] = [
-  { to: '/',          icon: '🗂', labelKey: 'nav.fileBrowser' },
-  { to: '/shortcuts', icon: '⭐', labelKey: 'nav.shortcuts' },
-  { to: '/library',   icon: '📚', labelKey: 'nav.library' },
-  { to: '/bookmarks', icon: '🔖', labelKey: 'nav.bookmarks' },
-  { to: '/likes',     icon: '❤', labelKey: 'nav.likes' },
-  { to: '/history',   icon: '🕘', labelKey: 'nav.history' },
-  { to: '/accounts',  icon: '🌐', labelKey: 'nav.accounts' },
-  { to: '/settings',  icon: '⚙', labelKey: 'nav.settings' },
+  { to: '/',          icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z', labelKey: 'nav.fileBrowser' },
+  { to: '/shortcuts', icon: 'M12 2l2.39 7.36H22l-6.18 4.49L18.21 22 12 17.27 5.79 4.73 2.39-8.15L4 9.36h7.61Z', labelKey: 'nav.shortcuts' },
+  { to: '/library',   icon: 'M3 19V5a2 2 0 0 1 2-2h5v16H5a2 2 0 0 1-2-2Zm8-16h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8V3Z', labelKey: 'nav.library' },
+  { to: '/bookmarks', icon: 'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16Z', labelKey: 'nav.bookmarks' },
+  { to: '/likes',     icon: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z', labelKey: 'nav.likes' },
+  { to: '/history',   icon: 'M3 12a9 9 0 1 0 3-6.7L3 8m0-5v5h5M12 7v5l4 2', labelKey: 'nav.history' },
+  { to: '/accounts',  icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 0c2 0 4 4 4 8s-2 8-4 8-4-4-4-8 4-8Zm0 0a16 16 0 0 1 16 16', labelKey: 'nav.accounts' },
+  { to: '/settings',  icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0 0a9 9 0 0 0 9-9 9 9 0 0 0-9-9', labelKey: 'nav.settings' },
 ];
 
 onMounted(async () => {
@@ -49,8 +50,7 @@ async function onToggle() {
 
 <template>
   <nav
-    class="sidenav"
-    :class="{ collapsed }"
+    :class="['sidenav', collapsed ? 'w-[60px]' : 'w-[220px]']"
     data-test="sidenav"
   >
     <button
@@ -60,14 +60,29 @@ async function onToggle() {
       data-test="sidenav-toggle"
       @click="onToggle"
     >
-      <span class="toggle-icon" aria-hidden="true">≡</span>
+      <span aria-hidden="true">≡</span>
     </button>
 
     <ol class="items">
       <li v-for="item in items" :key="item.to">
-        <RouterLink :to="item.to" class="item" active-class="active">
-          <span class="icon" aria-hidden="true">{{ item.icon }}</span>
-          <span class="label">{{ $t(item.labelKey) }}</span>
+        <RouterLink
+          :to="item.to"
+          :class="['item', 'flex', 'items-center', 'gap-3', 'py-2', 'px-3', 'rounded', 'text-sm', 'no-underline', 'transition-colors', collapsed ? 'justify-center px-2' : '']"
+          active-class="active"
+        >
+          <svg
+            class="w-[15px] h-[15px] flex-shrink-0"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path :d="item.icon" />
+          </svg>
+          <span v-if="!collapsed" class="truncate">{{ $t(item.labelKey) }}</span>
         </RouterLink>
       </li>
     </ol>
@@ -75,84 +90,68 @@ async function onToggle() {
 </template>
 
 <style scoped>
+/* Tailwind v4 utility class 已经覆盖大多数样式. 这里只放 @apply 不能表达的复杂规则 */
+
+/* 玻璃质感 + 渐变背景继承 (Xplorer style) */
 .sidenav {
-  width: var(--layout-sidenav-w);
-  background: var(--surface-1);
+  background-color: var(--color-surface-1);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  border-right: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--color-border-subtle);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
   height: 100%;
-  transition: width var(--dur-base) var(--ease-out);
+  transition: width 180ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.sidenav.collapsed { width: var(--layout-sidenav-w-collapsed); }
 
 .toggle {
   width: 100%;
-  padding: var(--space-3) var(--space-4);
+  padding: 12px 16px;
   background: transparent;
   border: none;
-  border-bottom: 1px solid var(--border-subtle);
-  color: var(--text-secondary);
+  border-bottom: 1px solid var(--color-border-subtle);
+  color: var(--color-text-secondary);
   cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
+  font-size: 16px;
+  transition: background 120ms cubic-bezier(0.16, 1, 0.3, 1),
+              color 120ms cubic-bezier(0.16, 1, 0.3, 1);
 }
-.toggle:hover { background: var(--surface-2); color: var(--text-primary); }
-.toggle:active { transform: translateY(1px); }
-.toggle-icon { font-size: 16px; line-height: 1; }
+.toggle:hover {
+  background-color: var(--color-surface-2);
+  color: var(--color-text-primary);
+}
+.toggle:active {
+  transform: translateY(1px);
+}
 
 .items {
   list-style: none;
   margin: 0;
-  padding: var(--space-2);
+  padding: 8px;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 
 .item {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
-  color: var(--text-secondary);
-  text-decoration: none;
-  font-size: var(--text-base);
-  font-weight: var(--weight-normal);
-  border-radius: var(--radius-sm);
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out),
-              box-shadow var(--dur-fast) var(--ease-out);
+  color: var(--color-text-secondary);
+  font-weight: 400;
+  transition: background 120ms cubic-bezier(0.16, 1, 0.3, 1),
+              color 120ms cubic-bezier(0.16, 1, 0.3, 1),
+              box-shadow 120ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 .item:hover {
-  background: var(--surface-2);
-  color: var(--text-primary);
+  background-color: var(--color-surface-2);
+  color: var(--color-text-primary);
 }
-.item:active { transform: translateY(1px); }
+.item:active {
+  transform: translateY(1px);
+}
 .item.active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: var(--weight-semibold);
-  box-shadow: var(--glow-accent);
+  background-color: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-weight: 600;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
 }
-
-.icon {
-  width: 20px;
-  text-align: center;
-  font-size: 15px;
-  flex-shrink: 0;
-}
-
-.label {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.sidenav.collapsed .label { display: none; }
-.sidenav.collapsed .item { justify-content: center; padding: var(--space-2); }
-.sidenav.collapsed .icon { margin: 0; }
 </style>

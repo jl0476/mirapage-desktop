@@ -1,12 +1,13 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
+import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath, URL } from 'node:url';
 
 // Tauri 期望一个固定端口的 dev server（默认 1420）
 const host = process.env.TAURI_DEV_HOST;
 
 export default defineConfig(() => ({
-  plugins: [vue()],
+  plugins: [vue(), tailwindcss()],
 
   // Vite 解析别名，方便 `@/` 引用 src/
   resolve: {
