@@ -173,11 +173,13 @@ export default {
   },
   error: {
     openFailed: 'Failed to open',
-    fileNotFound: 'File not found',
+    fileNotFound: 'Path not found or inaccessible',
     networkError: 'Network error',
     permissionDenied: 'Permission denied',
     timeout: 'Operation timed out',
+    ioError: 'File system error',
     unknown: 'Unknown error',
+    pathTooLong: 'Path too long (Windows MAX_PATH limit; try moving root closer to C:\\ or enable long path support)',
   },
   lang: {
     system: 'System',

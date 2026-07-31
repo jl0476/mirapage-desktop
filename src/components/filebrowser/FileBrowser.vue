@@ -119,15 +119,38 @@ async function onSaveSubmit() {
 }
 
 /**
+ * 截断路径用于错误显示. 长路径 (Windows MAX_PATH ~260) 在深层嵌套时
+ * 难看也容易截断 UI — 头 60 + "..." + 尾 60.
+ */
+function truncatePath(p: string, head = 60, tail = 60): string {
+  if (p.length <= head + tail + 5) return p;
+  return `${p.slice(0, head)}…${p.slice(-tail)}`;
+}
+
+function errorMessage(kind: string, msg: string): string {
+  // Windows MAX_PATH ~260 字符限制检测. 深层嵌套目录或长文件夹名
+  // 会触发 NotFound, 但实际是 path too long.
+  if (kind === 'notFound' && msg.length > 200) {
+    return t('error.pathTooLong') + ' — ' + truncatePath(msg, 50, 50);
+  }
+  const tr = truncatePath(msg);
+  if (kind === 'notFound') return t('error.fileNotFound') + ': ' + tr;
+  if (kind === 'permissionDenied') return t('error.permissionDenied') + ': ' + tr;
+  return t('error.ioError') + ': ' + tr;
+}
+
+/**
  * #3 FileList @open handler
  * - 目录: navigate 进入 (currentPath 拼上 entry.path)
  * - 文件/压缩包: emit 'open' 给父组件 (模块 #2 接管 reader 路由)
  */
 async function onEntryOpen(entry: import('@/lib/sourceDescriptor').MediaEntry) {
-  log('[FileBrowser] onEntryOpen', entry.name, 'isDirectory=', entry.isDirectory, 'currentPath=', fb.currentPath);
+  log('[FileBrowser] onEntryOpen', entry.name, 'isDirectory=', entry.isDirectory, 'lastFetchedPath=', fb.lastFetchedPath);
   if (entry.isDirectory) {
-    const newPath = fb.currentPath
-      ? `${fb.currentPath}/${entry.path}`.replace(/\/+/g, '/')
+    // 用 lastFetchedPath (而非 currentPath) 拼接, 避免快速连点两个目录
+    // 时把第二次点击当成第一次的子目录
+    const newPath = fb.lastFetchedPath
+      ? `${fb.lastFetchedPath}/${entry.path}`.replace(/\/+/g, '/')
       : entry.path;
     log('[FileBrowser] navigate to', newPath);
     await fb.navigate(newPath);
@@ -232,14 +255,24 @@ const rootLabel = computed(() => {
         class="error-toast"
         data-test="error-toast"
       >
-        <span>{{ fb.error.message }}</span>
-        <button data-test="error-refresh" @click="onRefresh">
-          {{ t('fileBrowser.refresh') }}
-        </button>
+        <span data-test="error-message">{{ errorMessage(fb.error.kind, fb.error.message) }}</span>
+        <div class="error-actions">
+          <button
+            v-if="fb.currentPath !== ''"
+            data-test="error-up"
+            @click="onUp"
+          >
+            ↑ {{ t('fileBrowser.up') }}
+          </button>
+          <button data-test="error-refresh" @click="onRefresh">
+            {{ t('fileBrowser.refresh') }}
+          </button>
+        </div>
       </p>
 
       <FileList
         :entries="fb.entries"
+        :loading="fb.loading"
         data-test="filelist"
         @open="onEntryOpen"
       />
@@ -345,13 +378,19 @@ const rootLabel = computed(() => {
   font-size: 13px;
 }
 .error-toast button {
-  margin-left: auto;
+  margin-left: 0;
   padding: 4px 10px;
   border: 1px solid #ff6b6b;
   background: transparent;
   color: #ff6b6b;
   border-radius: 4px;
   cursor: pointer;
+  font-size: 12px;
+}
+.error-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
 }
 .loading {
   color: var(--color-muted, #888);

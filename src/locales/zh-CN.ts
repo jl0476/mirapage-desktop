@@ -174,11 +174,13 @@ export default {
   },
   error: {
     openFailed: '打开失败',
-    fileNotFound: '文件不存在',
+    fileNotFound: '路径不存在或无法访问',
     networkError: '网络错误',
     permissionDenied: '权限被拒绝',
     timeout: '操作超时',
+    ioError: '文件系统错误',
     unknown: '未知错误',
+    pathTooLong: '路径过长（Windows MAX_PATH 限制，可尝试将根目录移近 C:\\ 或开启长路径支持）',
   },
   lang: {
     system: '跟随系统',

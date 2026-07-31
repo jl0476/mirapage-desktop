@@ -2,6 +2,10 @@
 /**
  * FileList.vue
  * 展示目录列表：图片/目录/压缩包分组，自然排序
+ *
+ * v0.1.0-module1.12+: `loading` prop 锁住 in-flight 切换期.
+ * 父级 fetch 中 (loading=true) 加 .loading class → CSS pointer-events:none,
+ * 避免快速连点两个目录时把第二次当作第一次子目录 (race condition).
  */
 import { computed } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -14,10 +18,13 @@ interface Props {
   entries: MediaEntry[];
   sortField?: SortField;
   sortAscending?: boolean;
+  /** 父级 fetch 进行中. true 时整列表 pointer-events:none, 防止 race */
+  loading?: boolean;
 }
 const props = withDefaults(defineProps<Props>(), {
   sortField: 'name',
   sortAscending: true,
+  loading: false,
 });
 
 interface Emits {
@@ -62,7 +69,7 @@ function iconFor(entry: MediaEntry): string {
   <ul v-if="sorted.length === 0" data-test="empty" class="empty">
     <li>{{ $t?.('fileBrowser.empty') ?? '空目录' }}</li>
   </ul>
-  <ul v-else class="filelist" data-test="filelist" aria-label="Directory contents">
+  <ul v-else :class="['filelist', { loading }]" role="button" data-test="filelist" aria-label="Directory contents">
     <li
       v-for="entry in sorted"
       :key="entry.path"
@@ -91,6 +98,11 @@ function iconFor(entry: MediaEntry): string {
   margin: 0;
   display: flex;
   flex-direction: column;
+  transition: opacity 0.15s ease;
+}
+.filelist.loading {
+  pointer-events: none;     /* 锁住 race: fetch 中不响应点击 */
+  opacity: 0.55;            /* 视觉变灰提示 */
 }
 .empty {
   list-style: none;
