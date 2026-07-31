@@ -70,11 +70,13 @@ async function onRefresh() {
 async function onShortcutChange(e: Event) {
   const value = (e.target as HTMLSelectElement).value;
   if (value === '') {
+    // #8 修复: 仅取消激活, 不清 rootPath (让用户保留当前目录浏览)
     shortcuts.setActive(null);
-    await fb.setRoot(null);
     return;
   }
   const id = Number(value);
+  // #8 修复: 切回已激活的 shortcut, no-op (避免重复 fetch)
+  if (id === shortcuts.activeId) return;
   const sc = shortcuts.items.find((s) => s.id === id);
   if (sc) {
     shortcuts.setActive(id);
@@ -130,6 +132,15 @@ async function onEntryOpen(entry: import('@/lib/sourceDescriptor').MediaEntry) {
   }
   emit('open', entry);
 }
+
+/**
+ * #1 UI 显示当前根目录: 用 rootPath basename 作 Breadcrumb 根标签
+ */
+const rootLabel = computed(() => {
+  if (!fb.rootPath) return t('nav.fileBrowser');
+  const parts = fb.rootPath.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? fb.rootPath;
+});
 </script>
 
 <template>
@@ -197,7 +208,7 @@ async function onEntryOpen(entry: import('@/lib/sourceDescriptor').MediaEntry) {
       </header>
 
       <Breadcrumb
-        :root-label="t('nav.fileBrowser')"
+        :root-label="rootLabel"
         :path="fb.currentPath"
         data-test="breadcrumb"
       />

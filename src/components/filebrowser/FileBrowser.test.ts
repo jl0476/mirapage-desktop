@@ -148,7 +148,7 @@ describe('FileBrowser — dropdown 切换', () => {
     expect(shortcuts.activeId).toBe(1);
   });
 
-  it('选 dropdown「无」(空 value) 清空 rootPath', async () => {
+  it('选 dropdown「无」(空 value) 仅取消激活, 不清 rootPath (#8)', async () => {
     mockedShortcuts.mockResolvedValue([
       { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
     ]);
@@ -162,9 +162,38 @@ describe('FileBrowser — dropdown 切换', () => {
     await dropdown.setValue('');
     await flushPromises();
 
-    expect(fb.rootPath).toBeNull();
+    // rootPath 保留 (用户继续浏览当前目录)
+    expect(fb.rootPath).toBe('C:/a');
+    // 仅取消激活
     const shortcuts = useShortcutsStore();
     expect(shortcuts.activeId).toBeNull();
+  });
+
+  it('dropdown 切回已激活 shortcut → no-op (#8)', async () => {
+    mockedShortcuts.mockResolvedValue([
+      { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
+    ]);
+    mockedList.mockResolvedValue([]);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/a');
+    await flushPromises();
+
+    // 先激活 id=1
+    const dropdown = wrapper.find('[data-test="shortcut-dropdown"]');
+    await dropdown.setValue('1');
+    await flushPromises();
+
+    const shortcuts = useShortcutsStore();
+    expect(shortcuts.activeId).toBe(1);
+
+    // 再选 1 (相同): no-op, 不再调 listDirectory
+    mockedList.mockClear();
+    await dropdown.setValue('1');
+    await flushPromises();
+
+    expect(mockedList).not.toHaveBeenCalled();
+    expect(shortcuts.activeId).toBe(1);
   });
 });
 
