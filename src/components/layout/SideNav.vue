@@ -78,6 +78,8 @@ async function onToggle() {
 .sidenav {
   width: var(--layout-sidenav-w);
   background: var(--surface-1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border-right: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
@@ -105,7 +107,7 @@ async function onToggle() {
 .items {
   list-style: none;
   margin: 0;
-  padding: var(--space-2) var(--space-2);
+  padding: var(--space-2);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -122,7 +124,8 @@ async function onToggle() {
   font-weight: var(--weight-normal);
   border-radius: var(--radius-sm);
   transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
+              color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
 }
 .item:hover {
   background: var(--surface-2);
@@ -133,6 +136,7 @@ async function onToggle() {
   background: var(--accent-soft);
   color: var(--accent);
   font-weight: var(--weight-semibold);
+  box-shadow: var(--glow-accent);
 }
 
 .icon {

@@ -320,7 +320,6 @@ const rootLabel = computed(() => {
   height: 100%;
   padding: var(--space-4);
   gap: var(--space-3);
-  background: var(--surface-0);
 }
 
 /* ─── Empty state ────────────────────────────────────── */
@@ -338,10 +337,6 @@ const rootLabel = computed(() => {
   font-size: var(--text-md);
   margin: 0;
 }
-.empty-state .primary,
-.empty-state .link {
-  font-size: var(--text-base);
-}
 .empty-state .primary {
   padding: var(--space-3) var(--space-6);
   background: var(--accent);
@@ -349,19 +344,25 @@ const rootLabel = computed(() => {
   border: none;
   border-radius: var(--radius-md);
   font-weight: var(--weight-semibold);
+  box-shadow: var(--glow-accent);
   transition: background var(--dur-fast) var(--ease-out),
-              transform var(--dur-fast) var(--ease-out);
+              transform var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
 }
-.empty-state .primary:hover { background: var(--accent-hover); }
+.empty-state .primary:hover {
+  background: var(--accent-hover);
+  box-shadow: var(--glow-accent-strong);
+}
 .empty-state .primary:active { transform: translateY(1px); }
 .empty-state .link {
   color: var(--accent);
   text-decoration: none;
+  font-size: var(--text-base);
   transition: color var(--dur-fast) var(--ease-out);
 }
 .empty-state .link:hover { color: var(--accent-hover); text-decoration: underline; }
 
-/* ─── Toolbar ────────────────────────────────────────── */
+/* ─── Toolbar (glass) ────────────────────────────────── */
 .toolbar {
   display: flex;
   gap: var(--space-2);
@@ -369,6 +370,8 @@ const rootLabel = computed(() => {
   flex-wrap: wrap;
   padding: var(--space-2);
   background: var(--surface-1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
 }
@@ -403,9 +406,9 @@ const rootLabel = computed(() => {
   padding-right: var(--space-5);
 }
 
-/* ─── Error toast ────────────────────────────────────── */
+/* ─── Error toast (glow red) ─────────────────────────── */
 .error-toast {
-  background: rgba(207, 102, 121, 0.08);
+  background: rgba(248, 113, 113, 0.08);
   border: 1px solid var(--error);
   border-radius: var(--radius-sm);
   padding: var(--space-3) var(--space-4);
@@ -414,6 +417,7 @@ const rootLabel = computed(() => {
   gap: var(--space-3);
   font-size: var(--text-base);
   color: var(--text-primary);
+  box-shadow: var(--glow-error);
 }
 .error-toast [data-test="error-message"] {
   color: var(--error);
@@ -430,7 +434,7 @@ const rootLabel = computed(() => {
   font-size: var(--text-sm);
   transition: background var(--dur-fast) var(--ease-out);
 }
-.error-toast button:hover { background: rgba(207, 102, 121, 0.15); }
+.error-toast button:hover { background: rgba(248, 113, 113, 0.15); }
 .error-actions {
   display: flex;
   gap: var(--space-2);
@@ -445,12 +449,13 @@ const rootLabel = computed(() => {
   padding: var(--space-2) var(--space-3);
 }
 
-/* ─── Save dialog ────────────────────────────────────── */
+/* ─── Save dialog (glassmorphism) ────────────────────── */
 .save-dialog-backdrop {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -508,6 +513,7 @@ const rootLabel = computed(() => {
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-weight: var(--weight-semibold);
+  box-shadow: var(--glow-accent);
   transition: background var(--dur-fast) var(--ease-out),
               transform var(--dur-fast) var(--ease-out);
 }

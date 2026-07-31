@@ -1,54 +1,78 @@
 /**
- * tokens.css — MiraPage Desktop 设计 token 系统
+ * tokens.css - MiraPage Desktop 设计 token 系统
  *
- * 单一来源. 所有组件 CSS 只引用这些变量, 不硬编码颜色 / 间距 / 字号.
+ * 参考 Xplorer (kimlimjustin/xplorer) 设计语言:
+ * - Glass 主题: 135deg 深蓝紫渐变背景 + glassmorphism 半透卡片
+ * - Indigo primary (#6366f1) 替代暖琥珀
+ * - 文件类型彩色图标 (folder=blue, image=green, archive=orange)
+ * - Neon glow shadow 效果
  *
- * 设计取向: 暗色低饱和 (AI 紫蓝渐变反例) + 一种暖色 accent + 暖灰单家族.
- * 复刻 macOS Finder / Windows 11 Explorer 现代化的克制.
+ * 单一来源. 所有组件 CSS 只引用这些变量, 不硬编码颜色.
  */
 
 :root {
-  /* ─── Color ──────────────────────────────────────────── */
+  /* ─── Glass 主题背景 (135deg 渐变) ─────────────────── */
+  --bg-gradient: linear-gradient(
+    135deg,
+    #0a0a1a 0%,
+    #0f0f2e 25%,
+    #1a0a2e 50%,
+    #0a1a2e 75%,
+    #0a0a1a 100%
+  );
+  --bg-gradient-solid: #0a0a1a;  /* fallback */
 
-  /* 表面层级 (单家族暖灰, 避免紫蓝 AI 渐变) */
-  --surface-0: #0f1011;          /* 桌面背景 (与系统窗口背景融合) */
-  --surface-1: #16181a;          /* 一级面板 (sidenav / toolbar) */
-  --surface-2: #1c1f22;          /* 二级 (filelist 行 hover) */
-  --surface-3: #232629;          /* 三级 (dropdown 选中 / focus ring 底) */
-  --surface-4: #2c2f33;          /* 弹窗 (save dialog) */
-  --surface-inset: #0c0d0e;       /* 凹陷 (path 显示 / input) */
+  /* ─── Surface 层级 (深蓝紫, 不是纯灰) ──────────────── */
+  --surface-0: transparent;              /* 让 bg-gradient 透出 */
+  --surface-1: rgba(17, 17, 34, 0.6);    /* 一级面板 (sidenav / toolbar) - glass */
+  --surface-2: rgba(22, 22, 48, 0.8);    /* 二级 (filelist 行 hover) */
+  --surface-3: #161630;                  /* 三级 (dropdown / solid) */
+  --surface-4: #1a1b2e;                  /* 弹窗 (save dialog) - solid */
+  --surface-inset: rgba(0, 0, 0, 0.3);   /* 凹陷 (input) */
 
-  /* 边框 — 全暖灰 1 步亮度差, 不是 #444 黑 */
-  --border-subtle: #25272a;      /* 极轻分隔 */
-  --border-default: #2e3134;     /* 默认行/按钮边框 */
-  --border-strong: #3b3e42;       /* hover/active 强调 */
+  /* ─── 边框 - 半透白 (glassmorphism) ────────────────── */
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.15);
 
-  /* 文本层级 */
-  --text-primary: #e8e8e6;        /* 主文本 */
-  --text-secondary: #a3a3a0;      /* 次要 (placeholder / meta) */
-  --text-tertiary: #6e6e6b;       /* 三级 (timestamp / 极弱) */
-  --text-disabled: #4a4a47;       /* 禁用 */
-  --text-on-accent: #0f1011;      /* 在 accent 上 */
+  /* ─── 文本层级 (半透白) ────────────────────────────── */
+  --text-primary: rgba(255, 255, 255, 0.92);
+  --text-secondary: rgba(255, 255, 255, 0.6);
+  --text-tertiary: rgba(255, 255, 255, 0.4);
+  --text-disabled: rgba(255, 255, 255, 0.25);
+  --text-on-accent: #ffffff;
 
-  /* 单 accent (DESIGN.md §11 暖琥珀, 替代蓝 #4a9eff) */
-  --accent: #d4a86a;             /* 暖琥珀 (选中态, 强调) */
-  --accent-hover: #e0b878;        /* 悬停 */
-  --accent-press: #c89a5c;        /* 按下 */
-  --accent-soft: rgba(212, 168, 106, 0.15); /* hover 半透底 */
+  /* ─── Accent: Indigo (Xplorer primary) ─────────────── */
+  --accent: #6366f1;
+  --accent-hover: #818cf8;
+  --accent-press: #4f46e5;
+  --accent-soft: rgba(99, 102, 241, 0.2);
 
-  /* 语义色 (饱和度 ≤70%, 不刺眼) */
-  --success: #6fae6f;
-  --warning: #d4a86a;            /* 与 accent 同色, 简化 */
-  --error: #cf6679;
-  --info: #7a9cc6;
+  /* ─── 文件类型色 (Xplorer file-icon-* 系列) ────────── */
+  --file-folder: #6366f1;    /* indigo - 文件夹 */
+  --file-image: #34d399;     /* green - 图片 */
+  --file-archive: #fb923c;   /* orange - 压缩包 */
+  --file-video: #f472b6;     /* pink - 视频 */
+  --file-audio: #a78bfa;     /* purple - 音频 */
+  --file-default: rgba(255, 255, 255, 0.5);
 
-  /* 阴影 — 带色阴影, 不是黑色 */
+  /* ─── 语义色 ────────────────────────────────────────── */
+  --success: #34d399;
+  --warning: #fbbf24;
+  --error: #f87171;
+  --info: #22d3ee;
+
+  /* ─── Glow 阴影 (neon 效果) ────────────────────────── */
+  --glow-accent: 0 0 8px rgba(99, 102, 241, 0.3);
+  --glow-accent-strong: 0 0 12px rgba(99, 102, 241, 0.5);
+  --glow-error: 0 0 8px rgba(248, 113, 113, 0.3);
+
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.25);
   --shadow-accent: 0 0 0 3px var(--accent-soft);
 
-  /* ─── Spacing (4px base scale) ──────────────────────── */
+  /* ─── Spacing (4px base scale) ─────────────────────── */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -59,14 +83,13 @@
   --space-8: 48px;
 
   /* ─── Radius ────────────────────────────────────────── */
-  --radius-xs: 3px;              /* 内嵌 input */
-  --radius-sm: 4px;              /* 默认按钮/卡片 */
-  --radius-md: 6px;              /* toolbar / sidenav */
-  --radius-lg: 8px;              /* 弹窗 / row hover */
-  --radius-full: 9999px;         /* pill badge */
+  --radius-xs: 3px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-full: 9999px;
 
   /* ─── Typography ────────────────────────────────────── */
-  /* 系统字体栈 — 避免 Inter everywhere, 用平台原生 */
   --font-sans:
     -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display",
     "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei UI",
@@ -75,21 +98,21 @@
     ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas,
     "Source Code Pro", monospace;
 
-  --text-xs: 11px;                /* meta / timestamp */
-  --text-sm: 12px;                /* 默认次要 */
-  --text-base: 13px;              /* 正文 (略小, 密集 UI) */
-  --text-md: 14px;                /* 标题 */
-  --text-lg: 16px;                /* 主标题 */
-  --text-xl: 20px;                /* h2 */
-  --text-2xl: 28px;               /* display, 暂未用 */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
 
   --leading-tight: 1.25;
   --leading-normal: 1.5;
   --leading-relaxed: 1.65;
 
-  --tracking-tight: -0.01em;      /* 大字 */
+  --tracking-tight: -0.01em;
   --tracking-normal: 0;
-  --tracking-wide: 0.04em;        /* 小标签 */
+  --tracking-wide: 0.04em;
 
   --weight-normal: 400;
   --weight-medium: 500;
@@ -103,7 +126,7 @@
   --dur-base: 180ms;
   --dur-slow: 280ms;
 
-  /* ─── Z-index scale (替代 z-index: 9999 乱用) ──────── */
+  /* ─── Z-index scale ─────────────────────────────────── */
   --z-base: 0;
   --z-elevated: 10;
   --z-overlay: 100;
@@ -126,8 +149,9 @@ body,
   font-size: var(--text-base);
   line-height: var(--leading-normal);
   color: var(--text-primary);
-  background: var(--surface-0);
-  font-feature-settings: "cv11", "ss01", "ss03"; /* OpenType 字符变体 (可选优化) */
+  background: var(--bg-gradient-solid);
+  background-image: var(--bg-gradient);
+  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -141,30 +165,29 @@ textarea {
   color: inherit;
 }
 
-/* 滚动条 — 暗色 UI 适配 */
+/* ─── Glassmorphism 滚动条 (Xplorer 风格) ────────────── */
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
+  background: rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-sm);
-  border: 2px solid var(--surface-0);
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-tertiary);
+  background: var(--accent);
 }
 
-/* 选区 */
+/* ─── 选区 ────────────────────────────────────────────── */
 ::selection {
   background: var(--accent-soft);
   color: var(--text-primary);
 }
 
-/* focus-visible 默认环 (a11y 必备) */
+/* ─── focus-visible 默认环 ────────────────────────────── */
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;

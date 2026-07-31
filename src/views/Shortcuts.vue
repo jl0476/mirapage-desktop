@@ -90,7 +90,6 @@ async function onDelete(id: number) {
   padding: var(--space-6);
   height: 100%;
   overflow-y: auto;
-  background: var(--surface-0);
 }
 header {
   display: flex;
@@ -136,12 +135,18 @@ h2 {
   gap: var(--space-4);
   padding: var(--space-3) var(--space-4);
   background: var(--surface-1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   flex-wrap: wrap;
-  transition: border-color var(--dur-fast) var(--ease-out);
+  transition: border-color var(--dur-fast) var(--ease-out),
+              box-shadow var(--dur-fast) var(--ease-out);
 }
-.shortcuts-list li:hover { border-color: var(--border-default); }
+.shortcuts-list li:hover {
+  border-color: var(--accent);
+  box-shadow: var(--glow-accent);
+}
 
 .name {
   font-weight: var(--weight-semibold);

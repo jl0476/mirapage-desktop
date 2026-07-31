@@ -64,6 +64,8 @@ function onCrumbClick(idx: number) {
   margin: 0;
   font-size: var(--text-sm);
   background: var(--surface-1);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   overflow-x: auto;

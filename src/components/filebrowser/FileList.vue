@@ -3,9 +3,10 @@
  * FileList.vue
  * 展示目录列表：图片/目录/压缩包分组，自然排序
  *
- * v0.1.0-module1.12+: `loading` prop 锁住 in-flight 切换期.
- * 父级 fetch 中 (loading=true) 加 .loading class → CSS pointer-events:none,
- * 避免快速连点两个目录时把第二次当作第一次子目录 (race condition).
+ * v0.1.0-module1.14+: 参考 Xplorer 设计
+ * - 文件类型彩色图标 (folder=indigo, image=green, archive=orange)
+ * - glassmorphism 行 hover (半透白底)
+ * - glow 效果 on hover (icon drop-shadow)
  */
 import { computed } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -33,7 +34,6 @@ interface Emits {
 const emit = defineEmits<Emits>();
 
 const sorted = computed<MediaEntry[]>(() => {
-  // 自然排序（页2 < 页10）
   const by = (a: MediaEntry, b: MediaEntry): number => {
     if (props.sortField === 'modifiedAt') {
       return (a.modifiedAt ?? 0) - (b.modifiedAt ?? 0);
@@ -41,14 +41,12 @@ const sorted = computed<MediaEntry[]>(() => {
     if (props.sortField === 'size') {
       return a.size - b.size;
     }
-    // name: 自然排序
-    return 0; // 由 naturalSort 处理
+    return 0;
   };
   const sortedByName = naturalSort(props.entries, (e) => e.name);
   if (props.sortField === 'name') {
     return props.sortAscending ? sortedByName : [...sortedByName].reverse();
   }
-  // modifiedAt / size: 先 name sort 再 by sort
   const stable = [...sortedByName].sort(by);
   return props.sortAscending ? stable : stable.reverse();
 });
@@ -58,10 +56,24 @@ function onClick(entry: MediaEntry) {
   emit('open', entry);
 }
 
+/**
+ * 文件类型图标 (emoji) + 颜色 class.
+ * 参考 Xplorer file-icon-* 系列: folder=blue, image=green, archive=orange.
+ */
 function iconFor(entry: MediaEntry): string {
   if (entry.isDirectory) return '📁';
   if (entry.isArchive) return '🗜';
-  return '🖼';
+  const ext = entry.name.split('.').pop()?.toLowerCase() ?? '';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return '🖼';
+  return '📄';
+}
+
+function iconClass(entry: MediaEntry): string {
+  if (entry.isDirectory) return 'icon-folder';
+  if (entry.isArchive) return 'icon-archive';
+  const ext = entry.name.split('.').pop()?.toLowerCase() ?? '';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return 'icon-image';
+  return 'icon-default';
 }
 </script>
 
@@ -82,7 +94,7 @@ function iconFor(entry: MediaEntry): string {
       @keydown.enter="onClick(entry)"
       @keydown.space.prevent="onClick(entry)"
     >
-      <span class="icon" aria-hidden="true">{{ iconFor(entry) }}</span>
+      <span class="icon" :class="iconClass(entry)" aria-hidden="true">{{ iconFor(entry) }}</span>
       <span class="name">{{ entry.name }}</span>
     </li>
   </ul>
@@ -113,7 +125,7 @@ function iconFor(entry: MediaEntry): string {
   color: var(--text-tertiary);
   font-size: var(--text-base);
 }
-.filelist > li {
+.filelist > .row {
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -127,23 +139,33 @@ function iconFor(entry: MediaEntry): string {
   transition: background var(--dur-fast) var(--ease-out),
               color var(--dur-fast) var(--ease-out);
 }
-.filelist > li:hover {
+.filelist > .row:hover {
   background: var(--surface-2);
   color: var(--text-primary);
 }
-.filelist > li:focus-visible {
+.filelist > .row:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
-.filelist > li:active {
+.filelist > .row:active {
   background: var(--surface-3);
 }
 
+/* ─── 文件类型彩色图标 (Xplorer 风格) ────────────────── */
 .icon {
   font-size: 15px;
   width: 20px;
   text-align: center;
   flex-shrink: 0;
+  transition: filter var(--dur-fast) var(--ease-out);
+}
+.icon-folder { color: var(--file-folder); }
+.icon-image { color: var(--file-image); }
+.icon-archive { color: var(--file-archive); }
+.icon-default { color: var(--file-default); }
+
+.row:hover .icon {
+  filter: drop-shadow(0 0 4px currentColor);
 }
 
 .name {
@@ -160,6 +182,6 @@ function iconFor(entry: MediaEntry): string {
 }
 
 .is-archive .name {
-  color: var(--accent);
+  color: var(--file-archive);
 }
 </style>
