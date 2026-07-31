@@ -3,9 +3,14 @@
  * FileBrowser.vue — 模块 #1 主屏
  * 5 元素工具栏 + Breadcrumb + FileList + 错误 toast + empty state + save dialog
  * 规格：docs/superpowers/specs/2026-07-30-module-1-file-browser-design.md §4.6
+ *
+ * 模块 #1 v2 反馈修复:
+ * - #1 记住上次根目录: settings.file_browser_last_root 持久化
+ * - #3 FileList @open handler: 目录 navigate / 文件 emit
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { getSetting, setSetting } from '@/lib/tauri';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import FileList from './FileList.vue';
@@ -21,9 +26,38 @@ const saveLabel = ref('');
 const canSave = computed(() => fb.rootPath !== null);
 const canUp = computed(() => fb.currentPath !== '');
 
+const emit = defineEmits<{
+  (e: 'open', entry: import('@/lib/sourceDescriptor').MediaEntry): void;
+}>();
+
+const LAST_ROOT_KEY = 'file_browser_last_root';
+
 onMounted(async () => {
   await shortcuts.refresh();
+  // #1 启动时读上次根目录, 自动加载
+  try {
+    const stored = await getSetting(LAST_ROOT_KEY);
+    if (stored && typeof stored === 'string' && stored.length > 0) {
+      await fb.setRoot(stored);
+    }
+  } catch {
+    // 静默回退: 显示 empty state
+  }
 });
+
+// #1 rootPath 变化时持久化
+watch(
+  () => fb.rootPath,
+  async (next) => {
+    try {
+      if (next) {
+        await setSetting(LAST_ROOT_KEY, next);
+      }
+    } catch {
+      // silent
+    }
+  },
+);
 
 async function onUp() {
   await fb.up();
@@ -49,18 +83,17 @@ async function onShortcutChange(e: Event) {
 }
 
 async function onPickRoot() {
-  // 动态 import 避免 happy-dom 测试环境出错（plugin-dialog 不可用）
   try {
     const mod = (await import('@tauri-apps/plugin-dialog').catch(() => null)) as
       | { open?: (opts: unknown) => Promise<string | null> }
       | null;
-    if (!mod?.open) return; // 浏览器/测试环境无此 API — 让用户手动用 Save 按钮
+    if (!mod?.open) return;
     const path = await mod.open({ directory: true });
     if (path && typeof path === 'string') {
       await fb.setRoot(path);
     }
   } catch {
-    // silent fail — 不打断体验
+    // silent
   }
 }
 
@@ -80,6 +113,22 @@ async function onSaveSubmit() {
   await shortcuts.add(fb.rootPath, label);
   showSaveDialog.value = false;
   saveLabel.value = '';
+}
+
+/**
+ * #3 FileList @open handler
+ * - 目录: navigate 进入 (currentPath 拼上 entry.path)
+ * - 文件/压缩包: emit 'open' 给父组件 (模块 #2 接管 reader 路由)
+ */
+async function onEntryOpen(entry: import('@/lib/sourceDescriptor').MediaEntry) {
+  if (entry.isDirectory) {
+    const newPath = fb.currentPath
+      ? `${fb.currentPath}/${entry.path}`.replace(/\/+/g, '/')
+      : entry.path;
+    await fb.navigate(newPath);
+    return;
+  }
+  emit('open', entry);
 }
 </script>
 
@@ -167,7 +216,7 @@ async function onSaveSubmit() {
       <FileList
         :entries="fb.entries"
         data-test="filelist"
-        @open="(e) => $emit('open', e)"
+        @open="onEntryOpen"
       />
 
       <p v-if="fb.loading" class="loading">

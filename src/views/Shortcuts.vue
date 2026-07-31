@@ -1,16 +1,18 @@
 <script setup lang="ts">
 /**
  * Shortcuts.vue — 模块 #1
- * 列出所有快捷方式，提供打开（跳 /）+ 删除
+ * 列出所有快捷方式，提供打开（跳 / 并切换到该根）+ 删除
  */
 import { onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import { useShortcutsStore } from '@/stores/shortcuts';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
 
 const { t } = useI18n();
 const router = useRouter();
 const shortcuts = useShortcutsStore();
+const fb = useFileBrowserStore();
 
 onMounted(async () => {
   await shortcuts.refresh();
@@ -25,7 +27,11 @@ function displayLabel(item: { label: string | null; rootPath: string }): string 
 }
 
 async function onOpen(id: number) {
+  const sc = shortcuts.items.find((s) => s.id === id);
+  if (!sc) return;
+  // 先激活 shortcut, 再设文件浏览器根目录, 最后路由跳转
   shortcuts.setActive(id);
+  await fb.setRoot(sc.rootPath);
   await router.push('/');
 }
 

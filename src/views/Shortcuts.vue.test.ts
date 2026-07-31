@@ -75,7 +75,7 @@ describe('Shortcuts.vue', () => {
     expect(rows[1].text()).toContain('D:/b/sub');
   });
 
-  it('点击「打开」 → router.push("/") + shortcuts.setActive(id)', async () => {
+  it('点击「打开」 → router.push("/") + shortcuts.setActive(id) + fb.setRoot(shortcut.rootPath)', async () => {
     mockedList.mockResolvedValue([
       { id: 7, rootPath: 'C:/a', label: 'A', createdAt: 100 },
     ]);
@@ -90,6 +90,10 @@ describe('Shortcuts.vue', () => {
     expect(pushSpy).toHaveBeenCalledWith('/');
     const store = useShortcutsStore();
     expect(store.activeId).toBe(7);
+    // #2 修复: 同时调 fb.setRoot(7 的 rootPath)
+    const { useFileBrowserStore } = await import('@/stores/fileBrowser');
+    const fb = useFileBrowserStore();
+    expect(fb.rootPath).toBe('C:/a');
   });
 
   it('点击「删除」+ confirm=true → store.remove(id) (经 IPC)', async () => {
