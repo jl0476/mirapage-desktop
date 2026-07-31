@@ -24,10 +24,13 @@ tauri-build = { version = "2", features = [] }
 indexmap = { version = "1.9", features = ["std"] }
 
 [dependencies]
-tauri = { version = "2", features = ["devtools"] }
+tauri = { version = "2", features = [] }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-fs" }
 tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-dialog" }
-tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-log" }
+# tauri-plugin-log (Phase X 启用: production 文件日志 + devtools)
+# 注: v0.1.0-module1.7 启用后 exe 启动崩溃 (plugin init 失败),
+# 回退到只用 console.log + Rust tracing. 后续单独排查日志方案.
+# tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-log" }
 # tauri-plugin-store（Phase 1 注释：settings 走自家 DB，不需要此 plugin）
 # tauri-plugin-store = "2"
 # tauri-plugin-updater（Phase 9 启用：自动更新）

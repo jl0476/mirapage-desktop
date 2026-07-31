@@ -1,23 +1,14 @@
 /**
- * logger.ts — 统一前端日志
+ * logger.ts — 前端日志 wrapper
  *
- * console.log → WebView2 DevTools Console (production 需 devtools feature)
- * info() → tauri-plugin-log → 文件 (默认 %APPDATA%/<id>/logs/main.log)
+ * v0.1.0-module1.6+: console.log (visible via devtools / dev mode).
+ * v0.1.0-module1.7: 加 tauri-plugin-log 写文件, 启动崩溃, 回退.
+ *                  logger 仍调用 console.log, 等待后续单独排查日志方案.
  *
- * 容错: 测试环境 (happy-dom, 无 Tauri runtime) 调 info() 会抛,
- * try/catch 静默吃掉, 不影响测试.
+ * 用法: import { log } from '@/lib/logger'; log('[FB] click', entry.name)
  */
-import { info } from '@tauri-apps/plugin-log';
-
 export function log(...args: unknown[]): void {
   // 控制台 (DevTools / dev mode)
   // eslint-disable-next-line no-console
   console.log(...args);
-  // 文件 (production 也可读) — 容错静默 (含 promise 拒绝)
-  try {
-    const msg = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-    void info(msg).catch(() => undefined);
-  } catch {
-    /* no-op (e.g. test 环境无 Tauri runtime) */
-  }
 }

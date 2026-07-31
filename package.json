@@ -19,6 +19,7 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@tauri-apps/plugin-log": "^2.0.0",
+    "#": "v0.1.0-module1.7 plugin-log 启动崩溃, 回退, 但保留依赖",
     "@tauri-apps/plugin-fs": "^2.0.0",
     "@tauri-apps/plugin-store": "^2.0.0",
     "@tauri-apps/plugin-updater": "^2.0.0",
