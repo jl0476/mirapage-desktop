@@ -2,7 +2,7 @@
 /**
  * SideNav.vue
  * 模块 #0 全局导航，左固定侧栏 + 8 项导航 + 折叠
- * v0.1.0-module1.16+: Tailwind v4 utility class + Xplorer glassmorphism
+ * v0.1.0-module1.17: 全部 Tailwind utility class, 紧凑无拥挤
  */
 import { ref, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -10,7 +10,6 @@ import { getSetting, setSetting } from '@/lib/tauri';
 
 interface NavItem {
   to: string;
-  /** lucide 风格线条 SVG path (12x12 viewBox 24) */
   icon: string;
   labelKey: string;
 }
@@ -50,12 +49,17 @@ async function onToggle() {
 
 <template>
   <nav
-    :class="['sidenav', collapsed ? 'w-[60px]' : 'w-[220px]']"
+    :class="[
+      'shrink-0 h-full border-r border-[var(--color-border-subtle)] flex flex-col',
+      'bg-[var(--color-surface-1)] backdrop-blur-md',
+      collapsed ? 'w-[60px]' : 'w-[220px]'
+    ]"
+    style="transition: width 180ms cubic-bezier(0.16, 1, 0.3, 1);"
     data-test="sidenav"
   >
     <button
       type="button"
-      class="toggle"
+      class="w-full px-4 py-3 bg-transparent border-0 border-b border-[var(--color-border-subtle)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text-primary)] cursor-pointer text-base"
       :aria-label="t('nav.toggleSidebar')"
       data-test="sidenav-toggle"
       @click="onToggle"
@@ -63,15 +67,22 @@ async function onToggle() {
       <span aria-hidden="true">≡</span>
     </button>
 
-    <ol class="items">
+    <ol class="list-none m-0 p-2 flex flex-col gap-0.5">
       <li v-for="item in items" :key="item.to">
         <RouterLink
           :to="item.to"
-          :class="['item', 'flex', 'items-center', 'gap-3', 'py-2', 'px-3', 'rounded', 'text-sm', 'no-underline', 'transition-colors', collapsed ? 'justify-center px-2' : '']"
+          :class="[
+            'flex items-center gap-3 py-1.5 px-2.5 rounded text-sm no-underline',
+            'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-2)]',
+            'hover:text-[var(--color-text-primary)] active:translate-y-px',
+            collapsed ? 'justify-center px-1.5' : '',
+            // active-class 通过 RouterLink 自动加 'router-link-active' / 'active'
+            // 用 Tailwind 的 [] 形式 + CSS @apply 不可, 直接挂 :class 链
+          ]"
           active-class="active"
         >
           <svg
-            class="w-[15px] h-[15px] flex-shrink-0"
+            class="w-[15px] h-[15px] shrink-0"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -89,69 +100,13 @@ async function onToggle() {
   </nav>
 </template>
 
-<style scoped>
-/* Tailwind v4 utility class 已经覆盖大多数样式. 这里只放 @apply 不能表达的复杂规则 */
-
-/* 玻璃质感 + 渐变背景继承 (Xplorer style) */
-.sidenav {
-  background-color: var(--color-surface-1);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border-right: 1px solid var(--color-border-subtle);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  height: 100%;
-  transition: width 180ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.toggle {
-  width: 100%;
-  padding: 12px 16px;
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid var(--color-border-subtle);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  font-size: 16px;
-  transition: background 120ms cubic-bezier(0.16, 1, 0.3, 1),
-              color 120ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.toggle:hover {
-  background-color: var(--color-surface-2);
-  color: var(--color-text-primary);
-}
-.toggle:active {
-  transform: translateY(1px);
-}
-
-.items {
-  list-style: none;
-  margin: 0;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.item {
-  color: var(--color-text-secondary);
-  font-weight: 400;
-  transition: background 120ms cubic-bezier(0.16, 1, 0.3, 1),
-              color 120ms cubic-bezier(0.16, 1, 0.3, 1),
-              box-shadow 120ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-.item:hover {
-  background-color: var(--color-surface-2);
-  color: var(--color-text-primary);
-}
-.item:active {
-  transform: translateY(1px);
-}
-.item.active {
-  background-color: var(--color-accent-soft);
-  color: var(--color-accent);
-  font-weight: 600;
-  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3);
+<style>
+/* Tailwind v4 utility class 已覆盖大多数样式. 这里只放不能表达的 active 态 */
+nav .active,
+nav .router-link-active {
+  background-color: var(--color-accent-soft) !important;
+  color: var(--color-accent) !important;
+  font-weight: 600 !important;
+  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3) !important;
 }
 </style>
