@@ -1,0 +1,171 @@
+/**
+ * tokens.css — MiraPage Desktop 设计 token 系统
+ *
+ * 单一来源. 所有组件 CSS 只引用这些变量, 不硬编码颜色 / 间距 / 字号.
+ *
+ * 设计取向: 暗色低饱和 (AI 紫蓝渐变反例) + 一种暖色 accent + 暖灰单家族.
+ * 复刻 macOS Finder / Windows 11 Explorer 现代化的克制.
+ */
+
+:root {
+  /* ─── Color ──────────────────────────────────────────── */
+
+  /* 表面层级 (单家族暖灰, 避免紫蓝 AI 渐变) */
+  --surface-0: #0f1011;          /* 桌面背景 (与系统窗口背景融合) */
+  --surface-1: #16181a;          /* 一级面板 (sidenav / toolbar) */
+  --surface-2: #1c1f22;          /* 二级 (filelist 行 hover) */
+  --surface-3: #232629;          /* 三级 (dropdown 选中 / focus ring 底) */
+  --surface-4: #2c2f33;          /* 弹窗 (save dialog) */
+  --surface-inset: #0c0d0e;       /* 凹陷 (path 显示 / input) */
+
+  /* 边框 — 全暖灰 1 步亮度差, 不是 #444 黑 */
+  --border-subtle: #25272a;      /* 极轻分隔 */
+  --border-default: #2e3134;     /* 默认行/按钮边框 */
+  --border-strong: #3b3e42;       /* hover/active 强调 */
+
+  /* 文本层级 */
+  --text-primary: #e8e8e6;        /* 主文本 */
+  --text-secondary: #a3a3a0;      /* 次要 (placeholder / meta) */
+  --text-tertiary: #6e6e6b;       /* 三级 (timestamp / 极弱) */
+  --text-disabled: #4a4a47;       /* 禁用 */
+  --text-on-accent: #0f1011;      /* 在 accent 上 */
+
+  /* 单 accent (DESIGN.md §11 暖琥珀, 替代蓝 #4a9eff) */
+  --accent: #d4a86a;             /* 暖琥珀 (选中态, 强调) */
+  --accent-hover: #e0b878;        /* 悬停 */
+  --accent-press: #c89a5c;        /* 按下 */
+  --accent-soft: rgba(212, 168, 106, 0.15); /* hover 半透底 */
+
+  /* 语义色 (饱和度 ≤70%, 不刺眼) */
+  --success: #6fae6f;
+  --warning: #d4a86a;            /* 与 accent 同色, 简化 */
+  --error: #cf6679;
+  --info: #7a9cc6;
+
+  /* 阴影 — 带色阴影, 不是黑色 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.35), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 4px rgba(0, 0, 0, 0.25);
+  --shadow-accent: 0 0 0 3px var(--accent-soft);
+
+  /* ─── Spacing (4px base scale) ──────────────────────── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 32px;
+  --space-8: 48px;
+
+  /* ─── Radius ────────────────────────────────────────── */
+  --radius-xs: 3px;              /* 内嵌 input */
+  --radius-sm: 4px;              /* 默认按钮/卡片 */
+  --radius-md: 6px;              /* toolbar / sidenav */
+  --radius-lg: 8px;              /* 弹窗 / row hover */
+  --radius-full: 9999px;         /* pill badge */
+
+  /* ─── Typography ────────────────────────────────────── */
+  /* 系统字体栈 — 避免 Inter everywhere, 用平台原生 */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display",
+    "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei UI",
+    "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --font-mono:
+    ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas,
+    "Source Code Pro", monospace;
+
+  --text-xs: 11px;                /* meta / timestamp */
+  --text-sm: 12px;                /* 默认次要 */
+  --text-base: 13px;              /* 正文 (略小, 密集 UI) */
+  --text-md: 14px;                /* 标题 */
+  --text-lg: 16px;                /* 主标题 */
+  --text-xl: 20px;                /* h2 */
+  --text-2xl: 28px;               /* display, 暂未用 */
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  --tracking-tight: -0.01em;      /* 大字 */
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;        /* 小标签 */
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* ─── Motion ────────────────────────────────────────── */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 280ms;
+
+  /* ─── Z-index scale (替代 z-index: 9999 乱用) ──────── */
+  --z-base: 0;
+  --z-elevated: 10;
+  --z-overlay: 100;
+  --z-modal: 1000;
+  --z-toast: 2000;
+
+  /* ─── Layout ────────────────────────────────────────── */
+  --layout-sidenav-w: 220px;
+  --layout-sidenav-w-collapsed: 60px;
+  --layout-toolbar-h: 48px;
+}
+
+/* ─── 全局 reset ──────────────────────────────────────── */
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--text-primary);
+  background: var(--surface-0);
+  font-feature-settings: "cv11", "ss01", "ss03"; /* OpenType 字符变体 (可选优化) */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+/* 滚动条 — 暗色 UI 适配 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--surface-0);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary);
+}
+
+/* 选区 */
+::selection {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+/* focus-visible 默认环 (a11y 必备) */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

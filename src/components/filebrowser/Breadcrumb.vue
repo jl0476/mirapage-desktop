@@ -58,34 +58,43 @@ function onCrumbClick(idx: number) {
 .breadcrumb ol {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   list-style: none;
-  padding: 0;
+  padding: var(--space-2) var(--space-4);
   margin: 0;
-  font-size: 13px;
+  font-size: var(--text-sm);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
 }
 .breadcrumb li {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
+  white-space: nowrap;
 }
 .breadcrumb li a {
-  color: #4a9eff;
+  color: var(--text-secondary);
   text-decoration: none;
-  padding: 2px 4px;
-  border-radius: 3px;
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-xs);
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
 }
 .breadcrumb li a:hover {
-  background: rgba(74, 158, 255, 0.1);
-  text-decoration: underline;
+  background: var(--surface-2);
+  color: var(--text-primary);
 }
 .breadcrumb li.active a {
-  color: inherit;
+  color: var(--accent);
+  font-weight: var(--weight-medium);
   pointer-events: none;
   cursor: default;
 }
 .breadcrumb .sep {
-  color: #888;
+  color: var(--text-tertiary);
   user-select: none;
+  margin: 0 var(--space-1);
 }
 </style>

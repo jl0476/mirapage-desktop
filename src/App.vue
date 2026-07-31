@@ -35,11 +35,12 @@ onMounted(async () => {
   </div>
 </template>
 
-<style>
+<style scoped>
 .app-root {
   width: 100vw;
   height: 100vh;
   overflow: hidden;
+  background: var(--surface-0);
 }
 .app-root.with-sidenav {
   display: flex;
@@ -49,5 +50,6 @@ onMounted(async () => {
   height: 100%;
   overflow: auto;
   min-width: 0;
+  background: var(--surface-0);
 }
 </style>

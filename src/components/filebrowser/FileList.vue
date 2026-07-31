@@ -90,68 +90,76 @@ function iconFor(entry: MediaEntry): string {
 
 <style scoped>
 .filelist {
-  flex: 1 1 auto;          /* 在 .file-browser (flex column) 中占满剩余空间 */
-  min-height: 0;           /* 允许 flex item 缩小到 content 之下, 否则 overflow 不生效 */
-  overflow-y: auto;        /* 条目多时出滚动条 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
   list-style: none;
-  padding: 0;
+  padding: var(--space-2) 0;
   margin: 0;
   display: flex;
   flex-direction: column;
-  transition: opacity 0.15s ease;
+  gap: 1px;
+  transition: opacity var(--dur-fast) var(--ease-out);
 }
 .filelist.loading {
-  pointer-events: none;     /* 锁住 race: fetch 中不响应点击 */
-  opacity: 0.55;            /* 视觉变灰提示 */
+  pointer-events: none;
+  opacity: 0.55;
 }
 .empty {
   list-style: none;
-  padding: 0;
+  padding: var(--space-8) var(--space-4);
   margin: 0;
+  text-align: center;
+  color: var(--text-tertiary);
+  font-size: var(--text-base);
 }
 .filelist > li {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 4px;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  margin: 0 var(--space-2);
+  border-radius: var(--radius-sm);
   cursor: pointer;
   user-select: none;
-  flex-shrink: 0;          /* 条目不被压缩 */
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
 }
-
 .filelist > li:hover {
-  background: rgba(74, 158, 255, 0.12);
+  background: var(--surface-2);
+  color: var(--text-primary);
 }
-
-.filelist > li:focus {
-  outline: 2px solid #4a9eff;
+.filelist > li:focus-visible {
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
+}
+.filelist > li:active {
+  background: var(--surface-3);
 }
 
 .icon {
-  font-size: 16px;
+  font-size: 15px;
   width: 20px;
   text-align: center;
+  flex-shrink: 0;
 }
 
 .name {
   flex: 1;
-  font-size: 13px;
+  font-size: var(--text-base);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .is-directory .name {
-  font-weight: 600;
+  font-weight: var(--weight-medium);
+  color: var(--text-primary);
 }
 
 .is-archive .name {
-  color: #d29bff;
-}
-
-.empty {
-  text-align: center;
-  color: var(--color-muted, #888);
-  padding: 24px;
-  font-size: 13px;
+  color: var(--accent);
 }
 </style>

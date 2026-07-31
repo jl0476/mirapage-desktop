@@ -87,70 +87,109 @@ async function onDelete(id: number) {
 
 <style scoped>
 .shortcuts-view {
-  padding: 24px;
+  padding: var(--space-6);
   height: 100%;
   overflow-y: auto;
+  background: var(--surface-0);
 }
 header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 24px;
+  margin-bottom: var(--space-6);
 }
-h2 { margin: 0; font-size: 20px; }
+h2 {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
 .back {
-  color: var(--color-primary, #4a9eff);
+  color: var(--text-secondary);
   text-decoration: none;
-  font-size: 13px;
+  font-size: var(--text-base);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
 }
+.back:hover { background: var(--surface-2); color: var(--text-primary); }
+
 .empty-hint {
-  color: #888;
+  color: var(--text-tertiary);
   text-align: center;
-  margin-top: 24px;
-  font-size: 14px;
+  margin-top: var(--space-8);
+  font-size: var(--text-md);
 }
+
 .shortcuts-list {
   list-style: none;
   padding: 0;
   margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 .shortcuts-list li {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px;
-  border: 1px solid #444;
-  border-radius: 8px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
   flex-wrap: wrap;
+  transition: border-color var(--dur-fast) var(--ease-out);
 }
+.shortcuts-list li:hover { border-color: var(--border-default); }
+
 .name {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   min-width: 160px;
+  color: var(--text-primary);
+  font-size: var(--text-md);
 }
 .path {
-  opacity: 0.7;
+  opacity: 0.6;
   flex: 1;
-  font-size: 12px;
-  font-family: monospace;
+  min-width: 200px;
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 button {
-  padding: 4px 10px;
-  border: 1px solid #555;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-secondary);
   cursor: pointer;
-  font-size: 13px;
+  font-size: var(--text-base);
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
 }
+button:hover {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+button[data-test="btn-delete"]:hover {
+  border-color: var(--error);
+  color: var(--error);
+}
+
 .add-link {
   display: block;
   text-align: center;
-  margin-top: 24px;
-  color: var(--color-primary, #4a9eff);
+  margin-top: var(--space-6);
+  color: var(--accent);
   text-decoration: none;
-  font-size: 13px;
+  font-size: var(--text-base);
+  transition: color var(--dur-fast) var(--ease-out);
 }
+.add-link:hover { color: var(--accent-hover); text-decoration: underline; }
 </style>

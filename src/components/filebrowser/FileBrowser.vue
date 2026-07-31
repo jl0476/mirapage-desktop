@@ -318,140 +318,213 @@ const rootLabel = computed(() => {
   display: flex;
   flex-direction: column;
   height: 100%;
-  padding: 16px;
-  gap: 12px;
+  padding: var(--space-4);
+  gap: var(--space-3);
+  background: var(--surface-0);
 }
+
+/* ─── Empty state ────────────────────────────────────── */
 .empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   height: 100%;
-  gap: 16px;
+  gap: var(--space-5);
+  padding: var(--space-8);
 }
 .empty-state .hint {
-  color: var(--color-muted, #888);
-  font-size: 14px;
+  color: var(--text-tertiary);
+  font-size: var(--text-md);
+  margin: 0;
+}
+.empty-state .primary,
+.empty-state .link {
+  font-size: var(--text-base);
 }
 .empty-state .primary {
-  padding: 8px 20px;
-  background: var(--color-primary, #4a9eff);
-  color: white;
+  padding: var(--space-3) var(--space-6);
+  background: var(--accent);
+  color: var(--text-on-accent);
   border: none;
-  border-radius: 6px;
-  cursor: pointer;
+  border-radius: var(--radius-md);
+  font-weight: var(--weight-semibold);
+  transition: background var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
 }
+.empty-state .primary:hover { background: var(--accent-hover); }
+.empty-state .primary:active { transform: translateY(1px); }
 .empty-state .link {
-  color: var(--color-primary, #4a9eff);
+  color: var(--accent);
   text-decoration: none;
-  font-size: 13px;
+  transition: color var(--dur-fast) var(--ease-out);
 }
+.empty-state .link:hover { color: var(--accent-hover); text-decoration: underline; }
+
+/* ─── Toolbar ────────────────────────────────────────── */
 .toolbar {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
   flex-wrap: wrap;
+  padding: var(--space-2);
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
 }
 .toolbar button,
 .toolbar select {
-  padding: 4px 10px;
-  border: 1px solid var(--color-border, #444);
-  background: transparent;
-  color: inherit;
-  border-radius: 4px;
-  font-size: 13px;
-  cursor: pointer;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-base);
+  font-family: inherit;
+  transition: background var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
 }
+.toolbar button:hover:not(:disabled),
+.toolbar select:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+.toolbar button:active:not(:disabled) { transform: translateY(1px); }
 .toolbar button:disabled,
 .toolbar select:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
+.toolbar select {
+  cursor: pointer;
+  padding-right: var(--space-5);
+}
+
+/* ─── Error toast ────────────────────────────────────── */
 .error-toast {
-  background: #4d2a2a;
-  border: 1px solid #ff6b6b;
-  border-radius: 4px;
-  padding: 8px 12px;
+  background: rgba(207, 102, 121, 0.08);
+  border: 1px solid var(--error);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 13px;
+  gap: var(--space-3);
+  font-size: var(--text-base);
+  color: var(--text-primary);
+}
+.error-toast [data-test="error-message"] {
+  color: var(--error);
+  flex: 1;
+  min-width: 0;
 }
 .error-toast button {
-  margin-left: 0;
-  padding: 4px 10px;
-  border: 1px solid #ff6b6b;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--error);
   background: transparent;
-  color: #ff6b6b;
-  border-radius: 4px;
+  color: var(--error);
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  font-size: 12px;
+  font-size: var(--text-sm);
+  transition: background var(--dur-fast) var(--ease-out);
 }
+.error-toast button:hover { background: rgba(207, 102, 121, 0.15); }
 .error-actions {
-  margin-left: auto;
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
+
+/* ─── Loading ────────────────────────────────────────── */
 .loading {
-  color: var(--color-muted, #888);
-  font-size: 12px;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
 }
+
+/* ─── Save dialog ────────────────────────────────────── */
 .save-dialog-backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 10;
+  z-index: var(--z-modal);
 }
 .save-dialog {
-  background: var(--color-bg-elevated, #2a2a2a);
-  border: 1px solid var(--color-border, #555);
-  border-radius: 8px;
-  padding: 24px;
+  background: var(--surface-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-width: 360px;
+  gap: var(--space-4);
+  min-width: 380px;
+  box-shadow: var(--shadow-lg);
 }
 .save-dialog h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--text-primary);
 }
 .save-dialog label {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
 }
 .save-dialog input {
-  padding: 6px 8px;
-  background: #1a1a1a;
-  border: 1px solid #555;
-  color: inherit;
-  border-radius: 4px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-inset);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-base);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.save-dialog input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--shadow-accent);
 }
 .save-dialog .actions {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }
 .save-dialog .actions .primary {
-  background: var(--color-primary, #4a9eff);
-  color: white;
-  border: 1px solid var(--color-primary, #4a9eff);
-  padding: 6px 16px;
-  border-radius: 4px;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  border: 1px solid var(--accent);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  font-weight: var(--weight-semibold);
+  transition: background var(--dur-fast) var(--ease-out),
+              transform var(--dur-fast) var(--ease-out);
 }
+.save-dialog .actions .primary:hover { background: var(--accent-hover); }
+.save-dialog .actions .primary:active { transform: translateY(1px); }
 .save-dialog .actions button:not(.primary) {
-  padding: 6px 16px;
-  border: 1px solid var(--color-border, #555);
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--border-default);
   background: transparent;
-  color: inherit;
-  border-radius: 4px;
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+.save-dialog .actions button:not(.primary):hover {
+  background: var(--surface-2);
+  color: var(--text-primary);
 }
 </style>

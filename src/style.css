@@ -1,11 +1,5 @@
-/* MiraPage Desktop —— 全局样式 */
-
-:root {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
-  color-scheme: light dark;
-}
+/* MiraPage Desktop -- 全局样式 */
+@import './styles/tokens.css';
 
 * {
   box-sizing: border-box;
@@ -16,11 +10,7 @@ html, body, #app {
   padding: 0;
   width: 100%;
   height: 100%;
-}
-
-body {
-  background: var(--color-bg, #1a1a1a);
-  color: var(--color-fg, #e0e0e0);
+  overflow: hidden;
 }
 
 button {
