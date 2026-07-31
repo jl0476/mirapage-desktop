@@ -13,6 +13,7 @@ import { useI18n } from 'vue-i18n';
 import { getSetting, setSetting } from '@/lib/tauri';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
+import { log } from '@/lib/logger';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
 
@@ -123,14 +124,12 @@ async function onSaveSubmit() {
  * - 文件/压缩包: emit 'open' 给父组件 (模块 #2 接管 reader 路由)
  */
 async function onEntryOpen(entry: import('@/lib/sourceDescriptor').MediaEntry) {
-  // eslint-disable-next-line no-console
-  console.log('[FileBrowser] onEntryOpen', entry.name, 'isDirectory=', entry.isDirectory, 'currentPath=', fb.currentPath);
+  log('[FileBrowser] onEntryOpen', entry.name, 'isDirectory=', entry.isDirectory, 'currentPath=', fb.currentPath);
   if (entry.isDirectory) {
     const newPath = fb.currentPath
       ? `${fb.currentPath}/${entry.path}`.replace(/\/+/g, '/')
       : entry.path;
-    // eslint-disable-next-line no-console
-    console.log('[FileBrowser] navigate to', newPath);
+    log('[FileBrowser] navigate to', newPath);
     await fb.navigate(newPath);
     return;
   }

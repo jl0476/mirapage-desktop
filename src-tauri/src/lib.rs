@@ -22,6 +22,7 @@ pub fn run() {
         .try_init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         // Phase 1 决策：settings 走自家 DB（commands::settings + db/migrations 001），

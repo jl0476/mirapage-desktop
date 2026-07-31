@@ -24,9 +24,10 @@ tauri-build = { version = "2", features = [] }
 indexmap = { version = "1.9", features = ["std"] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-fs" }
 tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-dialog" }
+tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-log" }
 # tauri-plugin-store（Phase 1 注释：settings 走自家 DB，不需要此 plugin）
 # tauri-plugin-store = "2"
 # tauri-plugin-updater（Phase 9 启用：自动更新）

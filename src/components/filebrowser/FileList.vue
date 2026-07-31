@@ -6,6 +6,7 @@
 import { computed } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 import { naturalSort } from '@/lib/naturalSort';
+import { log } from '@/lib/logger';
 
 type SortField = 'name' | 'modifiedAt' | 'size';
 
@@ -46,8 +47,7 @@ const sorted = computed<MediaEntry[]>(() => {
 });
 
 function onClick(entry: MediaEntry) {
-  // eslint-disable-next-line no-console
-  console.log('[FileList] click', entry.name, 'isDirectory=', entry.isDirectory, 'path=', entry.path);
+  log('[FileList] click', entry.name, 'isDirectory=', entry.isDirectory, 'path=', entry.path);
   emit('open', entry);
 }
 
