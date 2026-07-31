@@ -137,6 +137,16 @@ async function onEntryOpen(entry: import('@/lib/sourceDescriptor').MediaEntry) {
 }
 
 /**
+ * Breadcrumb @navigate handler
+ * - 接收累积路径, 调 fb.navigate 重定位 currentPath
+ * - 路径 '' (根) → 回到根目录列表
+ */
+async function onBreadcrumbNavigate(path: string) {
+  log('[FileBrowser] breadcrumb navigate to', path);
+  await fb.navigate(path);
+}
+
+/**
  * #1 UI 显示当前根目录: 用 rootPath basename 作 Breadcrumb 根标签
  */
 const rootLabel = computed(() => {
@@ -214,6 +224,7 @@ const rootLabel = computed(() => {
         :root-label="rootLabel"
         :path="fb.currentPath"
         data-test="breadcrumb"
+        @navigate="onBreadcrumbNavigate"
       />
 
       <p

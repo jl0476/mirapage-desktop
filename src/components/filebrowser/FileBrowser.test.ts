@@ -330,6 +330,44 @@ describe('FileBrowser — FileList @open (双击进入)', () => {
     expect(fb.currentPath).toBe('chapter1');
   });
 
+  it('Breadcrumb 跳到子目录 crumb → fb.navigate 到该路径', async () => {
+    mockedList
+      .mockResolvedValueOnce(makeEntries('chapter1', 'chapter2'))
+      .mockResolvedValueOnce(makeEntries('sub'))
+      .mockResolvedValueOnce(makeEntries('page1.jpg', 'page2.jpg'));
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await fb.navigate('chapter1');
+    await fb.navigate('chapter1/sub');
+    await flushPromises();
+
+    // 模拟点 Breadcrumb "chapter1" — emit 'navigate' with path 'chapter1'
+    const breadcrumb = wrapper.findComponent({ name: 'Breadcrumb' });
+    await breadcrumb.vm.$emit('navigate', 'chapter1');
+    await flushPromises();
+
+    expect(fb.currentPath).toBe('chapter1');
+  });
+
+  it('Breadcrumb 跳回根 crumb (path="") → fb.navigate 回到根列表', async () => {
+    mockedList
+      .mockResolvedValueOnce(makeEntries('chapter1'))
+      .mockResolvedValueOnce(makeEntries('page1.jpg'))
+      .mockResolvedValueOnce(makeEntries('chapter1', 'chapter2'));
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await fb.navigate('chapter1');
+    await flushPromises();
+
+    const breadcrumb = wrapper.findComponent({ name: 'Breadcrumb' });
+    await breadcrumb.vm.$emit('navigate', '');
+    await flushPromises();
+
+    expect(fb.currentPath).toBe('');
+  });
+
   it('双击文件行 → emit "open" 给父 (模块 #2 接管)', async () => {
     const wrapper = await mountFileBrowser();
     const fb = useFileBrowserStore();

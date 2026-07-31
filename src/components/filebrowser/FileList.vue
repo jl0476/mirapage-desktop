@@ -82,15 +82,21 @@ function iconFor(entry: MediaEntry): string {
 </template>
 
 <style scoped>
-.filelist,
-.empty {
+.filelist {
+  flex: 1 1 auto;          /* 在 .file-browser (flex column) 中占满剩余空间 */
+  min-height: 0;           /* 允许 flex item 缩小到 content 之下, 否则 overflow 不生效 */
+  overflow-y: auto;        /* 条目多时出滚动条 */
   list-style: none;
   padding: 0;
   margin: 0;
   display: flex;
   flex-direction: column;
 }
-
+.empty {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
 .filelist > li {
   display: flex;
   align-items: center;
@@ -99,6 +105,7 @@ function iconFor(entry: MediaEntry): string {
   border-radius: 4px;
   cursor: pointer;
   user-select: none;
+  flex-shrink: 0;          /* 条目不被压缩 */
 }
 
 .filelist > li:hover {
