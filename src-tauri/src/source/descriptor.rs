@@ -137,7 +137,13 @@ impl SourceDescriptor {
 }
 
 /// 目录项
+///
+/// **字段命名**: 默认 serde 用 snake_case (`is_directory`/`modified_at`), Tauri 2.x
+/// IPC 不自动转换大小写 → 之前 TS 端 `entry.isDirectory` 一直 undefined,
+/// 导致 #5 双击无响应 (目录被误判为文件走 emit 分支).
+/// 加 `rename_all = "camelCase"` 字段映射匹配 TS 接口契约 (v0.1.0-module1.10).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaEntry {
     /// 显示名（含扩展名）
     pub name: String,
@@ -160,6 +166,25 @@ pub struct MediaEntry {
 mod tests {
     //! 锁住 SourceDescriptor 与 TS IPC 契约：variant 名 lower，字段名 camelCase。
     //! Tauri 2.x 不自动转换大小写——这一层是模块 #1 manual 验证暴露的契约 bug 的回归测试。
+
+    #[test]
+    fn media_entry_serializes_as_camelcase() {
+        // 锁住 MediaEntry 字段名 camelCase (v0.1.0-module1.10 修 #5 根因:
+        // isDirectory 之前 undefined, 目录被误判为文件 → 双击无响应)
+        let entry = MediaEntry {
+            name: "test_dir".into(),
+            path: "test_dir".into(),
+            is_directory: true,
+            is_archive: false,
+            size: 0,
+            modified_at: Some(1000),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("\"isDirectory\":true"), "应是 isDirectory: {json}");
+        assert!(json.contains("\"isArchive\":false"), "应是 isArchive: {json}");
+        assert!(json.contains("\"modifiedAt\":1000"), "应是 modifiedAt: {json}");
+        assert!(!json.contains("\"is_directory\""), "不应有 is_directory: {json}");
+    }
 
     use super::*;
 
