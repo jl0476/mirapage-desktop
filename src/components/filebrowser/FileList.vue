@@ -3,15 +3,14 @@
  * FileList.vue
  * 展示目录列表：图片/目录/压缩包分组，自然排序
  *
- * v0.1.0-module1.14+: 参考 Xplorer 设计
- * - 文件类型彩色图标 (folder=indigo, image=green, archive=orange)
- * - glassmorphism 行 hover (半透白底)
- * - glow 效果 on hover (icon drop-shadow)
+ * v0.1.0-module1.15+: 用 FileIcon (lucide 线条 SVG) 替代 emoji.
+ * 参考 Xplorer 文件类型彩色图标: folder=indigo, image=green, archive=orange.
  */
 import { computed } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 import { naturalSort } from '@/lib/naturalSort';
 import { log } from '@/lib/logger';
+import FileIcon from './FileIcon.vue';
 
 type SortField = 'name' | 'modifiedAt' | 'size';
 
@@ -56,18 +55,16 @@ function onClick(entry: MediaEntry) {
   emit('open', entry);
 }
 
-/**
- * 文件类型图标 (emoji) + 颜色 class.
- * 参考 Xplorer file-icon-* 系列: folder=blue, image=green, archive=orange.
- */
-function iconFor(entry: MediaEntry): string {
-  if (entry.isDirectory) return '📁';
-  if (entry.isArchive) return '🗜';
+/** 文件类型图标 type (FileIcon props) */
+function iconType(entry: MediaEntry): 'folder' | 'image' | 'archive' | 'file' {
+  if (entry.isDirectory) return 'folder';
+  if (entry.isArchive) return 'archive';
   const ext = entry.name.split('.').pop()?.toLowerCase() ?? '';
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return '🖼';
-  return '📄';
+  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return 'image';
+  return 'file';
 }
 
+/** 文件类型颜色 class (对应 CSS .icon-folder / .icon-image / .icon-archive) */
 function iconClass(entry: MediaEntry): string {
   if (entry.isDirectory) return 'icon-folder';
   if (entry.isArchive) return 'icon-archive';
@@ -94,7 +91,9 @@ function iconClass(entry: MediaEntry): string {
       @keydown.enter="onClick(entry)"
       @keydown.space.prevent="onClick(entry)"
     >
-      <span class="icon" :class="iconClass(entry)" aria-hidden="true">{{ iconFor(entry) }}</span>
+      <span class="icon" :class="iconClass(entry)" aria-hidden="true">
+        <FileIcon :type="iconType(entry)" />
+      </span>
       <span class="name">{{ entry.name }}</span>
     </li>
   </ul>
@@ -153,18 +152,18 @@ function iconClass(entry: MediaEntry): string {
 
 /* ─── 文件类型彩色图标 (Xplorer 风格) ────────────────── */
 .icon {
-  font-size: 15px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 20px;
-  text-align: center;
   flex-shrink: 0;
-  transition: filter var(--dur-fast) var(--ease-out);
 }
 .icon-folder { color: var(--file-folder); }
 .icon-image { color: var(--file-image); }
 .icon-archive { color: var(--file-archive); }
 .icon-default { color: var(--file-default); }
 
-.row:hover .icon {
+.row:hover .icon :deep(.file-icon) {
   filter: drop-shadow(0 0 4px currentColor);
 }
 
