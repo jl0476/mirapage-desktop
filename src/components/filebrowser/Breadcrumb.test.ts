@@ -36,7 +36,7 @@ describe('Breadcrumb.vue', () => {
     const w = mount(Breadcrumb, {
       props: { rootLabel: 'Root', path: 'docs/comics/x' },
     });
-    const segs = w.findAll('[data-test="crumb"] a');
+    const segs = w.findAll('[data-test="crumb"] button.crumb-btn');
     await segs[2].trigger('click'); // comics
     expect(w.emitted('navigate')).toBeTruthy();
     expect(w.emitted('navigate')![0]).toEqual(['docs/comics']);
@@ -46,7 +46,7 @@ describe('Breadcrumb.vue', () => {
     const w = mount(Breadcrumb, {
       props: { rootLabel: 'Home', path: 'docs/comics' },
     });
-    await w.findAll('[data-test="crumb"] a')[0].trigger('click');
+    await w.findAll('[data-test="crumb"] button.crumb-btn')[0].trigger('click');
     expect(w.emitted('navigate')![0]).toEqual(['']);
   });
 
