@@ -4,7 +4,8 @@
  * 展示目录列表：图片/目录/压缩包分组，自然排序
  *
  * v0.1.0-module1.15+: 用 FileIcon (lucide 线条 SVG) 替代 emoji.
- * 参考 Xplorer 文件类型彩色图标: folder=indigo, image=green, archive=orange.
+ * v0.1.0-module1.19: 重写样式 — 旧 var(--accent) 已废弃, 改用新 --color-* token.
+ *                  FileList 行高更紧凑、hover/focus 用 indigo accent.
  */
 import { computed } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -75,10 +76,20 @@ function iconClass(entry: MediaEntry): string {
 </script>
 
 <template>
-  <ul v-if="sorted.length === 0" data-test="empty" class="empty">
+  <ul
+    v-if="sorted.length === 0"
+    class="list-none p-8 text-center text-text-tertiary text-sm"
+    data-test="empty"
+  >
     <li>{{ $t?.('fileBrowser.empty') ?? '空目录' }}</li>
   </ul>
-  <ul v-else :class="['filelist', { loading }]" role="button" data-test="filelist" aria-label="Directory contents">
+  <ul
+    v-else
+    :class="['filelist flex-1 min-h-0 overflow-y-auto list-none py-1 m-0 flex flex-col gap-px transition-opacity duration-100', { loading }]"
+    role="button"
+    data-test="filelist"
+    aria-label="Directory contents"
+  >
     <li
       v-for="entry in sorted"
       :key="entry.path"
@@ -100,54 +111,35 @@ function iconClass(entry: MediaEntry): string {
 </template>
 
 <style scoped>
-.filelist {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  list-style: none;
-  padding: var(--space-2) 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  transition: opacity var(--dur-fast) var(--ease-out);
-}
 .filelist.loading {
   pointer-events: none;
   opacity: 0.55;
 }
-.empty {
-  list-style: none;
-  padding: var(--space-8) var(--space-4);
-  margin: 0;
-  text-align: center;
-  color: var(--text-tertiary);
-  font-size: var(--text-base);
-}
+
+/* ─── 行 ────────────────────────────────────────────── */
 .filelist > .row {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-4);
-  margin: 0 var(--space-2);
-  border-radius: var(--radius-sm);
+  gap: 12px;
+  padding: 6px 16px;
+  margin: 0 8px;
+  border-radius: 4px;
   cursor: pointer;
   user-select: none;
   flex-shrink: 0;
-  color: var(--text-secondary);
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
+  color: var(--color-text-secondary);
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .filelist > .row:hover {
-  background: var(--surface-2);
-  color: var(--text-primary);
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
 }
 .filelist > .row:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
 .filelist > .row:active {
-  background: var(--surface-3);
+  background: var(--color-surface-3);
 }
 
 /* ─── 文件类型彩色图标 (Xplorer 风格) ────────────────── */
@@ -158,29 +150,30 @@ function iconClass(entry: MediaEntry): string {
   width: 20px;
   flex-shrink: 0;
 }
-.icon-folder { color: var(--file-folder); }
-.icon-image { color: var(--file-image); }
-.icon-archive { color: var(--file-archive); }
-.icon-default { color: var(--file-default); }
+.icon-folder { color: var(--color-file-folder); }
+.icon-image { color: var(--color-file-image); }
+.icon-archive { color: var(--color-file-archive); }
+.icon-default { color: var(--color-file-default); }
 
+/* hover 时图标轻微 glow */
 .row:hover .icon :deep(.file-icon) {
   filter: drop-shadow(0 0 4px currentColor);
 }
 
 .name {
   flex: 1;
-  font-size: var(--text-base);
+  font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .is-directory .name {
-  font-weight: var(--weight-medium);
-  color: var(--text-primary);
+  font-weight: 500;
+  color: var(--color-text-primary);
 }
 
 .is-archive .name {
-  color: var(--file-archive);
+  color: var(--color-file-archive);
 }
 </style>

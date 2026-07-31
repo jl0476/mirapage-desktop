@@ -62,6 +62,6 @@ const props = defineProps<{ type: FileIconType }>();
 <style scoped>
 .file-icon {
   flex-shrink: 0;
-  transition: filter var(--dur-fast) var(--ease-out);
+  transition: filter 120ms var(--ease-out);
 }
 </style>

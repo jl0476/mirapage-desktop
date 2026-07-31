@@ -2,7 +2,9 @@
 /**
  * Breadcrumb.vue
  * 路径面包屑: 段点击 navigate, 整行可点击进入编辑模式 (Xplorer 风格).
- * 实时路径校验 (valid/invalid 边框色, 借用 fb.error.kind 隐含).
+ *
+ * v0.1.0-module1.19: 重写样式 — 旧 var(--accent) / var(--surface-1) 等已废弃.
+ *                  改用 Tailwind @apply + 新 token 名 (--color-accent 等).
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { PathUtils } from '@/lib/path';
@@ -85,15 +87,18 @@ watch(isEditing, (v) => {
 </script>
 
 <template>
-  <nav class="breadcrumb" aria-label="Breadcrumb">
+  <nav
+    class="flex items-center gap-1 px-2 py-1 bg-surface-1 backdrop-blur-md border border-white/10 rounded-md transition-[border-color,box-shadow] duration-100"
+    aria-label="Breadcrumb"
+  >
     <!-- 显示模式: 段链接 + 分隔符 + 末尾 pencil -->
-    <div v-if="!isEditing" class="display" data-test="display">
-      <ol>
+    <div v-if="!isEditing" class="flex items-center gap-1 flex-1 min-w-0" data-test="display">
+      <ol class="flex items-center list-none m-0 p-0 flex-1 min-w-0 overflow-x-auto">
         <template v-for="(c, idx) in crumbs" :key="c.path + '/' + c.label + '/' + idx">
           <li
             data-test="crumb"
             :aria-disabled="idx === crumbs.length - 1 ? 'true' : 'false'"
-            :class="{ active: idx === crumbs.length - 1 }"
+            class="inline-flex items-center whitespace-nowrap shrink-0"
           >
             <button
               type="button"
@@ -105,14 +110,14 @@ watch(isEditing, (v) => {
           </li>
           <span
             v-if="idx < crumbs.length - 1"
-            class="sep"
+            class="text-text-tertiary select-none px-1 font-mono text-xs"
             aria-hidden="true"
           >/</span>
         </template>
       </ol>
       <button
         type="button"
-        class="edit-btn"
+        class="flex items-center justify-center bg-transparent border-0 text-text-tertiary rounded p-1 cursor-pointer shrink-0 transition-[background,color,opacity] duration-100 opacity-60 hover:bg-surface-2 hover:text-text-primary hover:opacity-100"
         data-test="edit-path"
         :title="fullPath"
         :aria-label="'edit path: ' + fullPath"
@@ -127,7 +132,7 @@ watch(isEditing, (v) => {
     </div>
 
     <!-- 编辑模式: input 替换显示 -->
-    <div v-else class="editor" :class="validation" data-test="editor">
+    <div v-else class="flex-1 min-w-0 px-2" :class="validation" data-test="editor">
       <input
         ref="inputRef"
         type="text"
@@ -145,118 +150,42 @@ watch(isEditing, (v) => {
 </template>
 
 <style scoped>
-.breadcrumb {
-  display: block;
-  font-size: var(--text-sm);
-  background: var(--surface-1);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  transition: border-color var(--dur-fast) var(--ease-out),
-              box-shadow var(--dur-fast) var(--ease-out);
-}
-.breadcrumb:focus-within {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-accent);
-}
-
-/* ─── Display mode ──────────────────────────────────── */
-.display {
-  display: flex;
-  align-items: center;
-  padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
-  gap: var(--space-1);
-  overflow-x: auto;
-}
-.display ol {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  flex: 1;
-  min-width: 0;
-  overflow-x: auto;
-}
-.display li {
-  display: inline-flex;
-  align-items: center;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
+/* ─── crumb 按钮 ─────────────────────────────────────── */
 .crumb-btn {
   background: transparent;
   border: none;
   font: inherit;
-  color: var(--text-secondary);
-  padding: var(--space-1) var(--space-2);
+  color: var(--color-text-secondary);
+  padding: 2px 8px;
   border-radius: var(--radius-xs);
   cursor: pointer;
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .crumb-btn:hover:not(:disabled) {
-  background: var(--surface-2);
-  color: var(--text-primary);
+  background: var(--color-surface-2);
+  color: var(--color-text-primary);
 }
 .crumb-btn:disabled {
-  color: var(--text-primary);
-  font-weight: var(--weight-medium);
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-medium);
   cursor: default;
   font-family: var(--font-sans);
 }
-.display li.active .crumb-btn {
-  color: var(--accent);
-}
-.sep {
-  color: var(--text-tertiary);
-  user-select: none;
-  padding: 0 var(--space-1);
-  font-family: var(--font-mono);
-}
 
-.edit-btn {
-  background: transparent;
-  border: none;
-  color: var(--text-tertiary);
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out),
-              opacity var(--dur-fast) var(--ease-out);
-  opacity: 0.6;
-}
-.edit-btn:hover {
-  background: var(--surface-2);
-  color: var(--accent);
-  opacity: 1;
-}
-
-/* ─── Editor mode ───────────────────────────────────── */
-.editor {
-  padding: var(--space-1) var(--space-2);
-}
+/* ─── path input (编辑模式) ──────────────────────────── */
 .path-input {
   width: 100%;
   background: transparent;
   border: none;
   outline: none;
-  color: var(--text-primary);
+  color: var(--color-text-primary);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
-  padding: var(--space-1);
+  padding: 2px 0;
 }
-.path-input.ok { color: var(--success); }
-.path-input.invalid { color: var(--error); }
-.path-input.pending { color: var(--text-tertiary); }
+.path-input.ok { color: var(--color-success); }
+.path-input.invalid { color: var(--color-error); }
+.path-input.pending { color: var(--color-text-tertiary); }
 </style>

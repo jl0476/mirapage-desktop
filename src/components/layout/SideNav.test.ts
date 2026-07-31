@@ -180,27 +180,27 @@ describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
     vi.mocked(setSetting).mockResolvedValue(undefined);
   });
 
-  it('当前路由 /library 时，/library 链接含 active + router-link-exact-active class', async () => {
+  it('当前路由 /library 时，/library 链接含 is-active + router-link-exact-active class', async () => {
     const { wrapper } = await mountSideNav('/library');
     await new Promise((r) => setTimeout(r, 0));
 
     const links = wrapper.findAllComponents(RouterLink);
     const libraryLink = links.find((l) => l.props('to') === '/library');
     expect(libraryLink).toBeTruthy();
-    // vue-router 4 exact match → 'active' (template active-class) + 'router-link-exact-active'
-    expect(libraryLink!.classes()).toContain('active');
+    // vue-router 4 exact match → 'is-active' (template active-class) + 'router-link-exact-active'
+    expect(libraryLink!.classes()).toContain('is-active');
     expect(libraryLink!.classes()).toContain('router-link-exact-active');
   });
 
-  it('当前路由 /accounts 时仅 /accounts 高亮，其它无 active class', async () => {
+  it('当前路由 /accounts 时仅 /accounts 高亮，其它无 is-active class', async () => {
     const { wrapper } = await mountSideNav('/accounts');
     await new Promise((r) => setTimeout(r, 0));
 
     const links = wrapper.findAllComponents(RouterLink);
-    const activeCount = links.filter((l) => l.classes().includes('active')).length;
+    const activeCount = links.filter((l) => l.classes().includes('is-active')).length;
     expect(activeCount).toBe(1);
     expect(links.find((l) => l.props('to') === '/accounts')!.classes())
-      .toContain('active');
+      .toContain('is-active');
   });
 
   it('8 个 RouterLink 逐个点击 → router.push 按顺序被调 8 次', async () => {

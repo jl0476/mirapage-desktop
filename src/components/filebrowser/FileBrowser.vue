@@ -2,11 +2,12 @@
 /**
  * FileBrowser.vue — 模块 #1 主屏
  * 5 元素工具栏 + Breadcrumb + FileList + 错误 toast + empty state + save dialog
- * 规格：docs/superpowers/specs/2026-07-30-module-1-file-browser-design.md §4.6
  *
- * 模块 #1 v2 反馈修复:
- * - #1 记住上次根目录: settings.file_browser_last_root 持久化
- * - #3 FileList @open handler: 目录 navigate / 文件 emit
+ * v0.1.0-module1.19: 全样式重写 —
+ *   - emoji (📁 🔄 ⭐ ↑) 全部替换为 lucide SVG 图标
+ *   - 旧 var(--accent) / var(--surface-1) 改用新 --color-* token
+ *   - 工具栏 / save dialog 用 indigo accent + glassmorphism
+ *   - empty state / error toast 用 Xplorer 风格 + glow
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -177,23 +178,52 @@ const rootLabel = computed(() => {
   const parts = fb.rootPath.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? fb.rootPath;
 });
+
+/* ─── Lucide SVG 图标路径 (24×24 viewBox, stroke 2, round) ─── */
+const ICON_UP = 'M5 12l7-7 7 7M12 19V5';
+const ICON_REFRESH = 'M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5';
+const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z';
+const ICON_STAR = 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z';
+const ICON_FOLDER_OPEN = 'M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2';
+const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01';
 </script>
 
 <template>
-  <main class="file-browser" data-test="file-browser">
+  <main
+    class="flex flex-col h-full gap-3 p-4"
+    data-test="file-browser"
+  >
     <!-- empty state -->
     <div
       v-if="fb.rootPath === null"
-      class="empty-state"
+      class="flex-1 flex flex-col items-center justify-center gap-5 p-8"
       data-test="empty-state"
     >
-      <p class="hint">{{ t('fileBrowser.noShortcut') }}</p>
-      <button data-test="btn-pick" class="primary" @click="onPickRoot">
-        📁 {{ t('fileBrowser.pickRoot') }}
+      <div
+        class="w-20 h-20 rounded-2xl bg-surface-1 border border-white/10 flex items-center justify-center backdrop-blur-md"
+      >
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+             stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path :d="ICON_FOLDER_OPEN" />
+        </svg>
+      </div>
+      <p class="text-text-tertiary text-sm m-0">{{ t('fileBrowser.noShortcut') }}</p>
+      <button
+        data-test="btn-pick"
+        class="flex items-center gap-2 px-5 py-2.5 bg-accent text-white border-0 rounded-md font-semibold cursor-pointer shadow-[0_0_12px_rgba(99,102,241,0.45)] transition-[background,transform,box-shadow] duration-100 hover:bg-accent-hover hover:shadow-[0_0_18px_rgba(99,102,241,0.65)] active:translate-y-px"
+        @click="onPickRoot"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path :d="ICON_FOLDER" />
+        </svg>
+        {{ t('fileBrowser.pickRoot') }}
       </button>
       <RouterLink
         to="/shortcuts"
-        class="link"
+        class="text-accent no-underline text-sm transition-colors duration-100 hover:text-accent-hover hover:underline"
         data-test="link-to-shortcuts"
       >
         {{ t('fileBrowser.goShortcuts') }} →
@@ -202,23 +232,40 @@ const rootLabel = computed(() => {
 
     <!-- main view -->
     <template v-else>
-      <header class="toolbar" data-test="toolbar">
+      <!-- Toolbar: 5 个操作按钮 (glass card, indigo active hover) -->
+      <header
+        class="flex items-center gap-2 flex-wrap p-2 bg-surface-1 backdrop-blur-md border border-white/10 rounded-md"
+        data-test="toolbar"
+      >
         <button
           data-test="btn-up"
+          class="tb-btn"
           :disabled="!canUp"
           @click="onUp"
         >
-          ↑ {{ t('fileBrowser.up') }}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_UP" />
+          </svg>
+          {{ t('fileBrowser.up') }}
         </button>
         <button
           data-test="btn-refresh"
+          class="tb-btn"
           :disabled="fb.loading"
           @click="onRefresh"
         >
-          🔄 {{ t('fileBrowser.refresh') }}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_REFRESH" />
+          </svg>
+          {{ t('fileBrowser.refresh') }}
         </button>
         <select
           data-test="shortcut-dropdown"
+          class="tb-select"
           :value="shortcuts.activeId ?? ''"
           @change="onShortcutChange"
         >
@@ -231,15 +278,30 @@ const rootLabel = computed(() => {
             {{ s.label || s.rootPath.split(/[\\/]/).pop() }}
           </option>
         </select>
-        <button data-test="btn-pick" @click="onPickRoot">
-          📁 {{ t('fileBrowser.pickRoot') }}
+        <button
+          data-test="btn-pick"
+          class="tb-btn"
+          @click="onPickRoot"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_FOLDER" />
+          </svg>
+          {{ t('fileBrowser.pickRoot') }}
         </button>
         <button
           data-test="btn-save"
+          class="tb-btn"
           :disabled="!canSave"
           @click="onSaveClick"
         >
-          ⭐ {{ t('fileBrowser.saveAsShortcut') }}
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_STAR" />
+          </svg>
+          {{ t('fileBrowser.saveAsShortcut') }}
         </button>
       </header>
 
@@ -250,24 +312,37 @@ const rootLabel = computed(() => {
         @navigate="onBreadcrumbNavigate"
       />
 
+      <!-- Error toast (glow red) -->
       <p
         v-if="fb.error"
-        class="error-toast"
+        class="flex items-center gap-3 px-4 py-3 bg-error/8 border border-error rounded text-sm text-text-primary shadow-[0_0_10px_rgba(248,113,113,0.3)]"
         data-test="error-toast"
       >
-        <span data-test="error-message">{{ errorMessage(fb.error.kind, fb.error.message) }}</span>
-        <div class="error-actions">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="var(--color-error)" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" class="shrink-0" aria-hidden="true">
+          <path :d="ICON_ALERT" />
+        </svg>
+        <span data-test="error-message" class="text-error flex-1 min-w-0 break-all">
+          {{ errorMessage(fb.error.kind, fb.error.message) }}
+        </span>
+        <span class="flex gap-2 shrink-0">
           <button
             v-if="fb.currentPath !== ''"
             data-test="error-up"
+            class="px-3 py-1 border border-error bg-transparent text-error rounded-xs text-xs cursor-pointer transition-colors duration-100 hover:bg-error/20"
             @click="onUp"
           >
             ↑ {{ t('fileBrowser.up') }}
           </button>
-          <button data-test="error-refresh" @click="onRefresh">
+          <button
+            data-test="error-refresh"
+            class="px-3 py-1 border border-error bg-transparent text-error rounded-xs text-xs cursor-pointer transition-colors duration-100 hover:bg-error/20"
+            @click="onRefresh"
+          >
             {{ t('fileBrowser.refresh') }}
           </button>
-        </div>
+        </span>
       </p>
 
       <FileList
@@ -277,31 +352,49 @@ const rootLabel = computed(() => {
         @open="onEntryOpen"
       />
 
-      <p v-if="fb.loading" class="loading">
+      <p
+        v-if="fb.loading"
+        class="text-text-tertiary text-xs m-0 px-3 py-2"
+      >
         {{ t('common.loading') }}
       </p>
 
-      <!-- save dialog -->
+      <!-- Save dialog (glassmorphism) -->
       <div
         v-if="showSaveDialog"
-        class="save-dialog-backdrop"
+        class="absolute inset-0 bg-black/50 backdrop-blur-md flex items-center justify-center z-[1000]"
         data-test="save-dialog"
         @click.self="onSaveCancel"
       >
-        <div class="save-dialog">
-          <h3>{{ t('fileBrowser.saveAsShortcut') }}</h3>
-          <label>
+        <div
+          class="bg-surface-4 border border-white/10 rounded-lg p-6 flex flex-col gap-4 min-w-[380px] shadow-lg"
+        >
+          <h3 class="m-0 text-base font-semibold text-text-primary flex items-center gap-2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                 stroke="#6366f1" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+              <path :d="ICON_STAR" />
+            </svg>
+            {{ t('fileBrowser.saveAsShortcut') }}
+          </h3>
+          <label class="flex flex-col gap-2 text-xs text-text-secondary">
             {{ t('fileBrowser.shortcutLabel') }}
             <input
               v-model="saveLabel"
               data-test="save-label-input"
+              class="px-3 py-2 bg-surface-inset border border-white/10 text-text-primary rounded text-sm transition-[border-color,box-shadow] duration-100 outline-none focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
             />
           </label>
-          <div class="actions">
-            <button @click="onSaveCancel">{{ t('common.cancel') }}</button>
+          <div class="flex justify-end gap-2 mt-2">
+            <button
+              class="px-4 py-2 border border-white/10 bg-transparent text-text-secondary rounded cursor-pointer transition-[background,color] duration-100 hover:bg-surface-2 hover:text-text-primary"
+              @click="onSaveCancel"
+            >
+              {{ t('common.cancel') }}
+            </button>
             <button
               data-test="btn-save-submit"
-              class="primary"
+              class="flex items-center gap-1.5 px-4 py-2 bg-accent border border-accent text-white rounded cursor-pointer font-semibold shadow-[0_0_10px_rgba(99,102,241,0.4)] transition-[background,transform] duration-100 hover:bg-accent-hover active:translate-y-px"
               @click="onSaveSubmit"
             >
               {{ t('common.save') }}
@@ -314,223 +407,45 @@ const rootLabel = computed(() => {
 </template>
 
 <style scoped>
-.file-browser {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  padding: var(--space-4);
-  gap: var(--space-3);
-}
-
-/* ─── Empty state ────────────────────────────────────── */
-.empty-state {
-  display: flex;
-  flex-direction: column;
+/* ─── 工具栏按钮统一 base ───────────────────────────── */
+.tb-btn,
+.tb-select {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  height: 100%;
-  gap: var(--space-5);
-  padding: var(--space-8);
-}
-.empty-state .hint {
-  color: var(--text-tertiary);
-  font-size: var(--text-md);
-  margin: 0;
-}
-.empty-state .primary {
-  padding: var(--space-3) var(--space-6);
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: none;
-  border-radius: var(--radius-md);
-  font-weight: var(--weight-semibold);
-  box-shadow: var(--glow-accent);
-  transition: background var(--dur-fast) var(--ease-out),
-              transform var(--dur-fast) var(--ease-out),
-              box-shadow var(--dur-fast) var(--ease-out);
-}
-.empty-state .primary:hover {
-  background: var(--accent-hover);
-  box-shadow: var(--glow-accent-strong);
-}
-.empty-state .primary:active { transform: translateY(1px); }
-.empty-state .link {
-  color: var(--accent);
-  text-decoration: none;
-  font-size: var(--text-base);
-  transition: color var(--dur-fast) var(--ease-out);
-}
-.empty-state .link:hover { color: var(--accent-hover); text-decoration: underline; }
-
-/* ─── Toolbar (glass) ────────────────────────────────── */
-.toolbar {
-  display: flex;
-  gap: var(--space-2);
-  align-items: center;
-  flex-wrap: wrap;
-  padding: var(--space-2);
-  background: var(--surface-1);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-}
-.toolbar button,
-.toolbar select {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border-default);
-  background: var(--surface-1);
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-base);
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(17, 17, 34, 0.4);
+  color: var(--color-text-secondary);
+  border-radius: 4px;
+  font-size: 13px;
   font-family: inherit;
-  transition: background var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out),
-              transform var(--dur-fast) var(--ease-out);
+  cursor: pointer;
+  transition: background 120ms var(--ease-out),
+              border-color 120ms var(--ease-out),
+              color 120ms var(--ease-out),
+              transform 120ms var(--ease-out);
 }
-.toolbar button:hover:not(:disabled),
-.toolbar select:hover:not(:disabled) {
-  background: var(--surface-2);
-  border-color: var(--border-strong);
-  color: var(--text-primary);
+.tb-btn:hover:not(:disabled),
+.tb-select:hover:not(:disabled) {
+  background: var(--color-surface-2);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: var(--color-text-primary);
 }
-.toolbar button:active:not(:disabled) { transform: translateY(1px); }
-.toolbar button:disabled,
-.toolbar select:disabled {
+.tb-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.tb-btn:disabled,
+.tb-select:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-.toolbar select {
-  cursor: pointer;
-  padding-right: var(--space-5);
-}
-
-/* ─── Error toast (glow red) ─────────────────────────── */
-.error-toast {
-  background: rgba(248, 113, 113, 0.08);
-  border: 1px solid var(--error);
-  border-radius: var(--radius-sm);
-  padding: var(--space-3) var(--space-4);
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  font-size: var(--text-base);
-  color: var(--text-primary);
-  box-shadow: var(--glow-error);
-}
-.error-toast [data-test="error-message"] {
-  color: var(--error);
-  flex: 1;
-  min-width: 0;
-}
-.error-toast button {
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--error);
-  background: transparent;
-  color: var(--error);
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  font-size: var(--text-sm);
-  transition: background var(--dur-fast) var(--ease-out);
-}
-.error-toast button:hover { background: rgba(248, 113, 113, 0.15); }
-.error-actions {
-  display: flex;
-  gap: var(--space-2);
-  flex-shrink: 0;
-}
-
-/* ─── Loading ────────────────────────────────────────── */
-.loading {
-  color: var(--text-tertiary);
-  font-size: var(--text-sm);
-  margin: 0;
-  padding: var(--space-2) var(--space-3);
-}
-
-/* ─── Save dialog (glassmorphism) ────────────────────── */
-.save-dialog-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: var(--z-modal);
-}
-.save-dialog {
-  background: var(--surface-4);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  padding: var(--space-6);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  min-width: 380px;
-  box-shadow: var(--shadow-lg);
-}
-.save-dialog h3 {
-  margin: 0;
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
-  color: var(--text-primary);
-}
-.save-dialog label {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-.save-dialog input {
-  padding: var(--space-2) var(--space-3);
-  background: var(--surface-inset);
-  border: 1px solid var(--border-default);
-  color: var(--text-primary);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-base);
-  transition: border-color var(--dur-fast) var(--ease-out);
-}
-.save-dialog input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: var(--shadow-accent);
-}
-.save-dialog .actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--space-2);
-  margin-top: var(--space-2);
-}
-.save-dialog .actions .primary {
-  background: var(--accent);
-  color: var(--text-on-accent);
-  border: 1px solid var(--accent);
-  padding: var(--space-2) var(--space-4);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  font-weight: var(--weight-semibold);
-  box-shadow: var(--glow-accent);
-  transition: background var(--dur-fast) var(--ease-out),
-              transform var(--dur-fast) var(--ease-out);
-}
-.save-dialog .actions .primary:hover { background: var(--accent-hover); }
-.save-dialog .actions .primary:active { transform: translateY(1px); }
-.save-dialog .actions button:not(.primary) {
-  padding: var(--space-2) var(--space-4);
-  border: 1px solid var(--border-default);
-  background: transparent;
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
-}
-.save-dialog .actions button:not(.primary):hover {
-  background: var(--surface-2);
-  color: var(--text-primary);
+.tb-select {
+  padding-right: 28px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.4)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 14px;
 }
 </style>

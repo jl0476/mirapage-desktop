@@ -2,7 +2,9 @@
 /**
  * SideNav.vue
  * 模块 #0 全局导航，左固定侧栏 + 8 项导航 + 折叠
- * v0.1.0-module1.17: 全部 Tailwind utility class, 紧凑无拥挤
+ *
+ * v0.1.0-module1.19: 真·Tailwind utility class (移除 bg-[var(--color-*)] arbitrary 形式,
+ *                  因为 Tailwind v4 不编译 var() arbitrary → 全部失效 → 视觉没变)
  */
 import { ref, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -23,9 +25,9 @@ const items: NavItem[] = [
   { to: '/library',   icon: 'M3 19V5a2 2 0 0 1 2-2h5v16H5a2 2 0 0 1-2-2Zm8-16h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8V3Z', labelKey: 'nav.library' },
   { to: '/bookmarks', icon: 'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16Z', labelKey: 'nav.bookmarks' },
   { to: '/likes',     icon: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z', labelKey: 'nav.likes' },
-  { to: '/history',   icon: 'M3 12a9 9 0 1 0 3-6.7L3 8m0-5v5h5M12 7v5l4 2', labelKey: 'nav.history' },
-  { to: '/accounts',  icon: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm0 0c2 0 4 4 4 8s-2 8-4 8-4-4-4-8 4-8Zm0 0a16 16 0 0 1 16 16', labelKey: 'nav.accounts' },
-  { to: '/settings',  icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm0 0a9 9 0 0 0 9-9 9 9 0 0 0-9-9', labelKey: 'nav.settings' },
+  { to: '/history',   icon: 'M12 8v4l3 2m6-2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z', labelKey: 'nav.history' },
+  { to: '/accounts',  icon: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm14 10v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75', labelKey: 'nav.accounts' },
+  { to: '/settings',  icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z', labelKey: 'nav.settings' },
 ];
 
 onMounted(async () => {
@@ -50,36 +52,49 @@ async function onToggle() {
 <template>
   <nav
     :class="[
-      'shrink-0 h-full border-r border-[var(--color-border-subtle)] flex flex-col',
-      'bg-[var(--color-surface-1)] backdrop-blur-md',
-      collapsed ? 'w-[60px]' : 'w-[220px]'
+      'shrink-0 h-full flex flex-col overflow-hidden',
+      'border-r border-white/10 bg-surface-1 backdrop-blur-md',
+      collapsed ? 'w-[60px]' : 'w-[220px]',
     ]"
     style="transition: width 180ms cubic-bezier(0.16, 1, 0.3, 1);"
     data-test="sidenav"
   >
+    <!-- 折叠 / 展开 toggle (顶部) -->
     <button
       type="button"
-      class="w-full px-4 py-3 bg-transparent border-0 border-b border-[var(--color-border-subtle)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-2)] hover:text-[var(--color-text-primary)] cursor-pointer text-base"
+      class="shrink-0 flex items-center justify-center border-0 border-b border-white/10 bg-transparent text-text-secondary hover:bg-surface-2 hover:text-text-primary cursor-pointer text-base transition-colors duration-100"
+      :class="collapsed ? 'h-12' : 'h-10 justify-start pl-4'"
       :aria-label="t('nav.toggleSidebar')"
       data-test="sidenav-toggle"
       @click="onToggle"
     >
-      <span aria-hidden="true">≡</span>
+      <!-- 折叠态: 横向 hamburger; 展开态: 左对齐文字 -->
+      <svg
+        v-if="collapsed"
+        width="16" height="16" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round"
+        stroke-linejoin="round" aria-hidden="true"
+      >
+        <line x1="3" y1="6" x2="21" y2="6" />
+        <line x1="3" y1="12" x2="21" y2="12" />
+        <line x1="3" y1="18" x2="21" y2="18" />
+      </svg>
+      <span v-else class="text-sm font-medium">≡  {{ t('nav.toggleSidebar') }}</span>
     </button>
 
-    <ol class="list-none m-0 p-2 flex flex-col gap-0.5">
+    <!-- 导航项列表 -->
+    <ol class="flex-1 list-none m-0 p-2 flex flex-col gap-0.5 overflow-y-auto">
       <li v-for="item in items" :key="item.to">
         <RouterLink
           :to="item.to"
           :class="[
-            'flex items-center gap-3 py-1.5 px-2.5 rounded text-sm no-underline',
-            'text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-2)]',
-            'hover:text-[var(--color-text-primary)] active:translate-y-px',
-            collapsed ? 'justify-center px-1.5' : '',
-            // active-class 通过 RouterLink 自动加 'router-link-active' / 'active'
-            // 用 Tailwind 的 [] 形式 + CSS @apply 不可, 直接挂 :class 链
+            'flex items-center gap-2.5 rounded-md text-sm no-underline select-none',
+            'text-text-secondary hover:bg-surface-2 hover:text-text-primary',
+            'transition-[background,color,transform] duration-100',
+            'active:translate-y-px',
+            collapsed ? 'h-9 justify-center px-0' : 'h-9 px-2.5',
           ]"
-          active-class="active"
+          active-class="is-active"
         >
           <svg
             class="w-[15px] h-[15px] shrink-0"
@@ -93,20 +108,27 @@ async function onToggle() {
           >
             <path :d="item.icon" />
           </svg>
-          <span v-if="!collapsed" class="truncate">{{ $t(item.labelKey) }}</span>
+          <span v-if="!collapsed" class="truncate font-medium">{{ $t(item.labelKey) }}</span>
         </RouterLink>
       </li>
     </ol>
+
+    <!-- 底部留白 (填充剩余空间) -->
+    <div class="shrink-0 h-2" />
   </nav>
 </template>
 
 <style>
-/* Tailwind v4 utility class 已覆盖大多数样式. 这里只放不能表达的 active 态 */
-nav .active,
+/* RouterLink active 态: indigo 软背景 + accent 文本 + 微 glow */
+nav .is-active,
 nav .router-link-active {
-  background-color: var(--color-accent-soft) !important;
-  color: var(--color-accent) !important;
-  font-weight: 600 !important;
-  box-shadow: 0 0 8px rgba(99, 102, 241, 0.3) !important;
+  background-color: rgb(99 102 241 / 0.18);
+  color: rgb(129 140 248);
+  box-shadow: 0 0 12px -2px rgb(99 102 241 / 0.35);
+  border-left: 2px solid rgb(129 140 248);
+}
+nav .is-active svg,
+nav .router-link-active svg {
+  color: rgb(129 140 248);
 }
 </style>
