@@ -39,6 +39,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   async function setRoot(root: string | null): Promise<void> {
+    // eslint-disable-next-line no-console
+    console.log('[fileBrowser] setRoot', root);
     rootPath.value = root;
     currentPath.value = '';
     entries.value = [];
@@ -49,6 +51,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   async function navigate(path: string): Promise<void> {
+    // eslint-disable-next-line no-console
+    console.log('[fileBrowser] navigate', path);
     currentPath.value = path;
     await fetch(path);
   }

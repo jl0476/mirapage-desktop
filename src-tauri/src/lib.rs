@@ -11,8 +11,16 @@ mod db;
 mod source;
 
 use tauri::Manager;
+use tracing_subscriber::EnvFilter;
 
 pub fn run() {
+    // 初始化 tracing — RUST_LOG=debug 看全部, RUST_LOG=mirapage_desktop_lib=debug
+    // 看本 crate, 默认 info. release 模式下 dev 默认关日志.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_target(false)
+        .try_init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
