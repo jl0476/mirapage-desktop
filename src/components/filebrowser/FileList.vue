@@ -120,10 +120,10 @@ function iconClass(entry: MediaEntry): string {
 .filelist > .row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 16px;
-  margin: 0 8px;
-  border-radius: 4px;
+  gap: 8px;
+  padding: 6px 12px;
+  margin: 0 4px;
+  border-radius: 6px;
   cursor: pointer;
   user-select: none;
   flex-shrink: 0;
@@ -131,7 +131,8 @@ function iconClass(entry: MediaEntry): string {
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .filelist > .row:hover {
-  background: var(--color-surface-2);
+  /* Xplorer hover 用 --xp-surface-light (#161630) 实色, 不是 surface-2 半透 */
+  background: var(--color-surface-light);
   color: var(--color-text-primary);
 }
 .filelist > .row:focus-visible {
@@ -141,13 +142,19 @@ function iconClass(entry: MediaEntry): string {
 .filelist > .row:active {
   background: var(--color-surface-3);
 }
+.filelist > .row.is-selected {
+  background: rgb(99 102 241 / 0.18);
+  border: 1px solid var(--color-accent);
+  outline: 2px solid rgb(99 102 241 / 0.6);
+  outline-offset: -1px;
+}
 
 /* ─── 文件类型彩色图标 (Xplorer 风格) ────────────────── */
 .icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
+  width: 18px;
   flex-shrink: 0;
 }
 .icon-folder { color: var(--color-file-folder); }
@@ -162,7 +169,7 @@ function iconClass(entry: MediaEntry): string {
 
 .name {
   flex: 1;
-  font-size: 13px;
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

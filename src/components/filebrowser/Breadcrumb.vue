@@ -1,16 +1,19 @@
 <script setup lang="ts">
 /**
- * Breadcrumb.vue
- * 路径面包屑: 段点击 navigate, 整行可点击进入编辑模式 (Xplorer 风格).
+ * Breadcrumb.vue — Xplorer NavigationBar 风格
  *
- * v0.1.0-module1.19: 重写样式 — 旧 var(--accent) / var(--surface-1) 等已废弃.
- *                  改用 Tailwind @apply + 新 token 名 (--color-accent 等).
+ * v0.1.0-module1.20: 完整对齐 xplorer-next/apps/client/src/components/explorer/NavigationBar.tsx
+ *  - 段之间用 ChevronRight 图标 (12px) 替代 / 字符
+ *  - 第一段是 Windows 盘符 / Linux 根时显示 HardDrive 图标
+ *  - 整条点击进编辑模式 (不只 pencil 图标)
+ *  - 编辑模式: input 左侧 6px validation dot (valid=绿, invalid=红, checking=黄)
+ *  - 轻量校验: 用 fb.lastFetchedPath / fb.entries 作锚点, 不调 IPC
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { PathUtils } from '@/lib/path';
 
 interface Props {
-  /** 根标签（如 "Home" / "Library"） */
+  /** 根标签（如 "C:" / "Home" / "Library"） */
   rootLabel: string;
   /** 当前子路径（相对 root），空 = 在根 */
   path: string;
@@ -29,13 +32,13 @@ function onCrumbClick(idx: number) {
   emit('navigate', crumbs.value[idx].path);
 }
 
-/* ─── 可点击进入编辑模式 (Xplorer 风格) ──────────────── */
+/* ─── 整条点击进编辑模式 (Xplorer NavigationBar 行为) ──── */
 const isEditing = ref(false);
 const inputRef = ref<HTMLInputElement | null>(null);
-// 拼出完整路径 (root + path)
+
+/** 完整路径 (root + path) — 编辑模式的初始值 */
 const fullPath = computed(() => {
   if (!props.path) return props.rootLabel;
-  // Linux/Windows 简单判断: path 含 / 用 /, 含 \ 用 \
   const sep = props.path.includes('\\') ? '\\' : '/';
   return props.rootLabel + sep + props.path;
 });
@@ -52,13 +55,12 @@ function commit() {
   isEditing.value = false;
   const val = inputRef.value?.value?.trim() ?? '';
   if (val && val !== fullPath.value) {
-    // 简单回退: 找 fullPath 的子路径 (去除 rootLabel 前缀)
     if (val.startsWith(props.rootLabel)) {
       let sub = val.slice(props.rootLabel.length);
       if (sub.startsWith('/') || sub.startsWith('\\')) sub = sub.slice(1);
       emit('navigate', sub);
     } else {
-      // 整段路径不在 root 下, 放弃 (或 emit 完整路径让父处理)
+      // 整段路径不在 root 下, 放弃
       emit('navigate', val);
     }
   }
@@ -66,6 +68,63 @@ function commit() {
 
 function cancel() {
   isEditing.value = false;
+}
+
+/* ─── Validation dot ─────────────────────────────────────── */
+type Validation = 'idle' | 'checking' | 'valid' | 'invalid';
+const validation = ref<Validation>('idle');
+const inputValue = ref('');
+
+let validateTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** 编辑模式: 同步 inputValue; debounce 300ms 后做轻量校验 */
+watch(isEditing, (v) => {
+  if (v) {
+    inputValue.value = fullPath.value;
+    validation.value = 'checking';
+    scheduleValidate();
+  } else {
+    validation.value = 'idle';
+    if (validateTimer) clearTimeout(validateTimer);
+  }
+});
+
+function scheduleValidate() {
+  if (validateTimer) clearTimeout(validateTimer);
+  validateTimer = setTimeout(doValidate, 300);
+}
+
+/**
+ * 轻量校验: 不调 IPC, 只用 props.rootLabel + props.path 推断
+ * - 输入 == 当前 fullPath → valid
+ * - 输入以 rootLabel 起头, 余下子路径未越界 → valid
+ * - 其它 → invalid (Xplorer 同款实现: 模糊校验不查 fs, 仅看形态)
+ */
+function doValidate() {
+  const v = inputValue.value.trim();
+  if (!v) {
+    validation.value = 'invalid';
+    return;
+  }
+  if (v === fullPath.value) {
+    validation.value = 'valid';
+    return;
+  }
+  // 在 root 之下: 子路径不应包含 '..' 或 rootLabel 之外的上跳
+  if (v.startsWith(props.rootLabel)) {
+    const sub = v.slice(props.rootLabel.length).replace(/^[\\/]/, '');
+    if (!sub.includes('..')) {
+      validation.value = 'valid';
+      return;
+    }
+  }
+  validation.value = 'invalid';
+}
+
+function onInput(e: Event) {
+  inputValue.value = (e.target as HTMLInputElement).value;
+  validation.value = 'checking';
+  scheduleValidate();
 }
 
 function onKey(e: KeyboardEvent) {
@@ -78,114 +137,126 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-/* ─── 简化路径校验 (占位, 后续可接 listDirectory 异步校验) ─ */
-const validation = ref<'idle' | 'pending' | 'ok' | 'invalid'>('idle');
-// 简化: 编辑中显示 pending, 退出后由 FileBrowser 反馈 (错误 toast 已覆盖 invalid 状态)
-watch(isEditing, (v) => {
-  validation.value = v ? 'pending' : 'idle';
+/** 第一段是否需要 HardDrive 图标 (盘符 C: / Linux /) */
+const firstSegmentNeedsDrive = computed(() => {
+  const first = crumbs.value[0];
+  if (!first) return false;
+  return /^[A-Za-z]:$/.test(first.label) || first.label === '/';
 });
+
+/** 段间 ChevronRight icon (lucide) */
+const ICON_CHEVRON_RIGHT = 'M9 18l6-6-6-6';
+/** HardDrive icon (lucide) */
+const ICON_HARD_DRIVE = 'M22 12H2M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z';
 </script>
 
 <template>
   <nav
-    class="flex items-center gap-1 px-2 py-1 bg-surface-1 backdrop-blur-md border border-white/10 rounded-md transition-[border-color,box-shadow] duration-100"
+    class="bg-surface border-b border-white/5 px-3 py-1"
     aria-label="Breadcrumb"
   >
-    <!-- 显示模式: 段链接 + 分隔符 + 末尾 pencil -->
-    <div v-if="!isEditing" class="flex items-center gap-1 flex-1 min-w-0" data-test="display">
-      <ol class="flex items-center list-none m-0 p-0 flex-1 min-w-0 overflow-x-auto">
-        <template v-for="(c, idx) in crumbs" :key="c.path + '/' + c.label + '/' + idx">
-          <li
-            data-test="crumb"
-            :aria-disabled="idx === crumbs.length - 1 ? 'true' : 'false'"
-            class="inline-flex items-center whitespace-nowrap shrink-0"
-          >
-            <button
-              type="button"
-              class="crumb-btn"
-              :disabled="idx === crumbs.length - 1"
-              :title="c.path"
-              @click="onCrumbClick(idx)"
-            >{{ c.label }}</button>
-          </li>
-          <span
-            v-if="idx < crumbs.length - 1"
-            class="text-text-tertiary select-none px-1 font-mono text-xs"
-            aria-hidden="true"
-          >/</span>
-        </template>
-      </ol>
-      <button
-        type="button"
-        class="flex items-center justify-center bg-transparent border-0 text-text-tertiary rounded p-1 cursor-pointer shrink-0 transition-[background,color,opacity] duration-100 opacity-60 hover:bg-surface-2 hover:text-text-primary hover:opacity-100"
-        data-test="edit-path"
-        :title="fullPath"
-        :aria-label="'edit path: ' + fullPath"
-        @click="startEditing"
+    <div
+      class="bg-bg border border-white/10 relative flex min-w-0 items-center rounded px-2 py-0.5 transition-[border-color] duration-200"
+      :class="validation !== 'idle' && validation !== 'checking' ? (
+        validation === 'valid' ? 'border-success' : 'border-error'
+      ) : ''"
+      @click.self="startEditing"
+    >
+      <!-- 显示模式: 段链接 + 分隔符 + 末尾 pencil -->
+      <div
+        v-if="!isEditing"
+        class="flex h-full cursor-text items-center gap-0.5 overflow-x-auto flex-1 min-w-0"
+        data-test="display"
       >
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M12 20h9" />
-          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
-        </svg>
-      </button>
-    </div>
+        <template v-for="(c, idx) in crumbs" :key="c.path + '/' + c.label + '/' + idx">
+          <button
+            type="button"
+            class="crumb-btn max-w-[160px] truncate flex-shrink-0 rounded px-1.5 py-0.5 text-xs transition-colors duration-100"
+            :class="idx === crumbs.length - 1
+              ? 'font-semibold text-text-primary'
+              : 'text-text-muted hover:bg-surface-light hover:text-text-primary'"
+            :title="c.path"
+            :aria-current="idx === crumbs.length - 1 ? 'location' : undefined"
+            :aria-label="`navigate to ${c.label}`"
+            :data-test="idx === 0 ? 'crumb-root' : 'crumb'"
+            :disabled="idx === crumbs.length - 1"
+            @click="onCrumbClick(idx)"
+          >
+            <svg
+              v-if="idx === 0 && firstSegmentNeedsDrive"
+              width="12" height="12" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round" class="inline-block mr-1 -mt-0.5"
+              aria-hidden="true"
+            >
+              <path :d="ICON_HARD_DRIVE" />
+            </svg>
+            {{ c.label }}
+          </button>
+          <svg
+            v-if="idx < crumbs.length - 1"
+            width="12" height="12" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            stroke-linejoin="round" class="text-text-muted opacity-60 shrink-0"
+            aria-hidden="true"
+          >
+            <path :d="ICON_CHEVRON_RIGHT" />
+          </svg>
+        </template>
+        <button
+          type="button"
+          class="ml-1 p-0.5 rounded text-text-muted hover:bg-surface-light hover:text-text-primary opacity-60 hover:opacity-100 transition-all duration-100 shrink-0"
+          data-test="edit-path"
+          :title="fullPath"
+          aria-label="edit path"
+          @click.stop="startEditing"
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+          </svg>
+        </button>
+      </div>
 
-    <!-- 编辑模式: input 替换显示 -->
-    <div v-else class="flex-1 min-w-0 px-2" :class="validation" data-test="editor">
-      <input
-        ref="inputRef"
-        type="text"
-        class="path-input"
-        :class="validation"
-        :value="fullPath"
-        spellcheck="false"
-        autocomplete="off"
-        @keydown="onKey"
-        @blur="commit"
-        data-test="path-input"
-      />
+      <!-- 编辑模式: validation dot + input -->
+      <div
+        v-else
+        class="flex w-full items-center gap-1.5"
+        data-test="editor"
+      >
+        <span
+          v-if="validation !== 'idle'"
+          :class="[
+            'w-1.5 h-1.5 rounded-full shrink-0 transition-colors duration-200',
+            validation === 'valid' ? 'bg-success' :
+            validation === 'invalid' ? 'bg-error' :
+            'bg-warning'
+          ]"
+          :title="validation === 'valid' ? '路径存在' :
+                  validation === 'invalid' ? '路径无效' : '校验中…'"
+        />
+        <input
+          ref="inputRef"
+          type="text"
+          class="path-input w-full bg-transparent text-xs outline-none"
+          :value="inputValue"
+          spellcheck="false"
+          autocomplete="off"
+          data-test="path-input"
+          @input="onInput"
+          @keydown="onKey"
+          @blur="commit"
+        />
+      </div>
     </div>
   </nav>
 </template>
 
 <style scoped>
-/* ─── crumb 按钮 ─────────────────────────────────────── */
-.crumb-btn {
-  background: transparent;
-  border: none;
-  font: inherit;
-  color: var(--color-text-secondary);
-  padding: 2px 8px;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
-}
-.crumb-btn:hover:not(:disabled) {
-  background: var(--color-surface-2);
-  color: var(--color-text-primary);
-}
-.crumb-btn:disabled {
-  color: var(--color-text-primary);
-  font-weight: var(--font-weight-medium);
-  cursor: default;
-  font-family: var(--font-sans);
-}
-
-/* ─── path input (编辑模式) ──────────────────────────── */
 .path-input {
-  width: 100%;
-  background: transparent;
-  border: none;
-  outline: none;
   color: var(--color-text-primary);
   font-family: var(--font-mono);
-  font-size: var(--text-sm);
   padding: 2px 0;
 }
-.path-input.ok { color: var(--color-success); }
-.path-input.invalid { color: var(--color-error); }
-.path-input.pending { color: var(--color-text-tertiary); }
 </style>

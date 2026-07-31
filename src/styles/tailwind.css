@@ -16,13 +16,14 @@
 @theme {
   /* 表面层级 (深蓝紫, 不是纯灰) */
   --color-surface-0: transparent;
-  --color-surface-1: rgba(17, 17, 34, 0.6);
-  --color-surface-2: rgba(22, 22, 48, 0.8);
+  --color-surface-1: rgba(17, 17, 34, 0.6);    /* 半透 (sidenav / toolbar glass) */
+  --color-surface-2: rgba(22, 22, 48, 0.8);    /* 半透 (dropdown / secondary) */
+  --color-surface-light: #161630;              /* 实色 hover 底色 (Xplorer --xp-surface-light) */
   --color-surface-3: #161630;
-  --color-surface-4: #1a1b2e;
-  --color-surface-inset: rgba(0, 0, 0, 0.3);
+  --color-surface-4: #1a1b2e;                  /* popover 实色 (Xplorer --xp-popover) */
+  --color-surface-inset: rgba(0, 0, 0, 0.3);   /* 凹陷 (input) */
 
-  /* 边框 - 半透白 (glassmorphism) */
+  /* Border — Xplorer Glass 主题用 0.06 比 :root 0.1 更细 */
   --color-border-subtle: rgba(255, 255, 255, 0.06);
   --color-border-default: rgba(255, 255, 255, 0.1);
   --color-border-strong: rgba(255, 255, 255, 0.15);

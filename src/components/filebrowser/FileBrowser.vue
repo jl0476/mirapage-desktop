@@ -200,15 +200,15 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
       data-test="empty-state"
     >
       <div
-        class="w-20 h-20 rounded-2xl bg-surface-1 border border-white/10 flex items-center justify-center backdrop-blur-md"
+        class="w-16 h-16 rounded-2xl bg-surface-1 border border-white/10 flex items-center justify-center backdrop-blur-md"
       >
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
              stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"
              stroke-linejoin="round" aria-hidden="true">
           <path :d="ICON_FOLDER_OPEN" />
         </svg>
       </div>
-      <p class="text-text-tertiary text-sm m-0">{{ t('fileBrowser.noShortcut') }}</p>
+      <p class="text-text-muted text-sm m-0">{{ t('fileBrowser.noShortcut') }}</p>
       <button
         data-test="btn-pick"
         class="flex items-center gap-2 px-5 py-2.5 bg-accent text-white border-0 rounded-md font-semibold cursor-pointer shadow-[0_0_12px_rgba(99,102,241,0.45)] transition-[background,transform,box-shadow] duration-100 hover:bg-accent-hover hover:shadow-[0_0_18px_rgba(99,102,241,0.65)] active:translate-y-px"
@@ -232,9 +232,9 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
 
     <!-- main view -->
     <template v-else>
-      <!-- Toolbar: 5 个操作按钮 (glass card, indigo active hover) -->
+      <!-- Toolbar: 5 个操作按钮 (Xplorer 风格: 顶部细线 + text-xs 小按钮 + 1px 分隔条) -->
       <header
-        class="flex items-center gap-2 flex-wrap p-2 bg-surface-1 backdrop-blur-md border border-white/10 rounded-md"
+        class="bg-surface border-b border-white/5 px-3 py-1.5 flex items-center gap-1 flex-wrap"
         data-test="toolbar"
       >
         <button
@@ -243,7 +243,7 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
           :disabled="!canUp"
           @click="onUp"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round" aria-hidden="true">
             <path :d="ICON_UP" />
@@ -256,13 +256,14 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
           :disabled="fb.loading"
           @click="onRefresh"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round" aria-hidden="true">
             <path :d="ICON_REFRESH" />
           </svg>
           {{ t('fileBrowser.refresh') }}
         </button>
+        <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
         <select
           data-test="shortcut-dropdown"
           class="tb-select"
@@ -283,7 +284,7 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
           class="tb-btn"
           @click="onPickRoot"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round" aria-hidden="true">
             <path :d="ICON_FOLDER" />
@@ -296,7 +297,7 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
           :disabled="!canSave"
           @click="onSaveClick"
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round" aria-hidden="true">
             <path :d="ICON_STAR" />
@@ -407,33 +408,29 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
 </template>
 
 <style scoped>
-/* ─── 工具栏按钮统一 base ───────────────────────────── */
+/* ─── 工具栏按钮统一 base (Xplorer OperationBar 风格) ─── */
 .tb-btn,
 .tb-select {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(17, 17, 34, 0.4);
-  color: var(--color-text-secondary);
+  gap: 4px;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
   border-radius: 4px;
-  font-size: 13px;
+  font-size: 12px;
   font-family: inherit;
   cursor: pointer;
-  transition: background 120ms var(--ease-out),
-              border-color 120ms var(--ease-out),
-              color 120ms var(--ease-out),
-              transform 120ms var(--ease-out);
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .tb-btn:hover:not(:disabled),
 .tb-select:hover:not(:disabled) {
-  background: var(--color-surface-2);
-  border-color: rgba(255, 255, 255, 0.2);
+  background: var(--color-surface-light);
   color: var(--color-text-primary);
 }
 .tb-btn:active:not(:disabled) {
-  transform: translateY(1px);
+  color: var(--color-accent);
 }
 .tb-btn:disabled,
 .tb-select:disabled {
@@ -441,11 +438,11 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
   cursor: not-allowed;
 }
 .tb-select {
-  padding-right: 28px;
+  padding-right: 24px;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.4)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.5)' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 6px center;
-  background-size: 14px;
+  background-position: right 4px center;
+  background-size: 12px;
 }
 </style>
