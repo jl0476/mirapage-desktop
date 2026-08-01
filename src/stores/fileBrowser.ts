@@ -37,7 +37,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   // v0.1.0-module1.22: 升维度
   const sortField = ref<SortField>('name');
   const sortAscending = ref<boolean>(true);
-  const viewMode = ref<ViewMode>('list');
+  const viewMode = ref<ViewMode>('details');
   const hideFinished = ref<boolean>(false);  // 从 FileBrowser.vue 搬入
   const selectedPaths = ref<Set<string>>(new Set());
   const anchorPath = ref<string | null>(null);

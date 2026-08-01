@@ -221,7 +221,7 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   <!-- v0.1.0-module1.23: Details 视图 (Windows 资源管理器多列布局) -->
   <div
     v-else-if="viewMode === 'details'"
-    class="details-view flex-1 min-h-0 flex flex-col overflow-y-auto"
+    class="details-view flex-1 min-h-0 overflow-y-auto"
     data-test="filelist"
     data-view="details"
     aria-label="Directory contents"

@@ -62,7 +62,8 @@ describe('fileBrowser store — 基础', () => {
     expect(store.loading).toBe(false);
     expect(store.error).toBeNull();
     expect(store.selectedPaths.size).toBe(0);
-    expect(store.viewMode).toBe('list');
+    // v0.1.0-module1.23: 默认 details 视图
+    expect(store.viewMode).toBe('details');
     expect(store.sortField).toBe('name');
     expect(store.sortAscending).toBe(true);
   });
@@ -293,7 +294,7 @@ describe('fileBrowser store — viewMode + persist', () => {
     const store = useFileBrowserStore();
     await store.loadLayout();
     expect(store.sortField).toBe('name');
-    expect(store.viewMode).toBe('list');
+    expect(store.viewMode).toBe('details');
     expect(store.hideFinished).toBe(false);
   });
 });
