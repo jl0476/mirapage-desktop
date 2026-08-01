@@ -39,6 +39,8 @@ function makeRouter(): Router {
     history: createMemoryHistory(),
     routes: [
       { path: '/',          name: 'home',       component: { template: '<div />' } },
+      { path: '/search',    name: 'search',     component: { template: '<div />' } },
+      { path: '/shortcuts', name: 'shortcuts',  component: { template: '<div />' } },
       { path: '/library',   name: 'library',    component: { template: '<div />' } },
       { path: '/bookmarks', name: 'bookmarks',  component: { template: '<div />' } },
       { path: '/likes',     name: 'likes',      component: { template: '<div />' } },
@@ -59,15 +61,16 @@ async function mountSideNav(initialRoute = '/'): Promise<{ wrapper: ReturnType<t
   return { wrapper, router };
 }
 
-describe('SideNav — 7 项导航', () => {
-  it('mount 渲染 8 个 RouterLink 指向 8 条路由', async () => {
+describe('SideNav — 8 项导航', () => {
+  it('mount 渲染 9 个 RouterLink 指向 9 条路由', async () => {
     const { wrapper } = await mountSideNav();
     const links = wrapper.findAllComponents(RouterLink);
-    expect(links.length).toBe(8);
+    expect(links.length).toBe(9);
 
     const hrefs = links.map((l) => l.props('to'));
     expect(hrefs).toEqual([
       '/',
+      '/search',
       '/shortcuts',
       '/library',
       '/bookmarks',
@@ -78,11 +81,11 @@ describe('SideNav — 7 项导航', () => {
     ]);
   });
 
-  it('8 个项目的 label 通过 i18n key 渲染', async () => {
+  it('9 个项目的 label 通过 i18n key 渲染', async () => {
     const { wrapper } = await mountSideNav();
     const html = wrapper.html();
-    // zh-CN 默认 locale 应包含中文文案
     expect(html).toContain('文件浏览');
+    expect(html).toContain('搜索');
     expect(html).toContain('快捷方式');
     expect(html).toContain('书架');
     expect(html).toContain('书签');
@@ -203,8 +206,8 @@ describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
       .toContain('is-active');
   });
 
-  it('8 个 RouterLink 逐个点击 → router.push 按顺序被调 8 次', async () => {
-    const targets = ['/', '/shortcuts', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
+  it('9 个 RouterLink 逐个点击 → router.push 按顺序被调 9 次', async () => {
+    const targets = ['/', '/search', '/shortcuts', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
     const { wrapper, router } = await mountSideNav('/');
     await new Promise((r) => setTimeout(r, 0));
 
@@ -215,14 +218,12 @@ describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
 
     for (const target of targets) {
       const link = links.find((l) => l.props('to') === target)!;
-      // 优先点击渲染后的 <a> 元素 — vue-router 4 在 happy-dom 下 a.click 触发 push
       const a = link.find('a');
       if (a.exists()) {
         await a.trigger('click');
       } else {
         await link.trigger('click');
       }
-      // 给 router 当前 tick 让 push resolve
       await router.isReady();
     }
 

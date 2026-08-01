@@ -28,6 +28,7 @@ export default {
     accounts: 'Accounts',
     settings: 'Settings',
     toggleSidebar: 'Toggle sidebar',
+    search: 'Search',
   },
   reader: {
     mode: {
@@ -107,6 +108,15 @@ export default {
     },
     hideFinished: 'Hide finished',
     showFinished: 'Show finished',
+    // v0.1.0-module1.22: viewMode + statusBar
+    viewMode: 'View',
+    viewList: 'List',
+    viewGrid: 'Grid',
+    statusBar: {
+      items: '{count} items',
+      selected: '{count} selected',
+      path: 'Current path',
+    },
   },
   library: {
     title: 'Library',
@@ -180,6 +190,20 @@ export default {
     noResults: 'No matches',
     modeFuzzy: 'Fuzzy',
     modeSubstring: 'Substring',
+    resultsCount: '{count} results',
+  },
+  // v0.1.0-module1.22: properties panel
+  properties: {
+    title: 'Properties',
+    labelName: 'Name',
+    labelLocation: 'Location',
+    labelSize: 'Size',
+    labelType: 'Type',
+    labelExtension: 'Extension',
+    labelModified: 'Modified',
+    labelCreated: 'Created',
+    labelAccessed: 'Accessed',
+    noFileSelected: 'No selection',
   },
   error: {
     openFailed: 'Failed to open',

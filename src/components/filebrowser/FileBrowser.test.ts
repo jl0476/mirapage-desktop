@@ -127,11 +127,15 @@ describe('FileBrowser — dropdown 切换', () => {
     await fb.setRoot('C:/comics');
     await flushPromises();
 
-    const dropdown = wrapper.find('[data-test="shortcut-dropdown"]');
-    const options = (dropdown.element as HTMLSelectElement).options;
-    expect(options.length).toBe(3); // 「无」+ 2
-    expect(options[1].text).toContain('A');
-    expect(options[2].text).toContain('B');
+    // v0.1.0-module1.22: ShortcutDropdown 是 chevron 弹层, 先点 trigger 打开
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+
+    const options = wrapper.findAll('[data-test^="shortcut-opt-"]');
+    expect(options.length).toBe(3); // 「none」+ 2
+    expect(options[0].attributes('data-test')).toBe('shortcut-opt-none');
+    expect(options[1].attributes('data-test')).toBe('shortcut-opt-1');
+    expect(options[2].attributes('data-test')).toBe('shortcut-opt-2');
   });
 
   it('选 dropdown option 切到对应 shortcut + 拉其根目录', async () => {
@@ -144,12 +148,12 @@ describe('FileBrowser — dropdown 切换', () => {
     await fb.setRoot('C:/comics');
     await flushPromises();
 
-    const dropdown = wrapper.find('[data-test="shortcut-dropdown"]');
-    await dropdown.setValue('1');
+    // 打开 dropdown, 选 id=1
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-1"]').trigger('click');
     await flushPromises();
 
-    // 注: dropdown 切换 activeId 但 setRoot 已在前 setRoot('C:/comics') 设了同一根
-    // 这里验证 activeId 已更新 (表示 onShortcutChange 跑通)
     const shortcuts = useShortcutsStore();
     expect(shortcuts.activeId).toBe(1);
   });
@@ -164,13 +168,20 @@ describe('FileBrowser — dropdown 切换', () => {
     await fb.setRoot('C:/a');
     await flushPromises();
 
-    const dropdown = wrapper.find('[data-test="shortcut-dropdown"]');
-    await dropdown.setValue('');
+    // 先激活 id=1
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-1"]').trigger('click');
+    await flushPromises();
+
+    // 再选 none
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-none"]').trigger('click');
     await flushPromises();
 
     // rootPath 保留 (用户继续浏览当前目录)
     expect(fb.rootPath).toBe('C:/a');
-    // 仅取消激活
     const shortcuts = useShortcutsStore();
     expect(shortcuts.activeId).toBeNull();
   });
@@ -186,8 +197,9 @@ describe('FileBrowser — dropdown 切换', () => {
     await flushPromises();
 
     // 先激活 id=1
-    const dropdown = wrapper.find('[data-test="shortcut-dropdown"]');
-    await dropdown.setValue('1');
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-1"]').trigger('click');
     await flushPromises();
 
     const shortcuts = useShortcutsStore();
@@ -195,7 +207,9 @@ describe('FileBrowser — dropdown 切换', () => {
 
     // 再选 1 (相同): no-op, 不再调 listDirectory
     mockedList.mockClear();
-    await dropdown.setValue('1');
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-1"]').trigger('click');
     await flushPromises();
 
     expect(mockedList).not.toHaveBeenCalled();
@@ -316,8 +330,7 @@ describe('FileBrowser — FileList @open (双击进入)', () => {
     mockedList.mockResolvedValue([]);
   });
 
-  it('真实 DOM click 目录行 → fb.navigate (#5 修 production 不响应)', async () => {
-    // 真实 DOM click 模拟 (不走 component.vm.$emit 绕过, 而是用 vue-test-utils trigger)
+  it('真实 DOM dblclick 目录行 → fb.navigate (v0.1.0-module1.22 单击=select, 双击=open)', async () => {
     mockedList
       .mockResolvedValueOnce(makeEntries('chapter1'))
       .mockResolvedValueOnce(makeEntries('page1.jpg'));
@@ -330,10 +343,26 @@ describe('FileBrowser — FileList @open (双击进入)', () => {
     expect(rows.length).toBe(1);
     expect(rows[0].classes()).toContain('is-directory');
 
-    await rows[0].trigger('click');
+    await rows[0].trigger('dblclick');
     await flushPromises();
 
     expect(fb.currentPath).toBe('chapter1');
+  });
+
+  it('真实 DOM click 目录行 → 仅 select (不 navigate)', async () => {
+    mockedList.mockResolvedValue(makeEntries('chapter1'));
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const rows = wrapper.findAll('[data-test="row"]');
+    await rows[0].trigger('click');
+    await flushPromises();
+
+    // 单击只 select, 不 navigate
+    expect(fb.currentPath).toBe('');
+    expect(fb.selectedPaths.has('chapter1')).toBe(true);
   });
 
   it('Breadcrumb 跳到子目录 crumb → fb.navigate 到该路径', async () => {

@@ -7,12 +7,16 @@
  *   - currentPath: 已被 navigate() 更新, 但 entries 还在拉取中
  *   - lastFetchedPath: 当前 entries 的实际生成路径 (反映用户看到列表时的状态)
  *
- * 快速连点两个目录场景: 用 lastFetchedPath 拼接, 避免把第 2 次点击
- * 当作第 1 次的子目录.
+ * v0.1.0-module1.22: 升维度 — sortField/viewMode 上提 (搬 FileList 内嵌),
+ *   selectedPaths/anchorPath (多选 anchor), searchQuery (搜索 query).
+ *   持久化: sortField/sortAscending/viewMode → settings store (fb_sort_* / fb_view_mode).
+ *   hideFinished 从 FileBrowser.vue 搬入 store, 跟 sortField 一组持久化.
  */
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { listDirectory } from '@/lib/tauri';
+import { sortEntries, type SortField } from '@/lib/fileSort';
+import { getSetting, setSetting } from '@/lib/tauri';
 import type { MediaEntry, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 export type FileBrowserError =
@@ -20,17 +24,24 @@ export type FileBrowserError =
   | { kind: 'permissionDenied'; message: string }
   | { kind: 'io'; message: string };
 
+export type ViewMode = 'list' | 'grid';
+
 export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
   const currentPath = ref<string>('');
-  /**
-   * 拉当前 entries 时所在的目录路径. 反映用户看到列表时的状态.
-   * 点击 entry 拼接路径时用这个, 不是 currentPath.
-   */
   const lastFetchedPath = ref<string>('');
   const entries = ref<MediaEntry[]>([]);
   const loading = ref(false);
   const error = ref<FileBrowserError | null>(null);
+
+  // v0.1.0-module1.22: 升维度
+  const sortField = ref<SortField>('name');
+  const sortAscending = ref<boolean>(true);
+  const viewMode = ref<ViewMode>('list');
+  const hideFinished = ref<boolean>(false);  // 从 FileBrowser.vue 搬入
+  const selectedPaths = ref<Set<string>>(new Set());
+  const anchorPath = ref<string | null>(null);
+  const searchQuery = ref<string>('');
 
   function toDescriptor(root: string): SourceDescriptorLocal {
     return { type: 'local', rootPath: root };
@@ -42,10 +53,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     error.value = null;
     try {
       entries.value = await listDirectory(toDescriptor(rootPath.value), path);
-      lastFetchedPath.value = path; // 列表生成完, 同步 lastFetchedPath
+      lastFetchedPath.value = path;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      // 简化：统一归为 io；后续可按消息内容分类
       error.value = { kind: 'io', message: msg };
     } finally {
       loading.value = false;
@@ -53,21 +63,18 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   async function setRoot(root: string | null): Promise<void> {
-    // eslint-disable-next-line no-console
-    console.log('[fileBrowser] setRoot', root);
     rootPath.value = root;
     currentPath.value = '';
-    lastFetchedPath.value = ''; // 根目录切换, 重置
+    lastFetchedPath.value = '';
     entries.value = [];
     error.value = null;
+    clearSelection();
     if (root !== null) {
       await fetch('');
     }
   }
 
   async function navigate(path: string): Promise<void> {
-    // eslint-disable-next-line no-console
-    console.log('[fileBrowser] navigate', path);
     currentPath.value = path;
     await fetch(path);
   }
@@ -84,16 +91,174 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     await fetch(currentPath.value);
   }
 
+  // ─── v0.1.0-module1.22: sort/viewMode/hideFinished actions ──
+
+  function setSortField(f: SortField): void {
+    if (sortField.value === f) {
+      // 同字段 → toggle 方向
+      sortAscending.value = !sortAscending.value;
+    } else {
+      sortField.value = f;
+    }
+    persist('fb_sort_field', sortField.value);
+    persist('fb_sort_ascending', sortAscending.value ? '1' : '0');
+  }
+
+  function toggleSortOrder(): void {
+    sortAscending.value = !sortAscending.value;
+    persist('fb_sort_ascending', sortAscending.value ? '1' : '0');
+  }
+
+  function setViewMode(m: ViewMode): void {
+    viewMode.value = m;
+    persist('fb_view_mode', m);
+  }
+
+  function setHideFinished(v: boolean): void {
+    hideFinished.value = v;
+    persist('fb_hide_finished', v ? '1' : '0');
+  }
+
+  /** 加载持久化的 sort/viewMode/hideFinished (启动时从 FileBrowser onMounted 调) */
+  async function loadLayout(): Promise<void> {
+    const [field, asc, vm, hf] = await Promise.all([
+      getSetting('fb_sort_field'),
+      getSetting('fb_sort_ascending'),
+      getSetting('fb_view_mode'),
+      getSetting('fb_hide_finished'),
+    ]);
+    if (field === 'name' || field === 'modifiedAt' || field === 'size') {
+      sortField.value = field;
+    }
+    if (asc === '0') sortAscending.value = false;
+    if (vm === 'list' || vm === 'grid') viewMode.value = vm;
+    if (hf === '1') hideFinished.value = true;
+  }
+
+  async function persist(key: string, value: string): Promise<void> {
+    try {
+      await setSetting(key, value);
+    } catch {
+      // silent
+    }
+  }
+
+  // ─── v0.1.0-module1.22: selection actions ──
+
+  /**
+   * 统一入口: 单击/Ctrl+Click/Shift+Click 都走这里.
+   * @param event - 用于判断 modifier; 键盘事件可传合成 MouseEvent
+   */
+  function selectFile(entry: MediaEntry, event: MouseEvent | KeyboardEvent): void {
+    const path = entry.path;
+    if (event.ctrlKey || event.metaKey) {
+      // Ctrl/Cmd+Click: toggle
+      toggleSelection(path);
+    } else if (event.shiftKey && anchorPath.value !== null) {
+      // Shift+Click: 从 anchor 到当前的范围
+      selectRange(anchorPath.value, path);
+    } else {
+      // 普通单击: 重置为单选
+      replaceSelection(path);
+    }
+    anchorPath.value = path;
+  }
+
+  function toggleSelection(path: string): void {
+    const next = new Set(selectedPaths.value);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
+    selectedPaths.value = next;
+  }
+
+  function replaceSelection(path: string): void {
+    selectedPaths.value = new Set([path]);
+  }
+
+  function selectRange(from: string, to: string): void {
+    const sorted = sortedEntries.value.map((e) => e.path);
+    const i = sorted.indexOf(from);
+    const j = sorted.indexOf(to);
+    if (i === -1 || j === -1) return;
+    const [lo, hi] = i <= j ? [i, j] : [j, i];
+    const next = new Set<string>();
+    for (let k = lo; k <= hi; k++) next.add(sorted[k]);
+    selectedPaths.value = next;
+  }
+
+  function clearSelection(): void {
+    selectedPaths.value = new Set();
+    anchorPath.value = null;
+  }
+
+  function selectAll(): void {
+    selectedPaths.value = new Set(sortedEntries.value.map((e) => e.path));
+  }
+
+  function setSearchQuery(q: string): void {
+    searchQuery.value = q;
+  }
+
+  // ─── v0.1.0-module1.22: computed ──
+
+  const sortedEntries = computed<MediaEntry[]>(() =>
+    sortEntries(entries.value, sortField.value, sortAscending.value),
+  );
+
+  const selectedEntries = computed<MediaEntry[]>(() =>
+    sortedEntries.value.filter((e) => selectedPaths.value.has(e.path)),
+  );
+
+  const selectedCount = computed<number>(() => selectedPaths.value.size);
+
+  const selectionSizeBytes = computed<number>(() =>
+    selectedEntries.value
+      .filter((e) => !e.isDirectory)
+      .reduce((s, e) => s + e.size, 0),
+  );
+
+  /** hide-finished 过滤; 调用方 (FileBrowser) 传 marks map 进来 */
+  const visibleEntries = computed<MediaEntry[]>(() => sortedEntries.value);
+
   return {
+    // 状态
     rootPath,
     currentPath,
     lastFetchedPath,
     entries,
     loading,
     error,
+    sortField,
+    sortAscending,
+    viewMode,
+    hideFinished,
+    selectedPaths,
+    anchorPath,
+    searchQuery,
+    // 原有 actions
     setRoot,
     navigate,
     refresh,
     up,
+    // sort/viewMode/hideFinished
+    setSortField,
+    toggleSortOrder,
+    setViewMode,
+    setHideFinished,
+    loadLayout,
+    // selection
+    selectFile,
+    toggleSelection,
+    replaceSelection,
+    selectRange,
+    clearSelection,
+    selectAll,
+    setSearchQuery,
+    // computed
+    sortedEntries,
+    selectedEntries,
+    selectedCount,
+    selectionSizeBytes,
+    visibleEntries,
   };
 });

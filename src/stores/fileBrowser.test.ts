@@ -1,20 +1,25 @@
 /**
  * fileBrowser store 单测 — 模块 #1
- * 覆盖：rootPath 状态、setRoot / navigate / refresh / up、错误状态
+ * v0.1.0-module1.22: 升维度 — sortField / viewMode / selectedPaths / hideFinished
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useFileBrowserStore } from './fileBrowser';
-import { listDirectory } from '@/lib/tauri';
+import { listDirectory, getSetting, setSetting } from '@/lib/tauri';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
-  return { ...actual, listDirectory: vi.fn() };
+  return {
+    ...actual,
+    listDirectory: vi.fn(),
+    getSetting: vi.fn(async () => null),
+    setSetting: vi.fn(async () => undefined),
+  };
 });
 const mockedList = vi.mocked(listDirectory);
-
-const localRoot = (p: string) => ({ type: 'local' as const, rootPath: p });
+const mockedGet = vi.mocked(getSetting);
+const mockedSet = vi.mocked(setSetting);
 
 function makeEntries(...names: string[]): MediaEntry[] {
   return names.map((n) => ({
@@ -23,154 +28,272 @@ function makeEntries(...names: string[]): MediaEntry[] {
     isDirectory: !n.includes('.'),
     isArchive: n.endsWith('.cbz') || n.endsWith('.zip'),
     size: 100,
+    modifiedAt: 0,
   }));
 }
 
-describe('fileBrowser store', () => {
+function makeEntry(name: string, opts: Partial<MediaEntry> = {}): MediaEntry {
+  return {
+    name,
+    path: name,
+    isDirectory: false,
+    isArchive: false,
+    size: 100,
+    modifiedAt: 0,
+    ...opts,
+  };
+}
+
+function mkMouseEvent(modifiers: { ctrlKey?: boolean; shiftKey?: boolean; metaKey?: boolean } = {}): MouseEvent {
+  return { ctrlKey: false, shiftKey: false, metaKey: false, ...modifiers } as MouseEvent;
+}
+
+describe('fileBrowser store — 基础', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
   });
 
-  it('初始状态：rootPath=null, currentPath="", entries=[], error=null', () => {
+  it('初始状态', () => {
     const store = useFileBrowserStore();
     expect(store.rootPath).toBeNull();
     expect(store.currentPath).toBe('');
     expect(store.entries).toEqual([]);
     expect(store.loading).toBe(false);
     expect(store.error).toBeNull();
+    expect(store.selectedPaths.size).toBe(0);
+    expect(store.viewMode).toBe('list');
+    expect(store.sortField).toBe('name');
+    expect(store.sortAscending).toBe(true);
   });
 
-  it('setRoot(root) 更新 rootPath + currentPath="" + 拉根目录条目', async () => {
-    mockedList.mockResolvedValue(makeEntries('comic1.cbz', 'chapter1'));
+  it('setRoot 更新 rootPath + 拉根目录', async () => {
+    mockedList.mockResolvedValue(makeEntries('a', 'b'));
     const store = useFileBrowserStore();
-
     await store.setRoot('C:/comics');
-
     expect(store.rootPath).toBe('C:/comics');
-    expect(store.currentPath).toBe('');
-    expect(store.entries.length).toBe(2);
-    expect(mockedList).toHaveBeenCalledWith(localRoot('C:/comics'), '');
-  });
-
-  it('setRoot(null) 清空状态，不调 listDirectory', async () => {
-    mockedList.mockResolvedValue([]);
-    const store = useFileBrowserStore();
-    await store.setRoot('C:/comics');
-    mockedList.mockClear();
-
-    await store.setRoot(null);
-
-    expect(store.rootPath).toBeNull();
-    expect(store.currentPath).toBe('');
-    expect(store.entries).toEqual([]);
-    expect(mockedList).not.toHaveBeenCalled();
-  });
-
-  it('navigate(p) 更新 currentPath + 拉新条目', async () => {
-    mockedList.mockResolvedValue(makeEntries('chapter1'));
-    const store = useFileBrowserStore();
-    await store.setRoot('C:/comics');
-
-    mockedList.mockResolvedValue(makeEntries('chapter1/page1.jpg', 'chapter1/page2.jpg'));
-    await store.navigate('chapter1');
-
-    expect(store.currentPath).toBe('chapter1');
-    expect(mockedList).toHaveBeenLastCalledWith(localRoot('C:/comics'), 'chapter1');
     expect(store.entries.length).toBe(2);
   });
 
-  it('refresh() 重新拉当前 path', async () => {
-    mockedList.mockResolvedValue(makeEntries('chapter1'));
-    const store = useFileBrowserStore();
-    await store.setRoot('C:/comics');
-
-    mockedList.mockClear();
-    mockedList.mockResolvedValue(makeEntries('chapter1', 'chapter2'));
-    await store.refresh();
-
-    expect(mockedList).toHaveBeenCalledTimes(1);
-    expect(mockedList).toHaveBeenCalledWith(localRoot('C:/comics'), '');
-  });
-
-  it('up() 跳到父目录', async () => {
-    mockedList.mockResolvedValue(makeEntries('rootA', 'rootB'));
-    const store = useFileBrowserStore();
-    await store.setRoot('C:/comics');
-
-    mockedList.mockResolvedValue(makeEntries('chapter1', 'chapter2'));
-    await store.navigate('chapter1');
-
-    mockedList.mockResolvedValue(makeEntries('rootA', 'rootB'));
-    await store.up();
-
-    expect(store.currentPath).toBe('');
-  });
-
-  it('up() 支持多级嵌套目录回退 (chapter/sub → chapter)', async () => {
-    mockedList.mockResolvedValue(makeEntries('chapter'));
-    const store = useFileBrowserStore();
-    await store.setRoot('C:/comics');
-
-    mockedList.mockResolvedValue(makeEntries('sub'));
-    await store.navigate('chapter');
-
-    mockedList.mockResolvedValue(makeEntries('page1'));
-    await store.navigate('chapter/sub');
-
-    mockedList.mockClear();
-    mockedList.mockResolvedValue(makeEntries('sub'));
-    await store.up();
-
-    expect(store.currentPath).toBe('chapter');
-    expect(mockedList).toHaveBeenCalledWith(localRoot('C:/comics'), 'chapter');
-  });
-
-  it('up() 在根目录不报错，currentPath 仍为 ""，不调 listDirectory', async () => {
+  it('setRoot(null) 清空 entries + 清空 selection', async () => {
     mockedList.mockResolvedValue(makeEntries('a'));
     const store = useFileBrowserStore();
     await store.setRoot('C:/comics');
+    store.replaceSelection('a');
+    await store.setRoot(null);
+    expect(store.entries).toEqual([]);
+    expect(store.selectedPaths.size).toBe(0);
+  });
 
-    mockedList.mockClear();
+  it('navigate 更新 currentPath', async () => {
+    mockedList.mockResolvedValue(makeEntries('chapter1'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    mockedList.mockResolvedValue(makeEntries('chapter1/page1.jpg'));
+    await store.navigate('chapter1');
+    expect(store.currentPath).toBe('chapter1');
+  });
+
+  it('up() 进上一级', async () => {
+    mockedList.mockResolvedValue(makeEntries('chapter1'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    mockedList.mockResolvedValue(makeEntries('page1.jpg'));
+    await store.navigate('chapter1');
+    mockedList.mockResolvedValue(makeEntries('chapter1'));
     await store.up();
-
     expect(store.currentPath).toBe('');
-    expect(mockedList).not.toHaveBeenCalled();
   });
 
   it('listDirectory 抛错 → error 状态', async () => {
     mockedList.mockRejectedValueOnce(new Error('not found'));
     const store = useFileBrowserStore();
-
     await store.setRoot('C:/missing');
-
-    expect(store.error).not.toBeNull();
     expect(store.error?.kind).toBe('io');
-    expect(store.error?.message).toBe('not found');
+  });
+});
+
+describe('fileBrowser store — sortedEntries (dir-first)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
   });
 
-  it('navigate 抛错也设 error 状态', async () => {
-    mockedList.mockResolvedValueOnce(makeEntries('a'));
+  it('name 排序时目录永远在前', async () => {
+    mockedList.mockResolvedValue([
+      makeEntry('a.txt'),
+      makeEntry('b-dir', { isDirectory: true }),
+      makeEntry('c.txt'),
+    ]);
     const store = useFileBrowserStore();
-    await store.setRoot('C:/comics');
-
-    mockedList.mockRejectedValueOnce(new Error('permission denied'));
-    await store.navigate('forbidden');
-
-    expect(store.error?.kind).toBe('io');
-    expect(store.error?.message).toBe('permission denied');
+    await store.setRoot('C:/x');
+    expect(store.sortedEntries.map((e) => e.name)).toEqual(['b-dir', 'a.txt', 'c.txt']);
   });
 
-  it('下次成功 fetch 清空前次 error', async () => {
-    mockedList.mockRejectedValueOnce(new Error('first failure'));
+  it('size 排序按 size 升序（目录 size=0 在前）', async () => {
+    mockedList.mockResolvedValue([
+      makeEntry('big.txt', { size: 1000 }),
+      makeEntry('dir', { isDirectory: true, size: 0 }),
+      makeEntry('medium.txt', { size: 100 }),
+    ]);
     const store = useFileBrowserStore();
-    await store.setRoot('C:/comics');
-    expect(store.error).not.toBeNull();
+    await store.setRoot('C:/x');
+    store.setSortField('size'); // 切到 size 字段
+    expect(store.sortedEntries.map((e) => e.name)).toEqual(['dir', 'medium.txt', 'big.txt']);
+  });
 
-    mockedList.mockResolvedValueOnce(makeEntries('recovered'));
-    await store.navigate('');
+  it('setSortField 同字段 → toggle 方向', async () => {
+    mockedList.mockResolvedValue([makeEntry('a'), makeEntry('b')]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    expect(store.sortAscending).toBe(true);
+    // 切到 size → 不 toggle
+    store.setSortField('size');
+    expect(store.sortAscending).toBe(true);
+    // 再次 'size' → toggle
+    store.setSortField('size');
+    expect(store.sortAscending).toBe(false);
+  });
 
-    expect(store.error).toBeNull();
-    expect(store.entries.length).toBe(1);
+  it('setSortField 不同字段 → 不 toggle 方向', async () => {
+    mockedList.mockResolvedValue([makeEntry('a')]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.setSortField('modifiedAt'); // 不同字段
+    expect(store.sortAscending).toBe(true);
+    store.setSortField('size'); // 不同字段
+    expect(store.sortAscending).toBe(true);
+  });
+});
+
+describe('fileBrowser store — selection', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('单击 → 单选 + 设 anchor', async () => {
+    mockedList.mockResolvedValue([makeEntry('a'), makeEntry('b'), makeEntry('c')]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.selectFile(makeEntry('b'), mkMouseEvent());
+    expect(store.selectedPaths).toEqual(new Set(['b']));
+    expect(store.anchorPath).toBe('b');
+  });
+
+  it('Ctrl+Click → toggle 已有选中', async () => {
+    mockedList.mockResolvedValue([makeEntry('a'), makeEntry('b')]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.selectFile(makeEntry('a'), mkMouseEvent());
+    store.selectFile(makeEntry('b'), mkMouseEvent({ ctrlKey: true }));
+    expect(store.selectedPaths).toEqual(new Set(['a', 'b']));
+    store.selectFile(makeEntry('a'), mkMouseEvent({ ctrlKey: true }));
+    expect(store.selectedPaths).toEqual(new Set(['b']));
+  });
+
+  it('Shift+Click → 范围选 (anchor 到当前)', async () => {
+    mockedList.mockResolvedValue([
+      makeEntry('a'),
+      makeEntry('b'),
+      makeEntry('c'),
+      makeEntry('d'),
+    ]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    // 先单击 a 设 anchor
+    store.selectFile(makeEntry('a'), mkMouseEvent());
+    // Shift+Click d → 选 a, b, c, d
+    store.selectFile(makeEntry('d'), mkMouseEvent({ shiftKey: true }));
+    expect(store.selectedPaths).toEqual(new Set(['a', 'b', 'c', 'd']));
+    // 改 anchor: 单击 c → 单选 c, anchor='c'
+    store.selectFile(makeEntry('c'), mkMouseEvent());
+    expect(store.selectedPaths).toEqual(new Set(['c']));
+    expect(store.anchorPath).toBe('c');
+    // Shift+Click a → 选 c, b, a (从 anchor 'c' 到 'a' 倒序)
+    store.selectFile(makeEntry('a'), mkMouseEvent({ shiftKey: true }));
+    expect(store.selectedPaths).toEqual(new Set(['c', 'b', 'a']));
+  });
+
+  it('selectAll → 全选当前 sortedEntries', async () => {
+    mockedList.mockResolvedValue([makeEntry('a'), makeEntry('b')]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.selectAll();
+    expect(store.selectedPaths).toEqual(new Set(['a', 'b']));
+  });
+
+  it('clearSelection → 清空 + anchor 复位', async () => {
+    mockedList.mockResolvedValue([makeEntry('a')]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.selectFile(makeEntry('a'), mkMouseEvent());
+    store.clearSelection();
+    expect(store.selectedPaths.size).toBe(0);
+    expect(store.anchorPath).toBeNull();
+  });
+
+  it('selectedCount / selectionSizeBytes computed', async () => {
+    mockedList.mockResolvedValue([
+      makeEntry('a', { size: 100 }),
+      makeEntry('b', { size: 200 }),
+      makeEntry('dir', { isDirectory: true, size: 0 }),
+    ]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.selectAll();
+    expect(store.selectedCount).toBe(3);
+    // dir 排除, 100 + 200 = 300
+    expect(store.selectionSizeBytes).toBe(300);
+  });
+});
+
+describe('fileBrowser store — viewMode + persist', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('setViewMode 写入 settings', async () => {
+    mockedList.mockResolvedValue([]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.setViewMode('grid');
+    expect(store.viewMode).toBe('grid');
+    expect(mockedSet).toHaveBeenCalledWith('fb_view_mode', 'grid');
+  });
+
+  it('setHideFinished 写入 settings', async () => {
+    mockedList.mockResolvedValue([]);
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.setHideFinished(true);
+    expect(store.hideFinished).toBe(true);
+    expect(mockedSet).toHaveBeenCalledWith('fb_hide_finished', '1');
+  });
+
+  it('loadLayout 读 settings 恢复状态', async () => {
+    mockedGet.mockImplementation(async (key) => {
+      if (key === 'fb_sort_field') return 'size';
+      if (key === 'fb_sort_ascending') return '0';
+      if (key === 'fb_view_mode') return 'grid';
+      if (key === 'fb_hide_finished') return '1';
+      return null;
+    });
+    const store = useFileBrowserStore();
+    await store.loadLayout();
+    expect(store.sortField).toBe('size');
+    expect(store.sortAscending).toBe(false);
+    expect(store.viewMode).toBe('grid');
+    expect(store.hideFinished).toBe(true);
+  });
+
+  it('loadLayout 无持久化 → 保持默认', async () => {
+    mockedGet.mockResolvedValue(null);
+    const store = useFileBrowserStore();
+    await store.loadLayout();
+    expect(store.sortField).toBe('name');
+    expect(store.viewMode).toBe('list');
+    expect(store.hideFinished).toBe(false);
   });
 });

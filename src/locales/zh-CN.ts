@@ -29,6 +29,7 @@ export default {
     accounts: '网络账户',
     settings: '设置',
     toggleSidebar: '折叠/展开 侧栏',
+    search: '搜索',
   },
   reader: {
     mode: {
@@ -108,6 +109,15 @@ export default {
     },
     hideFinished: '隐藏已读完',
     showFinished: '显示已读完',
+    // v0.1.0-module1.22: 视图模式 + 状态栏
+    viewMode: '视图',
+    viewList: '列表',
+    viewGrid: '网格',
+    statusBar: {
+      items: '共 {count} 项',
+      selected: '已选 {count} 项',
+      path: '当前路径',
+    },
   },
   library: {
     title: '书架',
@@ -181,6 +191,20 @@ export default {
     noResults: '无匹配',
     modeFuzzy: '模糊',
     modeSubstring: '子串',
+    resultsCount: '共 {count} 条结果',
+  },
+  // v0.1.0-module1.22: 详情面板
+  properties: {
+    title: '属性',
+    labelName: '名称',
+    labelLocation: '位置',
+    labelSize: '大小',
+    labelType: '类型',
+    labelExtension: '扩展名',
+    labelModified: '修改时间',
+    labelCreated: '创建时间',
+    labelAccessed: '访问时间',
+    noFileSelected: '未选择',
   },
   error: {
     openFailed: '打开失败',

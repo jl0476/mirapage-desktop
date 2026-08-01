@@ -21,6 +21,7 @@ const collapsed = ref(false);
 
 const items: NavItem[] = [
   { to: '/',          icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z', labelKey: 'nav.fileBrowser' },
+  { to: '/search',    icon: 'M21 21l-4.35-4.35M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', labelKey: 'nav.search' },
   { to: '/shortcuts', icon: 'M12 2l2.39 7.36H22l-6.18 4.49L18.21 22 12 17.27 5.79 4.73 2.39-8.15L4 9.36h7.61Z', labelKey: 'nav.shortcuts' },
   { to: '/library',   icon: 'M3 19V5a2 2 0 0 1 2-2h5v16H5a2 2 0 0 1-2-2Zm8-16h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8V3Z', labelKey: 'nav.library' },
   { to: '/bookmarks', icon: 'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16Z', labelKey: 'nav.bookmarks' },

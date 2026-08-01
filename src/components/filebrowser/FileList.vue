@@ -5,61 +5,60 @@
  *
  * v0.1.0-module1.15+: 用 FileIcon (lucide 线条 SVG) 替代 emoji.
  * v0.1.0-module1.19: 重写样式 — 旧 var(--accent) 已废弃, 改用新 --color-* token.
- *                  FileList 行高更紧凑、hover/focus 用 indigo accent.
  * v0.1.0-module1.21: 加 marks prop → 目录行 is-finished / is-reading 双染色 + label
- *                  (参考 perfect-viewer FileBrowserScreen.kt:664-730 EntryRow)
+ * v0.1.0-module1.22: 删 sortField / sortAscending props (store 持有), 接 selectedPaths.
+ *                  单击 = selectFile(entry, $event) (走 store),
+ *                  双击 = open, Enter = open, Space = select.
  */
-import { computed } from 'vue';
 import type { MediaEntry, ReadStatusMap } from '@/lib/sourceDescriptor';
-import { naturalSort } from '@/lib/naturalSort';
 import { log } from '@/lib/logger';
 import FileIcon from './FileIcon.vue';
 
-type SortField = 'name' | 'modifiedAt' | 'size';
-
 interface Props {
+  /** 排序由父级 fileBrowser store 完成 (sortedEntries), 此处只接收已排序列表 */
   entries: MediaEntry[];
-  sortField?: SortField;
-  sortAscending?: boolean;
   /** 父级 fetch 进行中. true 时整列表 pointer-events:none, 防止 race */
   loading?: boolean;
   /** v0.1.0-module1.21: 目录级阅读状态. key 用 descriptor-prefixed (父级算), value 'reading'/'finished'. */
   marks?: ReadStatusMap;
+  /** v0.1.0-module1.22: 当前选中 entry.path 集合 (从 store.sortedEntries.filter 派生) */
+  selectedPaths?: Set<string>;
+  /** v0.1.0-module1.22: 当前 viewMode (list/grid) — 影响行的 layout */
+  viewMode?: 'list' | 'grid';
 }
 const props = withDefaults(defineProps<Props>(), {
-  sortField: 'name',
-  sortAscending: true,
   loading: false,
   marks: () => ({}),
+  selectedPaths: () => new Set<string>(),
+  viewMode: 'list',
 });
 
 interface Emits {
   (e: 'open', entry: MediaEntry): void;
   (e: 'contextmenu', entry: MediaEntry, x: number, y: number): void;
+  (e: 'select', entry: MediaEntry, event: MouseEvent | KeyboardEvent): void;
 }
 const emit = defineEmits<Emits>();
 
-const sorted = computed<MediaEntry[]>(() => {
-  const by = (a: MediaEntry, b: MediaEntry): number => {
-    if (props.sortField === 'modifiedAt') {
-      return (a.modifiedAt ?? 0) - (b.modifiedAt ?? 0);
-    }
-    if (props.sortField === 'size') {
-      return a.size - b.size;
-    }
-    return 0;
-  };
-  const sortedByName = naturalSort(props.entries, (e) => e.name);
-  if (props.sortField === 'name') {
-    return props.sortAscending ? sortedByName : [...sortedByName].reverse();
-  }
-  const stable = [...sortedByName].sort(by);
-  return props.sortAscending ? stable : stable.reverse();
-});
-
-function onClick(entry: MediaEntry) {
+function onClick(entry: MediaEntry, event: MouseEvent) {
   log('[FileList] click', entry.name, 'isDirectory=', entry.isDirectory, 'path=', entry.path);
+  emit('select', entry, event);
+}
+
+function onDblClick(entry: MediaEntry) {
+  log('[FileList] dblclick', entry.name, 'path=', entry.path);
   emit('open', entry);
+}
+
+function onKeydown(entry: MediaEntry, event: KeyboardEvent) {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    emit('open', entry);
+  } else if (event.key === ' ') {
+    event.preventDefault();
+    // Space = 单选 (不传 modifier)
+    emit('select', entry, event);
+  }
 }
 
 function onContextMenu(entry: MediaEntry, e: MouseEvent) {
@@ -86,12 +85,7 @@ function iconClass(entry: MediaEntry): string {
   return 'icon-default';
 }
 
-/**
- * v0.1.0-module1.21: 行阅读状态 class (供 scoped CSS 双染色).
- * marks prop 是 readStatus.marks: key = `${rootPath}|${bookId}`,
- * value = 'reading' | 'finished'. 行查 marks 用 entry.path 后缀匹配
- * (父级 FileBrowser 已经把 readStatus.marks 原样传过来).
- */
+/** v0.1.0-module1.21: 行阅读状态 class (供 scoped CSS 双染色). */
 function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
   if (!entry.isDirectory && !entry.isArchive) return 'none';
   const pathSuffix = `|${entry.path}`;
@@ -102,25 +96,67 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
   }
   return 'none';
 }
+
+function isSelected(entry: MediaEntry): boolean {
+  return props.selectedPaths.has(entry.path);
+}
 </script>
 
 <template>
   <ul
-    v-if="sorted.length === 0"
+    v-if="entries.length === 0"
     class="list-none p-8 text-center text-text-tertiary text-sm"
     data-test="empty"
   >
     <li>{{ $t?.('fileBrowser.empty') ?? '空目录' }}</li>
   </ul>
   <ul
+    v-else-if="viewMode === 'grid'"
+    class="grid-view flex-1 min-h-0 overflow-y-auto list-none py-2 m-0 grid gap-2 px-3"
+    data-test="filelist"
+    data-view="grid"
+    aria-label="Directory contents"
+  >
+    <div
+      v-for="entry in entries"
+      :key="entry.path"
+      class="grid-item"
+      :class="{
+        'is-directory': entry.isDirectory,
+        'is-archive': entry.isArchive,
+        'is-finished': markFor(entry) === 'finished',
+        'is-reading': markFor(entry) === 'reading',
+        'is-selected': isSelected(entry),
+      }"
+      data-test="row"
+      role="button"
+      tabindex="0"
+      @click="onClick(entry, $event)"
+      @dblclick="onDblClick(entry)"
+      @keydown="onKeydown(entry, $event)"
+      @contextmenu="onContextMenu(entry, $event)"
+    >
+      <span class="icon" :class="iconClass(entry)" aria-hidden="true">
+        <FileIcon :type="iconType(entry)" />
+      </span>
+      <span class="name">{{ entry.name }}</span>
+      <span
+        v-if="markFor(entry) !== 'none'"
+        class="status"
+        :class="markFor(entry)"
+        data-test="read-status"
+      >{{ $t(markFor(entry) === 'finished' ? 'fileBrowser.status.finished' : 'fileBrowser.status.reading') }}</span>
+    </div>
+  </ul>
+  <ul
     v-else
     :class="['filelist flex-1 min-h-0 overflow-y-auto list-none py-1 m-0 flex flex-col gap-px transition-opacity duration-100', { loading }]"
-    role="button"
     data-test="filelist"
+    data-view="list"
     aria-label="Directory contents"
   >
     <li
-      v-for="entry in sorted"
+      v-for="entry in entries"
       :key="entry.path"
       class="row"
       :class="{
@@ -128,14 +164,15 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
         'is-archive': entry.isArchive,
         'is-finished': markFor(entry) === 'finished',
         'is-reading': markFor(entry) === 'reading',
+        'is-selected': isSelected(entry),
       }"
       data-test="row"
       :data-status="markFor(entry)"
       role="button"
       tabindex="0"
-      @click="onClick(entry)"
-      @keydown.enter="onClick(entry)"
-      @keydown.space.prevent="onClick(entry)"
+      @click="onClick(entry, $event)"
+      @dblclick="onDblClick(entry)"
+      @keydown="onKeydown(entry, $event)"
       @contextmenu="onContextMenu(entry, $event)"
     >
       <span class="icon" :class="iconClass(entry)" aria-hidden="true">
@@ -153,12 +190,13 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
 </template>
 
 <style scoped>
-.filelist.loading {
+.filelist.loading,
+.grid-view.loading {
   pointer-events: none;
   opacity: 0.55;
 }
 
-/* ─── 行 ────────────────────────────────────────────── */
+/* ─── 行 (list view) ───────────────────────────────── */
 .filelist > .row {
   display: flex;
   align-items: center;
@@ -173,7 +211,6 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
   transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
 }
 .filelist > .row:hover {
-  /* Xplorer hover 用 --xp-surface-light (#161630) 实色, 不是 surface-2 半透 */
   background: var(--color-surface-light);
   color: var(--color-text-primary);
 }
@@ -191,6 +228,50 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
   outline-offset: -1px;
 }
 
+/* ─── 行 (grid view) ───────────────────────────────── */
+.grid-view {
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+}
+.grid-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid transparent;
+  color: var(--color-text-secondary);
+  transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out);
+}
+.grid-item:hover {
+  background: var(--color-surface-light);
+  color: var(--color-text-primary);
+}
+.grid-item.is-selected {
+  background: rgb(99 102 241 / 0.18);
+  border-color: var(--color-accent);
+}
+.grid-item .icon {
+  width: 32px;
+  height: 32px;
+}
+.grid-item .name {
+  font-size: 12px;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+.grid-item .status {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  font-size: 9px;
+}
+
 /* ─── 文件类型彩色图标 (Xplorer 风格) ────────────────── */
 .icon {
   display: inline-flex;
@@ -205,7 +286,8 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
 .icon-default { color: var(--color-file-default); }
 
 /* hover 时图标轻微 glow */
-.row:hover .icon :deep(.file-icon) {
+.row:hover .icon :deep(.file-icon),
+.grid-item:hover .icon :deep(.file-icon) {
   filter: drop-shadow(0 0 4px currentColor);
 }
 
@@ -227,13 +309,15 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
 }
 
 /* ─── v0.1.0-module1.21: 阅读状态双染色 (icon tint + label badge) ─── */
-.filelist > .row.is-finished .icon {
+.filelist > .row.is-finished .icon,
+.grid-item.is-finished .icon {
   color: var(--color-status-finished);
 }
 .filelist > .row.is-finished .name {
-  color: var(--color-text-secondary); /* 略微暗 */
+  color: var(--color-text-secondary);
 }
-.filelist > .row.is-reading .icon {
+.filelist > .row.is-reading .icon,
+.grid-item.is-reading .icon {
   color: var(--color-status-reading);
 }
 .filelist > .row.is-reading .name {
