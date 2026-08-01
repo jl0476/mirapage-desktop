@@ -146,3 +146,271 @@ cargo test -p mirapage-desktop-lib natural_compare
 **CI 自动化**：GitHub Actions 已端到端验证打包链路——`.github/workflows/verify.yml`（push/PR 触发：前端 type-check + test + build + 后端 `cargo check`）和 `.github/workflows/release.yml`（push `v*` tag 或手动触发：完整 release 构建 + 上传 portable exe 到 GitHub Release）。3 个 Release tag 已发布：`v0.1.0-ci-test`（MSI + NSIS 安装包）、`v0.1.0-ci-portable-v2`（portable 单 exe，当前可用）。完整描述、产物路径、tag 发版命令见 [BUILD.md §5.3](./BUILD.md)。
 
 **待验证**：本地 Windows 原生环境的首次直接 `cargo check` / `cargo build` / `tauri build` 仍有待验证——CI 跑通不等于本地一定能跑（Rust 工具链版本、MSVC Build Tools 完整性、文件路径等因素都可能影响）。
+
+---
+
+## 开发规约（v0.1.0-module1.22 沉淀）
+
+下文是写完模块 #1 后沉淀的约定。新增模块前先读一遍——**约束比自由更重要**，避免无意义的返工。
+
+### 1. UI / UE 规范
+
+**1.1 视觉风格基线**（与 Xplorer Next / Perfect-Viewer 对齐，参考 [`xplorer-next/apps/client/src/`](file:///F:/WorkSpaceCollection/git/xplorer-next)）
+
+- **配色**：Tokyo Night 暗色，`--color-bg` `#0a0a1a` 渐变到 `#1a0a2e`；accent indigo `#6366f1`；文件类型色：folder=indigo、image=green `#34d399`、archive=orange `#fb923c`、video=ping `#f472b6`、audio=purple `#a78bfa`。
+- **Tailwind v4 `@theme`**: 所有颜色 token 集中在 `src/styles/tailwind.css` 的 `@theme {}` 块声明，组件**只用 Tailwind utility class**（`bg-surface-1` / `text-accent` / `border-text-tertiary` 等），不用 scoped CSS 变量 hex 写死。
+- **CSS 变量分两层**：`@theme` 生成的 `--color-*`（Tailwind utility 源）+ 组件 scoped CSS 里的 `var(--color-*)` 引用。**不要在模板里写 `style="background: #xxxxxx"`**，要写 utility。
+
+**1.2 工具栏 / 按钮（Xplorer OperationBar 风格）**
+
+- 容器：`bg-surface border-b border-white/5 px-3 py-1.5 flex items-center gap-1 flex-wrap`，**无圆角、无 backdrop-blur**（Xplorer 真实风格）。
+- 按钮统一 `.tb-btn` class：`text-xs (12px) px-2 py-1 gap-1 text-text-muted hover:bg-surface-light hover:text-text-primary transition-colors`，激活态 `text-accent`。
+- **按钮间的分隔条**：`<span class="w-px h-4 bg-white/10 shrink-0" />`（1px 垂直灰条）。
+- **图标尺寸**：12px（按钮内的 SVG）；16px（empty state 大图标）；14px（按钮外的列表图标）。
+- 所有 SVG icon 用 `const ICON_X = 'm...lucide path data'` 形式内嵌在父组件 script 顶部，**不**用 lucide-vue-next / lucide-react 包，统一无依赖。
+
+**1.3 Dropdown（Xplorer 真实模式）**
+
+三层结构，**不要**用 `<select>` 原生下拉（丑且 WebView 渲染不一致）：
+
+```
+<div class="relative" ref="dropdownRef">      ← 容器
+  <button @click="open = !open">...</button>   ← trigger
+  <div v-if="open" class="absolute left-0 top-full z-50 mt-1
+       min-w-[170px] bg-surface-4 border border-white/10
+       rounded-lg py-1 shadow-xl backdrop-blur-xl">
+    <button v-for="opt" class="flex w-full items-center px-3 py-1.5
+         text-left text-xs hover:bg-surface-light"
+         :class="opt.field === current ? 'text-accent' : ''">
+      <span>{{ opt.label }}</span>
+      <svg v-if="..." ... ArrowUp/Down 11px />
+    </button>
+  </div>
+</div>
+```
+
+`click-outside` 关闭（Xplorer OperationBar 模式）：
+
+```ts
+onMounted(() => document.addEventListener('mousedown', onMouseDown))
+onUnmounted(() => document.removeEventListener('mousedown', onMouseDown))
+function onMouseDown(e: MouseEvent) {
+  if (!dropdownRef.value?.contains(e.target as Node)) open.value = false
+}
+```
+
+**1.4 列表行（FileList 行级规范）**
+
+- 行高 `py-1.5 px-3`（紧凑 Xplorer 风格）；padding `p-2 px-3` 也可。
+- 间距：name `gap-2`、icon `width: 18px`、text `text-xs (12px)`。
+- 选中/未读/已读状态**只通过 scoped CSS class 切换**（`is-selected` / `is-reading` / `is-finished` / `is-directory` / `is-archive`），模板里 `:class` 数组或对象字面量。
+- 图标 + 名字 + 状态 badge 三段式，badge `margin-left: auto` 推到右侧。
+- **列表行 hover 颜色**：用 `--color-surface-light`（实色 `#161630`），**不是** 半透 `--color-surface-2`（Xplorer 用实色）。
+
+**1.5 选中与多选**
+
+- 单击 = 选中（更新 `selectedPaths` Set），双击 = 打开（emit `open`）；Enter = 双击，Space = 单击。
+- `ctrlKey / metaKey` → toggle；`shiftKey` → range 选（依赖 `anchorPath` 记录上一次 click 的 path）。
+- `selectedPaths` 是 `Set<string>`，key 用 `entry.path`，**不用** `entry.name`（同名文件会冲突）。
+- 1 选中显示详情面板，多选不显示（Xplorer 也是）。
+
+**1.6 详情面板字段规则**
+
+- 全部前端**派生**（不要为 MediaEntry 元数据新增 IPC）。MediaEntry 字段：`name / path / isDirectory / isArchive / size / modifiedAt`（秒级）。
+- 派生工具：`src/lib/mime.ts` 的 `extensionOf / mimeFromName`，`src/lib/format.ts` / `src/locales/helpers.ts` 的 `formatBytes / formatDate(seconds*1000, locale)`。
+- **目录不显示扩展名**（避免 `VOL.11` / `S01.E03` 这类名字里的 `.` 误识别为扩展名），固定 `—`。
+- **类型翻译用 i18n**：不要在模板里 `v-if="isDirectory"` 显示 `folder` 字符串硬码。用 `t('properties.typeDirectory')` 等 key。
+- 字段缺失（`MediaEntry` 没有 `createdAt` / `accessedAt`）显示 `—`，**不要**为了填字段去 IPC。
+
+**1.7 状态栏（Xplorer 三段式）**
+
+- 左：`X 项 / 已选 Y 项 (Z MB)`；中：当前路径（`truncate` + `title` 是 full path）；右：暂留空（git / free-space 后续模块）。
+- 容器：`bg-surface border-t border-white/5 px-3 h-6 flex items-center justify-between gap-2 text-xs`。
+- `role="status" aria-live="polite"`（屏幕阅读器友好）。
+
+**1.8 Empty / Error / Loading**
+
+- Empty state：图标放置在 `w-16 h-16 rounded-2xl bg-surface-1 border border-white/10` 容器内，accent 色 stroke；下方 1 行 hint + 1 个 primary CTA（**主按钮不该是按钮组**，只能 1 个）。
+- Error toast：`bg-error/8 border border-error text-error` + `shadow-[0_0_10px_rgba(248,113,113,0.3)]`（Xplorer 错误 glow）。
+- Loading：单独 `<p v-if="fb.loading">` 行，**不要**用 spinner（Xplorer 也不滥用）。
+
+### 2. i18n 约定
+
+**2.1 namespace 命名（按模块 / 上下文）**
+
+- `nav.*` — SideNav 标题（`fileBrowser / shortcuts / library / bookmarks / likes / history / accounts / settings / search`）
+- `fileBrowser.*` — 文件浏览器 (`title / pickRoot / up / refresh / empty / sortBy / sortField.{name,date,size} / sortAscending / sortDescending / search / saveAsShortcut / shortcutLabel / shortcutSaved / noShortcut / goShortcuts / status.{finished,reading} / contextMenu.resetProgress / hideFinished / showFinished / viewMode / viewList / viewGrid / statusBar.{items,selected,path}`)
+- `properties.*` — 详情面板 (`title / labelName / labelLocation / labelSize / labelType / labelExtension / labelModified / labelCreated / labelAccessed / noFileSelected / typeDirectory / typeFile / typeArchive / typeImage`)
+- `search.*` — 搜索视图 (`placeholder / noResults / modeFuzzy / modeSubstring / resultsCount`)
+- `common.*` — 通用 (`loading / cancel / save / etc`)
+- `error.*` — 错误（`openFailed / fileNotFound / networkError / permissionDenied / timeout / ioError / unknown / pathTooLong`）
+- `lang.*` — locale 切换 (`system / zh-CN / en-US`)
+
+**2.2 命名规范**
+
+- 用 camelCase 命名 key（`sortField` / `noShortcut`），**不**用 snake_case 或 kebab-case。
+- 复数用 `items` / `selected`（不带 `Count` 后缀，靠 `count` 参数区分）。
+- 状态值用 `finished` / `reading`（过去式 / 现在进行时），**不**用 `is-finished` / `is-reading`（那是 class 名）。
+- 占位符 `{count}` / `{name}` / `{size}` — vue-i18n 模板里直接 `{count}`。
+
+**2.3 中英文档对齐**
+
+- **每个 i18n key 在 zh-CN.ts 和 en-US.ts 都必须存在**（type-check 不强制，但 raw value 缺失会 fallback 留 warning）。
+- 翻译只在本文件里写一次，**不**在组件里 `$t('fileBrowser.sort')` 字符串硬编码。
+- 新增 key 时**务必同时改两个文件**，避免后续 CI 失败。
+
+**2.4 模板里调用**
+
+```vue
+<!-- 简单 -->
+<span>{{ t('fileBrowser.empty') }}</span>
+
+<!-- 带参数 -->
+<span>{{ t('fileBrowser.statusBar.items', { count: total }) }}</span>
+
+<!-- 缺 fallback 时 (测试里用) -->
+<p>{{ $t?.('fileBrowser.empty') ?? '空目录' }}</p>
+```
+
+**2.5 业务值不要翻译**
+
+- 文件名、路径、shortcut label、tag 名、bookmark label —— **保留原文**（用户输入的）。
+- enum 值（如 `source: 'library' | 'bookmark' | 'history' | 'tag'`）—— 后端 schema / IPC 通信用，**不**翻译；UI 显示时通过 `t()` 映射。
+
+### 3. 代码约定
+
+**3.1 Component 命名 & 路径**
+
+- PascalCase：`FileBrowser.vue`、`SortDropdown.vue`。
+- 路径：`src/components/<feature>/<Component>.vue` 或 `src/views/<Page>.vue`。
+- view（页面）放 `src/views/`，业务组件放 `src/components/<feature>/`。
+- 纯逻辑（无 Vue 依赖）放 `src/lib/`，可独立测试。
+
+**3.2 Props / Emits 命名**
+
+- Props：`camelCase`，类型用 `interface` 声明，常量 `default` 用 `withDefaults`。
+- Emits：`camelCase`，**总是**用 `defineEmits<{ (e: 'name', payload: Type): void }>()` 签名。
+- 事件名与 prop 同名时，**不**用 `update:propName`（Vue 3 v-model 风格，只是有些场景适用）。
+- 受控 prop 写注释说明父级必须 watch。
+
+**3.3 Store 设计**
+
+- Pinia setup store（`defineStore('id', () => { ... })` 风格）。
+- state 全部 `ref`，派生用 `computed`，actions 是普通函数。
+- **持久化 state**：调用 `useSettingsStore().update('key', value)`，**不**直接调 `setSetting`。store 内统一 `persist('fb_xxx', value)` 包装。
+- **跨视图共享 state**（如 sortField / viewMode / selectedPaths）放专门 store，**不**放组件 local state。
+- **视图临时 state**（如当前 dropdown 是否展开）放组件 `ref`。
+
+**3.4 IPC 桥接 (`src/lib/tauri.ts`)**
+
+- 所有 `invoke()` 调用集中在本文件，**不**在组件里直接 `import { invoke }`。
+- 函数命名：`listX / getX / addX / removeX / setX / recordX`（读 / 写 / upsert / delete / update / upsert）。
+- TS 函数包装返回**纯类型**（不返回 Rust 原生 enum），前后端边界翻译在 `tauri.ts` 里完成。
+- SourceDescriptor 字段命名：Rust `snake_case`，TS `camelCase`（Tauri 自动转换）。
+
+**3.5 后端 → 前端类型同步**
+
+- Rust `serde(rename_all = "camelCase")` + TS `interface` 字段名 `camelCase`，**字节级一致**。
+- 改 Rust 端 struct 必须同步改 TS 端 interface + 加 regression test（参考 `src-tauri/src/source/descriptor.rs:171-187` 现有模式）。
+
+**3.6 不能做的**
+
+- ❌ 写 `any` / `as any`（TS 严格模式开启）。
+- ❌ 用 `@ts-ignore` / `@ts-expect-error` 掩盖错误。
+- ❌ 直接 `import { invoke } from '@tauri-apps/api'`（必须经过 `lib/tauri.ts`）。
+- ❌ 在组件里写 `console.log` 调试（用 `src/lib/logger.ts` 的 `log()` 写文件日志）。
+- ❌ 在 commits 里写 `🤖 Generated with Claude Code`。
+- ❌ 编辑类功能（新建 / 重命名 / 删除 / 复制 / 粘贴 / 拖放）—— 用户明确不做。
+- ❌ 在 `tauri::generate_handler!` 自动发现外漏掉注册命令。
+- ❌ hardcode 颜色 / 字体大小（必须用 `@theme` token 或 Tailwind utility）。
+
+### 4. 测试约定
+
+**4.1 框架**
+
+- Vitest + happy-dom（前端组件 / Pinia store / 纯函数）。
+- Rust: `cargo test`（algorithm 全 pure + 部分 commands）。
+
+**4.2 命名规范**
+
+- `*.test.ts` 文件与被测文件同目录同级。
+- describe 块用被测组件 / 函数名。
+- it 描述用中文：`'click trigger 打开弹出层' / '空数组返回空'`。
+
+**4.3 mock 模板**
+
+```ts
+vi.mock('@/lib/tauri', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
+  return { ...actual, listDirectory: vi.fn(), getSetting: vi.fn(async () => null) };
+});
+```
+
+**4.4 必须测试**
+
+- 所有 `*.test.ts` 文件**先写测试**（TDD 风格）。
+- 单测跑：220 → 259 用例（v0.1.0-module1.22 增量），目标 0 fail。
+- 任何新组件至少 1 个 default + 1 个 edge case（null / empty / disabled）。
+
+### 5. Tag / Commit / Branch 约定
+
+**5.1 模块 → Tag 命名**
+
+- 模块内每个里程碑：`v0.1.0-module1.NN` （NN 从 17 开始计数：m1.17 / m1.20 / m1.21 / m1.22）。
+- 跨模块：`v0.2.0-module2.0`。
+
+**5.2 Commit 格式**
+
+- 中文写 commit message（项目主要维护者中文）。
+- 第一行 `[scope]: [简述]`，正文分点列改动。
+- 引用 issue 时写 `Refs #123` / `Fixes #123`。
+- 一个 commit = 一个可独立跑通的概念（比如"加 SortDropdown" 不要混"加 listDirectory IPC"）。
+
+**5.3 提交流程**
+
+```bash
+# 1. 跑全测 + type-check
+npm run type-check && npm test -- --run
+
+# 2. 本地 build portable exe (可选 — 验证新增组件)
+cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\tauri-build-portable.bat"
+
+# 3. commit + tag + push
+git add <files>
+git commit -m "..."
+git tag v0.1.0-module1.NN
+git push github main
+git push github v0.1.0-module1.NN
+```
+
+**5.4 不要 commit 进 git**
+
+- `mirapage-desktop-local.exe`（本地 build 产物）
+- `tauri-build-portable.bat`（临时脚本，写到本机 D:\compile）
+- `backend.diff / full.diff`（诊断遗留）
+- `tsconfig.tsbuildinfo`（vue-tsc 缓存）
+
+### 6. 决策记录（用户拍板）
+
+- **CLI 风格 vs GitHub 风格**：用户偏好简洁中文 commit，**不要**保留 `🤖 Generated with Claude Code` co-author 提示。
+- **编辑类功能**：用户明确不做（新建 / 重命名 / 删除 / 复制 / 粘贴 / 拖放）。后续 plan 不规划这些。
+- **每个模块集中一个 milestone tag**（不要按子功能打多个 tag）。
+- **本地构建优先**（BUILD.md §1.0）：Rust 改动先本地 `cargo check` + `cargo test`，再 push CI 验证。
+- **不做百分比进度**（Xplorer / Perfect-Viewer 都用枚举三态）：阅读状态只用 `reading / finished / none` 离散值。
+- **plan 文件位置**：`C:\Users\jl0476\.claude\plans\`，每次 plan 完整覆盖（不再 plan 旧内容，diff 友好）。
+- **Rust 端不调 IPC 拿 metadata**（如 `get_detailed_file_properties`）—— 全部由前端 `extensionOf / mimeFromName / formatBytes` 派生，避免 Rust 端命令膨胀。
+- **numbering 范围**：MediaEntry 字段就 6 个（`name / path / isDirectory / isArchive / size / modifiedAt`），不要为了详情面板扩字段（`createdAt / accessedAt / mime / extension` 等由前端派生）。
+
+---
+
+## 协作清单（开始新模块前）
+
+- [ ] 读 `DESIGN.md` 对应章节
+- [ ] 用 `brainstorming` skill 走需求 / 设计
+- [ ] 用 `writing-plans` skill 写 plan（在 `C:\Users\jl0476\.claude\plans\`）
+- [ ] 与用户确认范围（在 `AskUserQuestion` 里明确"不做"清单）
+- [ ] `TDD`：先写测试 → 失败 → 实现
+- [ ] `verification-before-completion`：跑 type-check + 单测 + 本地 build
+- [ ] commit + tag + push，按 §5.3 流程
+- [ ] 更新"当前状态"表格（本文件 + BUILD.md）
+- [ ] 用户的反馈 → 记到 `MEMORY.md`（如果跨会话有用）
