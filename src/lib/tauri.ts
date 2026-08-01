@@ -89,7 +89,8 @@ export async function recordHistory(
   bookId: number,
   lastPage: number,
 ): Promise<void> {
-  await invoke<void>('record_history', { sourceDescriptor, bookId, lastPage });
+  // Tauri 2: 单个结构体参数 invoke 时前端传 { args: { ... } }
+  await invoke<void>('record_history', { args: { sourceDescriptor, bookId, lastPage } });
 }
 
 // ─── Library / Book (Phase 4) ───────────────────────────────────────────
@@ -106,15 +107,17 @@ export async function listLibrary(): Promise<BookItem[]> {
 
 /**
  * v0.1.0-module2.0 触发阅读入口:
- * - create_book(title, sourceDescriptor) → 返回新 bookId
- * - Rust 端 book 表 + 立即 INSERT, 主键 id 自增
+ * - create_book(args) → 返回新 bookId (Rust 端 book 表 + 立即 INSERT, 主键 id 自增)
+ * - Tauri 2 默认: 单个结构体参数会自动包成 `args` key, 所以前端必须传
+ *   `{ args: { title, sourceDescriptor } }` 而不是 `{ title, sourceDescriptor }`
  * - 调用方拿到 bookId 后, 写入 history (recordHistory) 然后 push /reader/:bookId
  */
 export async function createBook(
   title: string,
   sourceDescriptor: SourceDescriptor,
 ): Promise<number> {
-  return invoke<number>('create_book', { title, sourceDescriptor });
+  // Tauri 2: 单个结构体参数 invoke 时前端传 { args: { ... } }
+  return invoke<number>('create_book', { args: { title, sourceDescriptor } });
 }
 export async function setFavorite(bookId: number, favorite: boolean): Promise<void> {
   await invoke<void>('set_favorite', { bookId, favorite });
