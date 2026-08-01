@@ -51,6 +51,11 @@ const router = createRouter({
       name: 'search',
       component: () => import('@/views/Search.vue'),
     },
+    {
+      path: '/reader/:bookId',
+      name: 'reader',
+      component: () => import('@/views/ReaderView.vue'),
+    },
   ],
 });
 
