@@ -113,6 +113,7 @@ export default {
     viewMode: '视图',
     viewList: '列表',
     viewGrid: '网格',
+    viewDetails: '详情',
     statusBar: {
       items: '共 {count} 项',
       selected: '已选 {count} 项',
@@ -205,6 +206,13 @@ export default {
     labelCreated: '创建时间',
     labelAccessed: '访问时间',
     noFileSelected: '未选择',
+    typeDirectory: '文件夹',
+    typeFile: '文件',
+    typeArchive: '压缩包',
+    typeImage: '图片',
+    typeVideo: '视频',
+    typeAudio: '音频',
+    typeText: '文本',
   },
   error: {
     openFailed: '打开失败',

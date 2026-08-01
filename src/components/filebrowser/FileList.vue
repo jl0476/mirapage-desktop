@@ -10,6 +10,11 @@
  *                  单击 = selectFile(entry, $event) (走 store),
  *                  双击 = open, Enter = open, Space = select.
  */
+import { useI18n } from 'vue-i18n';
+import { formatBytes, formatDate } from '@/locales/helpers';
+import { useSettingsStore } from '@/stores/settings';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
+import { mimeFromName, getMimeCategory } from '@/lib/mime';
 import type { MediaEntry, ReadStatusMap } from '@/lib/sourceDescriptor';
 import { log } from '@/lib/logger';
 import FileIcon from './FileIcon.vue';
@@ -24,7 +29,7 @@ interface Props {
   /** v0.1.0-module1.22: 当前选中 entry.path 集合 (从 store.sortedEntries.filter 派生) */
   selectedPaths?: Set<string>;
   /** v0.1.0-module1.22: 当前 viewMode (list/grid) — 影响行的 layout */
-  viewMode?: 'list' | 'grid';
+  viewMode?: 'list' | 'grid' | 'details';
 }
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
@@ -39,6 +44,10 @@ interface Emits {
   (e: 'select', entry: MediaEntry, event: MouseEvent | KeyboardEvent): void;
 }
 const emit = defineEmits<Emits>();
+
+const { t } = useI18n();
+const settings = useSettingsStore();
+const fb = useFileBrowserStore();
 
 function onClick(entry: MediaEntry, event: MouseEvent) {
   log('[FileList] click', entry.name, 'isDirectory=', entry.isDirectory, 'path=', entry.path);
@@ -100,6 +109,27 @@ function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
 function isSelected(entry: MediaEntry): boolean {
   return props.selectedPaths.has(entry.path);
 }
+
+/**
+ * v0.1.0-module1.23: details 视图 Type 列.
+ * 目录 / 压缩包 / mime 大类 (image/video/audio/text) / 文件, 全部走 i18n key.
+ * 不用 mime.split('/')[0] 硬编码英文 (用户已强调).
+ */
+function getTypeLabel(entry: MediaEntry): string {
+  if (entry.isDirectory) return t('properties.typeDirectory');
+  if (entry.isArchive) return t('properties.typeArchive');
+  const mime = mimeFromName(entry.name);
+  const cat = getMimeCategory(mime);
+  if (cat === 'image') return t('properties.typeImage');
+  if (cat === 'video') return t('properties.typeVideo');
+  if (cat === 'audio') return t('properties.typeAudio');
+  if (cat === 'text') return t('properties.typeText');
+  return t('properties.typeFile');
+}
+
+/** v0.1.0-module1.23: 列头排序箭头 (inline 子组件, 复用 ICON_ARROW_UP/DOWN 路径) */
+const ICON_ARROW_UP = 'M5 12l7-7 7 7';
+const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 </script>
 
 <template>
@@ -149,7 +179,7 @@ function isSelected(entry: MediaEntry): boolean {
     </div>
   </ul>
   <ul
-    v-else
+    v-else-if="viewMode === 'list'"
     :class="['filelist flex-1 min-h-0 overflow-y-auto list-none py-1 m-0 flex flex-col gap-px transition-opacity duration-100', { loading }]"
     data-test="filelist"
     data-view="list"
@@ -187,13 +217,166 @@ function isSelected(entry: MediaEntry): boolean {
       >{{ $t(markFor(entry) === 'finished' ? 'fileBrowser.status.finished' : 'fileBrowser.status.reading') }}</span>
     </li>
   </ul>
+
+  <!-- v0.1.0-module1.23: Details 视图 (Windows 资源管理器多列布局) -->
+  <div
+    v-else-if="viewMode === 'details'"
+    class="details-view flex-1 min-h-0 flex flex-col overflow-y-auto"
+    data-test="filelist"
+    data-view="details"
+    aria-label="Directory contents"
+  >
+    <!-- sticky 表头 (列头可点击排序) -->
+    <div
+      class="details-header sticky top-0 z-10 bg-surface border-b border-white/5 px-3 py-1.5 grid items-center gap-2 text-xs text-text-muted select-none"
+      style="grid-template-columns: 28px 1fr 160px 120px 100px 110px"
+      role="row"
+    >
+      <span aria-hidden="true" />
+      <button
+        type="button"
+        class="text-left truncate hover:text-text-primary transition-colors"
+        data-test="details-sort-name"
+        @click="fb.setSortField('name')"
+      >
+        {{ t('properties.labelName') }}
+        <svg v-if="fb.sortField === 'name'" width="9" height="9" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"
+             class="inline-block ml-1 -mt-0.5" aria-hidden="true">
+          <path :d="fb.sortAscending ? ICON_ARROW_UP : ICON_ARROW_DOWN" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="text-right hover:text-text-primary transition-colors"
+        data-test="details-sort-modified"
+        @click="fb.setSortField('modifiedAt')"
+      >
+        {{ t('properties.labelModified') }}
+        <svg v-if="fb.sortField === 'modifiedAt'" width="9" height="9" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"
+             class="inline-block ml-1 -mt-0.5" aria-hidden="true">
+          <path :d="fb.sortAscending ? ICON_ARROW_UP : ICON_ARROW_DOWN" />
+        </svg>
+      </button>
+      <span
+        class="text-center"
+        data-test="details-header-type"
+      >{{ t('properties.labelType') }}</span>
+      <button
+        type="button"
+        class="text-right hover:text-text-primary transition-colors"
+        data-test="details-sort-size"
+        @click="fb.setSortField('size')"
+      >
+        {{ t('properties.labelSize') }}
+        <svg v-if="fb.sortField === 'size'" width="9" height="9" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"
+             class="inline-block ml-1 -mt-0.5" aria-hidden="true">
+          <path :d="fb.sortAscending ? ICON_ARROW_UP : ICON_ARROW_DOWN" />
+        </svg>
+      </button>
+      <span
+        class="text-right"
+        data-test="details-header-status"
+      >{{ t('fileBrowser.status.reading') }}/{{ t('fileBrowser.status.finished') }}</span>
+    </div>
+
+    <!-- 行 -->
+    <ul class="list-none m-0 p-0">
+      <li
+        v-for="entry in entries"
+        :key="entry.path"
+        class="details-row grid items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
+        :class="{
+          'is-directory': entry.isDirectory,
+          'is-archive': entry.isArchive,
+          'is-finished': markFor(entry) === 'finished',
+          'is-reading': markFor(entry) === 'reading',
+          'is-selected': isSelected(entry),
+        }"
+        :data-status="markFor(entry)"
+        :data-test="'row' + (markFor(entry) !== 'none' ? '-' + markFor(entry) : '')"
+        style="grid-template-columns: 28px 1fr 160px 120px 100px 110px"
+        @click="onClick(entry, $event)"
+        @dblclick="onDblClick(entry)"
+        @keydown="onKeydown(entry, $event)"
+        @contextmenu="onContextMenu(entry, $event)"
+      >
+        <span class="icon" :class="iconClass(entry)" aria-hidden="true">
+          <FileIcon :type="iconType(entry)" />
+        </span>
+        <span class="name truncate text-text-primary" :title="entry.name">{{ entry.name }}</span>
+        <span class="text-right text-text-secondary font-mono">
+          {{ entry.modifiedAt ? formatDate(entry.modifiedAt * 1000, settings.locale) : '—' }}
+        </span>
+        <span
+          class="text-center text-text-secondary"
+          :data-test="`details-type-${entry.path}`"
+        >{{ getTypeLabel(entry) }}</span>
+        <span
+          class="text-right text-text-secondary font-mono"
+          :data-test="`details-size-${entry.path}`"
+        >{{ entry.isDirectory ? '—' : formatBytes(entry.size) }}</span>
+        <span class="text-right">
+          <span
+            v-if="markFor(entry) === 'reading'"
+            class="status-badge reading"
+            data-test="details-status-reading"
+          >{{ t('fileBrowser.status.reading') }}</span>
+          <span
+            v-else-if="markFor(entry) === 'finished'"
+            class="status-badge finished"
+            data-test="details-status-finished"
+          >{{ t('fileBrowser.status.finished') }}</span>
+        </span>
+      </li>
+    </ul>
+  </div>
 </template>
 
 <style scoped>
 .filelist.loading,
+.details-view.loading,
 .grid-view.loading {
   pointer-events: none;
   opacity: 0.55;
+}
+
+/* ─── 行 (details view, v0.1.0-module1.23) ──── */
+.details-header button {
+  cursor: pointer;
+  transition: color 120ms var(--ease-out);
+}
+.details-row {
+  border-bottom: 1px solid transparent;
+  transition: background 120ms var(--ease-out);
+}
+.details-row:hover {
+  background: var(--color-surface-light);
+  color: var(--color-text-primary);
+}
+.details-row.is-selected {
+  background: rgb(99 102 241 / 0.18);
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+.status-badge {
+  font-size: 9px;
+  font-weight: 500;
+  padding: 1px 5px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  display: inline-block;
+  line-height: 1.4;
+}
+.status-badge.reading {
+  background: rgb(99 102 241 / 0.18);
+  color: var(--color-status-reading);
+}
+.status-badge.finished {
+  background: rgb(52 211 153 / 0.15);
+  color: var(--color-status-finished);
 }
 
 /* ─── 行 (list view) ───────────────────────────────── */

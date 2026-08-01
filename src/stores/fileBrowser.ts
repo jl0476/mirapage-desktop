@@ -24,7 +24,7 @@ export type FileBrowserError =
   | { kind: 'permissionDenied'; message: string }
   | { kind: 'io'; message: string };
 
-export type ViewMode = 'list' | 'grid';
+export type ViewMode = 'list' | 'grid' | 'details';
 
 export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);

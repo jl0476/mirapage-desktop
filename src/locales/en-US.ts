@@ -112,6 +112,7 @@ export default {
     viewMode: 'View',
     viewList: 'List',
     viewGrid: 'Grid',
+    viewDetails: 'Details',
     statusBar: {
       items: '{count} items',
       selected: '{count} selected',
@@ -204,6 +205,13 @@ export default {
     labelCreated: 'Created',
     labelAccessed: 'Accessed',
     noFileSelected: 'No selection',
+    typeDirectory: 'Folder',
+    typeFile: 'File',
+    typeArchive: 'Archive',
+    typeImage: 'Image',
+    typeVideo: 'Video',
+    typeAudio: 'Audio',
+    typeText: 'Text',
   },
   error: {
     openFailed: 'Failed to open',

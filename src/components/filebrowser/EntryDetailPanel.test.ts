@@ -53,23 +53,35 @@ describe('EntryDetailPanel.vue', () => {
     expect(html).toContain('C:/x/photo.jpg');
   });
 
-  it('文件夹: size 显示 —, type = folder', () => {
+  it('文件夹: size 显示 —, type = 文件夹 (i18n)', () => {
     const w = mount(EntryDetailPanel, {
       props: { entry: entry('subdir', { isDirectory: true, size: 0 }), rootPath: 'C:/x' },
       global: { plugins: [i18n] },
     });
     const html = w.html();
-    expect(html).toContain('folder');
+    expect(html).toContain('文件夹');
     expect(html).toContain('—'); // size 为 '—'
   });
 
-  it('压缩包: type = archive', () => {
+  it('压缩包: type = 压缩包 (i18n)', () => {
     const w = mount(EntryDetailPanel, {
       props: { entry: entry('comic.cbz', { isArchive: true }), rootPath: 'C:/x' },
       global: { plugins: [i18n] },
     });
     const html = w.html();
-    expect(html).toContain('archive');
+    expect(html).toContain('压缩包');
+  });
+
+  it('目录不显示扩展名 (避免误识别名字里的 \'.\')', () => {
+    const w = mount(EntryDetailPanel, {
+      props: { entry: entry('VOL.11 5 NIKKE', { isDirectory: true }), rootPath: 'C:/x' },
+      global: { plugins: [i18n] },
+    });
+    const html = w.html();
+    // 目录的 extension 字段必须显示 '—', 不是 '11 5 nikke'
+    const m = html.match(/<dd[^>]*>([^<]+)<\/dd>/g);
+    expect(m).toBeTruthy();
+    expect(m!.some((s) => s.includes('—'))).toBe(true);
   });
 
   it('无扩展名文件: extension 显示 —', () => {

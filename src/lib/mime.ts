@@ -44,3 +44,20 @@ export function mimeFromName(name: string): string | null {
       return null;
   }
 }
+
+/**
+ * 把 MIME 字符串 (e.g. 'image/jpeg') 归类到大类 (e.g. 'image').
+ * 用于 details 视图 Type 列的 i18n 翻译键生成.
+ *
+ *   getMimeCategory('image/jpeg')  → 'image'
+ *   getMimeCategory('video/mp4')  → 'video'
+ *   getMimeCategory('audio/mp3')  → 'audio'
+ *   getMimeCategory('text/plain')  → 'text'
+ *   getMimeCategory('application/x')  → 'application'
+ *   getMimeCategory(null)         → null
+ */
+export function getMimeCategory(mime: string | null): string | null {
+  if (!mime) return null;
+  const slash = mime.indexOf('/');
+  return slash === -1 ? null : mime.slice(0, slash);
+}

@@ -9,7 +9,7 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatBytes, formatDate } from '@/locales/helpers';
 import { useSettingsStore } from '@/stores/settings';
-import { extensionOf, mimeFromName } from '@/lib/mime';
+import { extensionOf, mimeFromName, getMimeCategory } from '@/lib/mime';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 interface Props {
@@ -24,10 +24,26 @@ const settings = useSettingsStore();
 const display = computed(() => {
   if (!props.entry) return null;
   const e = props.entry;
-  const ext = extensionOf(e.name);
+  // 目录不显示扩展名 (避免名字里的 '.' 误识别, e.g. "VOL.11")
+  // 压缩包显示真实扩展 (.cbz / .zip 等); 普通文件显示扩展
+  const ext =
+    e.isDirectory
+      ? '—'
+      : extensionOf(e.name) ?? '—';
   const mime = mimeFromName(e.name);
-  const type =
-    e.isDirectory ? 'folder' : e.isArchive ? 'archive' : mime ?? 'file';
+  // 类型: 目录 / 压缩包 / mime 大类 / 文件 (全部走 i18n key, 不用 mime.split('/')[0] 硬编码英文)
+  const type = e.isDirectory
+    ? t('properties.typeDirectory')
+    : e.isArchive
+      ? t('properties.typeArchive')
+      : (() => {
+          const cat = getMimeCategory(mime);
+          if (cat === 'image') return t('properties.typeImage');
+          if (cat === 'video') return t('properties.typeVideo');
+          if (cat === 'audio') return t('properties.typeAudio');
+          if (cat === 'text') return t('properties.typeText');
+          return t('properties.typeFile');
+        })();
   const location = props.rootPath
     ? `${props.rootPath}/${e.path}`
     : e.path;
@@ -36,7 +52,7 @@ const display = computed(() => {
     location,
     size: e.isDirectory ? '—' : formatBytes(e.size),
     type,
-    extension: ext ?? '—',
+    extension: ext,
     mime: mime ?? '—',
     modified: e.modifiedAt ? formatDate(e.modifiedAt * 1000, settings.locale) : '—',
     created: '—',
