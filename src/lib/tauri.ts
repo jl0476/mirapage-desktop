@@ -103,6 +103,19 @@ export interface BookItem {
 export async function listLibrary(): Promise<BookItem[]> {
   return invoke<BookItem[]>('list_library');
 }
+
+/**
+ * v0.1.0-module2.0 触发阅读入口:
+ * - create_book(title, sourceDescriptor) → 返回新 bookId
+ * - Rust 端 book 表 + 立即 INSERT, 主键 id 自增
+ * - 调用方拿到 bookId 后, 写入 history (recordHistory) 然后 push /reader/:bookId
+ */
+export async function createBook(
+  title: string,
+  sourceDescriptor: SourceDescriptor,
+): Promise<number> {
+  return invoke<number>('create_book', { title, sourceDescriptor });
+}
 export async function setFavorite(bookId: number, favorite: boolean): Promise<void> {
   await invoke<void>('set_favorite', { bookId, favorite });
 }

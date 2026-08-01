@@ -25,6 +25,8 @@ const props = defineProps<Props>();
 
 interface Emits {
   (e: 'close'): void;
+  (e: 'read-now', entry: MediaEntry): void;
+  (e: 'add-to-library', entry: MediaEntry): void;
 }
 const emit = defineEmits<Emits>();
 
@@ -102,6 +104,24 @@ async function onResetProgress() {
     class="fixed z-[1100] bg-surface-4 border border-white/10 rounded-md py-1 shadow-xl backdrop-blur-xl min-w-[160px] text-xs"
     :style="{ left: x + 'px', top: y + 'px' }"
   >
+    <!-- v0.1.0-module2.0: 目录专属 read-now / add-to-library (Android 风格) -->
+    <template v-if="entry.isDirectory">
+      <button
+        data-test="ctx-read-now"
+        class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
+        @click="emit('read-now', entry); emit('close')"
+      >
+        ▶ {{ t('fileBrowser.contextMenu.readNow') }}
+      </button>
+      <button
+        data-test="ctx-add-to-library"
+        class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
+        @click="emit('add-to-library', entry); emit('close')"
+      >
+        ＋ {{ t('fileBrowser.contextMenu.addToLibrary') }}
+      </button>
+      <div class="my-1 mx-2 h-px bg-white/5" aria-hidden="true" />
+    </template>
     <button
       data-test="reset-progress"
       class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"

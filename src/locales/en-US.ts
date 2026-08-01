@@ -125,7 +125,16 @@ export default {
     },
     contextMenu: {
       resetProgress: 'Reset reading progress',
+      readNow: 'Read now',
+      addToLibrary: 'Add to library',
     },
+    // v0.1.0-module2.0: read trigger / add to library (no double-click)
+    readNow: 'Read now',
+    addToLibrary: 'Add to library',
+    inLibrary: 'In library',
+    downloadAll: 'Download all',
+    downloadAllUnavailable: 'Local files do not need download',
+    noImagesInFolder: 'No images in this folder',
     hideFinished: 'Hide finished',
     showFinished: 'Show finished',
     // v0.1.0-module1.22: viewMode + statusBar

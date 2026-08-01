@@ -126,7 +126,16 @@ export default {
     },
     contextMenu: {
       resetProgress: '重置阅读进度',
+      readNow: '立即阅读',
+      addToLibrary: '加入书库',
     },
+    // v0.1.0-module2.0: 触发阅读 / 加入书库 (不靠双击)
+    readNow: '立即阅读',
+    addToLibrary: '加入书库',
+    inLibrary: '已在书库',
+    downloadAll: '下载全部',
+    downloadAllUnavailable: '本地文件无需下载',
+    noImagesInFolder: '此目录没有图片',
     hideFinished: '隐藏已读完',
     showFinished: '显示已读完',
     // v0.1.0-module1.22: 视图模式 + 状态栏

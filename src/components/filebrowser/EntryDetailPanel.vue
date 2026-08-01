@@ -4,6 +4,11 @@
  *
  * v0.1.0-module1.22: 选中 1 项时显示在 FileList 右侧.
  * 全部前端派生 (不调 Rust IPC), 字段缺失显示 '—'.
+ *
+ * v0.1.0-module2.0: 选中目录时显示 3 CTA (参考 Android 底部 「下载全部/立即阅读/加入书库」):
+ *  - 立即阅读 (主按钮, 仅目录 enable)
+ *  - 加入书库 (次按钮, 仅目录 enable)
+ *  - 下载全部 (stub, 永远 disabled, 显示 tooltip)
  */
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -17,6 +22,10 @@ interface Props {
   rootPath: string | null;
 }
 const props = defineProps<Props>();
+const emit = defineEmits<{
+  (e: 'read-now'): void;
+  (e: 'add-to-library'): void;
+}>();
 
 const { t } = useI18n();
 const settings = useSettingsStore();
@@ -59,6 +68,8 @@ const display = computed(() => {
     accessed: '—',
   };
 });
+
+const isDirectory = computed(() => props.entry?.isDirectory === true);
 </script>
 
 <template>
@@ -104,6 +115,46 @@ const display = computed(() => {
       <dt class="text-text-muted">{{ t('properties.labelAccessed') }}</dt>
       <dd class="text-text-tertiary font-mono">{{ display.accessed }}</dd>
     </dl>
+
+    <!-- v0.1.0-module2.0: 目录专属 3 CTA (Android 模式移植) -->
+    <div
+      v-if="isDirectory"
+      class="flex flex-col gap-1.5 pt-3 border-t border-white/5"
+      data-test="entry-detail-actions"
+    >
+      <button
+        type="button"
+        class="w-full px-3 py-2 rounded text-xs font-semibold text-white
+               bg-accent hover:bg-accent-hover transition-colors
+               disabled:opacity-40 disabled:cursor-not-allowed"
+        data-test="entry-detail-read-now"
+        :disabled="!isDirectory"
+        @click="emit('read-now')"
+      >
+        ▶ {{ t('fileBrowser.readNow') }}
+      </button>
+      <button
+        type="button"
+        class="w-full px-3 py-2 rounded text-xs text-text-secondary
+               border border-white/10 bg-surface hover:bg-surface-light hover:text-text-primary
+               transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        data-test="entry-detail-add-to-library"
+        :disabled="!isDirectory"
+        @click="emit('add-to-library')"
+      >
+        ＋ {{ t('fileBrowser.addToLibrary') }}
+      </button>
+      <button
+        type="button"
+        class="w-full px-3 py-2 rounded text-xs text-text-tertiary
+               border border-white/5 bg-surface-1 cursor-not-allowed"
+        data-test="entry-detail-download-all"
+        disabled
+        :title="t('fileBrowser.downloadAllUnavailable')"
+      >
+        ⊟ {{ t('fileBrowser.downloadAll') }}
+      </button>
+    </div>
   </aside>
   <div
     v-else

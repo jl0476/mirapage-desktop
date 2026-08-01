@@ -8,6 +8,12 @@
  *  - 单击接 store.selectFile (Ctrl/Shift 多选), 双击 emit open
  *  - 集成 StatusBar (3 段式) + EntryDetailPanel (1 选中时显示)
  *  - FileList 接收 sortedEntries (不再内部 sort)
+ *
+ * v0.1.0-module2.0: 触发阅读 / 加入书库 —
+ *  - 移除双击 emit open (双击只进目录)
+ *  - 选中目录后启用 toolbar 「立即阅读」按钮
+ *  - EntryDetailPanel 显示 3 个 CTA: 立即阅读 / 加入书库 / 下载全部 (stub)
+ *  - 右键菜单 (RowContextMenu) 加 立即阅读 / 加入书库 项
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -15,6 +21,7 @@ import { getSetting, setSetting } from '@/lib/tauri';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
+import { useReaderActions } from '@/composables/useReaderActions';
 import { log } from '@/lib/logger';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
@@ -153,6 +160,10 @@ function errorMessage(kind: string, msg: string): string {
 
 /**
  * FileList @open handler (双击进入)
+ * v0.1.0-module2.0: 双击只进目录, 不再触发 reader. 进 reader 走:
+ *  - toolbar 立即阅读按钮
+ *  - EntryDetailPanel CTA
+ *  - 右键菜单 readNow
  */
 async function onEntryOpen(entry: MediaEntry) {
   log('[FileBrowser] onEntryOpen', entry.name, 'isDirectory=', entry.isDirectory, 'lastFetchedPath=', fb.lastFetchedPath);
@@ -163,8 +174,24 @@ async function onEntryOpen(entry: MediaEntry) {
     await fb.navigate(newPath);
     return;
   }
-  emit('open', entry);
+  // 文件行: 双击也无操作 (避免误触发)
+  log('[FileBrowser] double-click on file is no-op (use right-click → read-now on containing folder)');
 }
+
+/**
+ * useReaderActions — v0.1.0-module2.0 触发阅读入口
+ *
+ * resolveRootPath: 从当前列表基础路径 (fb.lastFetchedPath) + entry.path 拼出绝对路径.
+ * 桌面端 sourceDescriptor 是 { rootPath: 绝对路径 }.
+ */
+const readerActions = useReaderActions({
+  resolveRootPath: (entry) => {
+    return fb.lastFetchedPath
+      ? `${fb.lastFetchedPath}/${entry.path}`.replace(/\/+/g, '/')
+      : entry.path;
+  },
+  buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
+});
 
 /** FileList @select handler (单击) → 走 store.selectFile 区分单选/Ctrl/Shift */
 function onEntrySelect(entry: MediaEntry, event: MouseEvent | KeyboardEvent) {
@@ -199,9 +226,30 @@ const ICON_STAR = 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25
 const ICON_FOLDER_OPEN = 'M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2';
 const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01';
 
-const emit = defineEmits<{
-  (e: 'open', entry: MediaEntry): void;
-}>();
+// v0.1.0-module2.0: emit 'open' 已废弃 (双击只进目录, 触发阅读走 useReaderActions)
+//  保留 emit 类型仅出于向后兼容 — 不再 emit
+
+// selectedEntry 已在前面声明 (line 46, 复用 store.selectedPaths + sortedEntries)
+const canReadNow = computed(() => selectedEntry.value?.isDirectory === true);
+
+function onReadNowClick() {
+  if (selectedEntry.value) {
+    void readerActions.readNow(selectedEntry.value);
+  }
+}
+function onAddToLibraryClick() {
+  // 当前 v0.1.0-module2.0: addToLibrary 等于 readNow 不导航; 暂不暴露差异
+  if (selectedEntry.value) {
+    void readerActions.addToLibrary(selectedEntry.value);
+  }
+}
+
+function onReadNowFromCtx(entry: MediaEntry) {
+  void readerActions.readNow(entry);
+}
+function onAddToLibraryFromCtx(entry: MediaEntry) {
+  void readerActions.addToLibrary(entry);
+}
 </script>
 
 <template>
@@ -286,6 +334,21 @@ const emit = defineEmits<{
         </button>
         <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
         <button
+          data-test="btn-read-now"
+          class="tb-btn text-accent"
+          :disabled="!canReadNow"
+          :title="canReadNow ? t('fileBrowser.readNow') : t('fileBrowser.noImagesInFolder')"
+          @click="onReadNowClick"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <polygon points="6 4 20 12 6 20 6 4" />
+          </svg>
+          {{ t('fileBrowser.readNow') }}
+        </button>
+        <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+        <button
           data-test="btn-hide-finished"
           class="tb-btn"
           :title="fb.hideFinished ? t('fileBrowser.showFinished') : t('fileBrowser.hideFinished')"
@@ -362,6 +425,8 @@ const emit = defineEmits<{
           :entry="selectedEntry"
           :root-path="fb.rootPath"
           class="w-72 shrink-0 overflow-y-auto"
+          @read-now="onReadNowClick"
+          @add-to-library="onAddToLibraryClick"
         />
       </div>
 
@@ -426,6 +491,8 @@ const emit = defineEmits<{
       :x="ctxMenu.x"
       :y="ctxMenu.y"
       @close="onCtxClose"
+      @read-now="onReadNowFromCtx"
+      @add-to-library="onAddToLibraryFromCtx"
     />
   </main>
 </template>
