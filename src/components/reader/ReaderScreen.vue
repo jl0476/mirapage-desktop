@@ -25,6 +25,7 @@ import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
+import { log } from '@/lib/logger';
 import SinglePageViewer from './SinglePageViewer.vue';
 import DoublePageViewer from './DoublePageViewer.vue';
 import ReaderOverlay from './ReaderOverlay.vue';
@@ -61,7 +62,10 @@ const finalSpreads = computed(() => {
 
 // 第一次 mount 时 openBook 一次 (ReaderView 通常已 open 过, 这是兜底)
 onMounted(() => {
+  log('[ReaderScreen] mount, store.bookId=', store.bookId, 'status=', store.status,
+    'pages.length=', store.pages.length, 'spreads.length=', store.spreads.length);
   if (store.bookId === null) {
+    log('[ReaderScreen] store not initialized, calling openBook fallback');
     store.openBook({
       bookId: store.bookId ?? 0,
       title: props.title,
@@ -103,7 +107,9 @@ const totalPages = computed(() => props.pageUrls.length);
 // 单页模式只看 spread 首张图
 const singlePageUrl = computed(() => {
   const idx = finalSpreads.value[store.currentSpreadIndex]?.start ?? 0;
-  return props.pageUrls[idx] ?? '';
+  const url = props.pageUrls[idx] ?? '';
+  log('[ReaderScreen] singlePageUrl', { idx, url, totalPages: props.pageUrls.length });
+  return url;
 });
 
 function onPrev() {

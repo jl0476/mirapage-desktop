@@ -51,38 +51,47 @@ async function loadBook() {
   status.value = 'loading';
   errorMessage.value = '';
   const id = bookId.value;
+  log('[ReaderView] loadBook start, bookId=', id);
   if (!id || isNaN(id)) {
     router.push('/');
     return;
   }
   try {
+    log('[ReaderView] calling listHistory');
     const history = await listHistory();
+    log('[ReaderView] listHistory returned', history.length, 'entries');
     const entry = history.find((h) => h.bookId === id) as unknown as { bookId: number; sourceDescriptor: { rootPath: string }; title?: string } | undefined;
     if (!entry) {
+      log('[ReaderView] no entry found for bookId', id, 'history=', history.map((h) => ({ id: h.bookId, sd: h.sourceDescriptor })));
       status.value = 'error';
       errorMessage.value = `找不到 bookId ${id} 的历史记录`;
       return;
     }
+    log('[ReaderView] found entry, sourceDescriptor=', JSON.stringify(entry.sourceDescriptor));
     const path = entry.sourceDescriptor?.rootPath ?? '';
+    log('[ReaderView] resolved path=', path);
     if (!path) {
       status.value = 'error';
       errorMessage.value = 'source descriptor 缺 rootPath';
       return;
     }
+    log('[ReaderView] setRoot', path);
     await fileBrowser.setRoot(path);
     const entries: MediaEntry[] = fileBrowser.entries;
+    log('[ReaderView] entries from setRoot', entries.length);
     const IMAGES = /\.(jpe?g|png|webp|bmp|gif|avif|heic|heif)$/i;
     const imageEntries = entries
       .filter((e) => !e.isDirectory && !e.isArchive && IMAGES.test(e.name))
       .map((e) => e.name)
       .sort();
+    log('[ReaderView] imageEntries', imageEntries.length, imageEntries.slice(0, 3));
     if (imageEntries.length === 0) {
       status.value = 'error';
       errorMessage.value = `${path} 下找不到图片`;
       return;
     }
     pageUrls.value = imageEntries.map((name) => convertFileSrc(`${path}/${name}`));
-    log('[ReaderView] loaded', imageEntries.length, 'pages');
+    log('[ReaderView] pageUrls sample', pageUrls.value[0]);
     reader.openBook({
       bookId: id,
       title: entry.title ?? '无标题',
@@ -90,6 +99,7 @@ async function loadBook() {
       spreads: SpreadPlanner.plan(pageUrls.value.length, true),
       initialSpreadIndex: 0,
     });
+    log('[ReaderView] reader.openBook done');
     status.value = 'ready';
   } catch (e) {
     log('[ReaderView] loadBook error', e);

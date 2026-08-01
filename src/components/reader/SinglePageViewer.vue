@@ -10,6 +10,7 @@
  */
 import OpenSeadragon from 'openseadragon';
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { log } from '@/lib/logger';
 
 interface Props {
   imageUrl: string;
@@ -20,7 +21,11 @@ const containerRef = ref<HTMLDivElement | null>(null);
 let viewer: OpenSeadragon.Viewer | null = null;
 
 onMounted(() => {
-  if (!containerRef.value) return;
+  if (!containerRef.value) {
+    log('[SinglePageViewer] mount: containerRef is null');
+    return;
+  }
+  log('[SinglePageViewer] mount: init OSD with url', props.imageUrl);
   viewer = OpenSeadragon({
     element: containerRef.value,
     tileSources: { type: 'image', url: props.imageUrl },

@@ -57,9 +57,18 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     try {
       const history = await listHistory();
       const existing = history.find((h) => {
-        const sd = h.sourceDescriptor as unknown;
+        const sd = h.sourceDescriptor;
+        // Rust 端已 parse JSON, sd 可能是 object 或 string (兼容旧数据)
         if (sd && typeof sd === 'object' && 'rootPath' in sd) {
           return (sd as { rootPath: string }).rootPath === rootPath;
+        }
+        if (typeof sd === 'string') {
+          try {
+            const parsed = JSON.parse(sd);
+            return parsed?.rootPath === rootPath;
+          } catch {
+            return false;
+          }
         }
         return false;
       });

@@ -15,6 +15,7 @@
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import { listDirectory } from '@/lib/tauri';
+import { log } from '@/lib/logger';
 import { sortEntries, type SortField } from '@/lib/fileSort';
 import { getSetting, setSetting } from '@/lib/tauri';
 import type { MediaEntry, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
@@ -51,11 +52,15 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     if (rootPath.value === null) return;
     loading.value = true;
     error.value = null;
+    log('[fileBrowser] fetch', { rootPath: rootPath.value, path });
     try {
-      entries.value = await listDirectory(toDescriptor(rootPath.value), path);
+      const result = await listDirectory(toDescriptor(rootPath.value), path);
+      log('[fileBrowser] listDirectory returned', result.length, 'entries');
+      entries.value = result;
       lastFetchedPath.value = path;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      log('[fileBrowser] fetch error', msg);
       error.value = { kind: 'io', message: msg };
     } finally {
       loading.value = false;

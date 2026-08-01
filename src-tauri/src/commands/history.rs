@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct HistoryItem {
     pub book_id: i64,
-    pub source_descriptor: String, // JSON
+    /// source_descriptor 已是 JSON 对象 (前端可直接读 type / rootPath)
+    pub source_descriptor: serde_json::Value,
     pub last_page: Option<i64>,
     pub last_read_at: i64,
 }
@@ -27,9 +28,13 @@ pub fn list_history(db: tauri::State<crate::db::Db>) -> Result<Vec<HistoryItem>,
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
+            // 解析 source_descriptor JSON 字符串为 Value, 前端可直接读 {type, rootPath}
+            let sd_str: String = row.get(1)?;
+            let sd_value: serde_json::Value = serde_json::from_str(&sd_str)
+                .unwrap_or(serde_json::Value::Null);
             Ok(HistoryItem {
                 book_id: row.get::<_, i64>(0)?,
-                source_descriptor: row.get::<_, String>(1)?,
+                source_descriptor: sd_value,
                 last_page: row.get::<_, Option<i64>>(2)?,
                 last_read_at: row.get::<_, i64>(3)?,
             })
