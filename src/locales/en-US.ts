@@ -97,6 +97,16 @@ export default {
     shortcutSaved: 'Shortcut saved',
     noShortcut: 'No shortcut selected',
     goShortcuts: 'Go to shortcuts',
+    // v0.1.0-module1.21: reading status + reset + hide
+    status: {
+      finished: 'Finished',
+      reading: 'Reading',
+    },
+    contextMenu: {
+      resetProgress: 'Reset reading progress',
+    },
+    hideFinished: 'Hide finished',
+    showFinished: 'Show finished',
   },
   library: {
     title: 'Library',

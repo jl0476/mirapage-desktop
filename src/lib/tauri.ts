@@ -114,12 +114,41 @@ export interface ProgressItem {
   readerMode: 'single' | 'double';
   updatedAt: number;
 }
+/**
+ * 保存阅读进度。
+ * finished 语义：
+ * - true: 翻到末页（永久 true，翻回不清零）
+ * - false: 主动重置（清 browse_history）
+ * - undefined: 普通翻页，保留已有 finished 值
+ */
 export async function saveProgress(
   bookId: number,
   page: number,
   readerMode: 'single' | 'double',
+  finished?: boolean,
 ): Promise<void> {
-  await invoke<void>('save_progress', { bookId, page, readerMode });
+  await invoke<void>('save_progress', {
+    bookId,
+    page,
+    readerMode,
+    finished: finished ?? null,
+  });
+}
+
+/**
+ * 手动标记 finished (右键菜单「重置阅读进度」用)。
+ * finished=false 时 Rust 端会清 browse_history。
+ */
+export async function markFinished(bookId: number, finished: boolean): Promise<void> {
+  await invoke<void>('mark_finished', { bookId, finished });
+}
+
+/**
+ * 返回所有 progress.finished 映射 { book_id: bool }。
+ * key 是 i64 字符串 (与 Rust HashMap<String, bool> 一致)。
+ */
+export async function listProgressFinished(): Promise<Record<string, boolean>> {
+  return invoke<Record<string, boolean>>('list_progress_finished');
 }
 
 // ─── Tags (Phase 4) ─────────────────────────────────────────────────────

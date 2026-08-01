@@ -5,9 +5,13 @@
  * 翻页: nextPage / prevPage / jumpToSpread
  * 跨卷触发累计: accumulateContinuePull (SWIPE 模式末页继续划)
  * 进度持久化防抖: 500ms debounce (DESIGN §12.4 进度保存策略)
+ *
+ * v0.1.0-module1.21: 末页翻到时持久化 finished=true (与 perfect-viewer 一致)
  */
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
+import { saveProgress } from '@/lib/tauri';
+import { log } from '@/lib/logger';
 
 export type ReaderStatus = 'idle' | 'ready' | 'error';
 export type ReaderErrorKind =
@@ -68,7 +72,13 @@ export const useReaderStore = defineStore('reader', () => {
     if (debounceTimer !== null) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       if (pendingEmit !== null) {
-        for (const listener of listeners) listener(pendingEmit);
+        const info = pendingEmit;
+        // 末页判定：finished=true (永久 true, Rust 端保证不降级)
+        const isLast = info.spreadIndex >= spreads.value.length - 1;
+        saveProgress(info.bookId, info.page, 'single', isLast ? true : undefined).catch(
+          (e) => log('[reader] saveProgress failed', e),
+        );
+        for (const listener of listeners) listener(info);
       }
       pendingEmit = null;
       debounceTimer = null;

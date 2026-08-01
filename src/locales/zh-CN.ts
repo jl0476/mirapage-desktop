@@ -98,6 +98,16 @@ export default {
     shortcutSaved: '快捷方式已保存',
     noShortcut: '未选快捷方式',
     goShortcuts: '前往快捷方式',
+    // v0.1.0-module1.21: 阅读状态 + 重置 + 隐藏
+    status: {
+      finished: '已读完',
+      reading: '阅读中',
+    },
+    contextMenu: {
+      resetProgress: '重置阅读进度',
+    },
+    hideFinished: '隐藏已读完',
+    showFinished: '显示已读完',
   },
   library: {
     title: '书架',

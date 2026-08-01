@@ -54,6 +54,12 @@
   --color-error: #f87171;
   --color-info: #22d3ee;
 
+  /* 阅读状态 (v0.1.0-module1.21) — 目录级染色源
+   * FINISHED → success 绿
+   * READING → accent indigo (复用) */
+  --color-status-finished: #34d399;
+  --color-status-reading: #6366f1;
+
   /* Radius */
   --radius-xs: 3px;
   --radius-sm: 4px;

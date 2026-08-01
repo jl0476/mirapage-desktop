@@ -36,6 +36,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 3 {
+        apply_003_finished_flag(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (3, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -182,6 +190,18 @@ fn apply_002_shortcuts(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Migration 003 — progress 表加 `finished` 列
+///
+/// 参考 perfect-viewer `ProgressEntity.finished` 字段：
+/// - 已翻到末页 = `finished=1`，永久 true（翻回不清零）
+/// - reader 末页判定后由 `commands::progress::save_progress` 写入
+fn apply_003_finished_flag(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE progress ADD COLUMN finished INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,5 +256,37 @@ mod tests {
             [],
         );
         assert!(r.is_err(), "重复 root_path 应违反 UNIQUE");
+    }
+
+    #[test]
+    fn migration_003_adds_finished_flag() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_001_init(&conn).unwrap();
+        apply_003_finished_flag(&conn).unwrap();
+
+        // finished 列存在
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(progress)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(cols.contains(&"finished".to_string()), "progress 应有 finished 列");
+
+        // DEFAULT 0: 新插入行 finished=0
+        conn.execute(
+            "INSERT INTO progress (book_id, page, reader_mode, updated_at) VALUES (1, 0, 'single', 100)",
+            [],
+        )
+        .unwrap();
+        let finished: i32 = conn
+            .query_row(
+                "SELECT finished FROM progress WHERE book_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(finished, 0, "新行 finished 默认 0");
     }
 }

@@ -61,6 +61,8 @@ pub fn run() {
             commands::library::set_favorite,
             commands::library::create_book,
             commands::progress::save_progress,
+            commands::progress::mark_finished,
+            commands::progress::list_progress_finished,
             commands::tags::list_tags,
             commands::tags::create_tag,
             commands::tags::delete_tag,

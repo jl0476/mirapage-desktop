@@ -8,25 +8,61 @@
  *   - 旧 var(--accent) / var(--surface-1) 改用新 --color-* token
  *   - 工具栏 / save dialog 用 indigo accent + glassmorphism
  *   - empty state / error toast 用 Xplorer 风格 + glow
+ *
+ * v0.1.0-module1.21: 阅读状态染色 —
+ *   - mount 时拉 readStatus.marks
+ *   - 给 FileList 传 marks prop (key = historyKey + '|' + entry.path)
+ *   - toolbar 加"隐藏已读完" Eye/EyeOff toggle
+ *   - 右键菜单 "重置阅读进度" 通过 markFinished(false) + refresh marks
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getSetting, setSetting } from '@/lib/tauri';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
+import { useReadStatusStore } from '@/stores/readStatus';
 import { log } from '@/lib/logger';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
+import RowContextMenu from './RowContextMenu.vue';
+import type { MediaEntry, ReadStatusMap } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
 const fb = useFileBrowserStore();
 const shortcuts = useShortcutsStore();
+const readStatus = useReadStatusStore();
 
 const showSaveDialog = ref(false);
 const saveLabel = ref('');
+const hideFinished = ref(false);
+const HIDE_FINISHED_KEY = 'fb_hide_finished';
+
+// 右键菜单状态
+const ctxMenu = ref<{ entry: MediaEntry; x: number; y: number } | null>(null);
 
 const canSave = computed(() => fb.rootPath !== null);
 const canUp = computed(() => fb.currentPath !== '');
+
+/**
+ * v0.1.0-module1.21: marks 派生.
+ * 直接返回 readStatus.marks — FileList 行按 entry.path 后缀匹配.
+ * marks map: key = `${rootPath}|${bookId}` (来自 readStatus store),
+ * value = 'reading' | 'finished'.
+ * 当前 fileBrowser 只支持 local, 一层目录下 rootPath 唯一.
+ */
+const marksForCurrent = computed<ReadStatusMap>(() => {
+  return readStatus.marks;
+});
+
+const visibleEntries = computed<MediaEntry[]>(() => {
+  if (!hideFinished.value) return fb.entries;
+  return fb.entries.filter((e) => {
+    if (!e.isDirectory && !e.isArchive) return true;
+    if (!fb.rootPath) return true;
+    const matched = Object.entries(readStatus.marks).find(([k]) => k.startsWith(`${fb.rootPath}|`) && k.endsWith(`|${e.path}`));
+    return matched?.[1] !== 'finished';
+  });
+});
 
 const emit = defineEmits<{
   (e: 'open', entry: import('@/lib/sourceDescriptor').MediaEntry): void;
@@ -36,6 +72,15 @@ const LAST_ROOT_KEY = 'file_browser_last_root';
 
 onMounted(async () => {
   await shortcuts.refresh();
+  // v0.1.0-module1.21: 拉历史 + progress 派生 marks
+  await readStatus.refresh();
+  // 读取 hide-finished 设置
+  try {
+    const stored = await getSetting(HIDE_FINISHED_KEY);
+    hideFinished.value = stored === '1';
+  } catch {
+    // silent
+  }
   // #1 启动时读上次根目录, 自动加载
   try {
     const stored = await getSetting(LAST_ROOT_KEY);
@@ -60,6 +105,15 @@ watch(
     }
   },
 );
+
+// #8 隐藏已读完 toggle 持久化
+watch(hideFinished, async (v) => {
+  try {
+    await setSetting(HIDE_FINISHED_KEY, v ? '1' : '0');
+  } catch {
+    // silent
+  }
+});
 
 async function onUp() {
   await fb.up();
@@ -160,6 +214,14 @@ async function onEntryOpen(entry: import('@/lib/sourceDescriptor').MediaEntry) {
   emit('open', entry);
 }
 
+function onRowContextMenu(entry: MediaEntry, x: number, y: number) {
+  ctxMenu.value = { entry, x, y };
+}
+
+function onCtxClose() {
+  ctxMenu.value = null;
+}
+
 /**
  * Breadcrumb @navigate handler
  * - 接收累积路径, 调 fb.navigate 重定位 currentPath
@@ -186,6 +248,8 @@ const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9
 const ICON_STAR = 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z';
 const ICON_FOLDER_OPEN = 'M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2';
 const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01';
+const ICON_EYE = 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z';
+const ICON_EYE_OFF = 'M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24M1 1l22 22';
 </script>
 
 <template>
@@ -304,6 +368,21 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
           </svg>
           {{ t('fileBrowser.saveAsShortcut') }}
         </button>
+        <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+        <button
+          data-test="btn-hide-finished"
+          class="tb-btn"
+          :title="hideFinished ? t('fileBrowser.showFinished') : t('fileBrowser.hideFinished')"
+          @click="hideFinished = !hideFinished"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path v-if="hideFinished" :d="ICON_EYE" />
+            <path v-else :d="ICON_EYE_OFF" />
+          </svg>
+          {{ hideFinished ? t('fileBrowser.showFinished') : t('fileBrowser.hideFinished') }}
+        </button>
       </header>
 
       <Breadcrumb
@@ -347,10 +426,12 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
       </p>
 
       <FileList
-        :entries="fb.entries"
+        :entries="visibleEntries"
         :loading="fb.loading"
+        :marks="marksForCurrent"
         data-test="filelist"
         @open="onEntryOpen"
+        @contextmenu="onRowContextMenu"
       />
 
       <p
@@ -404,6 +485,15 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
         </div>
       </div>
     </template>
+
+    <!-- 右键菜单 (v0.1.0-module1.21: 仅 "重置阅读进度") -->
+    <RowContextMenu
+      v-if="ctxMenu"
+      :entry="ctxMenu.entry"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      @close="onCtxClose"
+    />
   </main>
 </template>
 

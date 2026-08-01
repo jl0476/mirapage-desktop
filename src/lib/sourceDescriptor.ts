@@ -48,6 +48,19 @@ export interface MediaEntry {
   modifiedAt?: number;
 }
 
+/**
+ * 阅读状态枚举 — 目录级染色源。
+ *
+ * v0.1.0-module1.21: 参考 perfect-viewer `ReadStatus` 三态离散模型。
+ * - none: 无历史 → 不显示
+ * - reading: history 命中 + progress.finished=false → "阅读中"
+ * - finished: history 命中 + progress.finished=true → "已读完"
+ */
+export type ReadStatus = 'none' | 'reading' | 'finished';
+
+/** key 是 `descriptorId(desc) + '|' + relPath` */
+export type ReadStatusMap = Record<string, ReadStatus>;
+
 export function descriptorId(desc: SourceDescriptor): string {
   switch (desc.type) {
     case 'local':

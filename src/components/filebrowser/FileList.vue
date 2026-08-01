@@ -6,9 +6,11 @@
  * v0.1.0-module1.15+: 用 FileIcon (lucide 线条 SVG) 替代 emoji.
  * v0.1.0-module1.19: 重写样式 — 旧 var(--accent) 已废弃, 改用新 --color-* token.
  *                  FileList 行高更紧凑、hover/focus 用 indigo accent.
+ * v0.1.0-module1.21: 加 marks prop → 目录行 is-finished / is-reading 双染色 + label
+ *                  (参考 perfect-viewer FileBrowserScreen.kt:664-730 EntryRow)
  */
 import { computed } from 'vue';
-import type { MediaEntry } from '@/lib/sourceDescriptor';
+import type { MediaEntry, ReadStatusMap } from '@/lib/sourceDescriptor';
 import { naturalSort } from '@/lib/naturalSort';
 import { log } from '@/lib/logger';
 import FileIcon from './FileIcon.vue';
@@ -21,15 +23,19 @@ interface Props {
   sortAscending?: boolean;
   /** 父级 fetch 进行中. true 时整列表 pointer-events:none, 防止 race */
   loading?: boolean;
+  /** v0.1.0-module1.21: 目录级阅读状态. key 用 descriptor-prefixed (父级算), value 'reading'/'finished'. */
+  marks?: ReadStatusMap;
 }
 const props = withDefaults(defineProps<Props>(), {
   sortField: 'name',
   sortAscending: true,
   loading: false,
+  marks: () => ({}),
 });
 
 interface Emits {
   (e: 'open', entry: MediaEntry): void;
+  (e: 'contextmenu', entry: MediaEntry, x: number, y: number): void;
 }
 const emit = defineEmits<Emits>();
 
@@ -56,6 +62,12 @@ function onClick(entry: MediaEntry) {
   emit('open', entry);
 }
 
+function onContextMenu(entry: MediaEntry, e: MouseEvent) {
+  e.preventDefault();
+  log('[FileList] contextmenu', entry.name, 'x=', e.clientX, 'y=', e.clientY);
+  emit('contextmenu', entry, e.clientX, e.clientY);
+}
+
 /** 文件类型图标 type (FileIcon props) */
 function iconType(entry: MediaEntry): 'folder' | 'image' | 'archive' | 'file' {
   if (entry.isDirectory) return 'folder';
@@ -72,6 +84,23 @@ function iconClass(entry: MediaEntry): string {
   const ext = entry.name.split('.').pop()?.toLowerCase() ?? '';
   if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) return 'icon-image';
   return 'icon-default';
+}
+
+/**
+ * v0.1.0-module1.21: 行阅读状态 class (供 scoped CSS 双染色).
+ * marks prop 是 readStatus.marks: key = `${rootPath}|${bookId}`,
+ * value = 'reading' | 'finished'. 行查 marks 用 entry.path 后缀匹配
+ * (父级 FileBrowser 已经把 readStatus.marks 原样传过来).
+ */
+function markFor(entry: MediaEntry): 'none' | 'reading' | 'finished' {
+  if (!entry.isDirectory && !entry.isArchive) return 'none';
+  const pathSuffix = `|${entry.path}`;
+  for (const [k, v] of Object.entries(props.marks)) {
+    if (k.endsWith(pathSuffix) && (v === 'reading' || v === 'finished')) {
+      return v;
+    }
+  }
+  return 'none';
 }
 </script>
 
@@ -94,18 +123,31 @@ function iconClass(entry: MediaEntry): string {
       v-for="entry in sorted"
       :key="entry.path"
       class="row"
-      :class="{ 'is-directory': entry.isDirectory, 'is-archive': entry.isArchive }"
+      :class="{
+        'is-directory': entry.isDirectory,
+        'is-archive': entry.isArchive,
+        'is-finished': markFor(entry) === 'finished',
+        'is-reading': markFor(entry) === 'reading',
+      }"
       data-test="row"
+      :data-status="markFor(entry)"
       role="button"
       tabindex="0"
       @click="onClick(entry)"
       @keydown.enter="onClick(entry)"
       @keydown.space.prevent="onClick(entry)"
+      @contextmenu="onContextMenu(entry, $event)"
     >
       <span class="icon" :class="iconClass(entry)" aria-hidden="true">
         <FileIcon :type="iconType(entry)" />
       </span>
       <span class="name">{{ entry.name }}</span>
+      <span
+        v-if="markFor(entry) !== 'none'"
+        class="status"
+        :class="markFor(entry)"
+        data-test="read-status"
+      >{{ $t(markFor(entry) === 'finished' ? 'fileBrowser.status.finished' : 'fileBrowser.status.reading') }}</span>
     </li>
   </ul>
 </template>
@@ -182,5 +224,39 @@ function iconClass(entry: MediaEntry): string {
 
 .is-archive .name {
   color: var(--color-file-archive);
+}
+
+/* ─── v0.1.0-module1.21: 阅读状态双染色 (icon tint + label badge) ─── */
+.filelist > .row.is-finished .icon {
+  color: var(--color-status-finished);
+}
+.filelist > .row.is-finished .name {
+  color: var(--color-text-secondary); /* 略微暗 */
+}
+.filelist > .row.is-reading .icon {
+  color: var(--color-status-reading);
+}
+.filelist > .row.is-reading .name {
+  color: var(--color-text-primary);
+}
+
+.status {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+.status.finished {
+  background: rgb(52 211 153 / 0.15);
+  color: var(--color-status-finished);
+}
+.status.reading {
+  background: rgb(99 102 241 / 0.18);
+  color: var(--color-status-reading);
 }
 </style>

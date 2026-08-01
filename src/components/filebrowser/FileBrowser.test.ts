@@ -18,6 +18,12 @@ vi.mock('@/lib/tauri', () => ({
   listShortcuts: vi.fn(async () => []),
   createShortcut: vi.fn(async () => 1),
   deleteShortcut: vi.fn(async () => undefined),
+  getSetting: vi.fn(async () => null),
+  setSetting: vi.fn(async () => undefined),
+  listHistory: vi.fn(async () => []),
+  listProgressFinished: vi.fn(async () => ({})),
+  markFinished: vi.fn(async () => undefined),
+  saveProgress: vi.fn(async () => undefined),
 }));
 
 const mockedList = vi.mocked(listDirectory);

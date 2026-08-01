@@ -4,9 +4,21 @@
  * 防抖:onPageChanged 500ms 内多次调用合并为 1 次 saveProgress。
  *
  * 设计参考 DESIGN §12.4 + §15.6 进度保存策略。
+ *
+ * v0.1.0-module1.21: saveProgress 多了一个 finished 入参.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
+
+vi.mock('@/lib/tauri', () => ({
+  saveProgress: vi.fn(async () => undefined),
+  markFinished: vi.fn(async () => undefined),
+  listProgressFinished: vi.fn(async () => ({})),
+}));
+vi.mock('@/lib/logger', () => ({
+  log: vi.fn(),
+}));
+
 import { useReaderStore } from './reader';
 
 describe('reader store — initial state', () => {
