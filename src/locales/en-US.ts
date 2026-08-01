@@ -66,7 +66,9 @@ export default {
     noNextVolume: 'No next volume',
     noPrevVolume: 'No previous volume',
     addBookmark: 'Add bookmark',
-  },
+    prev: 'Previous',
+    next: 'Next',
+    jumpTo: 'Jump to',
     menu: {
       back: 'Back',
       title: 'Reader controls',
@@ -83,6 +85,7 @@ export default {
       slideshowPause: 'Pause',
       close: 'Close',
     },
+  },
   slideshow: {
     interval: 'Auto-advance interval (seconds)',
     direction: 'Slideshow direction',
@@ -91,6 +94,7 @@ export default {
     directionBackward: 'Backward',
     play: 'Play',
     pause: 'Pause',
+    control: 'Slideshow controls',
   },
   fileBrowser: {
     title: 'File Browser',

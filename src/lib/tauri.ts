@@ -238,3 +238,13 @@ export async function createShortcut(
 export async function deleteShortcut(id: number): Promise<void> {
   await invoke<void>('delete_shortcut', { id });
 }
+
+// ─── Reader keep-screen-on (v0.1.0-module2.0) ──────────────────────────
+/**
+ * 阅读器阻止屏幕休眠 / 自动锁屏.
+ * Windows 调 SetThreadExecutionState(ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED).
+ * macOS / Linux 暂 stub (Phase 9 跨平台分发时补).
+ */
+export async function keepScreenOn(enable: boolean): Promise<void> {
+  await invoke<void>('keep_screen_on', { enable });
+}

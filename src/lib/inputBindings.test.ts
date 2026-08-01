@@ -47,7 +47,7 @@ describe('defaultKeyBindings', () => {
   it('exposes a frozen bindings record per TouchAction', () => {
     expect(defaultKeyBindings.nextPage).toContain('ArrowRight');
     expect(defaultKeyBindings.nextPage).toContain('PageDown');
-    expect(defaultKeyBindings.nextPage).toContain(' ');
+    expect(defaultKeyBindings.slideshowToggle).toContain(' ');
     expect(defaultKeyBindings.prevPage).toContain('ArrowLeft');
     expect(defaultKeyBindings.prevPage).toContain('PageUp');
     expect(defaultKeyBindings.toggleChrome).toContain('c');
@@ -65,10 +65,10 @@ describe('defaultKeyBindings', () => {
 });
 
 describe('resolveHotkey — keyboard', () => {
-  it('maps ArrowRight / PageDown / Space to nextPage', () => {
+  it('maps ArrowRight / PageDown to nextPage, Space to slideshowToggle', () => {
     expect(resolveHotkey(keyboardEvent('ArrowRight'), defaultKeyBindings)).toBe('nextPage');
     expect(resolveHotkey(keyboardEvent('PageDown'), defaultKeyBindings)).toBe('nextPage');
-    expect(resolveHotkey(keyboardEvent(' '), defaultKeyBindings)).toBe('nextPage');
+    expect(resolveHotkey(keyboardEvent(' '), defaultKeyBindings)).toBe('slideshowToggle');
   });
 
   it('maps ArrowLeft / PageUp to prevPage', () => {

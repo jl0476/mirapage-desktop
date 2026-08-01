@@ -22,6 +22,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const slideshowIntervalMs = ref(3000);
   const slideshowLoop = ref(true);
   const slideshowDirection = ref<'forward' | 'backward'>('forward');
+  const keepScreenOn = ref(true);
 
   const initialized = ref(false);
 
@@ -37,6 +38,7 @@ export const useSettingsStore = defineStore('settings', () => {
       ['slideshow_interval_ms', (v) => (slideshowIntervalMs.value = Number(v))],
       ['slideshow_loop', (v) => (slideshowLoop.value = v === '1')],
       ['slideshow_direction', (v) => (slideshowDirection.value = v as 'forward' | 'backward')],
+      ['keep_screen_on', (v) => (keepScreenOn.value = v === '1')],
     ];
 
     for (const [key, apply] of keys) {
@@ -64,6 +66,7 @@ export const useSettingsStore = defineStore('settings', () => {
     slideshowIntervalMs,
     slideshowLoop,
     slideshowDirection,
+    keepScreenOn,
     initialized,
     // 方法
     load,

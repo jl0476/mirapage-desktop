@@ -117,4 +117,15 @@ describe('useReaderHotkeys', () => {
     mouseHandler!(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 400 }));
     expect(r.currentSpreadIndex).toBe(0);
   });
+
+  it('Space key toggles slideshow (slideshowToggle command)', async () => {
+    const { useSlideshowStore } = await import('@/stores/slideshow');
+    const slideshow = useSlideshowStore();
+    expect(slideshow.isPlaying).toBe(false);
+    useReaderHotkeys();
+    keyHandler!(new KeyboardEvent('keydown', { key: ' ' }) as unknown as KeyboardEvent);
+    expect(slideshow.isPlaying).toBe(true);
+    keyHandler!(new KeyboardEvent('keydown', { key: ' ' }) as unknown as KeyboardEvent);
+    expect(slideshow.isPlaying).toBe(false);
+  });
 });

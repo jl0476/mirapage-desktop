@@ -1,16 +1,30 @@
 /**
  * ReaderOverlay.vue 测试
- * 阅读器 UI 层：
- * - 顶栏：标题 + 页码 + 模式切换 + 主菜单
- * - 底栏：上一页 / 下一页按钮
- * - chrome 不可见时不渲染(via Esc/M/C)
- * - 点击下一页按钮 emit 'next'
- * - 点击上一页按钮 emit 'prev'
- * - 模式切换按钮 emit 'toggle-mode'
+ * v0.1.0-module2.0: 增加 slideshow 控制条 + 使用 vue-i18n
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
+import { createPinia, setActivePinia } from 'pinia';
+import { createI18n } from 'vue-i18n';
+import zhCN from '@/locales/zh-CN';
 import ReaderOverlay from './ReaderOverlay.vue';
+
+vi.mock('@/stores/slideshow', async () => {
+  const actual = await vi.importActual<typeof import('@/stores/slideshow')>('@/stores/slideshow');
+  return {
+    ...actual,
+    useSlideshowStore: () => ({
+      isPlaying: false,
+      intervalMs: 3000,
+      direction: 'forward' as const,
+      toggle: vi.fn(),
+      updateIntervalMs: vi.fn(),
+      updateDirection: vi.fn(),
+    }),
+  };
+});
+
+const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
 function makeWrapper(propsOverride: Record<string, unknown> = {}) {
   return mount(ReaderOverlay, {
@@ -20,12 +34,18 @@ function makeWrapper(propsOverride: Record<string, unknown> = {}) {
       totalPages: 24,
       mode: 'single',
       chromeVisible: true,
+      hovered: false,
       ...propsOverride,
     },
+    global: { plugins: [i18n] },
   });
 }
 
 describe('ReaderOverlay.vue', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
   it('renders title and page indicator when chrome visible', () => {
     const w = makeWrapper();
     expect(w.find('[data-test="title"]').text()).toBe('漫画 A');
@@ -35,7 +55,8 @@ describe('ReaderOverlay.vue', () => {
 
   it('renders nothing when chrome not visible', () => {
     const w = makeWrapper({ chromeVisible: false });
-    expect(w.find('[data-test="overlay"]').exists()).toBe(false);
+    expect(w.find('[data-test="overlay-top"]').exists()).toBe(false);
+    expect(w.find('[data-test="overlay-bottom"]').exists()).toBe(false);
   });
 
   it('emits "next" when next button clicked', async () => {
@@ -66,10 +87,15 @@ describe('ReaderOverlay.vue', () => {
     expect(w.emitted('jump')![0]).toEqual([12]);
   });
 
-  it('displays current mode label', () => {
+  it('displays current mode label (i18n)', () => {
     const wSingle = makeWrapper({ mode: 'single' });
     expect(wSingle.find('[data-test="btn-mode"]').text()).toContain('单页');
     const wDouble = makeWrapper({ mode: 'double' });
     expect(wDouble.find('[data-test="btn-mode"]').text()).toContain('双页');
+  });
+
+  it('不显示轮播控制条 (isPlaying=false 且未 hover)', () => {
+    const w = makeWrapper({ hovered: false });
+    expect(w.find('[data-test="slideshow-control"]').exists()).toBe(false);
   });
 });

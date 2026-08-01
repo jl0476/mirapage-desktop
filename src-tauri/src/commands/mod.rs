@@ -8,6 +8,7 @@ pub mod bookmarks;
 pub mod file_browser;
 pub mod find_next_volume;
 pub mod history;
+pub mod keep_screen_on;
 pub mod library;
 pub mod likes;
 pub mod log;

@@ -79,6 +79,8 @@ pub fn run() {
             commands::shortcuts::delete_shortcut,
             // 日志 (前端 → 文件)
             commands::log::log_to_file,
+            // 阅读器屏幕常亮 (v0.1.0-module2.0)
+            commands::keep_screen_on::keep_screen_on,
             // Phase 5
             commands::find_next_volume::find_next_volume,
         ])

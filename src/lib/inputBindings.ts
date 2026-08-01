@@ -40,7 +40,7 @@ export interface KeyBindings {
  * 详见 DESIGn §15.9 完整映射表
  */
 export const defaultKeyBindings: KeyBindings = {
-  nextPage: ['ArrowRight', 'PageDown', ' '],
+  nextPage: ['ArrowRight', 'PageDown'],
   prevPage: ['ArrowLeft', 'PageUp'],
   openMainMenu: ['Escape', 'm'],
   toggleChrome: ['c', 'Ctrl+h'],
@@ -50,7 +50,7 @@ export const defaultKeyBindings: KeyBindings = {
   openFileBrowser: ['b'],
   folderNext: ['Alt+ArrowRight'],
   folderPrev: ['Alt+ArrowLeft'],
-  slideshowToggle: ['p', 'F5'],
+  slideshowToggle: [' ', 'p', 'F5'],
 };
 
 /** 把 KeyboardEvent 归一化为 "Ctrl+Alt+Shift+key" 字符串（与 bindings key 比对） */

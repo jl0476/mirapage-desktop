@@ -71,6 +71,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 percent-encoding = "2"
 
+# 阅读器屏幕常亮 (v0.1.0-module2.0). Windows 用 SetThreadExecutionState;
+# macOS/Linux 暂 stub (IOPMAssertion / org.freedesktop.ScreenSaver 等需要
+# 平台专有 crate, Phase 9 跨平台分发时再补).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_Power"] }
+
 [dev-dependencies]
 # Phase 3 实装测试使用 tempfile 生成临时 CBZ/ZIP 文件
 tempfile = "3"

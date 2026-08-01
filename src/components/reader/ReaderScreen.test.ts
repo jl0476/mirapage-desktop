@@ -1,14 +1,12 @@
 /**
  * ReaderScreen.vue 测试
- * - mount 时:display title + current/total pages + next/prev buttons
- * - chromeVisible=false 时整个 overlay 不渲染
- * - 点击 prev 按钮 emit prev → reader.prevPage()
- * - 点击 next 按钮 emit next → reader.nextPage()
- * - 单页 / 双页切换:mode prop 切换 viewer 类型
+ * v0.1.0-module2.0: 增加 i18n + slideshow mock
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
+import { createI18n } from 'vue-i18n';
+import zhCN from '@/locales/zh-CN';
 import { useReaderStore } from '@/stores/reader';
 import ReaderScreen from './ReaderScreen.vue';
 
@@ -19,7 +17,6 @@ vi.mock('./SinglePageViewer.vue', () => ({
     template: '<div data-test="single" :data-url="imageUrl" />',
   },
 }));
-
 vi.mock('./DoublePageViewer.vue', () => ({
   default: {
     name: 'DoublePageViewer',
@@ -27,6 +24,25 @@ vi.mock('./DoublePageViewer.vue', () => ({
     template: '<div data-test="double" :data-pages="pageUrls.length" :data-spreads="spreads.length" :data-current="currentSpreadIndex" />',
   },
 }));
+vi.mock('@/stores/slideshow', async () => {
+  const actual = await vi.importActual<typeof import('@/stores/slideshow')>('@/stores/slideshow');
+  return {
+    ...actual,
+    useSlideshowStore: () => ({
+      isPlaying: false,
+      intervalMs: 3000,
+      direction: 'forward' as const,
+      load: vi.fn(),
+      pause: vi.fn(),
+      toggle: vi.fn(),
+      reset: vi.fn(),
+      updateIntervalMs: vi.fn(),
+      updateDirection: vi.fn(),
+    }),
+  };
+});
+
+const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
 function mountReader(props: Record<string, unknown> = {}) {
   return mount(ReaderScreen, {
@@ -41,6 +57,7 @@ function mountReader(props: Record<string, unknown> = {}) {
       mode: 'single',
       ...props,
     },
+    global: { plugins: [i18n] },
   });
 }
 
@@ -52,7 +69,6 @@ describe('ReaderScreen.vue', () => {
   it('renders title and page indicator', () => {
     const w = mountReader();
     expect(w.text()).toContain('漫画 A');
-    // ReaderOverlay 显示 "1 / 3"（spread 0 → page 0, totalPages = 3）
     expect(w.text()).toMatch(/1.*\/.*3/);
   });
 
@@ -71,25 +87,22 @@ describe('ReaderScreen.vue', () => {
   it('emits back when overlay back button clicked', async () => {
     const w = mountReader();
     const buttons = w.findAll('button');
-    // 找 "返回" 按钮或任意 back button — 实际按钮有 text label
     const backBtn = buttons.find((b) => b.text().includes('返') || b.text().includes('Back'));
     if (backBtn) {
       await backBtn.trigger('click');
       expect(w.emitted('back')).toBeTruthy();
     } else {
-      // 找不到也算 pass — overlay 可能没 back button
       expect(true).toBe(true);
     }
   });
 
-  it('overlay is hidden when chromeVisible=false', async () => {
+  it('overlay top/bottom is hidden when chromeVisible=false', async () => {
     const w = mountReader();
-    // 找 Esc 等快捷键暂时不支持,我们直接 toggle Chrome 通过 reader store
     const r = useReaderStore();
     r.toggleChrome();
     await w.vm.$nextTick?.();
-    // After toggle, ReaderOverlay 内 [data-test=overlay] 不应存在
-    expect(w.find('[data-test="overlay"]').exists()).toBe(false);
+    expect(w.find('[data-test="overlay-top"]').exists()).toBe(false);
+    expect(w.find('[data-test="overlay-bottom"]').exists()).toBe(false);
   });
 
   it('emits toggle-mode when mode button clicked', async () => {

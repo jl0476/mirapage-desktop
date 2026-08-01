@@ -3,6 +3,12 @@
  * ReaderScreen.vue
  * 阅读器端到端整合：viewer + overlay + reader store 状态联动 + 输入绑定
  *
+ * v0.1.0-module2.0: 接线 slideshow
+ * - onMounted: slideshow.load() (从 settings 读 intervalMs/direction/loop)
+ * - onUnmounted: slideshow.pause() + store.closeBook
+ * - 任何翻页 (prev/next/jump) → slideshow.reset() (重启 timer)
+ * - mouseenter/mouseleave 在容器上 → hovered state 控制轮播控制条显示
+ *
  * Props 提供初始页表/spreads；openBook 在父路由/调用方完成后，
  * 阅读器只需 watch 翻页（reader.prevPage/nextPage/jumpToSpread）。
  *
@@ -14,8 +20,9 @@
  * - back:用户返回文件浏览器
  * - toggle-mode:用户点模式切换(single↔double)
  */
-import { computed, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useReaderStore } from '@/stores/reader';
+import { useSlideshowStore } from '@/stores/slideshow';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
 import SinglePageViewer from './SinglePageViewer.vue';
@@ -42,6 +49,9 @@ interface Emits {
 const emit = defineEmits<Emits>();
 
 const store = useReaderStore();
+const slideshow = useSlideshowStore();
+const containerRef = ref<HTMLElement | null>(null);
+const hovered = ref(false);
 
 // 派生 spreads: 如果 props 没传,从 pageUrls + 默认 coverStandalone = true 算
 const finalSpreads = computed(() => {
@@ -49,9 +59,9 @@ const finalSpreads = computed(() => {
   return SpreadPlanner.plan(props.pageUrls.length, true);
 });
 
-watch(
-  () => [props.title, props.pageUrls, props.spreads, props.initialSpreadIndex, props.mode],
-  () => {
+// 第一次 mount 时 openBook 一次 (ReaderView 通常已 open 过, 这是兜底)
+onMounted(() => {
+  if (store.bookId === null) {
     store.openBook({
       bookId: store.bookId ?? 0,
       title: props.title,
@@ -59,12 +69,29 @@ watch(
       spreads: finalSpreads.value,
       initialSpreadIndex: props.initialSpreadIndex,
     });
+  }
+});
+
+// 父级 props 变化时 (mode 切换 / 跳页) 同步更新 store
+watch(
+  () => [props.mode, props.initialSpreadIndex],
+  () => {
+    if (props.initialSpreadIndex !== store.currentSpreadIndex) {
+      store.jumpToSpread(props.initialSpreadIndex);
+    }
   },
-  { immediate: true },
 );
 
 // 绑定键盘 / 鼠标 / 滚轮到 reader store
 useReaderHotkeys();
+
+onMounted(() => {
+  void slideshow.load();
+});
+
+onUnmounted(() => {
+  slideshow.pause();
+});
 
 // current page indicator
 const currentPage = computed(() => {
@@ -81,9 +108,11 @@ const singlePageUrl = computed(() => {
 
 function onPrev() {
   store.prevPage();
+  slideshow.reset();
 }
 function onNext() {
   store.nextPage();
+  slideshow.reset();
 }
 function onToggleMode() {
   emit('toggle-mode');
@@ -93,14 +122,28 @@ function onJump(page: number) {
   const target = page - 1;
   const idx = SpreadPlanner.spreadIndexForPage(target, finalSpreads.value);
   store.jumpToSpread(idx);
+  slideshow.reset();
 }
 function onBack() {
   emit('back');
 }
+
+function onContainerMouseEnter() {
+  hovered.value = true;
+}
+function onContainerMouseLeave() {
+  hovered.value = false;
+}
 </script>
 
 <template>
-  <div class="reader-screen">
+  <div
+    ref="containerRef"
+    class="reader-screen relative w-full h-full overflow-hidden bg-black"
+    data-test="reader-screen"
+    @mouseenter="onContainerMouseEnter"
+    @mouseleave="onContainerMouseLeave"
+  >
     <!-- viewer -->
     <SinglePageViewer v-if="mode === 'single'" :image-url="singlePageUrl" />
     <DoublePageViewer
@@ -110,13 +153,14 @@ function onBack() {
       :current-spread-index="store.currentSpreadIndex"
     />
 
-    <!-- overlay (隐藏 chrome 时不渲染) -->
+    <!-- overlay (隐藏 chrome 时不渲染; 轮播控制条独立 hover 控) -->
     <ReaderOverlay
       :title="props.title"
       :current-page="currentPage"
       :total-pages="totalPages"
       :mode="props.mode"
       :chrome-visible="store.chromeVisible"
+      :hovered="hovered"
       @next="onNext"
       @prev="onPrev"
       @toggle-mode="onToggleMode"
@@ -125,13 +169,3 @@ function onBack() {
     />
   </div>
 </template>
-
-<style scoped>
-.reader-screen {
-  position: relative;
-  width: 100vw;
-  height: 100vh;
-  overflow: hidden;
-  background: #000;
-}
-</style>

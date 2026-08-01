@@ -20,10 +20,12 @@ import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
+import { useKeepScreenOn } from '@/composables/useKeepScreenOn';
 import {
   useReaderTouchZones,
   dispatchZoneAction,
 } from '@/composables/useReaderTouchZones';
+import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { log } from '@/lib/logger';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
@@ -85,7 +87,7 @@ async function loadBook() {
       bookId: id,
       title: entry.title ?? '无标题',
       pages: pageUrls.value,
-      spreads: [],
+      spreads: SpreadPlanner.plan(pageUrls.value.length, true),
       initialSpreadIndex: 0,
     });
     status.value = 'ready';
@@ -129,6 +131,8 @@ const zoneActions = {
 };
 
 useReaderHotkeys();
+const keepScreenOnRef = computed(() => settings.keepScreenOn);
+useKeepScreenOn(keepScreenOnRef);
 useReaderTouchZones({
   containerRef,
   onAction: (a) => dispatchZoneAction(a, zoneActions),
@@ -169,8 +173,8 @@ watch(
       v-else-if="status === 'ready' && reader.status === 'ready'"
       class="flex-1 min-h-0"
       :page-urls="pageUrls"
-      :spreads="[]"
-      :initial-spread-index="0"
+      :spreads="reader.spreads"
+      :initial-spread-index="reader.currentSpreadIndex"
       :mode="settings.readerDefaultMode"
       :title="reader.title"
       @back="router.push('/')"

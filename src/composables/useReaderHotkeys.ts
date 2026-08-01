@@ -12,15 +12,19 @@
  */
 import { onBeforeUnmount, onMounted } from 'vue';
 import { useReaderStore } from '@/stores/reader';
+import { useSlideshowStore } from '@/stores/slideshow';
 import { resolveHotkey, defaultKeyBindings, type ReaderCommand } from '@/lib/inputBindings';
 
 function dispatch(store: ReturnType<typeof useReaderStore>, cmd: ReaderCommand): void {
+  const slideshow = useSlideshowStore();
   switch (cmd) {
     case 'nextPage':
       store.nextPage();
+      slideshow.reset();
       break;
     case 'prevPage':
       store.prevPage();
+      slideshow.reset();
       break;
     case 'toggleChrome':
       store.toggleChrome();
@@ -30,15 +34,19 @@ function dispatch(store: ReturnType<typeof useReaderStore>, cmd: ReaderCommand):
       break;
     case 'jumpFirst':
       store.jumpToSpread(0);
+      slideshow.reset();
       break;
     case 'jumpLast':
       store.jumpToSpread(store.spreads.length - 1);
+      slideshow.reset();
+      break;
+    case 'slideshowToggle':
+      slideshow.toggle();
       break;
     case 'fitWidth':
     case 'openFileBrowser':
     case 'folderNext':
     case 'folderPrev':
-    case 'slideshowToggle':
       // TODO(Phase 5/Phase 2 扩展): 接到对应实现
       break;
   }

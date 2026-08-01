@@ -67,7 +67,9 @@ export default {
     noNextVolume: '无下一卷',
     noPrevVolume: '无上一卷',
     addBookmark: '添加书签',
-  },
+    prev: '上一页',
+    next: '下一页',
+    jumpTo: '跳页',
     menu: {
       back: '返回',
       title: '阅读控制',
@@ -84,6 +86,7 @@ export default {
       slideshowPause: '暂停',
       close: '关闭',
     },
+  },
   slideshow: {
     interval: '自动推进间隔（秒）',
     direction: '幻灯片方向',
@@ -92,6 +95,7 @@ export default {
     directionBackward: '反向',
     play: '播放',
     pause: '暂停',
+    control: '轮播控制',
   },
   fileBrowser: {
     title: '文件浏览器',
