@@ -51,6 +51,7 @@ pub fn set_favorite(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateBookArgs {
     pub title: String,
     pub source_descriptor: serde_json::Value,

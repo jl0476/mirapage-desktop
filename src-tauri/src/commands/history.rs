@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct HistoryItem {
     pub book_id: i64,
     pub source_descriptor: String, // JSON
@@ -11,6 +12,7 @@ pub struct HistoryItem {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecordHistoryArgs {
     pub source_descriptor: serde_json::Value,
     pub book_id: i64,
