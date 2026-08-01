@@ -29,6 +29,8 @@ export interface ReaderActionsOptions {
   buildSourceDescriptor: (rootPath: string) => SourceDescriptor;
   /** 可选 router, 测试时手动传入; 缺省时尝试 useRouter() */
   router?: Router;
+  /** 数据变化后回调 (UI 刷新 Reading/Finished 标记 / book 列表) */
+  onLibraryChanged?: () => void | Promise<void>;
 }
 
 export function useReaderActions(opts: ReaderActionsOptions) {
@@ -84,6 +86,7 @@ export function useReaderActions(opts: ReaderActionsOptions) {
   async function readNow(entry: MediaEntry): Promise<void> {
     const bookId = await ensureBookId(entry);
     if (bookId === null) return;
+    if (opts.onLibraryChanged) await opts.onLibraryChanged();
     if (router) {
       await router.push(`/reader/${bookId}`);
     } else {
@@ -92,7 +95,11 @@ export function useReaderActions(opts: ReaderActionsOptions) {
   }
 
   async function addToLibrary(entry: MediaEntry): Promise<number | null> {
-    return ensureBookId(entry);
+    const bookId = await ensureBookId(entry);
+    if (bookId !== null && opts.onLibraryChanged) {
+      await opts.onLibraryChanged();
+    }
+    return bookId;
   }
 
   return { readNow, addToLibrary };

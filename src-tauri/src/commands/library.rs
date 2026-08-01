@@ -60,10 +60,22 @@ pub struct CreateBookArgs {
 pub fn create_book(args: CreateBookArgs, db: tauri::State<crate::db::Db>) -> Result<i64, String> {
     let conn = db.conn();
     let descriptor_str = serde_json::to_string(&args.source_descriptor).map_err(|e| e.to_string())?;
+    // 复用同 source_descriptor 的 book (Android 端 ensureBook 语义):
+    // 找到则返回已有 bookId, 找不到则 INSERT 新行返回新 id.
+    // ON CONFLICT + last_insert_rowid 在 Rust sqlite 行为: 命中 conflict
+    // 时 last_insert_rowid 返回冲突行 id (SQLite 标准).
     conn.execute(
-        "INSERT INTO book (title, source_descriptor, is_favorite) VALUES (?1, ?2, 0)",
+        "INSERT INTO book (title, source_descriptor, is_favorite) VALUES (?1, ?2, 0)
+         ON CONFLICT(source_descriptor) DO NOTHING",
         rusqlite::params![args.title, descriptor_str],
     )
     .map_err(|e| e.to_string())?;
-    Ok(conn.last_insert_rowid())
+    let id: i64 = conn
+        .query_row(
+            "SELECT id FROM book WHERE source_descriptor = ?1",
+            [&descriptor_str],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(id)
 }

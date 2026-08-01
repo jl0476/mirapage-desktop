@@ -37,6 +37,16 @@ const { t } = useI18n();
 const fb = useFileBrowserStore();
 const shortcuts = useShortcutsStore();
 const readStatus = useReadStatusStore();
+const readerActions = useReaderActions({
+  resolveRootPath: (entry) => {
+    const base = fb.lastFetchedPath ?? '';
+    return base ? `${base}/${entry.path}` : entry.path;
+  },
+  buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
+  onLibraryChanged: async () => {
+    await readStatus.refresh();
+  },
+});
 
 const showSaveDialog = ref(false);
 const saveLabel = ref('');
@@ -177,21 +187,6 @@ async function onEntryOpen(entry: MediaEntry) {
   // 文件行: 双击也无操作 (避免误触发)
   log('[FileBrowser] double-click on file is no-op (use right-click → read-now on containing folder)');
 }
-
-/**
- * useReaderActions — v0.1.0-module2.0 触发阅读入口
- *
- * resolveRootPath: 从当前列表基础路径 (fb.lastFetchedPath) + entry.path 拼出绝对路径.
- * 桌面端 sourceDescriptor 是 { rootPath: 绝对路径 }.
- */
-const readerActions = useReaderActions({
-  resolveRootPath: (entry) => {
-    return fb.lastFetchedPath
-      ? `${fb.lastFetchedPath}/${entry.path}`.replace(/\/+/g, '/')
-      : entry.path;
-  },
-  buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
-});
 
 /** FileList @select handler (单击) → 走 store.selectFile 区分单选/Ctrl/Shift */
 function onEntrySelect(entry: MediaEntry, event: MouseEvent | KeyboardEvent) {

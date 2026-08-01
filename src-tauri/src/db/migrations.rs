@@ -44,6 +44,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 4 {
+        apply_004_book_source_descriptor_unique(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (4, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -198,6 +206,25 @@ fn apply_002_shortcuts(conn: &Connection) -> anyhow::Result<()> {
 fn apply_003_finished_flag(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         "ALTER TABLE progress ADD COLUMN finished INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    Ok(())
+}
+
+/// Migration 004 — book / browse_history 加 source_descriptor UNIQUE 索引
+///
+/// 目的:
+/// - 与 Android 端 schema 对齐 (Android `book` 表对 source_descriptor UNIQUE 约束)
+/// - 保证双端导出互导: 同 sourceDescriptor 必同 bookId
+/// - `create_book` 命令 INSERT ... ON CONFLICT(source_descriptor) DO NOTHING
+///   + 回查 id 即复用, 前端无需查 listHistory
+fn apply_004_book_source_descriptor_unique(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_book_source_descriptor
+            ON book(source_descriptor);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_browse_history_source_descriptor
+            ON browse_history(source_descriptor);
+        "#,
     )?;
     Ok(())
 }
