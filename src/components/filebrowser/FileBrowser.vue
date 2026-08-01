@@ -228,14 +228,19 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
 const canReadNow = computed(() => selectedEntry.value?.isDirectory === true);
 
 function onReadNowClick() {
+  log('[FileBrowser] onReadNowClick fired', selectedEntry.value?.name, 'canReadNow=', canReadNow.value);
   if (selectedEntry.value) {
     void readerActions.readNow(selectedEntry.value);
+  } else {
+    log('[FileBrowser] onReadNowClick: no selectedEntry');
   }
 }
 function onAddToLibraryClick() {
-  // 当前 v0.1.0-module2.0: addToLibrary 等于 readNow 不导航; 暂不暴露差异
+  log('[FileBrowser] onAddToLibraryClick fired', selectedEntry.value?.name);
   if (selectedEntry.value) {
     void readerActions.addToLibrary(selectedEntry.value);
+  } else {
+    log('[FileBrowser] onAddToLibraryClick: no selectedEntry');
   }
 }
 

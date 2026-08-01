@@ -34,15 +34,14 @@ export interface ReaderActionsOptions {
 }
 
 export function useReaderActions(opts: ReaderActionsOptions) {
-  const fallbackRouter = opts.router ?? null;
-  let liveRouter: Router | null = null;
+  // setup 调用 useRouter; 测试环境 fallback 即可
+  let router: Router | null;
   try {
-    // 实组件内有效 (setup 调用 useRouter); 测试环境 fallbackRouter 即可
-    liveRouter = useRouter() ?? null;
+    router = useRouter() ?? null;
   } catch {
-    liveRouter = null;
+    router = null;
   }
-  const router: Router | null = liveRouter ?? fallbackRouter;
+  if (!router && opts.router) router = opts.router;
 
   /**
    * 复用 / 创建 bookId (同 sourceDescriptor 复用, 新书创建)
@@ -84,20 +83,37 @@ export function useReaderActions(opts: ReaderActionsOptions) {
   }
 
   async function readNow(entry: MediaEntry): Promise<void> {
+    log('[useReaderActions] readNow called', entry.name, 'isDirectory=', entry.isDirectory);
     const bookId = await ensureBookId(entry);
-    if (bookId === null) return;
-    if (opts.onLibraryChanged) await opts.onLibraryChanged();
+    if (bookId === null) {
+      log('[useReaderActions] readNow: bookId is null, abort');
+      return;
+    }
+    if (opts.onLibraryChanged) {
+      try {
+        await opts.onLibraryChanged();
+      } catch (e) {
+        log('[useReaderActions] onLibraryChanged failed', e);
+      }
+    }
     if (router) {
+      log('[useReaderActions] readNow: router.push /reader/' + bookId);
       await router.push(`/reader/${bookId}`);
+      log('[useReaderActions] readNow: pushed');
     } else {
       log('[useReaderActions] router unavailable, cannot navigate');
     }
   }
 
   async function addToLibrary(entry: MediaEntry): Promise<number | null> {
+    log('[useReaderActions] addToLibrary called', entry.name);
     const bookId = await ensureBookId(entry);
     if (bookId !== null && opts.onLibraryChanged) {
-      await opts.onLibraryChanged();
+      try {
+        await opts.onLibraryChanged();
+      } catch (e) {
+        log('[useReaderActions] onLibraryChanged failed', e);
+      }
     }
     return bookId;
   }
