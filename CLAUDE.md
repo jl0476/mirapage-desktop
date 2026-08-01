@@ -132,7 +132,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | Phase | 内容 | 状态 |
 |---|---|---|
 | 1 | Tauri 骨架 + SQLite + `algorithm/` 纯函数 | ✅ |
-| 2 | OpenSeadragon 阅读器 + 文件浏览器 | ✅ `Single/DoublePageViewer` + `ReaderScreen` |
+| 2 | OpenSeadragon 阅读器 + 文件浏览器 + 阅读器路由 | ✅ `v0.1.0-module2.0`：`ReaderView` / `ReaderMainMenu` / 9 宫格 / 滚轮 / 轮播 |
 | 3 | 压缩包（CBZ/ZIP） | 🟡 ZIP ✅；RAR/7z 占位（`unrar`/`sevenz-rust` 注释未启） |
 | 4 | 书签/喜欢/历史/书架/标签/搜索 | ✅ 10 个 commands + 9 个 Pinia stores |
 | 5 | 跨卷连续阅读 + 幻灯片 | ✅ `findNextDirectory` + `slideshow` store |
@@ -149,9 +149,54 @@ cargo test -p mirapage-desktop-lib natural_compare
 
 ---
 
-## 开发规约（v0.1.0-module1.22 沉淀）
+## 开发规约（v0.1.0-module2.0 沉淀）
 
-下文是写完模块 #1 后沉淀的约定。新增模块前先读一遍——**约束比自由更重要**，避免无意义的返工。
+下文是写完模块 #2 后沉淀的约定。新增模块前先读一遍——**约束比自由更重要**，避免无意义的返工。
+
+### 0. 阅读器交互规约（v0.1.0-module2.0 新增）
+
+**0.1 路由**
+
+- 阅读器路由 `/reader/:bookId`（bookId 是 history 表的主键）。
+- `ReaderView.vue` 是 thin wrapper：`listHistory` 找 entry → `fileBrowser.setRoot` 拿 MediaEntry[] → 过滤图片 → `convertFileSrc` 转 `tauri://localhost/` URL → `reader.openBook`。
+- onUnmounted：`saveProgress` 兜底 + `slideshow.pause()` + `reader.closeBook()`。
+
+**0.2 全屏阅读控制 Dialog（`ReaderMainMenu.vue`）**
+
+- 用 `<Teleport to="body">` 跳出 reader 容器 z-index，`z-[1100]` 高于一切。
+- `bg-black/88 backdrop-blur-sm flex flex-col items-stretch p-8 gap-4 overflow-y-auto` —— 88% 透明黑 + 模糊背景。
+- **不自动 fade out**（Android 已删），显式关闭按钮 + 路由跳转关闭。
+- Props：`show / title / currentSpreadIndex / totalSpreads`，emit `update:show / back / jump-page / cycle-mode / cycle-direction`。
+
+**0.3 9 宫格点击（`useReaderTouchZones.ts`）**
+
+- 3x3 网格：`tl / tm / tr / ml / mm / mr / bl / bm / br`（**全部 3 字母 key，与 Android 端保持一致**）。
+- 默认映射（`DEFAULT_READER_ZONES`）：`tl=first / tm=open-menu / tr=last / ml=prev / mm=open-menu / mr=next / bl=prev-volume / bm=toggle-slideshow / br=next-volume`。
+- 中央 + 顶中 **都**映射 `open-menu` —— 让用户能稳定打开控制面板（任意点击屏幕中部）。
+- `dispatchZoneAction(action, ctx)` 统一派发到 `openMainMenu / prevPage / nextPage / jumpToFirst / jumpToLast / toggleSlideshow / prevVolume / nextVolume` 8 个回调。
+
+**0.4 桌面端滚轮（`useReaderWheel.ts`）**
+
+- `passive: false` 才能 `preventDefault()` 阻止页面滚动 + OSD 内部缩放。
+- 250ms 节流避免 Mac 触控板惯性事件一次触发多页。
+- `deltaY > 0` 下滚 = 下一页，`deltaY < 0` 上滚 = 上一页（与 Android 音量键一致）。
+- 不区分水平滚轮（`deltaX`）—— 桌面端水平滚轮少见。
+- `useReaderHotkeys` 也接管 `wheel`（走 `inputBindings.resolveHotkey`），二者并存：hotkey 走全局，wheel composable 走 containerRef，**只在 ReaderView 容器范围**生效。
+
+**0.5 轮播 store（`useSlideshowStore`）**
+
+- 运行时：`isPlaying / intervalMs / direction / loop` + `pendingNextVolume` ref。
+- `start()` / `pause()` / `toggle()` 控制 setInterval。
+- `reset()` —— 用户翻页/点击/滚轮时调用，**不影响 isPlaying** 仅重启 timer。
+- `tick(onAdvance, onPrev, atLast)` 是回调式（**不直接调 reader store**，避免循环依赖）。
+- 末页触发：`pause()` + `pendingNextVolume = true` → ReaderScreen watch 触发 `find_next_volume` IPC（v0.1.0-module2.0 留 TODO 占位，settings.continueToNextVolume 已就绪）。
+- `setInterval` 在 Node / happy-dom 返回类型不一致（`Timeout` vs `number`）—— `let timerId: any = null` 绕过。
+
+**0.6 跨卷意图 flag**
+
+- `slideshow.pendingNextVolume` 是 ref，ReaderView `watch` 它 → 调 `find_next_volume` IPC。
+- 处理完后调 `consumePendingNextVolume()` 清 flag，避免重复触发。
+- 跨卷实际加载 v0.1.0-module2.0 **未落地**（reader store 需扩展 sourceDescriptor 字段），但 flag 通路已通。
 
 ### 1. UI / UE 规范
 
