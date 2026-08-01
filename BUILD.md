@@ -13,6 +13,12 @@
 
 ## 1. 推荐环境：Windows 原生
 
+### 1.0 优先级：本地构建优先于 CI
+
+> **v0.1.0-module1.21 起，本地 Windows 原生 Cargo 1.97.1 + MSVC BuildTools 14.51 工具链已端到端验证通过**（migration 003 + 全部 commands + lib.rs 注册）。后续模块（#2-#13）改动后，**优先在本地跑 `cargo check --manifest-path src-tauri/Cargo.toml` + `cargo test --manifest-path src-tauri/Cargo.toml` 验证 Rust 端**，再 push 触发 CI。这样迭代速度更快、错误信息更本地化。
+>
+> CI (`verify.yml`) 仍作为最终验证关口，但不再是唯一验证手段。
+
 ### 1.1 必装组件
 
 | 组件 | 用途 | 安装 |
@@ -36,7 +42,63 @@ rustup default stable-msvc
 cargo --version    # 应输出版本号
 ```
 
-### 1.2 构建
+### 1.2 自定义路径：D:\compile 布局（推荐）
+
+如果不想把工具链装在 C 盘（占空间），已验证以下布局可工作：
+
+```
+D:\compile\
+├── .cargo\bin\cargo.exe, rustc.exe     # CARGO_HOME/bin
+├── .rustup\toolchains\stable-x86_64-pc-windows-msvc\  # RUSTUP_HOME
+└── vs\BuildTools\
+    ├── VC\Tools\MSVC\14.51.36231\      # MSVC 编译器 + linker
+    └── VC\Auxiliary\Build\vcvars64.bat # MSVC 环境变量设置脚本
+```
+
+**Git Bash 调用要点**（cargo check 全量需要 MSVC 工具链）：
+
+```bash
+# 1. 设 Rust 环境变量指向 D:\compile
+export PATH="/d/compile/.cargo/bin:$PATH"
+export RUSTUP_HOME="D:\\compile\\.rustup"
+export CARGO_HOME="D:\\compile\\.cargo"
+
+# 2. Bash 直跑 cargo 会失败 — Git Bash PATH 里的 MSYS `link` 命令
+#    会被 MSVC 的 link.exe 误用,报 "extra operand ... cgu.0.rcgu.o"
+#    必须用 cmd.exe 套 vcvars64.bat 套壳
+```
+
+**推荐做法：写个 bat wrapper 一键调用**：
+
+```bat
+@echo off
+REM cargo-check.bat — 本地 cargo check 全套 (D:\compile 布局)
+call "D:\compile\vs\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
+set PATH=D:\compile\.cargo\bin;%PATH%
+set RUSTUP_HOME=D:\compile\.rustup
+set CARGO_HOME=D:\compile\.cargo
+cd /d F:\WorkSpaceCollection\git\mirapage-desktop\src-tauri
+cargo check 2>&1
+```
+
+调用：
+
+```bash
+cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\cargo-check.bat"
+```
+
+或单独跑测试：
+
+```bash
+cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\src-tauri\\cargo-test-db.bat"
+```
+
+**踩坑记录**（v0.1.0-module1.21 验证时）：
+1. `rustup` 默认 home 在 `C:\Users\<user>\.rustup`，复制到 D 盘后必须显式 `RUSTUP_HOME` 指向新位置，否则 `rustup toolchain list` 显示空
+2. Git Bash 不能直接 `cargo check` —— MSYS 的 `link` 命令（coreutils）在 PATH 里，先于 MSVC `link.exe` 被发现，Rust 调用 `link.exe` 时参数被当成文件路径。**必须用 cmd.exe + vcvars64.bat**
+3. Bash 里 `cmd.exe //C` 的反斜杠要双写 (`\\`)，否则 cmd 解析路径错
+
+### 1.3 构建
 
 ```bash
 npm install                # 前端依赖
@@ -128,6 +190,19 @@ cargo test --manifest-path src-tauri-algorithm-tests/Cargo.toml
 cd src-tauri && cargo test     # 需完整 Tauri 环境（见 §1）
 ```
 
+如果用 §1.2 的 D:\compile 布局，用 bat wrapper（避免 Git Bash link 冲突）：
+
+```bash
+cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\cargo-test.bat"
+```
+
+**已知失败的 3 个测试**（v0.1.0-module1.21 实测，与新功能无关，先记着后续修）：
+- `algorithm::path::tests::test_crumbs`
+- `source::webdav_impl::tests::parse_propfind_extracts_collection_and_files`
+- `commands::shortcuts::tests::list_orders_by_created_at_desc`
+
+CI 跑 release 不会因此失败（release 不跑 test），但本地 `cargo test` 会红 3 条。
+
 ### 4.3 前端
 
 ```bash
@@ -200,8 +275,11 @@ git push github v0.1.0
 | `v0.1.0-ci-test` | `MiraPage_0.1.0_x64-setup.exe` + `MiraPage_0.1.0_x64_en-US.msi` | MSI + NSIS 安装包（参考） |
 | `v0.1.0-ci-portable` | `mirapage-desktop.exe` | 初版 portable,因协议注册缺失导致白屏,已废弃 |
 | `v0.1.0-ci-portable-v2` | `mirapage-desktop.exe` | 修复后 portable（用 `tauri build --no-bundle`）,当前可用 |
+| `v0.1.0-module1.17` | `mirapage-desktop.exe` | Tokyo Night 配色 + Tailwind v4 落地 |
+| `v0.1.0-module1.20` | `mirapage-desktop.exe` | Xplorer NavigationBar / OperationBar 视觉对齐 |
+| `v0.1.0-module1.21` | `mirapage-desktop.exe` | 阅读状态染色 (Reading/Finished) + 重置 + 隐藏过滤 |
 
-> **当前状态**：CI 打包链路已端到端验证通过；本地 `npm run tauri:build` / `tauri build --no-bundle` 在 Windows 原生环境（[§1](#1-推荐环境windows-原生)）下的首次直接 build 仍有待验证（CI 跑通不等于本地一定能跑,因 Rust 工具链版本、MSVC Build Tools 完整性、文件路径含中文等因素都可能影响）。
+> **当前状态**：本地 D:\compile 工具链（Rust 1.97.1 + MSVC 14.51）已端到端验证 v0.1.0-module1.21 通过 `cargo check` + `cargo test db::migrations::`（migration 003 测试通过）。后续模块验证首选本地，CI 作为最后一道关。
 
 ---
 
@@ -211,6 +289,10 @@ git push github v0.1.0
 |---|---|
 | `E0107 IndexMap 泛型参数` | 确认 `Cargo.toml` `[build-dependencies]` 有 `indexmap = { version = "1.9", features = ["std"] }`（[§2](#2-依赖兼容性修复schemars--indexmap重要)） |
 | `error: linker 'link.exe' not found` / MSVC 缺失 | 装 VS Build Tools + C++ workload（[§1.1](#11-必装组件)） |
+| Git Bash 跑 `cargo check` 报 `link: extra operand ... cgu.0.rcgu.o` | MSYS `link` 干扰，用 cmd.exe 套 vcvars64.bat（[§1.2](#12-自定义路径dcompile-布局推荐)） |
+| `rustup toolchain list` 显示 "no installed toolchains" 但 `D:\compile\.rustup\toolchains` 有内容 | rustup home 默认指向 C 盘，设 `RUSTUP_HOME=D:\compile\.rustup` |
+| `Could not compile ... linking with link.exe failed: exit code: 1` 且错误是文件路径当 link 参数 | 同 Git Bash `link` 干扰问题；cmd.exe + vcvars64.bat 解决 |
+| `vswhere.exe 不是内部或外部命令` 警告 | vcvars64.bat 找不到 VS，常见原因是 VS BuildTools 路径不在 `D:\compile\vs\BuildTools\`；警告级别，不影响 cargo check |
 | WebView2 相关错误 | 确认 WebView2 Runtime 已装（Win11 自带） |
 | WSL 编译 `PermissionDenied` / `EPERM` | 改用 Windows 原生，或源码移 WSL ext4（[§3](#3-不推荐wsl-构建)） |
 | Vite 端口冲突 | `vite.config.ts` 固定 `port: 1420, strictPort: true`，勿改 |
