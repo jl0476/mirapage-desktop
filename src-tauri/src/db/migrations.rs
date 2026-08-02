@@ -52,6 +52,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 5 {
+        apply_005_library_history_redesign(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (5, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -229,6 +237,58 @@ fn apply_004_book_source_descriptor_unique(conn: &Connection) -> anyhow::Result<
     Ok(())
 }
 
+/// Migration 005 — book → library 重命名 + 7 列新增（Android LibraryEntity 对齐）
+/// + browse_history per-book → per-folder 重写（Android BrowseHistoryEntity 对齐）
+/// + directory_sort 新建（Android DirectorySortEntity 对齐）
+///
+/// 注意：browse_history schema 完全重构（per-book book_id PK → per-folder
+/// (source_descriptor, rel_path) PK），旧行不可迁移 → DROP。
+fn apply_005_library_history_redesign(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        -- 1. book → library 重命名
+        ALTER TABLE book RENAME TO library;
+
+        -- 2. 删 migration 004 留下的单列 UNIQUE 索引（重命名后仍是 idx_library_source_descriptor）
+        --    与下面的 (source_descriptor, absolute_path) UNIQUE 冲突（同一 source 多本书被禁）
+        DROP INDEX IF EXISTS idx_library_source_descriptor;
+        DROP INDEX IF EXISTS idx_book_source_descriptor;
+
+        -- 3. library 补字段（Android LibraryEntity 11 列对齐）
+        ALTER TABLE library ADD COLUMN source_type TEXT NOT NULL DEFAULT 'Local';
+        ALTER TABLE library ADD COLUMN absolute_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE library ADD COLUMN cover_entry_path TEXT;
+        ALTER TABLE library ADD COLUMN cover_entry_name TEXT;
+        ALTER TABLE library ADD COLUMN page_count INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE library ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0;
+
+        -- 4. UNIQUE 索引：(source_descriptor, absolute_path) 一书一行（Android 对齐）
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_library_source_path
+            ON library(source_descriptor, absolute_path);
+
+        -- 5. browse_history 重写：per-book → per-folder
+        DROP TABLE IF EXISTS browse_history;
+        CREATE TABLE browse_history (
+          source_descriptor TEXT NOT NULL,
+          rel_path TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          last_visited_at INTEGER NOT NULL,
+          PRIMARY KEY (source_descriptor, rel_path)
+        );
+        CREATE INDEX idx_browse_history_last_visited
+            ON browse_history(last_visited_at DESC);
+
+        -- 6. directory_sort 新建（Android DirectorySortEntity 对齐）
+        CREATE TABLE directory_sort (
+          location_key TEXT PRIMARY KEY,
+          sort_field TEXT NOT NULL,
+          ascending INTEGER NOT NULL
+        );
+        "#,
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,5 +375,143 @@ mod tests {
             )
             .unwrap();
         assert_eq!(finished, 0, "新行 finished 默认 0");
+    }
+
+    #[test]
+    fn migration_005_renames_book_to_library_and_adds_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // 走 001~004 完整路径
+        apply_001_init(&conn).unwrap();
+        apply_002_shortcuts(&conn).unwrap();
+        apply_003_finished_flag(&conn).unwrap();
+        apply_004_book_source_descriptor_unique(&conn).unwrap();
+
+        // 旧表名 book 应存在（迁移前）
+        let book_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='book'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(book_exists, 1, "迁移前 book 表应存在");
+
+        // 应用 migration 005
+        apply_005_library_history_redesign(&conn).unwrap();
+
+        // 1. book → library 重命名
+        let library_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='library'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(library_exists, 1, "library 表应存在");
+        let book_remaining: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='book'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(book_remaining, 0, "book 表名应消失");
+
+        // 2. 11 列（含新增 6 列）
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(library)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for expected in [
+            "id", "title", "source_descriptor", "last_read_at", "is_favorite",
+            "source_type", "absolute_path", "cover_entry_path", "cover_entry_name",
+            "page_count", "added_at",
+        ] {
+            assert!(cols.contains(&expected.to_string()), "library 缺列 {expected}");
+        }
+
+        // 3. UNIQUE 索引 (source_descriptor, absolute_path)
+        let idx_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_library_source_path'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_exists, 1, "idx_library_source_path 应存在");
+
+        // 4. browse_history 重写（per-folder schema）
+        let bh_cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(browse_history)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(bh_cols.contains(&"source_descriptor".to_string()));
+        assert!(bh_cols.contains(&"rel_path".to_string()));
+        assert!(bh_cols.contains(&"display_name".to_string()));
+        assert!(bh_cols.contains(&"last_visited_at".to_string()));
+        assert!(!bh_cols.contains(&"book_id".to_string()), "book_id 列应已消失");
+        assert!(!bh_cols.contains(&"last_page".to_string()), "last_page 列应已消失");
+
+        // 5. directory_sort 新建
+        let ds_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='directory_sort'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(ds_exists, 1, "directory_sort 表应存在");
+    }
+
+    #[test]
+    fn migration_005_preserves_old_book_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_001_init(&conn).unwrap();
+        apply_002_shortcuts(&conn).unwrap();
+        apply_003_finished_flag(&conn).unwrap();
+        apply_004_book_source_descriptor_unique(&conn).unwrap();
+
+        // 插入一行旧数据
+        conn.execute(
+            "INSERT INTO book (title, source_descriptor, is_favorite, last_read_at)
+             VALUES ('TestVol', '{\"type\":\"local\",\"rootPath\":\"/a\"}', 1, 1000)",
+            [],
+        )
+        .unwrap();
+
+        apply_005_library_history_redesign(&conn).unwrap();
+
+        // 行仍在 library，5 旧字段值保留
+        let (id, title, is_fav, last_read_at, sd): (i64, String, i64, Option<i64>, String) = conn
+            .query_row(
+                "SELECT id, title, is_favorite, last_read_at, source_descriptor FROM library WHERE title = 'TestVol'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(title, "TestVol");
+        assert_eq!(is_fav, 1);
+        assert_eq!(last_read_at, Some(1000));
+        assert!(sd.contains("/a"));
+
+        // 6 新字段填默认值（source_type='Local', absolute_path='', page_count=0, added_at=0）
+        let (st, ap, pc, aa): (String, String, i64, i64) = conn
+            .query_row(
+                "SELECT source_type, absolute_path, page_count, added_at FROM library WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(st, "Local");
+        assert_eq!(ap, "");
+        assert_eq!(pc, 0);
+        assert_eq!(aa, 0);
     }
 }
