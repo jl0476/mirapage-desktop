@@ -80,6 +80,8 @@ export interface BrowseHistoryEntry {
   relPath: string;
   displayName: string;
   lastVisitedAt: number;
+  /** v0.1.0-module3.0.1: 关联 library.id（reader 真正打开时记录） */
+  bookId: number | null;
 }
 export async function listHistory(): Promise<BrowseHistoryEntry[]> {
   return invoke<BrowseHistoryEntry[]>('list_history');
@@ -87,13 +89,18 @@ export async function listHistory(): Promise<BrowseHistoryEntry[]> {
 /**
  * FileBrowser.fetch 成功后调 — upsert 到 browse_history（folder-level）
  * Tauri 2: 单个结构体参数 invoke 时前端传 { args: { ... } }
+ *
+ * v0.1.0-module3.0.1: bookId optional, reader 真正打开时传（仅"实际阅读"才入 history）
  */
 export async function recordHistory(
   sourceDescriptor: SourceDescriptor,
   relPath: string,
   displayName: string,
+  bookId?: number,
 ): Promise<void> {
-  await invoke<void>('record_history', { args: { sourceDescriptor, relPath, displayName } });
+  await invoke<void>('record_history', {
+    args: { sourceDescriptor, relPath, displayName, bookId: bookId ?? null },
+  });
 }
 export async function deleteHistory(
   sourceDescriptor: SourceDescriptor,

@@ -60,6 +60,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 6 {
+        apply_006_history_book_id(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (6, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -286,6 +294,16 @@ fn apply_005_library_history_redesign(conn: &Connection) -> anyhow::Result<()> {
         );
         "#,
     )?;
+    Ok(())
+}
+
+/// Migration 006 — browse_history 加 book_id 列 (关联 library.id)
+///
+/// 目的:
+/// - v0.1.0-module3.0.1 readStatus 修正: 走 history ∩ progress 路径
+/// - reader 打开时 record_history 把 book_id 存进去, 后端 join 查 progress 决定 finished/reading
+fn apply_006_history_book_id(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute("ALTER TABLE browse_history ADD COLUMN book_id INTEGER", [])?;
     Ok(())
 }
 

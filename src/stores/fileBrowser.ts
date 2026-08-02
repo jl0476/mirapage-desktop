@@ -70,15 +70,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
 
       entries.value = result;
       lastFetchedPath.value = path;
-
-      // v0.1.0-module3.0: 自动 upsert browse_history (Android BrowseHistoryRepository.record)
-      try {
-        const { useHistoryStore } = await import('@/stores/history');
-        const history = useHistoryStore();
-        void history.record(descriptor, path, directoryDisplayName(path));
-      } catch (e) {
-        log('[fileBrowser] history.record failed', e);
-      }
+      // browse_history 仅在 reader 真正打开时记录（useReaderActions.readNow），
+      // 单纯文件夹浏览不写——避免根目录被默认加进去。
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('[fileBrowser] fetch error', msg);
@@ -88,11 +81,6 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     }
   }
 
-  function directoryDisplayName(dir: string): string {
-    if (!dir) return rootPath.value ?? 'root';
-    const parts = dir.split(/[/\\]/).filter(Boolean);
-    return parts[parts.length - 1] ?? 'root';
-  }
 
   async function setRoot(root: string | null): Promise<void> {
     rootPath.value = root;

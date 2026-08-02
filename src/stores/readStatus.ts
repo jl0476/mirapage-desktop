@@ -1,65 +1,63 @@
 /**
  * readStatus store — 目录级"阅读中 / 已读完"染色数据源。
  *
- * v0.1.0-module1.21: 参考 perfect-viewer `FileBrowserViewModel.computeMarks`
- * 的三态离散模型。
+ * v0.1.0-module3.0.1: 数据源从 library 改为 history (Android FileBrowserViewModel.computeMarks
+ * 语义)。规则：
+ *   - history 不命中 → NONE（不显示）
+ *   - history 命中 + progress.finished=true → FINISHED
+ *   - history 命中 + progress 有行 → READING
  *
- * v0.1.0-module3.0: 数据源从 history 改为 library（library 表存所有 books，
- * 包括 temp-imported，isFavorite=0 的 books 也参与 readStatus 计算）。
- *   - useLibraryStore.items (library 表) — 含所有 create_book 的书（含 temp）
- *   - listProgressFinished() (progress.finished 列) — {book_id: bool}
- *
- * 派生规则:
- *   - library 命中 → READING（默认）或 FINISHED（progress.finished=true）
- *   - library 未命中 → NONE（不显示）
+ * 关键不变量：readStatus **不**依赖 library——加入书库 ≠ 阅读中。
  */
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
-import { listProgressFinished, type BookItem } from '@/lib/tauri';
-import { useLibraryStore } from './library';
+import { listProgressFinished } from '@/lib/tauri';
+import { useHistoryStore } from './history';
 
 export type ReadStatus = 'none' | 'reading' | 'finished';
 export type ReadStatusMap = Record<string, ReadStatus>;
 
 /**
- * 从 library item 提取 (rootPath, absolutePath) 复合 key.
+ * 从 history item 提取 marks key: `${rootPath}|${relPath}`
+ * 与 FileList.markFor() 末尾 `|${entry.path}` 匹配
  */
-export function libraryEntryKey(b: BookItem): string {
-  const sd = b.sourceDescriptor as unknown;
+export function historyEntryKey(h: { sourceDescriptor: unknown; relPath: string }): string {
+  const sd = h.sourceDescriptor as unknown;
   if (typeof sd === 'string') {
     try {
       const d = JSON.parse(sd);
-      if (d?.type === 'local') return `${d.rootPath}|${b.absolutePath}`;
-      return `${d?.type ?? 'unknown'}:${b.absolutePath}`;
+      return `${d?.rootPath ?? sd}|${h.relPath}`;
     } catch {
-      return `${sd}|${b.absolutePath}`;
+      return `${sd}|${h.relPath}`;
     }
   }
-  if (sd && typeof sd === 'object' && 'type' in sd) {
-    const d = sd as { type: string; rootPath?: string };
-    if (d.type === 'local' && d.rootPath) return `${d.rootPath}|${b.absolutePath}`;
-    return `${d.type}:${b.absolutePath}`;
+  if (sd && typeof sd === 'object' && 'rootPath' in sd) {
+    const d = sd as { rootPath?: string };
+    return `${d.rootPath ?? ''}|${h.relPath}`;
   }
-  return `unknown:${b.absolutePath}`;
+  return `unknown|${h.relPath}`;
 }
 
 export const useReadStatusStore = defineStore('readStatus', () => {
-  /** key = libraryEntryKey(b) → ReadStatus */
+  /** key = historyEntryKey(h) → ReadStatus */
   const marks = ref<ReadStatusMap>({});
 
   async function refresh(): Promise<void> {
-    const library = useLibraryStore();
-    if (library.items.length === 0) {
-      await library.refresh();
+    const history = useHistoryStore();
+    if (history.items.length === 0) {
+      await history.refresh();
     }
     const finishedMap = await listProgressFinished();
 
     const m: ReadStatusMap = {};
-    for (const b of library.items) {
-      const key = libraryEntryKey(b);
-      const realBid = b.id.toString();
-      const isFinished = finishedMap[realBid] === true;
-      m[key] = isFinished ? 'finished' : 'reading';
+    for (const h of history.items) {
+      // v0.1.0-module3.0.1: 没 book_id 的 history 行（旧 migration 005 前或 bookId 未传）跳过
+      if (h.bookId == null) continue;
+      const bid = h.bookId.toString();
+      // history 命中 + progress 表里有 row 才 mark
+      if (bid in finishedMap) {
+        m[historyEntryKey(h)] = finishedMap[bid] === true ? 'finished' : 'reading';
+      }
     }
     marks.value = m;
   }

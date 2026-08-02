@@ -308,18 +308,13 @@ describe('fileBrowser store — v0.1.0-module3.0 集成', () => {
     vi.clearAllMocks();
   });
 
-  it('fetch 成功后 recordHistory 被调一次（Android BrowseHistory 对齐）', async () => {
+  it('fetch 成功后不调 recordHistory（仅目录浏览不进 history，进 reader 才进）', async () => {
     const { recordHistory } = await import('@/lib/tauri');
     mockedList.mockResolvedValue(makeEntries('Vol.01', 'Vol.02'));
     const store = useFileBrowserStore();
     await store.setRoot('C:/comics');
-    // setRoot 内部已调 fetch('') → recordHistory
-    expect(recordHistory).toHaveBeenCalled();
-    const calls = vi.mocked(recordHistory).mock.calls;
-    const lastCall = calls[calls.length - 1]!;
-    expect(lastCall[0]).toEqual({ type: 'local', rootPath: 'C:/comics' });
-    expect(lastCall[1]).toBe('');  // relPath = ''
-    expect(lastCall[2]).toBe('C:/comics');  // displayName = rootPath
+    // v0.1.0-module3.0.1: fetch 只列目录, 不写 history. recordHistory 由 useReaderActions.readNow 调.
+    expect(recordHistory).not.toHaveBeenCalled();
   });
 
   it('fetch 失败不调 recordHistory', async () => {

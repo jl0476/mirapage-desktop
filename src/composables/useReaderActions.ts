@@ -10,7 +10,7 @@
  * - ❌ 编辑类 (新建/重命名/删除/拖放)
  */
 import { useRouter } from 'vue-router';
-import { createBook, listDirectory, type CreateBookArgs } from '@/lib/tauri';
+import { createBook, listDirectory, recordHistory, type CreateBookArgs } from '@/lib/tauri';
 import { isImage } from '@/lib/mime';
 import { naturalCompare } from '@/lib/naturalSort';
 import { log } from '@/lib/logger';
@@ -109,6 +109,15 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     if (bookId === null) {
       log('[useReaderActions] readNow: bookId is null, abort');
       return;
+    }
+    // v0.1.0-module3.0.1: 进入 reader 才记录阅览（Android BrowseHistoryRepository.record 行为）
+    // —— 单纯文件夹浏览不进 history。bookId 关联 library, readStatus 据此派生 reading/finished。
+    try {
+      const rootPath = opts.resolveRootPath();
+      const descriptor = opts.buildSourceDescriptor(rootPath);
+      await recordHistory(descriptor, entry.path, entry.name, bookId);
+    } catch (e) {
+      log('[useReaderActions] recordHistory failed (容错)', e);
     }
     if (opts.onLibraryChanged) {
       try {

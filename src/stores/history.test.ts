@@ -11,12 +11,14 @@ vi.mock('@/lib/tauri', () => ({
       relPath: '',
       displayName: 'root',
       lastVisitedAt: 200,
+      bookId: null,
     },
     {
       sourceDescriptor: { type: 'local', rootPath: '/manga' } as never,
       relPath: 'VOL.01',
       displayName: 'VOL.01',
       lastVisitedAt: 100,
+      bookId: null,
     },
   ]),
   recordHistory: vi.fn(async () => undefined),
@@ -67,6 +69,7 @@ describe('history store', () => {
         relPath: 'Vol.01',
         displayName: 'Vol.01',
         lastVisitedAt: 100,
+        bookId: 42,
       },
     ]);
     const store = useHistoryStore();

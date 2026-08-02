@@ -16,6 +16,7 @@ vi.mock('@/lib/tauri', async () => {
     ...actual,
     createBook: vi.fn(),
     listDirectory: vi.fn(),
+    recordHistory: vi.fn(),
   };
 });
 
@@ -23,7 +24,7 @@ vi.mock('vue-router', () => ({
   useRouter: () => null,
 }));
 
-import { createBook, listDirectory } from '@/lib/tauri';
+import { createBook, listDirectory, recordHistory } from '@/lib/tauri';
 import { useReaderActions } from './useReaderActions';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
@@ -45,7 +46,7 @@ describe('useReaderActions', () => {
     vi.clearAllMocks();
   });
 
-  it('readNow: enumerate 封面 + createBook(favorite=false) + router.push', async () => {
+  it('readNow: enumerate 封面 + createBook(favorite=false) + recordHistory(bookId) + router.push', async () => {
     vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(42);
     const onLibraryChanged = vi.fn();
@@ -66,6 +67,13 @@ describe('useReaderActions', () => {
         favorite: false,
         pageCount: 0,
       }),
+    );
+    // v0.1.0-module3.0.1: recordHistory 携带 bookId
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/manga' },
+      'VOL.01',
+      'VOL.01',
+      42,
     );
     expect(fakeRouter.push).toHaveBeenCalledWith('/reader/42');
     expect(onLibraryChanged).toHaveBeenCalled();
@@ -92,7 +100,7 @@ describe('useReaderActions', () => {
     );
   });
 
-  it('addToLibrary: 不 router.push, createBook(favorite=true)', async () => {
+  it('addToLibrary: 不 router.push, 不 recordHistory（仅 favorite=true, 阅读状态独立）', async () => {
     vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(99);
     const actions = useReaderActions({
@@ -104,6 +112,8 @@ describe('useReaderActions', () => {
     expect(result).toBe(99);
     expect(fakeRouter.push).not.toHaveBeenCalled();
     expect(createBook).toHaveBeenCalledWith(expect.objectContaining({ favorite: true }));
+    // v0.1.0-module3.0.1: 加书库 ≠ 进 reader，不写 history
+    expect(recordHistory).not.toHaveBeenCalled();
   });
 
   it('非目录: 返回 null, 不调 IPC', async () => {

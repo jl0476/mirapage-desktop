@@ -1,4 +1,5 @@
 //! `commands::history` —— 阅览记录 (v0.1.0-module3.0: folder-level, Android BrowseHistory 对齐)
+//! v0.1.0-module3.0.1: book_id 列 (关联 library.id, 用于 readStatus 派生)
 
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +10,8 @@ pub struct BrowseHistoryEntry {
     pub rel_path: String,
     pub display_name: String,
     pub last_visited_at: i64,
+    /// v0.1.0-module3.0.1: 关联 library.id (reader 真正打开时记录)
+    pub book_id: Option<i64>,
 }
 
 #[tauri::command]
@@ -16,7 +19,7 @@ pub fn list_history(db: tauri::State<crate::db::Db>) -> Result<Vec<BrowseHistory
     let conn = db.conn();
     let mut stmt = conn
         .prepare(
-            "SELECT source_descriptor, rel_path, display_name, last_visited_at
+            "SELECT source_descriptor, rel_path, display_name, last_visited_at, book_id
              FROM browse_history ORDER BY last_visited_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -30,6 +33,7 @@ pub fn list_history(db: tauri::State<crate::db::Db>) -> Result<Vec<BrowseHistory
                 rel_path: row.get(1)?,
                 display_name: row.get(2)?,
                 last_visited_at: row.get(3)?,
+                book_id: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -44,6 +48,8 @@ pub struct RecordHistoryArgs {
     pub source_descriptor: serde_json::Value,
     pub rel_path: String,
     pub display_name: String,
+    /// v0.1.0-module3.0.1: optional book_id — reader 打开时传
+    pub book_id: Option<i64>,
 }
 
 #[tauri::command]
@@ -52,12 +58,13 @@ pub fn record_history(args: RecordHistoryArgs, db: tauri::State<crate::db::Db>) 
     let descriptor_str = serde_json::to_string(&args.source_descriptor).map_err(|e| e.to_string())?;
     let now = chrono_now();
     conn.execute(
-        "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at)
-         VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id)
+         VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(source_descriptor, rel_path) DO UPDATE SET
            display_name = excluded.display_name,
-           last_visited_at = excluded.last_visited_at",
-        rusqlite::params![descriptor_str, args.rel_path, args.display_name, now],
+           last_visited_at = excluded.last_visited_at,
+           book_id = excluded.book_id",
+        rusqlite::params![descriptor_str, args.rel_path, args.display_name, now, args.book_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

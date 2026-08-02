@@ -55,7 +55,8 @@ async function toggleFav(id: number) {
         <span class="fav" :class="{ on: book.isFavorite }" @click="toggleFav(book.id)">
           {{ book.isFavorite ? '★' : '☆' }}
         </span>
-        <RouterLink :to="{ path: '/reader', query: { bookId: book.id } }">
+        <!-- v0.1.0-module3.0.1: 用 name+params 触发 /reader/:bookId path-param 路由 -->
+        <RouterLink :to="{ name: 'reader', params: { bookId: book.id } }">
           {{ t('common.open') }}
         </RouterLink>
       </li>
@@ -65,7 +66,7 @@ async function toggleFav(id: number) {
       <li v-for="hit in hits" :key="`${hit.source}-${hit.bookId}`">
         <span class="title">{{ hit.title }}</span>
         <span class="source">{{ t('library.source.' + hit.source) }}</span>
-        <RouterLink :to="{ path: '/reader', query: { bookId: hit.bookId } }">
+        <RouterLink :to="{ name: 'reader', params: { bookId: hit.bookId } }">
           {{ t('common.open') }}
         </RouterLink>
       </li>

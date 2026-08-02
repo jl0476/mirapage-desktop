@@ -17,12 +17,14 @@ const sample: BrowseHistoryEntry[] = [
     relPath: '',
     displayName: 'root',
     lastVisitedAt: 1000,
+    bookId: null,
   },
   {
     sourceDescriptor: { type: 'local', rootPath: 'C:/comics' },
     relPath: 'Vol.01',
     displayName: 'Vol.01',
     lastVisitedAt: 2000,
+    bookId: 7,
   },
 ];
 
