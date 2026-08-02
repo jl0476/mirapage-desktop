@@ -18,6 +18,7 @@ import { listDirectory } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import { sortEntries, type SortField } from '@/lib/fileSort';
 import { getSetting, setSetting } from '@/lib/tauri';
+import { useDirectorySortStore } from '@/stores/directorySort';
 import type { MediaEntry, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 export type FileBrowserError =
@@ -38,6 +39,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   // v0.1.0-module1.22: 升维度
   const sortField = ref<SortField>('name');
   const sortAscending = ref<boolean>(true);
+  // v0.1.0-module3.0: per-folder 排序覆盖的 effective 值（directorySort override 或 fallback）
+  const effectiveSortField = ref<SortField>('name');
+  const effectiveSortAscending = ref<boolean>(true);
   const viewMode = ref<ViewMode>('details');
   const hideFinished = ref<boolean>(false);  // 从 FileBrowser.vue 搬入
   const selectedPaths = ref<Set<string>>(new Set());
@@ -54,10 +58,27 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     error.value = null;
     log('[fileBrowser] fetch', { rootPath: rootPath.value, path });
     try {
-      const result = await listDirectory(toDescriptor(rootPath.value), path);
+      const descriptor = toDescriptor(rootPath.value);
+      const result = await listDirectory(descriptor, path);
       log('[fileBrowser] listDirectory returned', result.length, 'entries');
+
+      // v0.1.0-module3.0: per-folder 排序覆盖 → fallback 到 settings 默认
+      const dsStore = useDirectorySortStore();
+      const override = await dsStore.resolve(descriptor, path).catch(() => null);
+      effectiveSortField.value = (override?.sortField as SortField) ?? sortField.value;
+      effectiveSortAscending.value = override?.ascending ?? sortAscending.value;
+
       entries.value = result;
       lastFetchedPath.value = path;
+
+      // v0.1.0-module3.0: 自动 upsert browse_history (Android BrowseHistoryRepository.record)
+      try {
+        const { useHistoryStore } = await import('@/stores/history');
+        const history = useHistoryStore();
+        void history.record(descriptor, path, directoryDisplayName(path));
+      } catch (e) {
+        log('[fileBrowser] history.record failed', e);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       log('[fileBrowser] fetch error', msg);
@@ -65,6 +86,12 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     } finally {
       loading.value = false;
     }
+  }
+
+  function directoryDisplayName(dir: string): string {
+    if (!dir) return rootPath.value ?? 'root';
+    const parts = dir.split(/[/\\]/).filter(Boolean);
+    return parts[parts.length - 1] ?? 'root';
   }
 
   async function setRoot(root: string | null): Promise<void> {
@@ -107,11 +134,32 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     }
     persist('fb_sort_field', sortField.value);
     persist('fb_sort_ascending', sortAscending.value ? '1' : '0');
+    effectiveSortField.value = f;
+    effectiveSortAscending.value = sortAscending.value;
+
+    // v0.1.0-module3.0: 写 per-folder override（Android DirectorySortRepository.setSort）
+    if (rootPath.value !== null) {
+      const descriptor = toDescriptor(rootPath.value);
+      const dsStore = useDirectorySortStore();
+      void dsStore.set(descriptor, currentPath.value, {
+        sortField: f,
+        ascending: sortAscending.value,
+      });
+    }
   }
 
   function toggleSortOrder(): void {
     sortAscending.value = !sortAscending.value;
     persist('fb_sort_ascending', sortAscending.value ? '1' : '0');
+    effectiveSortAscending.value = sortAscending.value;
+    if (rootPath.value !== null) {
+      const descriptor = toDescriptor(rootPath.value);
+      const dsStore = useDirectorySortStore();
+      void dsStore.set(descriptor, currentPath.value, {
+        sortField: sortField.value,
+        ascending: sortAscending.value,
+      });
+    }
   }
 
   function setViewMode(m: ViewMode): void {
@@ -207,7 +255,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   // ─── v0.1.0-module1.22: computed ──
 
   const sortedEntries = computed<MediaEntry[]>(() =>
-    sortEntries(entries.value, sortField.value, sortAscending.value),
+    sortEntries(entries.value, effectiveSortField.value, effectiveSortAscending.value),
   );
 
   const selectedEntries = computed<MediaEntry[]>(() =>
@@ -237,6 +285,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     sortAscending,
     viewMode,
     hideFinished,
+    effectiveSortField,
+    effectiveSortAscending,
     selectedPaths,
     anchorPath,
     searchQuery,
