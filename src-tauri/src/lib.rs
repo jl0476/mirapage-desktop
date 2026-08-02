@@ -61,6 +61,7 @@ pub fn run() {
             commands::library::list_library,
             commands::library::set_favorite,
             commands::library::create_book,
+            commands::library::get_book,
             commands::directory_sort::get_directory_sort,
             commands::directory_sort::set_directory_sort,
             commands::progress::save_progress,

@@ -14,7 +14,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { listHistory, saveProgress } from '@/lib/tauri';
+import { getBook, saveProgress } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
@@ -57,18 +57,16 @@ async function loadBook() {
     return;
   }
   try {
-    log('[ReaderView] calling listHistory');
-    const history = await listHistory();
-    log('[ReaderView] listHistory returned', history.length, 'entries');
-    const entry = history.find((h) => h.bookId === id) as unknown as { bookId: number; sourceDescriptor: { rootPath: string }; title?: string } | undefined;
-    if (!entry) {
-      log('[ReaderView] no entry found for bookId', id, 'history=', history.map((h) => ({ id: h.bookId, sd: h.sourceDescriptor })));
+    log('[ReaderView] calling getBook', id);
+    const book = await getBook(id);
+    log('[ReaderView] getBook returned', book ? book.title : 'null');
+    if (!book) {
       status.value = 'error';
-      errorMessage.value = `找不到 bookId ${id} 的历史记录`;
+      errorMessage.value = `找不到 bookId ${id}`;
       return;
     }
-    log('[ReaderView] found entry, sourceDescriptor=', JSON.stringify(entry.sourceDescriptor));
-    const path = entry.sourceDescriptor?.rootPath ?? '';
+    const sd = book.sourceDescriptor;
+    const path = (sd as { rootPath?: string }).rootPath ?? '';
     log('[ReaderView] resolved path=', path);
     if (!path) {
       status.value = 'error';
@@ -94,7 +92,7 @@ async function loadBook() {
     log('[ReaderView] pageUrls sample', pageUrls.value[0]);
     reader.openBook({
       bookId: id,
-      title: entry.title ?? '无标题',
+      title: book.title || '无标题',
       pages: pageUrls.value,
       spreads: SpreadPlanner.plan(pageUrls.value.length, true),
       initialSpreadIndex: 0,

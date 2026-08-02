@@ -8,7 +8,6 @@ import { createI18n } from 'vue-i18n';
 import { createRouter, createMemoryHistory } from 'vue-router';
 import zhCN from '@/locales/zh-CN';
 import History from './History.vue';
-import { useHistoryStore } from '@/stores/history';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import type { BrowseHistoryEntry } from '@/lib/tauri';
 

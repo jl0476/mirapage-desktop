@@ -9,8 +9,9 @@
  */
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useHistoryStore } from '@/stores/history';
+import { useLibraryStore } from '@/stores/library';
 import { useReadStatusStore } from '@/stores/readStatus';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { markFinished } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -31,8 +32,9 @@ interface Emits {
 const emit = defineEmits<Emits>();
 
 const { t } = useI18n();
-const history = useHistoryStore();
+const library = useLibraryStore();
 const readStatus = useReadStatusStore();
+const fb = useFileBrowserStore();
 
 const visible = ref(false);
 
@@ -64,31 +66,29 @@ onUnmounted(() => {
 
 async function onResetProgress() {
   if (!props.entry) return;
-  // 通过 history 找 entry 对应的 book_id (本地 fuzzy: 找 history 里 sourceDescriptor 含 entry.path 的)
-  // 当前简化: history.items 中找最后一个 sourceDescriptor rootPath 等于 fb.rootPath + bookId 关联
-  // 为避免错乱: 仅当 history items 只有一个时 reset, 否则提示"暂只支持单条重置"
-  const match = history.items.find((h) => {
-    const sd = h.sourceDescriptor as unknown;
+  // v0.1.0-module3.0: 从 library（不是 browse_history）找同 sourceDescriptor+absolutePath 的 book_id
+  // library.list 只会包含 is_favorite=1；temp-imported books 也已在 DB 中，refresh 后可见
+  await library.refresh();
+  const match = library.items.find((b) => {
+    const sd = b.sourceDescriptor as unknown;
     if (typeof sd === 'string') {
       try {
-        const d = JSON.parse(sd);
-        return d?.type === 'local' && h.bookId > 0;
+        return JSON.parse(sd).rootPath === fb.rootPath;
       } catch {
         return false;
       }
     }
-    if (sd && typeof sd === 'object' && 'type' in sd) {
-      return (sd as { type: string }).type === 'local' && h.bookId > 0;
-    }
-    return false;
+    return typeof sd === 'object' && sd !== null && 'rootPath' in sd
+      && (sd as { rootPath: string }).rootPath === fb.rootPath;
   });
+  // 注意: 这里只看 rootPath, 多本书无法区分精确目录, 仅做单文件夹重置.
   if (!match) {
-    log('[RowContextMenu] no matching history for entry', props.entry.path);
+    log('[RowContextMenu] no matching library book for entry', props.entry.path);
     emit('close');
     return;
   }
   try {
-    await markFinished(match.bookId, false);
+    await markFinished(match.id, false);
     await readStatus.refresh();
   } catch (e) {
     log('[RowContextMenu] markFinished failed', e);

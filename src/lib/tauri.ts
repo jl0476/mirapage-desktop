@@ -119,6 +119,9 @@ export interface BookItem {
 export async function listLibrary(): Promise<BookItem[]> {
   return invoke<BookItem[]>('list_library');
 }
+export async function getBook(bookId: number): Promise<BookItem | null> {
+  return invoke<BookItem | null>('get_book', { bookId });
+}
 
 /**
  * v0.1.0-module3.0 createBook 入参扩展：

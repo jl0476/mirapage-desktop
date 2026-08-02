@@ -68,6 +68,38 @@ pub fn set_favorite(
     Ok(())
 }
 
+/// v0.1.0-module3.0: 按 book_id 查单条 (ReaderView 启动时用,
+/// 替代旧 per-book history.bookId 查找模式)
+#[tauri::command]
+pub fn get_book(book_id: i64, db: tauri::State<crate::db::Db>) -> Result<Option<BookItem>, String> {
+    let conn = db.conn();
+    let result = conn
+        .query_row(
+            "SELECT id, title, source_descriptor, source_type, absolute_path,
+                    cover_entry_path, cover_entry_name, page_count,
+                    last_read_at, added_at, is_favorite
+             FROM library WHERE id = ?1",
+            rusqlite::params![book_id],
+            |row| {
+                Ok(BookItem {
+                    id: row.get::<_, i64>(0)?,
+                    title: row.get::<_, String>(1)?,
+                    source_descriptor: row.get::<_, String>(2)?,
+                    source_type: row.get::<_, String>(3)?,
+                    absolute_path: row.get::<_, String>(4)?,
+                    cover_entry_path: row.get::<_, Option<String>>(5)?,
+                    cover_entry_name: row.get::<_, Option<String>>(6)?,
+                    page_count: row.get::<_, i64>(7)?,
+                    last_read_at: row.get::<_, Option<i64>>(8)?,
+                    added_at: row.get::<_, i64>(9)?,
+                    is_favorite: row.get::<_, i64>(10)? != 0,
+                })
+            },
+        )
+        .ok();
+    Ok(result)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateBookArgs {
