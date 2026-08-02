@@ -1,42 +1,35 @@
-//! `commands::history` —— 阅览记录
+//! `commands::history` —— 阅览记录 (v0.1.0-module3.0: folder-level, Android BrowseHistory 对齐)
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct HistoryItem {
-    pub book_id: i64,
-    /// source_descriptor 已是 JSON 对象 (前端可直接读 type / rootPath)
+pub struct BrowseHistoryEntry {
     pub source_descriptor: serde_json::Value,
-    pub last_page: Option<i64>,
-    pub last_read_at: i64,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RecordHistoryArgs {
-    pub source_descriptor: serde_json::Value,
-    pub book_id: i64,
-    pub last_page: i64,
+    pub rel_path: String,
+    pub display_name: String,
+    pub last_visited_at: i64,
 }
 
 #[tauri::command]
-pub fn list_history(db: tauri::State<crate::db::Db>) -> Result<Vec<HistoryItem>, String> {
+pub fn list_history(db: tauri::State<crate::db::Db>) -> Result<Vec<BrowseHistoryEntry>, String> {
     let conn = db.conn();
     let mut stmt = conn
-        .prepare("SELECT book_id, source_descriptor, last_page, last_read_at FROM browse_history ORDER BY last_read_at DESC")
+        .prepare(
+            "SELECT source_descriptor, rel_path, display_name, last_visited_at
+             FROM browse_history ORDER BY last_visited_at DESC",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
-            // 解析 source_descriptor JSON 字符串为 Value, 前端可直接读 {type, rootPath}
-            let sd_str: String = row.get(1)?;
+            let sd_str: String = row.get(0)?;
             let sd_value: serde_json::Value = serde_json::from_str(&sd_str)
                 .unwrap_or(serde_json::Value::Null);
-            Ok(HistoryItem {
-                book_id: row.get::<_, i64>(0)?,
+            Ok(BrowseHistoryEntry {
                 source_descriptor: sd_value,
-                last_page: row.get::<_, Option<i64>>(2)?,
-                last_read_at: row.get::<_, i64>(3)?,
+                rel_path: row.get(1)?,
+                display_name: row.get(2)?,
+                last_visited_at: row.get(3)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -45,19 +38,42 @@ pub fn list_history(db: tauri::State<crate::db::Db>) -> Result<Vec<HistoryItem>,
     Ok(rows)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordHistoryArgs {
+    pub source_descriptor: serde_json::Value,
+    pub rel_path: String,
+    pub display_name: String,
+}
+
 #[tauri::command]
 pub fn record_history(args: RecordHistoryArgs, db: tauri::State<crate::db::Db>) -> Result<(), String> {
     let conn = db.conn();
-    let now = chrono_now();
     let descriptor_str = serde_json::to_string(&args.source_descriptor).map_err(|e| e.to_string())?;
+    let now = chrono_now();
     conn.execute(
-        "INSERT INTO browse_history (book_id, source_descriptor, last_page, last_read_at)
+        "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at)
          VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(book_id) DO UPDATE SET
-           source_descriptor = excluded.source_descriptor,
-           last_page = excluded.last_page,
-           last_read_at = excluded.last_read_at",
-        rusqlite::params![args.book_id, descriptor_str, args.last_page, now],
+         ON CONFLICT(source_descriptor, rel_path) DO UPDATE SET
+           display_name = excluded.display_name,
+           last_visited_at = excluded.last_visited_at",
+        rusqlite::params![descriptor_str, args.rel_path, args.display_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_history(
+    source_descriptor: serde_json::Value,
+    rel_path: String,
+    db: tauri::State<crate::db::Db>,
+) -> Result<(), String> {
+    let conn = db.conn();
+    let descriptor_str = serde_json::to_string(&source_descriptor).map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM browse_history WHERE source_descriptor = ?1 AND rel_path = ?2",
+        rusqlite::params![descriptor_str, rel_path],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
