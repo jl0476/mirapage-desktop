@@ -221,7 +221,7 @@ npm run type-check             # vue-tsc
 | 方案 | 命令 | 产物 | 适用场景 |
 |------|------|------|---------|
 | **A. 安装包** | `npm run tauri:build` | MSI + NSIS 安装程序 | 正式分发、Start Menu 集成、卸载面板 |
-| **B. Portable** | `npm run tauri -- build --no-bundle` | 单 exe 自包含（~15 MB） | 朋友试用、截图分享、绿色运行 |
+| **B. Portable** | `npm run tauri -- build --no-bundle` | 单 exe 自包含（~17 MB） | 朋友试用、截图分享、绿色运行 |
 
 两种方案都依赖 [§1 推荐环境](#1-推荐环境windows-原生)。
 
@@ -230,7 +230,56 @@ npm run type-check             # vue-tsc
 > `cargo build` 漏掉这一步,webview 把 `tauri.localhost` 当真实 HTTP 连接,失败后
 > 显示 Edge 的 ERR_CONNECTION_REFUSED 白屏（项目首次 CI 完整打包时踩过此坑）。
 
-### 5.2 产物路径
+### 5.2 推荐：PowerShell 一键脚本（v0.1.0-module3.0.1+）
+
+`scripts/build-portable.ps1` 把方案 B 的 `npm run build` + `tauri build --no-bundle` + 复制到本地副本的流程封装成幂等脚本，包含三项本地打包常见痛的解法：
+
+| 痛点 | 脚本处理 |
+|------|---------|
+| **本地旧 exe 正在运行** → `cp` 报 `Device or resource busy` | 步骤 [1/5] 用 `Get-Process mirapage-desktop` 检测 → `Stop-Process -Force` → `Start-Sleep 2` → 二次确认退出（最多 3 次重试）|
+| **Windows 防病毒/索引器占用文件** → 复制中途失败 | 步骤 [4/5] 用 `Remove-Item` + `Copy-Item` 重试 3 次，每次间隔 2s |
+| **复制后不知道是否对得上** | 步骤 [5/5] 计算源 + 副本 MD5 对比，不一致报错退出 |
+
+**用法**（Git Bash）：
+
+```bash
+powershell.exe -ExecutionPolicy Bypass -File "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\scripts\\build-portable.ps1"
+```
+
+或直接双击 PowerShell 文件（默认会用 PowerShell ISE 或 pwsh 打开）。
+
+**参数化**（覆盖默认值）：
+
+```powershell
+.\scripts\build-portable.ps1 `
+  -ProjectDir "F:\WorkSpaceCollection\git\mirapage-desktop" `
+  -RustTarget "D:\compile\rust_target\release\mirapage-desktop.exe" `
+  -LocalExeName "mirapage-desktop-local.exe"
+```
+
+**典型输出**（成功）：
+
+```text
+[1/5] 检测 mirapage-desktop 运行实例
+      ✓ 无运行实例
+[2/5] npm run build (vue-tsc + vite)
+      ✓ dist/ 生成
+[3/5] tauri build --no-bundle (Rust release)
+      ✓ Rust release 完成
+[4/5] 复制到 F:\...\mirapage-desktop-local.exe
+      ✓ 复制完成
+[5/5] MD5 校验
+      src   853fc6617d8737dbc6f897ee06d3a38a  17.98 MB
+      local 853fc6617d8737dbc6f897ee06d3a38a  17.98 MB
+
+=== DONE ✓ ===
+产物: F:\...\mirapage-desktop-local.exe
+
+下一步: 双击 .exe 直接运行, 或
+  git tag vX.Y.Z && git push github vX.Y.Z   # 触发 CI release
+```
+
+### 5.3 产物路径
 
 ```text
 src-tauri/target/release/
@@ -240,11 +289,12 @@ src-tauri/target/release/
     └── nsis/MiraPage_0.1.0_x64-setup.exe
 ```
 
-- 前端 `dist/` 由 `tauri::generate_context!()` 在编译时嵌入二进制,**无需任何外部资源**
-- Windows 10/11 自带 WebView2 Runtime;Windows 7/8 用户需手动装（[WebView2 Evergreen Standalone](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)）
+- 前端 `dist/` 由 `tauri::generate_context!()` 在编译时嵌入二进制，**无需任何外部资源**
+- Windows 10/11 自带 WebView2 Runtime；Windows 7/8 用户需手动装（[WebView2 Evergreen Standalone](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)）
 - 未签名 exe 首次运行会弹 SmartScreen —— 右键 exe → 属性 → 勾选「解除锁定」→ 应用即可
+- **本地副本** `mirapage-desktop-local.exe` 在项目根目录，保留 .git 黑名单（按 [CLAUDE.md §5.4](../CLAUDE.md)）—— 是脚本的复制目标，便于双击运行
 
-### 5.3 CI 自动打包（GitHub Actions）
+### 5.4 CI 自动打包（GitHub Actions）
 
 `.github/workflows/` 下两个 workflow：
 
@@ -278,8 +328,12 @@ git push github v0.1.0
 | `v0.1.0-module1.17` | `mirapage-desktop.exe` | Tokyo Night 配色 + Tailwind v4 落地 |
 | `v0.1.0-module1.20` | `mirapage-desktop.exe` | Xplorer NavigationBar / OperationBar 视觉对齐 |
 | `v0.1.0-module1.21` | `mirapage-desktop.exe` | 阅读状态染色 (Reading/Finished) + 重置 + 隐藏过滤 |
+| `v0.1.0-module2.0` | `mirapage-desktop.exe` | 阅读器接线（路由 + 9 宫格 + 滚轮 + 轮播） |
+| `v0.1.0-module2.1` | `mirapage-desktop.exe` | Tauri 2 IPC 嵌套 args + asset protocol + history sourceDescriptor 修复 |
+| `v0.1.0-module3.0` | `mirapage-desktop.exe` | 书库 / 阅览记录 / directory_sort 重写（Android schema 对齐） |
+| `v0.1.0-module3.0.1` | `mirapage-desktop.exe` | 3 个反馈 bug 修复（history 仅 reader 触发 / readStatus 走 history∩progress / Library 路由 path param） |
 
-> **当前状态**：本地 D:\compile 工具链（Rust 1.97.1 + MSVC 14.51）已端到端验证 v0.1.0-module1.21 通过 `cargo check` + `cargo test db::migrations::`（migration 003 测试通过）。后续模块验证首选本地，CI 作为最后一道关。
+> **当前状态**：本地 `scripts/build-portable.ps1` 已端到端验证通过（17.98 MB / MD5 一致）。后续模块首选本地脚本验证，CI 作为最后一道关。
 
 ---
 
