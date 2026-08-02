@@ -135,6 +135,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 2 | OpenSeadragon 阅读器 + 文件浏览器 + 阅读器路由 | ✅ `v0.1.0-module2.0`：`ReaderView` / `ReaderMainMenu` / 9 宫格 / 滚轮 / 轮播 |
 | 3 | 压缩包（CBZ/ZIP） | 🟡 ZIP ✅；RAR/7z 占位（`unrar`/`sevenz-rust` 注释未启） |
 | 4 | 书签/喜欢/历史/书架/标签/搜索 | ✅ 10 个 commands + 9 个 Pinia stores |
+| 4.5 | 书库 / 阅览记录 / directory_sort（Android schema 对齐） | ✅ `v0.1.0-module3.0`：`library` 11 列 + `browse_history` folder-level + `directory_sort` per-folder |
 | 5 | 跨卷连续阅读 + 幻灯片 | ✅ `findNextDirectory` + `slideshow` store |
 | 6 | i18n（中/英） | ✅ TDD 双语一致性 |
 | 7 | SMB 协议层 | ❌ stub（`smb_impl.rs` 多处 `NotImplemented`，`smb = "0.11"` 依赖已加未用） |
@@ -445,6 +446,10 @@ git push github v0.1.0-module1.NN
 - **plan 文件位置**：`C:\Users\jl0476\.claude\plans\`，每次 plan 完整覆盖（不再 plan 旧内容，diff 友好）。
 - **Rust 端不调 IPC 拿 metadata**（如 `get_detailed_file_properties`）—— 全部由前端 `extensionOf / mimeFromName / formatBytes` 派生，避免 Rust 端命令膨胀。
 - **numbering 范围**：MediaEntry 字段就 6 个（`name / path / isDirectory / isArchive / size / modifiedAt`），不要为了详情面板扩字段（`createdAt / accessedAt / mime / extension` 等由前端派生）。
+- **library 只显示 is_favorite=1**（v0.1.0-module3.0）：用户反馈明确；Android LibraryScreen 模式扩展（Android UI 仍列全部，桌面端过滤更严）；temp row 用于 progress 持久化但不显示
+- **history 重写为 folder-level**（v0.1.0-module3.0）：Android BrowseHistory 直接对齐；旧 per-book 行丢弃
+- **`book` 表重命名为 `library`**（v0.1.0-module3.0）：与 Android LibraryEntity 字节级镜像，简化 backup/restore 对接
+- **per-folder 排序覆盖**（v0.1.0-module3.0）：Android DirectorySortEntity 对齐；`locationKey = JSON.stringify(sourceDescriptor) + "|" + relPath`
 
 ---
 
