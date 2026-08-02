@@ -127,7 +127,11 @@ async function loadBook() {
       log('[ReaderView/loadBook] ERROR: no images at', targetDir, '— targetDir vs rootPath mismatch?', { targetDir, rootPath: path, equal: targetDir === path });
       return;
     }
-    pageUrls.value = sortedNames.map((name) => convertFileSrc(encodePathForUrl(`${targetDir}/${name}`)));
+    // v0.1.0-module3.0.2-hotfix4 (H9): convertFileSrc 内部已经 percent-encode
+    // path. 前端不能 pre-encode, 否则会双重编码: '%2528' 解码一次是 '%28',
+    // 不是 '(' — Tauri Rust 端收到 '%28...' 找不到文件, OSD open-failed.
+    // 修: 直接传 raw path, 让 Tauri 自己处理 encode.
+    pageUrls.value = sortedNames.map((name) => convertFileSrc(`${targetDir}/${name}`));
     log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
     // v0.1.0-module3.0.2: H5 修复 — 取上次阅读位置
     log('[ReaderView/loadBook] IPC[getProgress] →', id);
@@ -184,27 +188,11 @@ function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
  *  - 注意: drive letter 'Q:' 必须保留, 所以 split '\\' / '/' 后只 encode
  *    非 drive-letter 段
  */
-function encodePathForUrl(rawPath: string): string {
-  const segments = rawPath.split(/[\\/]/);
-  return segments
-    .map((seg, i) => {
-      if (i === 0 && /^[A-Za-z]:$/.test(seg)) {
-        // drive letter (Q:) 保留
-        return seg;
-      }
-      // encodeURIComponent 不 encode RFC 3986 sub-delims: ! ' ( ) *
-      // 但 WebView2 asset:// 把 () 当 sub-delim 处理, 文件系统文件名包含 () 时
-      // 需要 percent-encode 才能被正确解析.
-      // 修: 在 encodeURIComponent 基础上额外 encode () * ! '
-      return encodeURIComponent(seg)
-        .replace(/\(/g, '%28')
-        .replace(/\)/g, '%29')
-        .replace(/\*/g, '%2A')
-        .replace(/!/g, '%21')
-        .replace(/'/g, '%27');
-    })
-    .join('/');
-}
+// v0.1.0-module3.0.2-hotfix3 撤回 — encodePathForUrl 不需要 (H9)
+// Tauri 2 的 convertFileSrc 内部已经 percent-encode path (调用了
+// encodeURI). 前端再 encode 会双重编码: '%2528' 解码一次是 '%28',
+// 不是 '(' — Tauri Rust 端拿 '%28...' 当字面字符串找不到文件.
+// 直接传 raw path 即可, 让 convertFileSrc 内部统一处理.
 
 /**
  * v0.1.0-module3.0.2 (H5): 恢复上次阅读位置

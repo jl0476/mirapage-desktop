@@ -48,7 +48,18 @@ vi.mock('@/composables/useReaderTouchZones', () => ({
 vi.mock('@/composables/useReaderWheel', () => ({ useReaderWheel: vi.fn() }));
 vi.mock('@/composables/useKeepScreenOn', () => ({ useKeepScreenOn: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
-  convertFileSrc: (p: string) => `tauri://localhost/${p}`,
+  // v0.1.0-module3.0.2-hotfix4 (H9): mock 模拟 Tauri 真实 convertFileSrc 行为
+  // (单层 percent-encode, encodeURI + 额外 encode sub-delims ( ) ! * ').
+  // 老的 pass-through mock 不能验证单层 vs 双层.
+  convertFileSrc: (p: string) => {
+    const encoded = encodeURI(p)
+      .replace(/\(/g, '%28')
+      .replace(/\)/g, '%29')
+      .replace(/\*/g, '%2A')
+      .replace(/!/g, '%21')
+      .replace(/'/g, '%27');
+    return `tauri://localhost/${encoded.replace(/^\//, '')}`;
+  },
   invoke: vi.fn(async () => null),
 }));
 
@@ -275,15 +286,12 @@ describe('ReaderView.vue', () => {
     );
   });
 
-  // v0.1.0-module3.0.2-hotfix3 (H8): pageUrls URL 必须 percent-encode
-  // 文件名/目录含特殊字符 ('(', ')', ' ', 中文) 时, WebView2 fetch asset://
-  // 失败导致 OSD tile load fail, 翻页后图片不显示.
-  // 现状: pageUrls = convertFileSrc(`Q:\\dir\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg`)
-  //       → 'http://asset.localhost/Q:\\dir\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg'
-  //       括号 / 空格 / 中文未 encode, WebView2 fetch 路径解析失败.
-  // 修: 拼接 url 时对每个 path segment 用 encodeURIComponent, 但保留 path
-  //     分隔符 '/'. 更稳的做法: 对整路径 split('/') 然后 encode 再 join.
-  it('pageUrls 文件名/目录含特殊字符时, URL 应 percent-encode', async () => {
+  // v0.1.0-module3.0.2-hotfix3 撤回 → hotfix4 (H9): convertFileSrc 内部已 encode,
+  // 前端不要再 pre-encode. 否则双重编码 '%2528' 解码一次是 '%28' (不是 '('),
+  // Tauri Rust 端找不到文件 → OSD open-failed.
+  // 测法: 给含特殊字符的 path, pageUrls 应是单层 encode (Tauri 自己处理),
+  // 不应看到 '%25' (那意味着双重 encode).
+  it('pageUrls 文件名/目录含特殊字符时, URL 应单层 encode (Tauri convertFileSrc 内部处理)', async () => {
     vi.mocked(getBook).mockResolvedValueOnce({
       id: 99,
       title: '(林星阑) - 秀人网模特 红衣黑丝',
@@ -298,11 +306,9 @@ describe('ReaderView.vue', () => {
       isFavorite: true,
     } as never);
     vi.mocked(listDirectory).mockImplementation(async (_sd, p) => {
-      // setRoot 调的 fetch('') 拿根目录
       if (p === '' || p === 'Q:\\00down\\2603') {
         return [] as never;
       }
-      // 实际子目录
       return [
         { name: 'c (1).jpg', path: 'Q:\\00down\\2603\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
       ] as never;
@@ -318,14 +324,12 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     await flushPromises();
     await flushPromises();
-    // 关键断言: pageUrls 第 1 个不应含未 encode 的 '(' ')' 或空格
     const reader = useReaderStore();
     const url = reader.pages[0] as string;
     expect(url).toBeDefined();
-    // 不能含未编码的 '(' ')' 或 ' ' (空格)
-    expect(url).not.toMatch(/[ ()]/);
-    // 应该含 '%E6%9E%97' (林) 和 '%20' (空格)
-    expect(url).toContain('%E6%9E%97');
-    expect(url).toContain('%20');
+    // 关键: URL 不能含 '%25' (双重编码的标志)
+    expect(url).not.toContain('%25');
+    // URL 必须含单层 encode 的 UTF-8 (林 = %E6%9E%97) 或 (1) = %281%29
+    expect(url).toMatch(/%E6%9E%97|%28/);
   });
 });
