@@ -28,6 +28,7 @@ vi.mock('@/lib/tauri', async () => {
     })),
     setRoot: vi.fn(async () => undefined),
     saveProgress: vi.fn(async () => undefined),
+    getProgress: vi.fn(async () => null),  // v0.1.0-module3.0.2 (H5)
     readFile: vi.fn(async () => new Uint8Array()),
     listDirectory: vi.fn(async () => [
       { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
@@ -44,6 +45,7 @@ vi.mock('@/composables/useReaderTouchZones', () => ({
   useReaderTouchZones: vi.fn(),
   dispatchZoneAction: vi.fn(),
 }));
+vi.mock('@/composables/useReaderWheel', () => ({ useReaderWheel: vi.fn() }));
 vi.mock('@/composables/useKeepScreenOn', () => ({ useKeepScreenOn: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (p: string) => `tauri://localhost/${p}`,
@@ -103,5 +105,71 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     await flushPromises();
     expect(w.find('[data-test="reader-error"]').exists()).toBe(true);
+  });
+
+  // v0.1.0-module3.0.2: H1 修复后 sourceDescriptor 是对象,
+  // reader 应正确解析 .rootPath, 进 ready 状态(而非 "source descriptor 缺 rootPath" 错误).
+  it('sourceDescriptor 是对象时, 正确解析 rootPath 进入 ready', async () => {
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: true,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(w.find('[data-test="reader-view"]').exists()).toBe(true);
+    expect(w.find('[data-test="reader-error"]').exists()).toBe(false);
+  });
+
+  // v0.1.0-module3.0.2: H1 防御性 - 即使 sourceDescriptor 是 JSON string, 也能解析
+  it('sourceDescriptor 是 JSON string 时也能正确解析 (legacy 兼容)', async () => {
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: JSON.stringify({ type: 'local', rootPath: '/test/manga' }),
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: true,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(w.find('[data-test="reader-error"]').exists()).toBe(false);
   });
 });

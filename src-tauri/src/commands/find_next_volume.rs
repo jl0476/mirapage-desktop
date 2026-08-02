@@ -5,6 +5,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")] // v0.1.0-module3.0.2 (H4): 与 create_book / record_history 对齐
 pub struct FindNextVolumeArgs {
     pub descriptor: serde_json::Value,
     pub current_path: String,

@@ -119,3 +119,27 @@ describe('slideshow — start/pause/toggle', () => {
     vi.useFakeTimers();
   });
 });
+
+// v0.1.0-module3.0.2 (H2): start() 启动的 timer 第一次 fire 必须能跑通.
+// 老实现 schedule() = setInterval(tick, ms), 但 tick 期望 3 个回调, 0 传入 → 抛 TypeError.
+describe('slideshow — start timer 真实链路', () => {
+  it('start 后等 intervalMs, 调 setAdvance / setPrev / getIsAtLast (不抛错)', () => {
+    vi.useRealTimers();
+    const store = useSlideshowStore();
+    store.intervalMs = 500;
+    const onAdvance = vi.fn();
+    const onPrev = vi.fn();
+    const atLast = vi.fn(() => false);
+    store.setAdvance(onAdvance);
+    store.setPrev(onPrev);
+    store.setIsAtLast(atLast);
+    store.start();
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        expect(onAdvance).toHaveBeenCalled();
+        store.pause();
+        resolve();
+      }, 700);
+    });
+  });
+});

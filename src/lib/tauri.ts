@@ -217,6 +217,15 @@ export async function saveProgress(
 }
 
 /**
+ * v0.1.0-module3.0.2 (H5): 取单本书的最近阅读进度.
+ * ReaderView 在 mount 时调用, 把 lastPage 映射成 spreadIndex 实现
+ * "关书再开恢复原页" 体验. 不存在进度时返回 null.
+ */
+export async function getProgress(bookId: number): Promise<ProgressItem | null> {
+  return invoke<ProgressItem | null>('get_progress', { bookId });
+}
+
+/**
  * 手动标记 finished (右键菜单「重置阅读进度」用)。
  * finished=false 时 Rust 端会清 browse_history。
  */
@@ -292,12 +301,16 @@ export async function testConnection(id: number): Promise<boolean> {
 }
 
 // ─── Continue Volume (Phase 5) ──────────────────────────────────────────
+// v0.1.0-module3.0.2 (H4): Rust 端 fn find_next_volume(args: FindNextVolumeArgs) 单结构体,
+// 走 v0.1.0-module2.1 的 `{ args: { ... } }` 包装契约 + camelCase.
 export async function findNextVolume(
   descriptor: SourceDescriptor,
   currentPath: string,
   direction: 'next' | 'prev',
 ): Promise<string | null> {
-  return invoke<string | null>('find_next_volume', { descriptor, currentPath, direction });
+  return invoke<string | null>('find_next_volume', {
+    args: { descriptor, currentPath, direction },
+  });
 }
 
 // ─── Shortcuts (模块 #1) ───────────────────────────────────────────────

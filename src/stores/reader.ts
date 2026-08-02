@@ -48,7 +48,8 @@ export const useReaderStore = defineStore('reader', () => {
   const spreads = ref<Array<{ start: number; end: number }>>([]);
   const currentSpreadIndex = ref<number>(0);
   const chromeVisible = ref<boolean>(true);
-  const continueSwipePull = ref<number>(0);
+  // v0.1.0-module3.0.2 (L3): 删 continueSwipePull / accumulateContinuePull
+  // 这两个字段/actions 0 引用, 跨卷 swip-pulling 进度语义未实现
   const errorKind = ref<ReaderErrorKind | null>(null);
 
   /** 累计订阅器列表 — 翻页防抖最终触发回调 */
@@ -108,7 +109,6 @@ export const useReaderStore = defineStore('reader', () => {
       Math.min(payload.initialSpreadIndex, payload.spreads.length - 1),
     );
     chromeVisible.value = true;
-    continueSwipePull.value = 0;
     errorKind.value = null;
     status.value = 'ready';
   }
@@ -120,7 +120,6 @@ export const useReaderStore = defineStore('reader', () => {
     pages.value = [];
     spreads.value = [];
     currentSpreadIndex.value = 0;
-    continueSwipePull.value = 0;
     errorKind.value = null;
     if (debounceTimer !== null) {
       clearTimeout(debounceTimer);
@@ -133,7 +132,6 @@ export const useReaderStore = defineStore('reader', () => {
     if (status.value !== 'ready') return;
     if (currentSpreadIndex.value < spreads.value.length - 1) {
       currentSpreadIndex.value += 1;
-      continueSwipePull.value = 0;
       emitChanged();
     }
   }
@@ -142,7 +140,6 @@ export const useReaderStore = defineStore('reader', () => {
     if (status.value !== 'ready') return;
     if (currentSpreadIndex.value > 0) {
       currentSpreadIndex.value -= 1;
-      continueSwipePull.value = 0;
       emitChanged();
     }
   }
@@ -154,19 +151,11 @@ export const useReaderStore = defineStore('reader', () => {
     const target = Math.max(0, Math.min(index, last));
     if (target === currentSpreadIndex.value) return;
     currentSpreadIndex.value = target;
-    continueSwipePull.value = 0;
     emitChanged();
   }
 
   function toggleChrome() {
     chromeVisible.value = !chromeVisible.value;
-  }
-
-  /** 累计跨卷触发进度（仅在末页生效） */
-  function accumulateContinuePull(delta: number) {
-    if (status.value !== 'ready') return;
-    if (!isAtLastSpread.value) return;
-    continueSwipePull.value = Math.min(1.0, continueSwipePull.value + delta);
   }
 
   /** 订阅页变化（每次翻页/跳页 debounce 后回调 1 次） */
@@ -184,7 +173,6 @@ export const useReaderStore = defineStore('reader', () => {
     spreads,
     currentSpreadIndex,
     chromeVisible,
-    continueSwipePull,
     errorKind,
     // 派生
     isAtFirstSpread,
@@ -196,7 +184,6 @@ export const useReaderStore = defineStore('reader', () => {
     prevPage,
     jumpToSpread,
     toggleChrome,
-    accumulateContinuePull,
     onPageChanged,
   };
 });

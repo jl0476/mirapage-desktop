@@ -51,6 +51,11 @@ export const DEFAULT_READER_ZONES: ReaderZoneConfig = {
 export interface UseReaderTouchZonesOptions {
   containerRef: Ref<HTMLElement | null>;
   zones?: ReaderZoneConfig;
+  /**
+   * v0.1.0-module3.0.2 (M4): 9 宫格 listener 落在该 selector 容器内的 click
+   * 直接忽略. 解决 overlay 顶/底栏按钮被 9 宫格拦截双触发.
+   */
+  ignoreSelector?: string;
   onAction: (a: ReaderZoneAction) => void;
 }
 
@@ -60,6 +65,11 @@ export function useReaderTouchZones(opts: UseReaderTouchZonesOptions): void {
   function onClick(e: MouseEvent): void {
     const el = opts.containerRef.value;
     if (!el) return;
+    // v0.1.0-module3.0.2 (M4): 落点命中 ignoreSelector 容器内则跳过
+    if (opts.ignoreSelector) {
+      const target = e.target as Element | null;
+      if (target && target.closest(opts.ignoreSelector)) return;
+    }
     const rect = el.getBoundingClientRect();
     const xRatio = (e.clientX - rect.left) / rect.width;   // 0..1
     const yRatio = (e.clientY - rect.top) / rect.height;  // 0..1

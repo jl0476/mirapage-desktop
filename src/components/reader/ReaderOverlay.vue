@@ -67,7 +67,11 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
 </script>
 
 <template>
-  <div class="absolute inset-0 pointer-events-none flex flex-col justify-between text-text-primary select-none" data-test="overlay">
+  <div
+    class="absolute inset-0 pointer-events-none flex flex-col justify-between text-text-primary select-none"
+    data-test="overlay"
+    data-test-ignore-touch-zones
+  >
     <!-- 顶栏 -->
     <header v-if="chromeVisible" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs" data-test="overlay-top">
       <span class="flex-1 font-semibold truncate" data-test="title">{{ title }}</span>

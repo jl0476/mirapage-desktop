@@ -7,7 +7,11 @@ use serde::{Deserialize, Serialize};
 pub struct BookItem {
     pub id: i64,
     pub title: String,
-    pub source_descriptor: String,
+    /// v0.1.0-module3.0.2: 用 serde_json::Value 序列化, IPC 边界自动拆成
+    /// SourceDescriptor 对象 (与 BrowseHistoryEntry / RecordHistoryArgs 对齐).
+    /// 旧 version 输出 JSON string, TS 端 ReaderView / RowContextMenu 需做
+    /// 防御性 JSON.parse 才不崩, 改 Value 后两边契约一致.
+    pub source_descriptor: serde_json::Value,
     pub source_type: String,
     pub absolute_path: String,
     pub cover_entry_path: Option<String>,
@@ -33,10 +37,13 @@ pub fn list_library(db: tauri::State<crate::db::Db>) -> Result<Vec<BookItem>, St
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
+            let raw: String = row.get(2)?;
+            let source_descriptor: serde_json::Value = serde_json::from_str(&raw)
+                .unwrap_or(serde_json::Value::Null);
             Ok(BookItem {
                 id: row.get::<_, i64>(0)?,
                 title: row.get::<_, String>(1)?,
-                source_descriptor: row.get::<_, String>(2)?,
+                source_descriptor,
                 source_type: row.get::<_, String>(3)?,
                 absolute_path: row.get::<_, String>(4)?,
                 cover_entry_path: row.get::<_, Option<String>>(5)?,
@@ -81,10 +88,13 @@ pub fn get_book(book_id: i64, db: tauri::State<crate::db::Db>) -> Result<Option<
              FROM library WHERE id = ?1",
             rusqlite::params![book_id],
             |row| {
+                let raw: String = row.get(2)?;
+                let source_descriptor: serde_json::Value = serde_json::from_str(&raw)
+                    .unwrap_or(serde_json::Value::Null);
                 Ok(BookItem {
                     id: row.get::<_, i64>(0)?,
                     title: row.get::<_, String>(1)?,
-                    source_descriptor: row.get::<_, String>(2)?,
+                    source_descriptor,
                     source_type: row.get::<_, String>(3)?,
                     absolute_path: row.get::<_, String>(4)?,
                     cover_entry_path: row.get::<_, Option<String>>(5)?,

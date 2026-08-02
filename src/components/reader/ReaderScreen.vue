@@ -23,7 +23,6 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { log } from '@/lib/logger';
 import SinglePageViewer from './SinglePageViewer.vue';
@@ -86,10 +85,17 @@ watch(
   },
 );
 
-// 绑定键盘 / 鼠标 / 滚轮到 reader store
-useReaderHotkeys();
+// v0.1.0-module3.0.2 (H3): useReaderHotkeys 已在 ReaderView 调一次, 此处删除避免双注册
+// (window.addEventListener 重复挂载 → 一次按键触发两次 nextPage)
+// 单/双页 viewer mount / unmount 各自 OSD 初始化与 destroy 不依赖 hotkey
+// 翻页/跳页绑定 reader store action 即可 (singlePageUrl/currentPage computed)
 
 onMounted(() => {
+  // v0.1.0-module3.0.2 (H2): 注入 slideshow 翻页回调
+  // store 内部 setInterval 触发 tick 时, 实际执行 reader store action
+  slideshow.setAdvance(() => store.nextPage());
+  slideshow.setPrev(() => store.prevPage());
+  slideshow.setIsAtLast(() => store.isAtLastSpread);
   void slideshow.load();
 });
 

@@ -8,6 +8,39 @@
 
 use std::collections::HashMap;
 
+/// v0.1.0-module3.0.2 (H5): 取单本书最近阅读进度.
+#[derive(Debug, serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressItem {
+    pub book_id: i64,
+    pub page: i64,
+    pub reader_mode: String,
+    pub updated_at: i64,
+}
+
+#[tauri::command]
+pub fn get_progress(
+    book_id: i64,
+    db: tauri::State<crate::db::Db>,
+) -> Result<Option<ProgressItem>, String> {
+    let conn = db.conn();
+    let result = conn
+        .query_row(
+            "SELECT book_id, page, reader_mode, updated_at FROM progress WHERE book_id = ?1",
+            rusqlite::params![book_id],
+            |row| {
+                Ok(ProgressItem {
+                    book_id: row.get::<_, i64>(0)?,
+                    page: row.get::<_, i64>(1)?,
+                    reader_mode: row.get::<_, String>(2)?,
+                    updated_at: row.get::<_, i64>(3)?,
+                })
+            },
+        )
+        .ok();
+    Ok(result)
+}
+
 /// 保存阅读进度。
 ///
 /// `finished` 语义：

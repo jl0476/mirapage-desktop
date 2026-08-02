@@ -160,7 +160,7 @@ describe('reader store — chrome toggle', () => {
   });
 });
 
-describe('reader store — continueSwipePull (跨卷触发累计)', () => {
+describe('reader store — continueSwipePull (跨卷触发累计 — v0.1.0-module3.0.2: 字段已删除, 兼容抛错)', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     const r = useReaderStore();
@@ -176,24 +176,14 @@ describe('reader store — continueSwipePull (跨卷触发累计)', () => {
     });
   });
 
-  it('accumulates pull while at last spread with NEXT direction', () => {
+  it('continueSwipePull 字段已删除 (YAGNI 清理)', () => {
     const r = useReaderStore();
-    r.jumpToSpread(1);
-    expect(r.isAtLastSpread).toBe(true);
-
-    r.accumulateContinuePull(0.2);
-    r.accumulateContinuePull(0.2);
-    expect(r.continueSwipePull).toBeCloseTo(0.4);
+    expect((r as unknown as { continueSwipePull?: unknown }).continueSwipePull).toBeUndefined();
   });
 
-  it('resets pull on leaving last spread', () => {
+  it('accumulateContinuePull 字段已删除 (YAGNI 清理)', () => {
     const r = useReaderStore();
-    r.jumpToSpread(1);
-    r.accumulateContinuePull(0.5);
-    expect(r.continueSwipePull).toBeGreaterThan(0);
-
-    r.jumpToSpread(0);
-    expect(r.continueSwipePull).toBe(0);
+    expect((r as unknown as { accumulateContinuePull?: unknown }).accumulateContinuePull).toBeUndefined();
   });
 });
 

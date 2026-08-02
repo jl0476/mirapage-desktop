@@ -31,6 +31,7 @@ vi.mock('@/lib/tauri', () => ({
   setFavorite: vi.fn(async () => undefined),
 }));
 
+import { listLibrary } from '@/lib/tauri';
 import { useLibraryStore } from './library';
 
 beforeEach(() => {
@@ -62,5 +63,32 @@ describe('library store', () => {
     expect(store.items[1].isFavorite).toBe(false);
     await store.toggleFavorite(2);
     expect(store.items[1].isFavorite).toBe(true);
+  });
+
+  // v0.1.0-module3.0.2: BookItem.sourceDescriptor 必须是对象（H1 修复）
+  // Rust 端 list_library / get_book 用 serde_json::Value 序列化,
+  // TS 端契约是 SourceDescriptor 对象（不是 raw JSON string）
+  it('items[].sourceDescriptor 是 SourceDescriptor 对象（非 JSON string）', async () => {
+    vi.mocked(listLibrary).mockResolvedValueOnce([
+      {
+        id: 1,
+        title: 'A',
+        sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+        sourceType: 'Local',
+        absolutePath: 'vol1',
+        coverEntryPath: null,
+        coverEntryName: null,
+        pageCount: 10,
+        lastReadAt: 100,
+        addedAt: 0,
+        isFavorite: true,
+      } as never,
+    ]);
+    const store = useLibraryStore();
+    await store.refresh();
+    const sd = store.items[0].sourceDescriptor;
+    expect(typeof sd).toBe('object');
+    expect(sd).not.toBeNull();
+    expect((sd as { rootPath?: string }).rootPath).toBe('/test/manga');
   });
 });

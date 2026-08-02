@@ -38,6 +38,10 @@ vi.mock('@/stores/slideshow', async () => {
       reset: vi.fn(),
       updateIntervalMs: vi.fn(),
       updateDirection: vi.fn(),
+      // v0.1.0-module3.0.2 (H2): ReaderScreen mount 时注入 callbacks
+      setAdvance: vi.fn(),
+      setPrev: vi.fn(),
+      setIsAtLast: vi.fn(),
     }),
   };
 });

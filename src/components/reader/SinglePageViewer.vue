@@ -30,7 +30,9 @@ onMounted(() => {
     element: containerRef.value,
     tileSources: { type: 'image', url: props.imageUrl },
     showNavigator: false,
-    gestureSettingsMouse: { scrollToZoom: true },
+    // v0.1.0-module3.0.2 (M5): 关掉 OSD 滚轮缩放, 改由 ReaderView 的
+    // useReaderWheel 接管翻页. 否则滚轮先被 OSD 缩放吞掉, 翻页不响应.
+    gestureSettingsMouse: { scrollToZoom: false },
     animationTime: 0.3,
   });
 });

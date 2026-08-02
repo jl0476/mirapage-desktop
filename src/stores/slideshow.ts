@@ -36,6 +36,14 @@ export const useSlideshowStore = defineStore('slideshow', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let timerId: any = null;
 
+  // v0.1.0-module3.0.2 (H2): 翻页回调注入接口.
+  // ReaderScreen 在 onMounted 调 setAdvance / setPrev / setIsAtLast 把 reader store
+  // 动作 wire 进来. 这样 schedule() 内的 setInterval(tick) 不再传 undefined.
+  // 用 noop 兜底, 非 reader 路径(纯 store 单测) 调 tick 也不会抛.
+  let advanceFn: () => void = () => undefined;
+  let prevFn: () => void = () => undefined;
+  let atLastFn: () => boolean = () => false;
+
   /** 末页触发跨卷后, ReaderScreen watch 此 ref → 调 find_next_volume IPC */
   const pendingNextVolume = ref(false);
 
@@ -91,7 +99,10 @@ export const useSlideshowStore = defineStore('slideshow', () => {
   }
 
   function schedule(): void {
-    timerId = setInterval(tick, intervalMs.value);
+    // v0.1.0-module3.0.2 (H2): 闭包捕获 advance/prev/atLast, 0 传 undefined → 老 bug
+    timerId = setInterval(() => {
+      tick(advanceFn, prevFn, atLastFn);
+    }, intervalMs.value);
   }
 
   /** 跨卷意图清空 (ReaderScreen 处理完后调) */
@@ -100,6 +111,11 @@ export const useSlideshowStore = defineStore('slideshow', () => {
     pendingNextVolume.value = false;
     return v;
   }
+
+  // v0.1.0-module3.0.2 (H2): callbacks 注入. ReaderScreen 在 mount / openBook 期调.
+  function setAdvance(fn: () => void): void { advanceFn = fn; }
+  function setPrev(fn: () => void): void { prevFn = fn; }
+  function setIsAtLast(fn: () => boolean): void { atLastFn = fn; }
 
   /**
    * tick: 翻页 (回调), 末页触发跨卷意图.
@@ -137,5 +153,8 @@ export const useSlideshowStore = defineStore('slideshow', () => {
     reset,
     tick,
     consumePendingNextVolume,
+    setAdvance,
+    setPrev,
+    setIsAtLast,
   };
 });

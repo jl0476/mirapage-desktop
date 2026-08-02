@@ -67,6 +67,7 @@ pub fn run() {
             commands::progress::save_progress,
             commands::progress::mark_finished,
             commands::progress::list_progress_finished,
+            commands::progress::get_progress,
             commands::tags::list_tags,
             commands::tags::create_tag,
             commands::tags::delete_tag,

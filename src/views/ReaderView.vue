@@ -14,22 +14,25 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { getBook, saveProgress } from '@/lib/tauri';
+import { getBook, saveProgress, getProgress } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
+import { useReaderWheel } from '@/composables/useReaderWheel';
 import { useKeepScreenOn } from '@/composables/useKeepScreenOn';
 import {
   useReaderTouchZones,
   dispatchZoneAction,
 } from '@/composables/useReaderTouchZones';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
+import { isImage } from '@/lib/mime';
+import { naturalSort } from '@/lib/naturalSort';
 import { log } from '@/lib/logger';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
-import type { MediaEntry } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 const route = useRoute();
 const router = useRouter();
@@ -65,8 +68,16 @@ async function loadBook() {
       errorMessage.value = `找不到 bookId ${id}`;
       return;
     }
-    const sd = book.sourceDescriptor;
-    const path = (sd as { rootPath?: string }).rootPath ?? '';
+    // v0.1.0-module3.0.2: H1 修复后 Rust 端 fields 是 serde_json::Value,
+    // IPC 边界自动拆成对象。Defensive parse 仍保留, 兼容老 DB 行 / 跨进程备份.
+    // SourceDescriptor 是判别联合, 只 Local 变体有 rootPath.
+    const sd = parseSourceDescriptor(book.sourceDescriptor);
+    if (!sd || sd.type !== 'local' || !sd.rootPath) {
+      status.value = 'error';
+      errorMessage.value = 'source descriptor 解析失败或非本地资源';
+      return;
+    }
+    const path = sd.rootPath;
     log('[ReaderView] resolved path=', path);
     if (!path) {
       status.value = 'error';
@@ -77,25 +88,29 @@ async function loadBook() {
     await fileBrowser.setRoot(path);
     const entries: MediaEntry[] = fileBrowser.entries;
     log('[ReaderView] entries from setRoot', entries.length);
-    const IMAGES = /\.(jpe?g|png|webp|bmp|gif|avif|heic|heif)$/i;
+    // v0.1.0-module3.0.2: M1 修复 — 用 lib/mime.isImage 与 lib/naturalSort
+    // 与 FileBrowser / useReaderActions.enumerateCover 字节级对齐
     const imageEntries = entries
-      .filter((e) => !e.isDirectory && !e.isArchive && IMAGES.test(e.name))
-      .map((e) => e.name)
-      .sort();
-    log('[ReaderView] imageEntries', imageEntries.length, imageEntries.slice(0, 3));
-    if (imageEntries.length === 0) {
+      .filter((e) => !e.isDirectory && !e.isArchive && isImage(e.name))
+      .map((e) => e.name);
+    const sortedNames = naturalSort(imageEntries, (n) => n);
+    log('[ReaderView] imageEntries', sortedNames.length, sortedNames.slice(0, 3));
+    if (sortedNames.length === 0) {
       status.value = 'error';
       errorMessage.value = `${path} 下找不到图片`;
       return;
     }
-    pageUrls.value = imageEntries.map((name) => convertFileSrc(`${path}/${name}`));
+    pageUrls.value = sortedNames.map((name) => convertFileSrc(`${path}/${name}`));
     log('[ReaderView] pageUrls sample', pageUrls.value[0]);
+    // v0.1.0-module3.0.2: H5 修复 — 取上次阅读位置
+    const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length);
+    log('[ReaderView] initialSpreadIndex=', initialSpreadIndex);
     reader.openBook({
       bookId: id,
       title: book.title || '无标题',
       pages: pageUrls.value,
       spreads: SpreadPlanner.plan(pageUrls.value.length, true),
-      initialSpreadIndex: 0,
+      initialSpreadIndex,
     });
     log('[ReaderView] reader.openBook done');
     status.value = 'ready';
@@ -106,6 +121,53 @@ async function loadBook() {
   }
 }
 
+/**
+ * v0.1.0-module3.0.2: 防御性解析 sourceDescriptor
+ *  - 新数据 (Rust serde_json::Value): 直接是 SourceDescriptor 对象
+ *  - 老数据 (Rust String raw blob): JSON.parse 拆
+ *  - 都坏了: 返回 null (上层走 error 路径)
+ */
+function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && 'rootPath' in parsed
+        ? (parsed as SourceDescriptor)
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof raw === 'object' && 'rootPath' in raw && typeof (raw as { rootPath: unknown }).rootPath === 'string') {
+    return raw as SourceDescriptor;
+  }
+  return null;
+}
+
+/**
+ * v0.1.0-module3.0.2: H5 修复 — 恢复上次阅读位置
+ *  - 调 getProgress(bookId) 拿 last read page
+ *  - page→spread 映射 (SpreadPlanner.spreadIndexForPage)
+ *  - 无 progress / 失败: 默认 0
+ */
+async function resolveInitialSpreadIndex(bookId: number, _pageCount: number): Promise<number> {
+  try {
+    const progress = await getProgress(bookId);
+    if (!progress) return 0;
+    const spreads = SpreadPlanner.plan(_pageCount, true);
+    const idx = SpreadPlanner.spreadIndexForPage(progress.page, spreads);
+    return Math.max(0, Math.min(idx, spreads.length - 1));
+  } catch (e) {
+    log('[ReaderView] resolveInitialSpreadIndex fallback 0:', e);
+    return 0;
+  }
+}
+
+/**
+ * v0.1.0-module3.0.2: H6 修复 — 入口立刻 consumePendingNextVolume
+ * (不论 settings), 防止 flag 永远 true 死循环
+ */
 async function onNextVolume() {
   if (!slideshow.consumePendingNextVolume()) return;
   if (settings.continueToNextVolume !== 'auto') return;
@@ -119,9 +181,16 @@ onMounted(async () => {
   await slideshow.load();
 });
 
+// v0.1.0-module3.0.2: M2 修复 — store 防抖路径存 spreads[start] (page),
+// unmount 路径必须对齐, 否则末页前的 spread 恢复会被 spreadIndex 覆盖.
+function currentReadPage(): number {
+  const spread = reader.spreads[reader.currentSpreadIndex];
+  return spread?.start ?? reader.currentSpreadIndex;
+}
+
 onUnmounted(() => {
   if (reader.bookId !== null) {
-    void saveProgress(reader.bookId, reader.currentSpreadIndex, 'single');
+    void saveProgress(reader.bookId, currentReadPage(), 'single');
   }
   slideshow.pause();
   reader.closeBook();
@@ -138,11 +207,24 @@ const zoneActions = {
   nextVolume: () => { onNextVolume(); },
 };
 
+// v0.1.0-module3.0.2: M5 修复 — 把写好的 useReaderWheel 实际挂上 (containerRef),
+// preventDefault 阻止页面滚动 + OSD 内部滚轮缩放. ReaderScreen 那边 SinglePageViewer
+// 已经 scrollToZoom=false, 此处 containerRef 接 wheel 接管翻页.
 useReaderHotkeys();
+useReaderWheel({
+  containerRef,
+  onPrev: () => { reader.prevPage(); slideshow.reset(); },
+  onNext: () => { reader.nextPage(); slideshow.reset(); },
+});
+
 const keepScreenOnRef = computed(() => settings.keepScreenOn);
 useKeepScreenOn(keepScreenOnRef);
+
+// v0.1.0-module3.0.2: M4 修复 — 让 9 宫格自动忽略 overlay 内的 button/input 点击,
+// 避免 overlay 按钮被 9 宫格拦截双触发. 用 [data-test-ignore-touch-zones] 属性 marker.
 useReaderTouchZones({
   containerRef,
+  ignoreSelector: '[data-test-ignore-touch-zones]',
   onAction: (a) => dispatchZoneAction(a, zoneActions),
 });
 
@@ -196,6 +278,8 @@ watch(
       :total-spreads="reader.spreads.length"
       @jump-page="(i: number) => reader.jumpToSpread(i)"
       @back="router.push('/')"
+      @cycle-mode="settings.update('reader_default_mode', settings.readerDefaultMode === 'single' ? 'double' : 'single')"
+      @cycle-direction="slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward')"
     >
     </ReaderMainMenu>
   </main>
