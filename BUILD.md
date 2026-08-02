@@ -260,24 +260,35 @@ powershell.exe -ExecutionPolicy Bypass -File "F:\\WorkSpaceCollection\\git\\mira
 **典型输出**（成功）：
 
 ```text
-[1/5] 检测 mirapage-desktop 运行实例
-      ✓ 无运行实例
+[1/5] Detect mirapage-desktop running instance
+      [OK] no running instance
 [2/5] npm run build (vue-tsc + vite)
-      ✓ dist/ 生成
+      [OK] dist/ generated
 [3/5] tauri build --no-bundle (Rust release)
-      ✓ Rust release 完成
-[4/5] 复制到 F:\...\mirapage-desktop-local.exe
-      ✓ 复制完成
-[5/5] MD5 校验
-      src   853fc6617d8737dbc6f897ee06d3a38a  17.98 MB
-      local 853fc6617d8737dbc6f897ee06d3a38a  17.98 MB
+      [OK] Rust release complete
+[4/5] Copy to F:\...\mirapage-desktop-local.exe
+      [OK] copy complete
+[5/5] MD5 verification
+      src   7673AC7D0604EA032F027FE039BC2B14  17.15 MB
+      local 7673AC7D0604EA032F027FE039BC2B14  17.15 MB
 
-=== DONE ✓ ===
-产物: F:\...\mirapage-desktop-local.exe
+=== DONE ===
+Output: F:\...\mirapage-desktop-local.exe
 
-下一步: 双击 .exe 直接运行, 或
-  git tag vX.Y.Z && git push github vX.Y.Z   # 触发 CI release
+Next: double-click .exe to run, OR
+  git tag vX.Y.Z && git push github vX.Y.Z   # trigger CI release
 ```
+
+**脚本踩坑记录**（v0.1.0-module3.0.1+ 实测）：
+
+| 坑 | 现象 | 解决 |
+|---|------|------|
+| `cmd.exe /c "... && ..."` 中的 `&&` | PowerShell 5.1 报"该版本的语句分隔符无效" | cmd.exe 调用链封装到 `scripts\build-tauri-inner.bat`，PowerShell 只 `cmd.exe /c <bat>` |
+| `2>&1` stderr→stdout 重定向 | `& cmd.exe ... 2>&1` 在 PowerShell 5.1 中 `2>&1` 被解释成 stderr 字符串传给 cmd.exe，cmd 报"找不到命令" | 直接 foreground `cmd.exe /c $InnerBat`，靠 `$LASTEXITCODE` 判断 |
+| `Start-Process` + `RedirectStandardOutput` | cargo 输出 ~1000 行，4 KB pipe buffer 填满后子进程阻塞，父进程 `WaitForExit()` 永远等 | foreground 直接跑，输出直接到 PowerShell 终端（用户看到 cargo 实时输出，体验也更好）|
+| UTF-8 文件 + 中文字符串 + 双引号变量插值 | PowerShell 5.1 解析器在 `Write-Host "中文${var}英文"` 处报"字符串缺少终止符" | 脚本消息体全部用 ASCII（`[OK]` / `[WARN]` / `[FAILED]`），注释里的中文 OK |
+
+最终脚本采用 `Start-Process` 之前那种"最朴素的 foreground 调用 + `$LASTEXITCODE` 校验"模式，反而比 Start-Process 更快（无 IPC 开销）+ 实时输出 + 无 deadlock。
 
 ### 5.3 产物路径
 
