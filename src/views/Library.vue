@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * LibraryView.vue — 书架视图
- * - 收藏的书(isFavorite=true)优先显示
+ * LibraryView.vue — 书库视图 (v0.1.0-module3.0)
+ * - 仅显示 is_favorite=1 的手动加入书（Android LibraryEntity 对齐）
  * - 全部按 lastReadAt DESC 排
- * - 双击 favorite 切换
+ * - 双击 ★ 切换 favorite 状态
  */
 import { onMounted, ref } from 'vue';
 import { storeToRefs } from 'pinia';
