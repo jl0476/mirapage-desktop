@@ -185,11 +185,13 @@ describe('ReaderView.vue', () => {
   });
 
   // v0.1.0-module3.0.2-hotfix1 (N3): 还原到末页时不应触发跨卷.
-  // 当前 spreadIndex = spreads.length - 1 会被 slideshow.tick() atLast() 立即 pause + setPendingNextVolume,
-  // 用户感知"刚开就跨卷". 修法: getProgress 返回末页 (page = pageCount - 1) 时,
-  // resolveInitialSpreadIndex 把 spreadIndex 钳到 last - 1 (倒数第二页).
+  // 当前 spreadIndex = spreads.length - 1 会被 slideshow.tick() atLast() 立即 pause
+  // + setPendingNextVolume, 用户感知"刚开就跨卷". 修法: getProgress 返回末页
+  // 时, resolveInitialSpreadIndex 把 spreadIndex 钳到 last - 1 (倒数第二 spread).
+  // v0.1.0-module3.0.2-hotfix7 (H13): 单页模式每 spread 1 张图, 3 张图 → 3 spread,
+  // page=2 (末张) → spread 2 → last=2 → 钳到 last-1=1.
   it('getProgress 末页 → initialSpreadIndex 钳到 last - 1 (避免立刻触发跨卷)', async () => {
-    // 3 张图 → spreads: [{start:0,end:1},{start:1,end:3}] → last spread index = 1
+    // 3 张图 (单页模式): spreads = [{0,1},{1,2},{2,3}] → last spread index = 2
     vi.mocked(getBook).mockResolvedValueOnce({
       id: 7,
       title: 'Manga 7',
@@ -225,9 +227,9 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     await flushPromises();
     await flushPromises();
-    // 末页钳位: page=2 → spreads[1].start=1, 但 last spread index = 1
-    // 应钳到 0 (倒数第二), 不在末 spread
-    expect(reader.currentSpreadIndex).toBe(0);
+    // 末页钳位: page=2 (单页模式每 spread 一张) → spreads[2].start=2, last=2
+    // 应钳到 last-1=1 (倒数第二), 不在末 spread
+    expect(reader.currentSpreadIndex).toBe(1);
     expect(reader.currentSpreadIndex).toBeLessThan(reader.spreads.length - 1);
   });
 

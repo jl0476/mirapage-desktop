@@ -128,18 +128,22 @@ async function loadBook() {
       return;
     }
     // v0.1.0-module3.0.2-hotfix4 (H9): convertFileSrc 内部已经 encode, 不 pre-encode
+    // v0.1.0-module3.0.2-hotfix7 (H13): singlePage mode 参数
+    // 单页模式 spread 大小 = 1 (除 cover), 滚轮一次跳 1 张图.
+    // 双页模式 spread 大小 = 2 (除 cover + 末张), 跳 2 张.
+    const isSinglePage = settings.readerDefaultMode === 'single';
+    log('[ReaderView/loadBook] spread mode=', isSinglePage ? 'single' : 'double');
     pageUrls.value = sortedNames.map((name) => convertFileSrc(joinPath(absDir, name)));
     log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
-    // v0.1.0-module3.0.2: H5 修复 — 取上次阅读位置
     log('[ReaderView/loadBook] IPC[getProgress] →', id);
-    const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length);
+    const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length, isSinglePage);
     log('[ReaderView/loadBook] initialSpreadIndex=', initialSpreadIndex, '(pageCount=', sortedNames.length, ')');
-    log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: book.title, pages: pageUrls.value.length, initialSpreadIndex });
+    log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: book.title, pages: pageUrls.value.length, initialSpreadIndex, isSinglePage });
     reader.openBook({
       bookId: id,
       title: book.title || '无标题',
       pages: pageUrls.value,
-      spreads: SpreadPlanner.plan(pageUrls.value.length, true),
+      spreads: SpreadPlanner.plan(pageUrls.value.length, true, isSinglePage),
       initialSpreadIndex,
     });
     log('[ReaderView/loadBook] reader.openBook done, status=ready');
@@ -218,11 +222,12 @@ function joinPath(...parts: string[]): string {
  *    让用户先正常翻页, 而不是看到跨卷 flag 触发.
  *  - 多 spread 的漫画钳到 last - 1; 单 spread 的极端情况不动 (无 last - 1).
  */
-async function resolveInitialSpreadIndex(bookId: number, pageCount: number): Promise<number> {
+async function resolveInitialSpreadIndex(bookId: number, pageCount: number, singlePage: boolean = false): Promise<number> {
   try {
     const progress = await getProgress(bookId);
     if (!progress) return 0;
-    const spreads = SpreadPlanner.plan(pageCount, true);
+    // v0.1.0-module3.0.2-hotfix7 (H13): singlePage 参数
+    const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
     const last = spreads.length - 1;
     if (last < 0) return 0;
     const idx = SpreadPlanner.spreadIndexForPage(progress.page, spreads);

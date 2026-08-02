@@ -7,9 +7,11 @@
  *
  * ## 语义
  * - `pageCount == 0` → `[]`
- * - `pageCount == 1` → `[{0..1}]`（无论 coverStandalone）
+ * - `pageCount == 1` → `[{0..1}]`（无论 coverStandalone / singlePage）
  * - `pageCount > 1 && coverStandalone` → `[{0..1}]` + `[{1..3}]` + ... + 余单页 `[{i..i+1}]`
  * - `coverStandalone == false` → 两两配对
+ * - v0.1.0-module3.0.2-hotfix7 (H13): `singlePage == true` → 每 spread 1 张图
+ *   (除 cover 外, 配对逻辑禁用). 用户单页模式滚轮一次 = 跳 1 张, 不是 2 张.
  *
  * RTL 由调用方通过 Pager 的 reverseLayout 控制，本函数不处理。
  */
@@ -24,11 +26,27 @@ export const SpreadPlanner = {
   /**
    * 把 `pageCount` 页切成 spread 列表
    * @param pageCount 总页数（≥ 0）
-   * @param coverStandalone 封面是否独占一页
+   * @param coverStandalone 封面是否独占一页（双页模式生效）
+   * @param singlePage 单页模式: 每 spread 1 张图 (除 cover 外).
+   *                  配对禁用. 与 coverStandalone 互不冲突 (cover 仍独占)
    */
-  plan(pageCount: number, coverStandalone: boolean): PageRange[] {
+  plan(pageCount: number, coverStandalone: boolean, singlePage: boolean = false): PageRange[] {
     if (pageCount === 0) return [];
     if (pageCount === 1) return [{ start: 0, end: 1 }];
+
+    // v0.1.0-module3.0.2-hotfix7 (H13): singlePage 短路
+    // 每 spread = 1 张图 (除了 cover 仍占首 spread)
+    if (singlePage) {
+      const spreads: PageRange[] = [];
+      if (coverStandalone) {
+        spreads.push({ start: 0, end: 1 });
+      }
+      const begin = coverStandalone ? 1 : 0;
+      for (let i = begin; i < pageCount; i++) {
+        spreads.push({ start: i, end: i + 1 });
+      }
+      return spreads;
+    }
 
     const spreads: PageRange[] = [];
 

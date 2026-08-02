@@ -67,6 +67,33 @@ describe('SpreadPlanner.plan', () => {
       { start: 9, end: 11 },
     ]);
   });
+
+  // v0.1.0-module3.0.2-hotfix7 (H13): singlePage=true 时每 spread 1 张
+  // 单页模式读者预期滚轮一次 = 跳 1 张图 (不是双页模式那样跨 2 张).
+  it('singlePage=true: 77 pages → 77 spreads, each size 1 (except cover)', () => {
+    const spreads = SpreadPlanner.plan(77, true, true);
+    expect(spreads.length).toBe(77);
+    expect(spreads[0]).toEqual({ start: 0, end: 1 });
+    expect(spreads[1]).toEqual({ start: 1, end: 2 });
+    expect(spreads[76]).toEqual({ start: 76, end: 77 });
+  });
+
+  it('singlePage=true + pageCount=1 → single spread', () => {
+    expect(SpreadPlanner.plan(1, true, true)).toEqual([{ start: 0, end: 1 }]);
+  });
+
+  it('singlePage=true + pageCount=0 → empty', () => {
+    expect(SpreadPlanner.plan(0, true, true)).toEqual([]);
+  });
+
+  it('singlePage=false (default double): 77 pages → cover + 38 pairs (39 spreads)', () => {
+    const spreads = SpreadPlanner.plan(77, true, false);
+    // [0..1] + [1..3] + [3..5] + ... + [75..77] = 1 + 38 = 39 spreads
+    expect(spreads.length).toBe(39);
+    expect(spreads[0]).toEqual({ start: 0, end: 1 });
+    expect(spreads[1]).toEqual({ start: 1, end: 3 });
+    expect(spreads[38]).toEqual({ start: 75, end: 77 });
+  });
 });
 
 describe('SpreadPlanner.spreadIndexForPage', () => {
