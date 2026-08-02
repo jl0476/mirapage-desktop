@@ -60,11 +60,6 @@ export function useReaderHotkeys(): void {
     if (cmd) dispatch(store, cmd);
   }
 
-  function onWheel(e: WheelEvent): void {
-    const cmd = resolveHotkey(e, defaultKeyBindings);
-    if (cmd) dispatch(store, cmd);
-  }
-
   function onMousedown(e: MouseEvent): void {
     const cmd = resolveHotkey(e, defaultKeyBindings, {
       kind: 'mouse',
@@ -75,14 +70,16 @@ export function useReaderHotkeys(): void {
   }
 
   onMounted(() => {
+    // v0.1.0-module3.0.2-hotfix6 (H12): 删 wheel listener
+    // useReaderWheel 已接管 wheel 翻页 (containerRef 范围, 节流 250ms).
+    // 老代码 wheel 同时挂 window (热键 dispatch) + containerRef (useReaderWheel),
+    // 一次滚动触发 2 次 nextPage (从 spread 0 → spread 2, 单页模式跳 2 张).
     window.addEventListener('keydown', onKeydown);
-    window.addEventListener('wheel', onWheel);
     window.addEventListener('mousedown', onMousedown);
   });
 
   onBeforeUnmount(() => {
     window.removeEventListener('keydown', onKeydown);
-    window.removeEventListener('wheel', onWheel);
     window.removeEventListener('mousedown', onMousedown);
   });
 }

@@ -18,7 +18,6 @@ import { getBook, saveProgress, getProgress, listDirectory } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
-import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
 import { useReaderWheel } from '@/composables/useReaderWheel';
 import { useKeepScreenOn } from '@/composables/useKeepScreenOn';
@@ -39,7 +38,6 @@ const router = useRouter();
 const reader = useReaderStore();
 const slideshow = useSlideshowStore();
 const settings = useSettingsStore();
-const fileBrowser = useFileBrowserStore();
 const { t } = useI18n();
 
 const status = ref('loading' as 'loading' | 'ready' | 'error');
@@ -110,9 +108,11 @@ async function loadBook() {
       isAlreadyAbs,
       absDir,
     });
-    log('[ReaderView/loadBook] IPC[fileBrowser.setRoot] →', path);
-    await fileBrowser.setRoot(path);
-    log('[ReaderView/loadBook] IPC[fileBrowser.setRoot] ← ok, entries=', fileBrowser.entries.length);
+    // v0.1.0-module3.0.2-hotfix6 (H11): 删 setRoot (省 1 IPC)
+    // ReaderView 不需要 fileBrowser.entries (rootPath 根目录 entries 没用),
+    // 只列 absDir 子目录. setRoot 内部已经调 fetch('')=listDirectory(rootPath),
+    // 是冗余 IPC (~500ms round-trip + 458 entry 处理), 直接 listDirectory(absDir)
+    // 一次完成.
     log('[ReaderView/loadBook] IPC[listDirectory] →', { descriptor: sd, path: absDir });
     const targetEntries: MediaEntry[] = await listDirectory(sd, absDir);
     log('[ReaderView/loadBook] IPC[listDirectory] ←', targetEntries.length, 'entries; first 3:', targetEntries.slice(0, 3).map((e) => `${e.name}(dir=${e.isDirectory},arc=${e.isArchive})`));
