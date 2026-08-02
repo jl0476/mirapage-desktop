@@ -73,28 +73,68 @@ pub fn set_favorite(
 pub struct CreateBookArgs {
     pub title: String,
     pub source_descriptor: serde_json::Value,
+    pub absolute_path: String,
+    pub source_type: String,
+    pub favorite: bool,
+    /// caller 已 enumerate 一次，传入封面 + 页数；enumerate 失败时传 None / 0
+    pub cover_entry_path: Option<String>,
+    pub cover_entry_name: Option<String>,
+    pub page_count: i64,
 }
 
 #[tauri::command]
 pub fn create_book(args: CreateBookArgs, db: tauri::State<crate::db::Db>) -> Result<i64, String> {
     let conn = db.conn();
     let descriptor_str = serde_json::to_string(&args.source_descriptor).map_err(|e| e.to_string())?;
-    // 复用同 source_descriptor 的 book (Android 端 ensureBook 语义):
-    // 找到则返回已有 bookId, 找不到则 INSERT 新行返回新 id.
-    // ON CONFLICT + last_insert_rowid 在 Rust sqlite 行为: 命中 conflict
-    // 时 last_insert_rowid 返回冲突行 id (SQLite 标准).
+
+    // 复用同 (sourceDescriptor, absolutePath) 的 row (Android LibraryRepository.importFromSource 行为)
+    let existing: Option<(i64, bool)> = conn
+        .query_row(
+            "SELECT id, is_favorite FROM library WHERE source_descriptor = ?1 AND absolute_path = ?2",
+            rusqlite::params![descriptor_str, args.absolute_path],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
+        )
+        .ok();
+
+    if let Some((id, is_fav)) = existing {
+        // favorite=true 且当前未 favorite → 升级
+        if args.favorite && !is_fav {
+            conn.execute(
+                "UPDATE library SET is_favorite = 1 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        return Ok(id);
+    }
+
+    // 不存在则 INSERT（11 列对齐 Android LibraryEntity）
+    let now = chrono_now();
     conn.execute(
-        "INSERT INTO book (title, source_descriptor, is_favorite) VALUES (?1, ?2, 0)
-         ON CONFLICT(source_descriptor) DO NOTHING",
-        rusqlite::params![args.title, descriptor_str],
+        "INSERT INTO library
+            (title, source_descriptor, source_type, absolute_path,
+             cover_entry_path, cover_entry_name, page_count,
+             added_at, is_favorite)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        rusqlite::params![
+            args.title,
+            descriptor_str,
+            args.source_type,
+            args.absolute_path,
+            args.cover_entry_path,
+            args.cover_entry_name,
+            args.page_count,
+            now,
+            if args.favorite { 1i64 } else { 0i64 },
+        ],
     )
     .map_err(|e| e.to_string())?;
-    let id: i64 = conn
-        .query_row(
-            "SELECT id FROM book WHERE source_descriptor = ?1",
-            [&descriptor_str],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(id)
+    Ok(conn.last_insert_rowid())
+}
+
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
