@@ -1,13 +1,20 @@
-//! `commands::library` —— 书架收藏
+//! `commands::library` —— 书库收藏 (v0.1.0-module3.0: 11 字段 + WHERE is_favorite=1 过滤)
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BookItem {
     pub id: i64,
     pub title: String,
     pub source_descriptor: String,
+    pub source_type: String,
+    pub absolute_path: String,
+    pub cover_entry_path: Option<String>,
+    pub cover_entry_name: Option<String>,
+    pub page_count: i64,
     pub last_read_at: Option<i64>,
+    pub added_at: i64,
     pub is_favorite: bool,
 }
 
@@ -16,7 +23,12 @@ pub fn list_library(db: tauri::State<crate::db::Db>) -> Result<Vec<BookItem>, St
     let conn = db.conn();
     let mut stmt = conn
         .prepare(
-            "SELECT id, title, source_descriptor, last_read_at, is_favorite FROM book ORDER BY is_favorite DESC, last_read_at DESC NULLS LAST",
+            "SELECT id, title, source_descriptor, source_type, absolute_path,
+                    cover_entry_path, cover_entry_name, page_count,
+                    last_read_at, added_at, is_favorite
+             FROM library
+             WHERE is_favorite = 1
+             ORDER BY last_read_at IS NULL, last_read_at DESC, added_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -25,8 +37,14 @@ pub fn list_library(db: tauri::State<crate::db::Db>) -> Result<Vec<BookItem>, St
                 id: row.get::<_, i64>(0)?,
                 title: row.get::<_, String>(1)?,
                 source_descriptor: row.get::<_, String>(2)?,
-                last_read_at: row.get::<_, Option<i64>>(3)?,
-                is_favorite: row.get::<_, i64>(4)? != 0,
+                source_type: row.get::<_, String>(3)?,
+                absolute_path: row.get::<_, String>(4)?,
+                cover_entry_path: row.get::<_, Option<String>>(5)?,
+                cover_entry_name: row.get::<_, Option<String>>(6)?,
+                page_count: row.get::<_, i64>(7)?,
+                last_read_at: row.get::<_, Option<i64>>(8)?,
+                added_at: row.get::<_, i64>(9)?,
+                is_favorite: row.get::<_, i64>(10)? != 0,
             })
         })
         .map_err(|e| e.to_string())?
@@ -43,7 +61,7 @@ pub fn set_favorite(
 ) -> Result<(), String> {
     let conn = db.conn();
     conn.execute(
-        "UPDATE book SET is_favorite = ?1 WHERE id = ?2",
+        "UPDATE library SET is_favorite = ?1 WHERE id = ?2",
         rusqlite::params![if favorite { 1i64 } else { 0i64 }, book_id],
     )
     .map_err(|e| e.to_string())?;
