@@ -127,7 +127,7 @@ async function loadBook() {
       log('[ReaderView/loadBook] ERROR: no images at', targetDir, '— targetDir vs rootPath mismatch?', { targetDir, rootPath: path, equal: targetDir === path });
       return;
     }
-    pageUrls.value = sortedNames.map((name) => convertFileSrc(`${targetDir}/${name}`));
+    pageUrls.value = sortedNames.map((name) => convertFileSrc(encodePathForUrl(`${targetDir}/${name}`)));
     log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
     // v0.1.0-module3.0.2: H5 修复 — 取上次阅读位置
     log('[ReaderView/loadBook] IPC[getProgress] →', id);
@@ -172,6 +172,38 @@ function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
     return raw as SourceDescriptor;
   }
   return null;
+}
+
+/**
+ * v0.1.0-module3.0.2-hotfix3 (H8): percent-encode path segments
+ *  - 老 pageUrls = convertFileSrc('Q:\\dir\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg')
+ *    生成 'http://asset.localhost/Q:\\...\\(林星阑) - ...\\c (1).jpg'
+ *  - 括号 / 空格 / 中文未 encode, WebView2 fetch asset:// 路径解析失败
+ *    OSD tile-load-failed, 翻页后图片不显示
+ *  - 修: encodeURIComponent 每段, 保留分隔符 (Windows '\\' / POSIX '/')
+ *  - 注意: drive letter 'Q:' 必须保留, 所以 split '\\' / '/' 后只 encode
+ *    非 drive-letter 段
+ */
+function encodePathForUrl(rawPath: string): string {
+  const segments = rawPath.split(/[\\/]/);
+  return segments
+    .map((seg, i) => {
+      if (i === 0 && /^[A-Za-z]:$/.test(seg)) {
+        // drive letter (Q:) 保留
+        return seg;
+      }
+      // encodeURIComponent 不 encode RFC 3986 sub-delims: ! ' ( ) *
+      // 但 WebView2 asset:// 把 () 当 sub-delim 处理, 文件系统文件名包含 () 时
+      // 需要 percent-encode 才能被正确解析.
+      // 修: 在 encodeURIComponent 基础上额外 encode () * ! '
+      return encodeURIComponent(seg)
+        .replace(/\(/g, '%28')
+        .replace(/\)/g, '%29')
+        .replace(/\*/g, '%2A')
+        .replace(/!/g, '%21')
+        .replace(/'/g, '%27');
+    })
+    .join('/');
 }
 
 /**

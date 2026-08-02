@@ -31,16 +31,32 @@ onMounted(() => {
     tileSources: { type: 'image', url: props.imageUrl },
     showNavigator: false,
     // v0.1.0-module3.0.2 (M5): 关掉 OSD 滚轮缩放, 改由 ReaderView 的
-    // useReaderWheel 接管翻页. 否则滚轮先被 OSD 缩放吞掉, 翻页不响应.
+    // useReaderWheel 接管翻页. 否则滚轮先被 OSD 缩吞, 翻页不响应.
     gestureSettingsMouse: { scrollToZoom: false },
     animationTime: 0.3,
+  });
+  // v0.1.0-module3.0.2-hotfix3: OSD tile load 失败/成功 hook — 便于诊断特殊字符 URL
+  viewer.addHandler('open-failed', (event) => {
+    log('[SinglePageViewer] OSD open-failed', { source: event.source, message: event.message, url: props.imageUrl });
+  });
+  viewer.addHandler('tile-load-failed', (event) => {
+    const failedUrl = (event.tile as { source?: { url?: string } } | undefined)?.source?.url;
+    log('[SinglePageViewer] OSD tile-load-failed', { failedUrl, originalUrl: props.imageUrl });
+  });
+  viewer.addHandler('open', () => {
+    log('[SinglePageViewer] OSD open ok');
   });
 });
 
 watch(
   () => props.imageUrl,
   (url) => {
-    viewer?.open({ type: 'image', url });
+    log('[SinglePageViewer] watch imageUrl →', url);
+    if (!viewer) {
+      log('[SinglePageViewer] watch: viewer is null, skip open');
+      return;
+    }
+    viewer.open({ type: 'image', url });
   },
 );
 

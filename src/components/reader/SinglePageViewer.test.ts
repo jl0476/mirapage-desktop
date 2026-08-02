@@ -13,6 +13,7 @@ interface MockViewer {
   opts: { tileSources: unknown; element: HTMLElement };
   open: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
+  addHandler: ReturnType<typeof vi.fn>;
 }
 
 // esbuild 在导入期就把 OpenSeadragon 实例化为带 _viewers 的 class
@@ -25,6 +26,8 @@ vi.mock('openseadragon', () => {
       opts,
       open: vi.fn(),
       destroy: vi.fn(),
+      // v0.1.0-module3.0.2-hotfix3: OSD tile load 失败日志 hook
+      addHandler: vi.fn(),
     };
     viewers.push(v);
     return v as unknown;

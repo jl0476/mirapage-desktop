@@ -274,4 +274,58 @@ describe('ReaderView.vue', () => {
       '/root/漫画',
     );
   });
+
+  // v0.1.0-module3.0.2-hotfix3 (H8): pageUrls URL 必须 percent-encode
+  // 文件名/目录含特殊字符 ('(', ')', ' ', 中文) 时, WebView2 fetch asset://
+  // 失败导致 OSD tile load fail, 翻页后图片不显示.
+  // 现状: pageUrls = convertFileSrc(`Q:\\dir\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg`)
+  //       → 'http://asset.localhost/Q:\\dir\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg'
+  //       括号 / 空格 / 中文未 encode, WebView2 fetch 路径解析失败.
+  // 修: 拼接 url 时对每个 path segment 用 encodeURIComponent, 但保留 path
+  //     分隔符 '/'. 更稳的做法: 对整路径 split('/') 然后 encode 再 join.
+  it('pageUrls 文件名/目录含特殊字符时, URL 应 percent-encode', async () => {
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 99,
+      title: '(林星阑) - 秀人网模特 红衣黑丝',
+      sourceDescriptor: { type: 'local', rootPath: 'Q:\\00down\\2603' },
+      sourceType: 'Local',
+      absolutePath: 'Q:\\00down\\2603\\(林星阑) - 秀人网模特 红衣黑丝',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 85,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: true,
+    } as never);
+    vi.mocked(listDirectory).mockImplementation(async (_sd, p) => {
+      // setRoot 调的 fetch('') 拿根目录
+      if (p === '' || p === 'Q:\\00down\\2603') {
+        return [] as never;
+      }
+      // 实际子目录
+      return [
+        { name: 'c (1).jpg', path: 'Q:\\00down\\2603\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      ] as never;
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 关键断言: pageUrls 第 1 个不应含未 encode 的 '(' ')' 或空格
+    const reader = useReaderStore();
+    const url = reader.pages[0] as string;
+    expect(url).toBeDefined();
+    // 不能含未编码的 '(' ')' 或 ' ' (空格)
+    expect(url).not.toMatch(/[ ()]/);
+    // 应该含 '%E6%9E%97' (林) 和 '%20' (空格)
+    expect(url).toContain('%E6%9E%97');
+    expect(url).toContain('%20');
+  });
 });
