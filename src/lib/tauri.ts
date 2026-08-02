@@ -74,31 +74,46 @@ export async function toggleLike(bookId: number): Promise<boolean> {
   return invoke<boolean>('toggle_like', { bookId });
 }
 
-// ─── History (Phase 4) ──────────────────────────────────────────────────
-export interface HistoryItem {
-  bookId: number;
+// ─── History (v0.1.0-module3.0: folder-level, Android BrowseHistory 对齐) ──
+export interface BrowseHistoryEntry {
   sourceDescriptor: SourceDescriptor;
-  lastPage: number;
-  lastReadAt: number;
+  relPath: string;
+  displayName: string;
+  lastVisitedAt: number;
 }
-export async function listHistory(): Promise<HistoryItem[]> {
-  return invoke<HistoryItem[]>('list_history');
+export async function listHistory(): Promise<BrowseHistoryEntry[]> {
+  return invoke<BrowseHistoryEntry[]>('list_history');
 }
+/**
+ * FileBrowser.fetch 成功后调 — upsert 到 browse_history（folder-level）
+ * Tauri 2: 单个结构体参数 invoke 时前端传 { args: { ... } }
+ */
 export async function recordHistory(
   sourceDescriptor: SourceDescriptor,
-  bookId: number,
-  lastPage: number,
+  relPath: string,
+  displayName: string,
 ): Promise<void> {
-  // Tauri 2: 单个结构体参数 invoke 时前端传 { args: { ... } }
-  await invoke<void>('record_history', { args: { sourceDescriptor, bookId, lastPage } });
+  await invoke<void>('record_history', { args: { sourceDescriptor, relPath, displayName } });
+}
+export async function deleteHistory(
+  sourceDescriptor: SourceDescriptor,
+  relPath: string,
+): Promise<void> {
+  await invoke<void>('delete_history', { sourceDescriptor, relPath });
 }
 
-// ─── Library / Book (Phase 4) ───────────────────────────────────────────
+// ─── Library / Book (v0.1.0-module3.0: 11 列对齐 Android LibraryEntity) ───
 export interface BookItem {
   id: number;
   title: string;
   sourceDescriptor: SourceDescriptor;
+  sourceType: string;
+  absolutePath: string;
+  coverEntryPath: string | null;
+  coverEntryName: string | null;
+  pageCount: number;
   lastReadAt: number | null;
+  addedAt: number;
   isFavorite: boolean;
 }
 export async function listLibrary(): Promise<BookItem[]> {
@@ -106,21 +121,61 @@ export async function listLibrary(): Promise<BookItem[]> {
 }
 
 /**
- * v0.1.0-module2.0 触发阅读入口:
- * - create_book(args) → 返回新 bookId (Rust 端 book 表 + 立即 INSERT, 主键 id 自增)
- * - Tauri 2 默认: 单个结构体参数会自动包成 `args` key, 所以前端必须传
- *   `{ args: { title, sourceDescriptor } }` 而不是 `{ title, sourceDescriptor }`
- * - 调用方拿到 bookId 后, 写入 history (recordHistory) 然后 push /reader/:bookId
+ * v0.1.0-module3.0 createBook 入参扩展：
+ * - favorite: true=加入书库（Library 可见），false=临时（Library 不可见，供 progress 持久化）
+ * - absolutePath / sourceType / 封面：与 Android LibraryEntity 11 列对齐
+ * - Tauri 2: 嵌套结构体 args 必须用 camelCase
  */
-export async function createBook(
-  title: string,
-  sourceDescriptor: SourceDescriptor,
-): Promise<number> {
-  // Tauri 2: 单个结构体参数 invoke 时前端传 { args: { ... } }
-  return invoke<number>('create_book', { args: { title, sourceDescriptor } });
+export interface CreateBookArgs {
+  title: string;
+  sourceDescriptor: SourceDescriptor;
+  absolutePath: string;
+  sourceType: string;
+  favorite: boolean;
+  coverEntryPath: string | null;
+  coverEntryName: string | null;
+  pageCount: number;
+}
+export async function createBook(args: CreateBookArgs): Promise<number> {
+  return invoke<number>('create_book', {
+    args: {
+      title: args.title,
+      sourceDescriptor: args.sourceDescriptor,
+      absolutePath: args.absolutePath,
+      sourceType: args.sourceType,
+      favorite: args.favorite,
+      coverEntryPath: args.coverEntryPath,
+      coverEntryName: args.coverEntryName,
+      pageCount: args.pageCount,
+    },
+  });
 }
 export async function setFavorite(bookId: number, favorite: boolean): Promise<void> {
   await invoke<void>('set_favorite', { bookId, favorite });
+}
+
+// ─── Directory Sort (v0.1.0-module3.0, Android DirectorySortEntity 对齐) ──
+export type DirectorySortField = 'name' | 'modifiedAt' | 'size';
+export interface DirectorySort {
+  locationKey: string;
+  sortField: DirectorySortField;
+  ascending: boolean;
+}
+export async function getDirectorySort(
+  sourceDescriptor: SourceDescriptor,
+  relPath: string,
+): Promise<DirectorySort | null> {
+  return invoke<DirectorySort | null>('get_directory_sort', { sourceDescriptor, relPath });
+}
+export async function setDirectorySort(
+  sourceDescriptor: SourceDescriptor,
+  relPath: string,
+  sortField: DirectorySortField,
+  ascending: boolean,
+): Promise<void> {
+  await invoke<void>('set_directory_sort', {
+    args: { sourceDescriptor, relPath, sortField, ascending },
+  });
 }
 
 // ─── Progress (Phase 4) ─────────────────────────────────────────────────
