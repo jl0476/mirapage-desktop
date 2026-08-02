@@ -1,38 +1,44 @@
 /**
- * History Pinia store
- * 与 Rust commands::history 对接(DESIGn §5 Phase 4):
- *   - list_history() → HistoryItem[]（按 lastReadAt DESC）
- *   - record_history(source, book_id, last_page)
- *
- * 进入 reader 时调用 record_history 写入,history 视图展示按时间倒序。
+ * History Pinia store — v0.1.0-module3.0
+ * 与 Rust commands::history 对接（folder-level, Android BrowseHistory 对齐）:
+ *   - listHistory() → BrowseHistoryEntry[]  (按 lastVisitedAt DESC)
+ *   - recordHistory(source, relPath, displayName)  (FileBrowser 导航成功后调)
+ *   - deleteHistory(source, relPath)
  */
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
-import { listHistory, recordHistory, type HistoryItem } from '@/lib/tauri';
+import { ref } from 'vue';
+import {
+  listHistory,
+  recordHistory,
+  deleteHistory,
+  type BrowseHistoryEntry,
+} from '@/lib/tauri';
 
 export const useHistoryStore = defineStore('history', () => {
-  const items = ref<HistoryItem[]>([]);
-
-  const sorted = computed<HistoryItem[]>(() =>
-    [...items.value].sort((a, b) => b.lastReadAt - a.lastReadAt),
-  );
+  const items = ref<BrowseHistoryEntry[]>([]);
 
   async function refresh(): Promise<void> {
     items.value = await listHistory();
   }
 
+  /** FileBrowser.fetch 成功后调 — 容错，失败不抛 */
   async function record(
-    bookId: number,
-    lastPage: number,
-    sourceDescriptor: HistoryItem['sourceDescriptor'],
+    sourceDescriptor: BrowseHistoryEntry['sourceDescriptor'],
+    relPath: string,
+    displayName: string,
   ): Promise<void> {
-    await recordHistory(sourceDescriptor, bookId, lastPage);
+    try {
+      await recordHistory(sourceDescriptor, relPath, displayName);
+    } catch (e) {
+      // 容错：历史记录失败不应影响 FileBrowser 列表展示
+      console.warn('[history] record failed', e);
+    }
+  }
+
+  async function deleteEntry(entry: BrowseHistoryEntry): Promise<void> {
+    await deleteHistory(entry.sourceDescriptor, entry.relPath);
     await refresh();
   }
 
-  function lastPageOf(bookId: number): number | undefined {
-    return items.value.find((it) => it.bookId === bookId)?.lastPage;
-  }
-
-  return { items, sorted, refresh, record, lastPageOf };
+  return { items, refresh, record, deleteEntry };
 });
