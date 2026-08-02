@@ -87,7 +87,7 @@ describe('SideNav — 8 项导航', () => {
     expect(html).toContain('文件浏览');
     expect(html).toContain('搜索');
     expect(html).toContain('快捷方式');
-    expect(html).toContain('书架');
+    expect(html).toContain('书库');
     expect(html).toContain('书签');
     expect(html).toContain('喜欢');
     expect(html).toContain('阅览记录');

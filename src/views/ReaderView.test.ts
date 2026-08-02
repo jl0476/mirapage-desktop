@@ -1,6 +1,6 @@
 /**
- * ReaderView.vue 测试 — v0.1.0-module2.0
- * 覆盖：mount 路由 /reader/:bookId → 调 listHistory / setRoot / openBook
+ * ReaderView.vue 测试 — v0.1.0-module3.0 (get_book IPC)
+ * 覆盖：mount 路由 /reader/:bookId → 调 getBook / setRoot / openBook
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
@@ -13,9 +13,19 @@ vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
   return {
     ...actual,
-    listHistory: vi.fn(async () => [
-      { bookId: 7, sourceDescriptor: { rootPath: '/test/manga' }, title: 'Manga 7' },
-    ]),
+    getBook: vi.fn(async () => ({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 0,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    })),
     setRoot: vi.fn(async () => undefined),
     saveProgress: vi.fn(async () => undefined),
     readFile: vi.fn(async () => new Uint8Array()),
@@ -43,7 +53,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { listHistory } from '@/lib/tauri';
+import { getBook } from '@/lib/tauri';
 import ReaderView from './ReaderView.vue';
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
@@ -66,7 +76,7 @@ describe('ReaderView.vue', () => {
     vi.clearAllMocks();
   });
 
-  it('mount 时调 listHistory 并拿 sourceDescriptor', async () => {
+  it('mount 时调 getBook 并拿 sourceDescriptor', async () => {
     const fb = useFileBrowserStore();
     useReaderStore();
     fb.entries = [
@@ -74,7 +84,7 @@ describe('ReaderView.vue', () => {
       { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
       { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
     ] as never;
-    useSlideshowStore(); // hydrate
+    useSlideshowStore();
     const router = makeRouter();
     await router.isReady();
     mount(ReaderView, { global: { plugins: [i18n, router] } });
@@ -82,12 +92,11 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     await flushPromises();
     await flushPromises();
-    // 至少 listHistory 调了
-    expect(listHistory).toHaveBeenCalled();
+    expect(getBook).toHaveBeenCalledWith(7);
   });
 
-  it('history 找不到 bookId 时显示错误', async () => {
-    vi.mocked(listHistory).mockResolvedValueOnce([]);
+  it('getBook 返回 null 时显示错误', async () => {
+    vi.mocked(getBook).mockResolvedValueOnce(null);
     const router = makeRouter();
     await router.isReady();
     const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
