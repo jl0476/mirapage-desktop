@@ -101,6 +101,13 @@ onMounted(() => {
 
 onUnmounted(() => {
   slideshow.pause();
+  // v0.1.0-module3.0.2-hotfix1 (N1): 复位 callbacks 避免闭包泄漏
+  // 闭包捕获本组件内的 `store` 引用, 跨路由后 store 不会自动清,
+  // 下次 slideshow.start() 仍会调旧 store.nextPage (Pinia 模块单例).
+  // 复位成 noop 让 schedule 内部 setInterval 不再触发坏闭包.
+  slideshow.setAdvance(() => undefined);
+  slideshow.setPrev(() => undefined);
+  slideshow.setIsAtLast(() => false);
 });
 
 // current page indicator

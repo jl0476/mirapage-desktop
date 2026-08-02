@@ -55,7 +55,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { getBook } from '@/lib/tauri';
+import { getBook, getProgress } from '@/lib/tauri';
 import ReaderView from './ReaderView.vue';
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
@@ -171,5 +171,52 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     await flushPromises();
     expect(w.find('[data-test="reader-error"]').exists()).toBe(false);
+  });
+
+  // v0.1.0-module3.0.2-hotfix1 (N3): 还原到末页时不应触发跨卷.
+  // 当前 spreadIndex = spreads.length - 1 会被 slideshow.tick() atLast() 立即 pause + setPendingNextVolume,
+  // 用户感知"刚开就跨卷". 修法: getProgress 返回末页 (page = pageCount - 1) 时,
+  // resolveInitialSpreadIndex 把 spreadIndex 钳到 last - 1 (倒数第二页).
+  it('getProgress 末页 → initialSpreadIndex 钳到 last - 1 (避免立刻触发跨卷)', async () => {
+    // 3 张图 → spreads: [{start:0,end:1},{start:1,end:3}] → last spread index = 1
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: true,
+    } as never);
+    // getProgress 返回末页 (page=2 = 0-indexed, 3 张图最后一张)
+    vi.mocked(getProgress).mockResolvedValueOnce({
+      bookId: 7,
+      page: 2,
+      readerMode: 'single',
+      updatedAt: 100,
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 末页钳位: page=2 → spreads[1].start=1, 但 last spread index = 1
+    // 应钳到 0 (倒数第二), 不在末 spread
+    expect(reader.currentSpreadIndex).toBe(0);
+    expect(reader.currentSpreadIndex).toBeLessThan(reader.spreads.length - 1);
   });
 });

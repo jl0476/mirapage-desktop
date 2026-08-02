@@ -24,27 +24,19 @@ vi.mock('./DoublePageViewer.vue', () => ({
     template: '<div data-test="double" :data-pages="pageUrls.length" :data-spreads="spreads.length" :data-current="currentSpreadIndex" />',
   },
 }));
+// v0.1.0-module3.0.2-hotfix1 (N1): 不 mock slideshow 任何方法
+// (整个 store 透传, 让 setAdvance/setPrev/setIsAtLast 实际写入真实 store 内部 fn)
+// 测试通过 tick() 副作用观察 cleanup: mount 注入 nextPage fn,
+// unmount 后 advanceFn 应被复位成 noop (不再触发 reader store.advanceFn).
 vi.mock('@/stores/slideshow', async () => {
   const actual = await vi.importActual<typeof import('@/stores/slideshow')>('@/stores/slideshow');
-  return {
-    ...actual,
-    useSlideshowStore: () => ({
-      isPlaying: false,
-      intervalMs: 3000,
-      direction: 'forward' as const,
-      load: vi.fn(),
-      pause: vi.fn(),
-      toggle: vi.fn(),
-      reset: vi.fn(),
-      updateIntervalMs: vi.fn(),
-      updateDirection: vi.fn(),
-      // v0.1.0-module3.0.2 (H2): ReaderScreen mount 时注入 callbacks
-      setAdvance: vi.fn(),
-      setPrev: vi.fn(),
-      setIsAtLast: vi.fn(),
-    }),
-  };
+  return actual;
 });
+// 但需要 mock @/lib/tauri 给 slideshow.load() 用 (getSetting/setSetting)
+vi.mock('@/lib/tauri', () => ({
+  getSetting: vi.fn(async () => null),
+  setSetting: vi.fn(async () => undefined),
+}));
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
@@ -114,5 +106,45 @@ describe('ReaderScreen.vue', () => {
     const modeBtn = w.find('[data-test="btn-mode"]');
     await modeBtn.trigger('click');
     expect(w.emitted('toggle-mode')).toBeTruthy();
+  });
+
+  // v0.1.0-module3.0.2-hotfix1 (N1): ReaderScreen unmount 应清 slideshow 内部
+  // advance/prev/atLast callbacks, 避免闭包指向已 unmount 的 reader store 实例.
+  // 测法: start() 启 setInterval, 等 fire, advanceFn 应执行 reader.nextPage.
+  // unmount → start() 再启 (interval 已在跑), 此时 advanceFn 应已被清成 noop
+  // → nextPage 不再被调.
+  it('unmount 后 slideshow.start 内部定时器不再调 reader.nextPage (闭包清理)', async () => {
+    vi.useFakeTimers();
+    try {
+      // 第一次 mount — 注入 callbacks
+      const w = mountReader();
+      // 准备 reader store
+      const reader = useReaderStore();
+      reader.openBook({
+        bookId: 1,
+        title: 'demo',
+        pages: ['a.jpg', 'b.jpg', 'c.jpg'],
+        spreads: [
+          { start: 0, end: 1 },
+          { start: 1, end: 3 },
+        ],
+        initialSpreadIndex: 0,
+      });
+      const initialSpreadIndex = reader.currentSpreadIndex;
+      expect(initialSpreadIndex).toBe(0);
+      // unmount
+      w.unmount();
+      // 此时 advanceFn 应已被清成 noop (setAdvance(() => undefined))
+      // 验证: 手动调内部 advanceFn 不应跑 reader.nextPage
+      // 用 slideshow 公开 API: start + advanceTimers, 看 currentSpreadIndex 不变
+      const slideshow = (await import('@/stores/slideshow')).useSlideshowStore();
+      slideshow.intervalMs = 100;
+      slideshow.start();
+      vi.advanceTimersByTime(500);
+      expect(reader.currentSpreadIndex).toBe(initialSpreadIndex);
+      slideshow.pause();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

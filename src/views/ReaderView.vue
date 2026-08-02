@@ -146,18 +146,29 @@ function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
 }
 
 /**
- * v0.1.0-module3.0.2: H5 修复 — 恢复上次阅读位置
+ * v0.1.0-module3.0.2 (H5): 恢复上次阅读位置
  *  - 调 getProgress(bookId) 拿 last read page
  *  - page→spread 映射 (SpreadPlanner.spreadIndexForPage)
  *  - 无 progress / 失败: 默认 0
+ *
+ * v0.1.0-module3.0.2-hotfix1 (N3): 末页钳位
+ *  - 还原到末页会让 slideshow.tick() atLast() 立刻 pause + setPendingNextVolume,
+ *    用户感知"刚开就跨卷".
+ *  - 修法: 把 initialSpreadIndex 钳到 last - 1 (倒数第二页),
+ *    让用户先正常翻页, 而不是看到跨卷 flag 触发.
+ *  - 多 spread 的漫画钳到 last - 1; 单 spread 的极端情况不动 (无 last - 1).
  */
-async function resolveInitialSpreadIndex(bookId: number, _pageCount: number): Promise<number> {
+async function resolveInitialSpreadIndex(bookId: number, pageCount: number): Promise<number> {
   try {
     const progress = await getProgress(bookId);
     if (!progress) return 0;
-    const spreads = SpreadPlanner.plan(_pageCount, true);
+    const spreads = SpreadPlanner.plan(pageCount, true);
+    const last = spreads.length - 1;
+    if (last < 0) return 0;
     const idx = SpreadPlanner.spreadIndexForPage(progress.page, spreads);
-    return Math.max(0, Math.min(idx, spreads.length - 1));
+    const clamped = Math.max(0, Math.min(idx, last));
+    // 末页钳位: 不在末 spread (last - 1)
+    return clamped >= last ? Math.max(0, last - 1) : clamped;
   } catch (e) {
     log('[ReaderView] resolveInitialSpreadIndex fallback 0:', e);
     return 0;
