@@ -22,7 +22,7 @@ export default {
   nav: {
     fileBrowser: '文件浏览器',
     shortcuts: '快捷方式',
-    library: '书架',
+    library: '书库',
     bookmarks: '书签',
     likes: '喜欢',
     history: '阅览记录',
@@ -150,10 +150,10 @@ export default {
     },
   },
   library: {
-    title: '书架',
-    empty: '书架为空',
+    title: '书库',
+    empty: '书库为空',
     source: {
-      library: '书架',
+      library: '书库',
       bookmark: '书签',
       history: '历史',
       tag: '标签',
