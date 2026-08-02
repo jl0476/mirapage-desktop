@@ -2,6 +2,9 @@
 //!
 //! v0.1.0-module1.21: 加 `finished` 字段, 标识已读完末页（永久 true，翻回不清零）。
 //! 参考 perfect-viewer `ProgressEntity.finished`。
+//!
+//! v0.1.0-module3.0: browse_history schema 改为 folder-level（不再有 book_id 列），
+//! save_progress / mark_finished 不再清 browse_history（旧逻辑已删）。
 
 use std::collections::HashMap;
 
@@ -9,7 +12,7 @@ use std::collections::HashMap;
 ///
 /// `finished` 语义：
 /// - `Some(true)` → 翻到末页；触发 finished=1（不可降级）
-/// - `Some(false)` → 主动标记重置；触发 finished=0 + 清 browse_history
+/// - `Some(false)` → 主动标记重置；触发 finished=0
 /// - `None` → 普通翻页，只更新 page/reader_mode（finished 字段保持不变）
 #[tauri::command]
 pub fn save_progress(
@@ -37,7 +40,7 @@ pub fn save_progress(
             .map_err(|e| e.to_string())?;
         }
         Some(false) => {
-            // 主动重置：finished=0, 清 browse_history
+            // 主动重置：finished=0
             conn.execute(
                 "INSERT INTO progress (book_id, page, reader_mode, updated_at, finished) VALUES (?1, ?2, ?3, ?4, 0)
                  ON CONFLICT(book_id) DO UPDATE SET
@@ -48,10 +51,6 @@ pub fn save_progress(
                 rusqlite::params![book_id, page, reader_mode, now],
             )
             .map_err(|e| e.to_string())?;
-            let _ = conn.execute(
-                "DELETE FROM browse_history WHERE book_id = ?1",
-                rusqlite::params![book_id],
-            );
         }
         None => {
             // 普通翻页: 保留已有 finished 值
@@ -71,8 +70,6 @@ pub fn save_progress(
 }
 
 /// 手动标记 / 重置 finished（不依赖翻页判定）。
-///
-/// `finished=false` 时同时清 browse_history，让 readStatus store 重置回 NONE。
 #[tauri::command]
 pub fn mark_finished(
     book_id: i64,
@@ -89,12 +86,6 @@ pub fn mark_finished(
         rusqlite::params![book_id, now, finished as i32],
     )
     .map_err(|e| e.to_string())?;
-    if !finished {
-        let _ = conn.execute(
-            "DELETE FROM browse_history WHERE book_id = ?1",
-            rusqlite::params![book_id],
-        );
-    }
     Ok(())
 }
 
