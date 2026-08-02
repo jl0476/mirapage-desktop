@@ -95,27 +95,27 @@ async function loadBook() {
     }
     const path = sd.rootPath;
     log('[ReaderView/loadBook] resolved rootPath=', path);
-    // v0.1.0-module3.0.2-hotfix2 (H7): book.absolutePath 才是实际子目录.
-    // sourceDescriptor.rootPath 是根, book.absolutePath 是 (sourceDescriptor, rootPath) 下的子目录.
-    // 错误地用 rootPath setRoot 会拿到根目录 458 个杂项, 过滤图片 0 → '找不到图片'.
-    const targetDir = book.absolutePath && book.absolutePath.length > 0
-      ? book.absolutePath
-      : path;
-    log('[ReaderView/loadBook] targetDir selected:', {
-      rootPath: path,
+    // v0.1.0-module3.0.2-hotfix5 (H10): book.absolutePath 是相对 rootPath 的子目录路径
+    // (useReaderActions 传 entry.path = 裸子目录名), 不是绝对路径. convertFileSrc
+    // 内部期望绝对路径 (Rust fs::read), 必须拼 rootPath 前缀.
+    // 兼容历史数据: 如果 absolutePath 已包含盘符 ('Q:\xxx'), 视为已绝对.
+    const rootPath = path.replace(/[\\/]+$/, '');
+    const isAlreadyAbs = book.absolutePath && /^[A-Za-z]:[\\/]/.test(book.absolutePath);
+    const absDir = book.absolutePath && book.absolutePath.length > 0
+      ? (isAlreadyAbs ? book.absolutePath : joinPath(rootPath, book.absolutePath))
+      : rootPath;
+    log('[ReaderView/loadBook] absDir computed:', {
+      rootPath,
       absolutePath: book.absolutePath,
-      effectiveTargetDir: targetDir,
-      fallback: book.absolutePath === '' || book.absolutePath === path,
+      isAlreadyAbs,
+      absDir,
     });
     log('[ReaderView/loadBook] IPC[fileBrowser.setRoot] →', path);
     await fileBrowser.setRoot(path);
     log('[ReaderView/loadBook] IPC[fileBrowser.setRoot] ← ok, entries=', fileBrowser.entries.length);
-    // 直接列子目录, 绕开 fileBrowser.entries (那是根目录的, 不是 absolutePath 子目录)
-    log('[ReaderView/loadBook] IPC[listDirectory] →', { descriptor: sd, path: targetDir });
-    const targetEntries: MediaEntry[] = await listDirectory(sd, targetDir);
+    log('[ReaderView/loadBook] IPC[listDirectory] →', { descriptor: sd, path: absDir });
+    const targetEntries: MediaEntry[] = await listDirectory(sd, absDir);
     log('[ReaderView/loadBook] IPC[listDirectory] ←', targetEntries.length, 'entries; first 3:', targetEntries.slice(0, 3).map((e) => `${e.name}(dir=${e.isDirectory},arc=${e.isArchive})`));
-    // v0.1.0-module3.0.2: M1 修复 — 用 lib/mime.isImage 与 lib/naturalSort
-    // 与 FileBrowser / useReaderActions.enumerateCover 字节级对齐
     const imageEntries = targetEntries
       .filter((e) => !e.isDirectory && !e.isArchive && isImage(e.name))
       .map((e) => e.name);
@@ -123,15 +123,12 @@ async function loadBook() {
     log('[ReaderView/loadBook] imageEntries', sortedNames.length, sortedNames.slice(0, 5));
     if (sortedNames.length === 0) {
       status.value = 'error';
-      errorMessage.value = `${targetDir} 下找不到图片`;
-      log('[ReaderView/loadBook] ERROR: no images at', targetDir, '— targetDir vs rootPath mismatch?', { targetDir, rootPath: path, equal: targetDir === path });
+      errorMessage.value = `${absDir} 下找不到图片`;
+      log('[ReaderView/loadBook] ERROR: no images at', absDir);
       return;
     }
-    // v0.1.0-module3.0.2-hotfix4 (H9): convertFileSrc 内部已经 percent-encode
-    // path. 前端不能 pre-encode, 否则会双重编码: '%2528' 解码一次是 '%28',
-    // 不是 '(' — Tauri Rust 端收到 '%28...' 找不到文件, OSD open-failed.
-    // 修: 直接传 raw path, 让 Tauri 自己处理 encode.
-    pageUrls.value = sortedNames.map((name) => convertFileSrc(`${targetDir}/${name}`));
+    // v0.1.0-module3.0.2-hotfix4 (H9): convertFileSrc 内部已经 encode, 不 pre-encode
+    pageUrls.value = sortedNames.map((name) => convertFileSrc(joinPath(absDir, name)));
     log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
     // v0.1.0-module3.0.2: H5 修复 — 取上次阅读位置
     log('[ReaderView/loadBook] IPC[getProgress] →', id);
@@ -176,6 +173,20 @@ function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
     return raw as SourceDescriptor;
   }
   return null;
+}
+
+/**
+ * v0.1.0-module3.0.2-hotfix5: 跨平台 path join (Windows '\\' / POSIX '/')
+ *  - 用于 rootPath + absolutePath 或 absolutePath + filename 拼接
+ *  - 保留 Windows '\\' 分隔符, 让 convertFileSrc encode 后 Rust fs::read 正确处理
+ *  - 不 trim 各 segment 内部分隔符 (例如 absolutePath 'root/漫画' 中的 '/' 不动),
+ *    只在 segment 边界加 1 个 '\\'
+ */
+function joinPath(...parts: string[]): string {
+  const cleaned = parts
+    .filter((s) => s && s.length > 0)
+    .map((s) => s.replace(/[\\/]+$/, ''));  // 只去尾部分隔符
+  return cleaned.join('\\');
 }
 
 /**

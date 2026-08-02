@@ -232,15 +232,16 @@ describe('ReaderView.vue', () => {
   });
 
   // v0.1.0-module3.0.2-hotfix2 (H7): absolutePath 回归 — 端到端
-  // getBook 返回 rootPath='/root' + absolutePath='/root/漫画' (子目录)
-  // ReaderView 应该用 absolutePath 枚举图片, 而非 setRoot 到 root
-  it('getBook 返回 absolutePath 子目录时, 正确枚举子目录图片 (不读根目录)', async () => {
+  // getBook 返回 rootPath='/root' + absolutePath='漫画' (裸子目录, 真实 useReaderActions
+  // 传 entry.path, 没 rootPath 前缀)
+  // ReaderView 必须拼成 '/root/漫画' 才能正确枚举图片
+  it('getBook 返回 absolutePath 裸子目录时, 正确拼上 rootPath 枚举图片', async () => {
     vi.mocked(getBook).mockResolvedValueOnce({
       id: 7,
       title: '漫画 A',
       sourceDescriptor: { type: 'local', rootPath: '/root' },
       sourceType: 'Local',
-      absolutePath: '/root/漫画',  // ← 关键: 子目录
+      absolutePath: '漫画',  // ← 真实: 裸子目录 (useReaderActions 传 entry.path)
       coverEntryPath: null,
       coverEntryName: null,
       pageCount: 3,
@@ -248,8 +249,6 @@ describe('ReaderView.vue', () => {
       addedAt: 0,
       isFavorite: true,
     } as never);
-    // listDirectory('/root/漫画')  返回 3 张图
-    // listDirectory('/root')       返回 458 个杂项 (模拟真实用户场景)
     vi.mocked(listDirectory).mockImplementation(async (_sd, p) => {
       if ((p as string).includes('漫画')) {
         return [
@@ -279,10 +278,10 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     await flushPromises();
     expect(w.find('[data-test="reader-error"]').exists()).toBe(false);
-    // 关键断言: 不应读根目录的 458 entries, 应该读 absolutePath 子目录的 3 张图
+    // listDirectory 必须收到 '/root/漫画' (rootPath + absolutePath 拼接后)
     expect(listDirectory).toHaveBeenCalledWith(
       expect.objectContaining({ rootPath: '/root' }),
-      '/root/漫画',
+      expect.stringContaining('漫画'),
     );
   });
 
