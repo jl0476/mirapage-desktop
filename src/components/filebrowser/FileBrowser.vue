@@ -38,10 +38,7 @@ const fb = useFileBrowserStore();
 const shortcuts = useShortcutsStore();
 const readStatus = useReadStatusStore();
 const readerActions = useReaderActions({
-  resolveRootPath: (entry) => {
-    const base = fb.lastFetchedPath ?? '';
-    return base ? `${base}/${entry.path}` : entry.path;
-  },
+  resolveRootPath: () => fb.rootPath ?? '',
   buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
   onLibraryChanged: async () => {
     await readStatus.refresh();

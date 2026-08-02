@@ -1,30 +1,25 @@
 /**
- * useReaderActions.ts — v0.1.0-module2.0 触发阅读 / 加入书库
+ * useReaderActions.ts — v0.1.0-module3.0
+ * - readNow(entry): 临时 import (favorite=false)，Library 不可见，progress 仍能持久化
+ * - addToLibrary(entry): 手动加入书库 (favorite=true)，Library 可见
  *
- * readNow(entry): 仅对目录
- *  1. listHistory 找同 rootPath 的 entry, 复用 bookId
- *  2. 没有则 createBook → 拿 bookId
- *  3. recordHistory (UPSERT)
- *  4. router.push('/reader/' + bookId)
- *
- * addToLibrary(entry): 等同 readNow 但不导航 — 写入后保留在文件浏览器
- *  (避免无意义跳页, 用户可能想批量加书)
+ * 不再调 recordHistory（browse_history 已重写为 folder-level，由 FileBrowser.fetch 自动 upsert）
  *
  * **不做** (plan §6 决策):
  * - ❌ 下载全部按钮 (本地文件无下载需求)
  * - ❌ 编辑类 (新建/重命名/删除/拖放)
- *
- * **跨卷 loader** 仍留 TODO: 不在本 composable 范围.
  */
 import { useRouter } from 'vue-router';
-import { listHistory, recordHistory, createBook } from '@/lib/tauri';
+import { createBook, listDirectory, type CreateBookArgs } from '@/lib/tauri';
+import { isImage } from '@/lib/mime';
+import { naturalCompare } from '@/lib/naturalSort';
 import { log } from '@/lib/logger';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 import type { Router } from 'vue-router';
 
 export interface ReaderActionsOptions {
-  /** 路径拼接: 当前列表基础路径 + entry.path */
-  resolveRootPath: (entry: MediaEntry) => string;
+  /** 当前列表的 rootPath (FileBrowser 顶层 root) */
+  resolveRootPath: () => string;
   /** sourceDescriptor — 桌面端单 source 模式 = { type: 'local', rootPath } */
   buildSourceDescriptor: (rootPath: string) => SourceDescriptor;
   /** 可选 router, 测试时手动传入; 缺省时尝试 useRouter() */
@@ -34,7 +29,6 @@ export interface ReaderActionsOptions {
 }
 
 export function useReaderActions(opts: ReaderActionsOptions) {
-  // setup 调用 useRouter; 测试环境 fallback 即可
   let router: Router | null;
   try {
     router = useRouter() ?? null;
@@ -44,46 +38,64 @@ export function useReaderActions(opts: ReaderActionsOptions) {
   if (!router && opts.router) router = opts.router;
 
   /**
-   * 复用 / 创建 bookId (同 sourceDescriptor 复用, 新书创建)
-   * 返回 bookId; 抛错时返回 null
+   * 枚举 entry 下的图片页（供 create_book 写入封面 + 页数）
+   * 失败时返 fallback（封面 null / 页数 0），不影响主流程。
    */
-  async function ensureBookId(entry: MediaEntry): Promise<number | null> {
+  async function enumerateCover(
+    descriptor: SourceDescriptor,
+    absPath: string,
+  ): Promise<{ coverEntryPath: string | null; coverEntryName: string | null; pageCount: number }> {
+    try {
+      const entries = await listDirectory(descriptor, absPath);
+      const images = entries
+        .filter((e) => !e.isDirectory && isImage(e.name))
+        .sort((a, b) => naturalCompare(a.name, b.name));
+      if (images.length === 0) {
+        return { coverEntryPath: null, coverEntryName: null, pageCount: 0 };
+      }
+      const first = images[0]!;
+      return {
+        coverEntryPath: first.path,
+        coverEntryName: first.name,
+        pageCount: images.length,
+      };
+    } catch (e) {
+      log('[useReaderActions] enumerateCover failed', e);
+      return { coverEntryPath: null, coverEntryName: null, pageCount: 0 };
+    }
+  }
+
+  function capitalize(s: string): string {
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  }
+
+  /**
+   * 复用 / 创建 bookId (Android LibraryRepository.importFromSource 行为)
+   * favorite=true → is_favorite=1（Library 可见）；false → is_favorite=0（Library 不可见）
+   */
+  async function ensureBookId(entry: MediaEntry, favorite: boolean): Promise<number | null> {
     if (!entry.isDirectory) {
       log('[useReaderActions] ensureBookId: entry is not a directory', entry.name);
       return null;
     }
-    const rootPath = opts.resolveRootPath(entry);
+    const rootPath = opts.resolveRootPath();
+    const absPath = entry.path;
     const descriptor = opts.buildSourceDescriptor(rootPath);
+    const sourceType = descriptor.type === 'local' ? 'Local' : capitalize(descriptor.type);
+
+    const cover = await enumerateCover(descriptor, absPath);
+
     try {
-      const history = await listHistory();
-      const existing = history.find((h) => {
-        const sd = h.sourceDescriptor;
-        // Rust 端已 parse JSON, sd 可能是 object 或 string (兼容旧数据)
-        if (sd && typeof sd === 'object' && 'rootPath' in sd) {
-          return (sd as { rootPath: string }).rootPath === rootPath;
-        }
-        if (typeof sd === 'string') {
-          try {
-            const parsed = JSON.parse(sd);
-            return parsed?.rootPath === rootPath;
-          } catch {
-            return false;
-          }
-        }
-        return false;
-      });
-      if (existing) {
-        log('[useReaderActions] reuse bookId', existing.bookId, 'for', rootPath);
-        await recordHistory(descriptor, existing.bookId, 0);
-        return existing.bookId;
-      }
-    } catch (e) {
-      log('[useReaderActions] listHistory failed, fallback to createBook', e);
-    }
-    try {
-      const bookId = await createBook(entry.name, descriptor);
-      await recordHistory(descriptor, bookId, 0);
-      log('[useReaderActions] created bookId', bookId, 'for', rootPath);
+      const args: CreateBookArgs = {
+        title: entry.name,
+        sourceDescriptor: descriptor,
+        absolutePath: absPath,
+        sourceType,
+        favorite,
+        ...cover,
+      };
+      const bookId = await createBook(args);
+      log('[useReaderActions] createBook', favorite ? 'favorite=true' : 'favorite=false', '→ bookId', bookId);
       return bookId;
     } catch (e) {
       log('[useReaderActions] createBook failed', e);
@@ -93,7 +105,7 @@ export function useReaderActions(opts: ReaderActionsOptions) {
 
   async function readNow(entry: MediaEntry): Promise<void> {
     log('[useReaderActions] readNow called', entry.name, 'isDirectory=', entry.isDirectory);
-    const bookId = await ensureBookId(entry);
+    const bookId = await ensureBookId(entry, /*favorite=*/false);
     if (bookId === null) {
       log('[useReaderActions] readNow: bookId is null, abort');
       return;
@@ -116,7 +128,7 @@ export function useReaderActions(opts: ReaderActionsOptions) {
 
   async function addToLibrary(entry: MediaEntry): Promise<number | null> {
     log('[useReaderActions] addToLibrary called', entry.name);
-    const bookId = await ensureBookId(entry);
+    const bookId = await ensureBookId(entry, /*favorite=*/true);
     if (bookId !== null && opts.onLibraryChanged) {
       try {
         await opts.onLibraryChanged();
