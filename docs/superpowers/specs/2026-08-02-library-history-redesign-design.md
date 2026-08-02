@@ -110,7 +110,7 @@ fn apply_005_library_history_redesign(conn: &Connection) -> anyhow::Result<()> {
 
 UNIQUE: `(source_descriptor, absolute_path)` —— 同位置的书只一行（与 Android 一致）
 
-### 3.3 新 `browse_history` 表
+### 3.3 新 `browse_history` 表（folder-level，对齐 Android BrowseHistoryEntity）
 
 | 字段 | 类型 | NOT NULL | 说明 |
 |---|---|---|---|
@@ -119,7 +119,55 @@ UNIQUE: `(source_descriptor, absolute_path)` —— 同位置的书只一行（�
 | `display_name` | TEXT | ✓ | 列表显示名（文件夹最后一段或 root 别名） |
 | `last_visited_at` | INTEGER | ✓ | 最近一次导航时间戳 |
 
-PRIMARY KEY: `(source_descriptor, rel_path)` —— 同文件夹只一条，重复访问 refresh 时间戳（Android `OnConflictStrategy.REPLACE` 行为）
+PRIMARY KEY: `(source_descriptor, rel_path)` —— 同文件夹只一条，重复访问 refresh 时间戳（Android `OnConflictStrategy.REPLACE` 行为）。
+
+### 3.4 新 `directory_sort` 表（v0.1.0-module3.0 第三张表，对齐 Android DirectorySortEntity）
+
+| 字段 | 类型 | NOT NULL | 默认 | 说明 |
+|---|---|---|---|---|
+| `location_key` | TEXT | ✓ | — | 主键；`sourceDescriptor + "|" + relPath` |
+| `sort_field` | TEXT | ✓ | — | `name` / `date` / `size`（SortField.name，与 Android 一致） |
+| `ascending` | INTEGER | ✓ | — | 0=desc / 1=asc |
+
+PRIMARY KEY: `location_key` —— 一键一覆盖；用户**未**显式改过排序的文件夹不存行（fallback 到 settings 默认）。
+
+### 3.5 Migration 005 完整 SQL
+
+```sql
+-- book → library 重命名（Android LibraryEntity 对齐）
+ALTER TABLE book RENAME TO library;
+
+-- library 补字段（Android LibraryEntity 全字段）
+ALTER TABLE library ADD COLUMN source_type TEXT NOT NULL DEFAULT 'Local';
+ALTER TABLE library ADD COLUMN absolute_path TEXT NOT NULL DEFAULT '';
+ALTER TABLE library ADD COLUMN cover_entry_path TEXT;
+ALTER TABLE library ADD COLUMN cover_entry_name TEXT;
+ALTER TABLE library ADD COLUMN page_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE library ADD COLUMN added_at INTEGER NOT NULL DEFAULT 0;
+
+-- 加 UNIQUE 索引：Android LibraryEntity `(sourceDescriptorJson, absolutePath)` 一致
+CREATE UNIQUE INDEX IF NOT EXISTS idx_library_source_path
+    ON library(source_descriptor, absolute_path);
+
+-- 旧 per-book browse_history 重写为 per-folder
+DROP TABLE IF EXISTS browse_history;
+CREATE TABLE browse_history (
+  source_descriptor TEXT NOT NULL,
+  rel_path TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  last_visited_at INTEGER NOT NULL,
+  PRIMARY KEY (source_descriptor, rel_path)
+);
+CREATE INDEX idx_browse_history_last_visited
+    ON browse_history(last_visited_at DESC);
+
+-- ★ 新增：directory_sort（Android DirectorySortEntity 对齐）
+CREATE TABLE directory_sort (
+  location_key TEXT PRIMARY KEY,
+  sort_field TEXT NOT NULL,
+  ascending INTEGER NOT NULL
+);
+```
 
 ## 4. Rust Commands
 
@@ -320,17 +368,80 @@ pub fn delete_history(source_descriptor: serde_json::Value, rel_path: String,
 //   （表名 book → library）
 ```
 
-### 4.4 `lib.rs` 注册
+### 4.4 `commands/directory_sort.rs`（新文件）
+
+```rust
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectorySort {
+    pub location_key: String,
+    pub sort_field: String,
+    pub ascending: bool,
+}
+
+fn location_key_of(source_descriptor: &serde_json::Value, rel_path: &str) -> String {
+    let sd_str = serde_json::to_string(source_descriptor).unwrap_or_default();
+    format!("{}|{}", sd_str, rel_path)
+}
+
+#[tauri::command]
+pub fn get_directory_sort(source_descriptor: serde_json::Value, rel_path: String,
+                          db: tauri::State<crate::db::Db>) -> Result<Option<DirectorySort>, String> {
+    let conn = db.conn();
+    let key = location_key_of(&source_descriptor, &rel_path);
+    let mut stmt = conn.prepare(
+        "SELECT location_key, sort_field, ascending FROM directory_sort WHERE location_key = ?1 LIMIT 1",
+    )?;
+    let mut rows = stmt.query([&key])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(DirectorySort {
+            location_key: row.get(0)?,
+            sort_field: row.get(1)?,
+            ascending: row.get::<_, i64>(2)? != 0,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetDirectorySortArgs {
+    pub source_descriptor: serde_json::Value,
+    pub rel_path: String,
+    pub sort_field: String,
+    pub ascending: bool,
+}
+
+#[tauri::command]
+pub fn set_directory_sort(args: SetDirectorySortArgs, db: tauri::State<crate::db::Db>) -> Result<(), String> {
+    let conn = db.conn();
+    let key = location_key_of(&args.source_descriptor, &args.rel_path);
+    conn.execute(
+        "INSERT INTO directory_sort (location_key, sort_field, ascending)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(location_key) DO UPDATE SET
+           sort_field = excluded.sort_field,
+           ascending = excluded.ascending",
+        rusqlite::params![key, args.sort_field, if args.ascending { 1i64 } else { 0i64 }],
+    )?;
+    Ok(())
+}
+```
+
+### 4.5 `lib.rs` 注册
 
 ```rust
 tauri::generate_handler![
     // ... 现有 commands
     commands::history::list_history,
-    commands::history::record_history,       // 入参变更（bookId → descriptor + relPath + displayName）
-    commands::history::delete_history,        // 新增
+    commands::history::record_history,
+    commands::history::delete_history,
     commands::library::list_library,
-    commands::library::create_book,           // 入参扩展
+    commands::library::create_book,
     commands::library::set_favorite,
+    commands::directory_sort::get_directory_sort,    // ★ 新增
+    commands::directory_sort::set_directory_sort,    // ★ 新增
     // ...
 ]
 ```
@@ -564,6 +675,91 @@ i18n key 保留 `library.*` / `history.*` 不变。
 - `ReaderView.vue` 用 `/reader/:bookId` path param（已正确，history 跳转修好后自动可用）
 - `Home.vue` 不显示 history，只显示 FileBrowser
 
+### 5.9 `src/stores/directorySort.ts` — 新增 store
+
+```ts
+import { defineStore } from 'pinia';
+import { ref } from 'vue';
+import { getDirectorySort, setDirectorySort } from '@/lib/tauri';
+
+export interface DirectorySort {
+  sortField: 'name' | 'date' | 'size';
+  ascending: boolean;
+}
+
+export const useDirectorySortStore = defineStore('directorySort', () => {
+  const overrides = ref<Map<string, DirectorySort>>(new Map());
+
+  function keyOf(sourceDescriptor: SourceDescriptor, relPath: string): string {
+    return JSON.stringify(sourceDescriptor) + '|' + relPath;
+  }
+
+  /** 读 override；未命中返回 null，调用方 fallback 到 settings 默认 */
+  async function resolve(sourceDescriptor: SourceDescriptor, relPath: string): Promise<DirectorySort | null> {
+    const key = keyOf(sourceDescriptor, relPath);
+    if (overrides.value.has(key)) return overrides.value.get(key) ?? null;
+    const result = await getDirectorySort(sourceDescriptor, relPath);
+    if (!result) return null;
+    const sort: DirectorySort = { sortField: result.sortField as any, ascending: result.ascending };
+    overrides.value.set(key, sort);
+    return sort;
+  }
+
+  /** 写 override（用户在该文件夹改了排序时调） */
+  async function set(sourceDescriptor: SourceDescriptor, relPath: string, sort: DirectorySort): Promise<void> {
+    const key = keyOf(sourceDescriptor, relPath);
+    overrides.value.set(key, sort);
+    await setDirectorySort(sourceDescriptor, relPath, sort.sortField, sort.ascending);
+  }
+
+  return { resolve, set };
+});
+```
+
+### 5.10 `src/stores/fileBrowser.ts` — 集成 directorySort
+
+```ts
+import { useDirectorySortStore } from '@/stores/directorySort';
+import { useSettingsStore } from '@/stores/settings';
+
+async function fetch(directory: string): Promise<void> {
+  loading.value = true;
+  error.value = null;
+  try {
+    const entries = await listDirectory(currentSourceDescriptor.value, directory);
+
+    // ★ 读 per-folder 排序 override；fallback 到 settings 默认
+    const dsStore = useDirectorySortStore();
+    const settings = useSettingsStore();
+    const override = await dsStore
+      .resolve(currentSourceDescriptor.value, directory)
+      .catch(() => null);
+    const sortField = override?.sortField ?? settings.fbSortField;
+    const ascending = override?.ascending ?? settings.fbSortAscending;
+    const sorted = naturalSort(entries, sortField, ascending);
+    entriesRef.value = sorted;
+
+    // ★ 自动记录 history
+    recordHistory(
+      currentSourceDescriptor.value,
+      directory,
+      directoryDisplayName(directory),
+    ).catch(e => log('[fb] recordHistory failed', e));
+  } catch (e) {
+    error.value = e as Error;
+  } finally {
+    loading.value = false;
+  }
+}
+
+/** 用户在 SortDropdown 改排序时调 → 写 override */
+async function updateSort(sortField: SortField, ascending: boolean): Promise<void> {
+  const dsStore = useDirectorySortStore();
+  await dsStore.set(currentSourceDescriptor.value, currentDirectory.value, { sortField, ascending });
+  entriesRef.value = naturalSort(entriesRef.value, sortField, ascending);
+}
+```
+
 ## 6. 测试
 
 ### 6.1 新增/更新
@@ -579,6 +775,9 @@ i18n key 保留 `library.*` / `history.*` 不变。
 | `src/views/History.test.ts` (新) | mount → 列 items / 点击 → 调 fb.setRoot + fb.navigate + router.push / 删除 → refresh |
 | `src/lib/tauri.ts` test | 加：deleteHistory / recordHistory 入参形状 |
 | `src-tauri/src/db/migrations.rs` test | 旧 `book` 表存在 → migration 005 后变 `library` 表 + 7 新字段 + 旧数据保留 |
+| `src-tauri/src/commands/directory_sort.rs` (单元) | `set_directory_sort` ON CONFLICT 行为；`get_directory_sort` 命中 / 未命中 |
+| `src/stores/directorySort.test.ts` (新) | `resolve` 命中 / 未命中返 null；`set` 写 map + 调 IPC |
+| `src/stores/fileBrowser.test.ts` 增量 | `fetch` 顺序：先 `getDirectorySort` 再 `listDirectory`；`updateSort` 调 `setDirectorySort` |
 
 ### 6.2 不变（仅 mock 形状更新）
 
@@ -612,12 +811,14 @@ npm run type-check && npm test -- --run   # 全过 + 新增测试 0 fail
 | `src-tauri/src/db/migrations.rs` | 改 | 新增 `apply_005_library_history_redesign` |
 | `src-tauri/src/commands/library.rs` | 改 | BookItem 加 6 字段 + list_library WHERE + create_book 入参扩展 + 复用升级 |
 | `src-tauri/src/commands/history.rs` | 改 | 完全重写（BrowseHistoryEntry + record + delete） |
+| `src-tauri/src/commands/directory_sort.rs` | 新建 | get_directory_sort + set_directory_sort |
 | `src-tauri/src/commands/progress.rs` | 改 | 删 `DELETE FROM browse_history` + 表名 `book` → `library` |
-| `src-tauri/src/lib.rs` | 改 | 注册 `delete_history`；其它 command 注册不变 |
+| `src-tauri/src/lib.rs` | 改 | 注册 `delete_history` + `get_directory_sort` + `set_directory_sort` |
 | `src/lib/tauri.ts` | 改 | createBook / listHistory / recordHistory / 新增 deleteHistory / 新增 BrowseHistoryEntry 类型 |
 | `src/composables/useReaderActions.ts` | 改 | 重写 ensureBookId(favorite) + enumerate 封面 + 删 recordHistory 调用 |
-| `src/stores/fileBrowser.ts` | 改 | fetch 成功调 recordHistory |
+| `src/stores/fileBrowser.ts` | 改 | fetch 成功调 recordHistory + getDirectorySort + updateSort |
 | `src/stores/history.ts` | 改 | 重写为 BrowseHistoryEntry |
+| `src/stores/directorySort.ts` | 新建 | resolve + set per-folder override |
 | `src/views/History.vue` | 改 | 重写（folder 行 + 删除 + 跳 FileBrowser） |
 | `src/views/Library.vue` | 改 | 仅 docstring "书架" → "书库" |
 | `src/locales/zh-CN.ts` | 改 | "书架" → "书库" 全替换 |
