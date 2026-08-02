@@ -15,6 +15,9 @@ vi.mock('@/lib/tauri', async () => {
     listDirectory: vi.fn(),
     getSetting: vi.fn(async () => null),
     setSetting: vi.fn(async () => undefined),
+    recordHistory: vi.fn(async () => undefined),
+    getDirectorySort: vi.fn(async () => null),
+    setDirectorySort: vi.fn(async () => undefined),
   };
 });
 const mockedList = vi.mocked(listDirectory);
@@ -296,5 +299,44 @@ describe('fileBrowser store — viewMode + persist', () => {
     expect(store.sortField).toBe('name');
     expect(store.viewMode).toBe('details');
     expect(store.hideFinished).toBe(false);
+  });
+});
+
+describe('fileBrowser store — v0.1.0-module3.0 集成', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('fetch 成功后 recordHistory 被调一次（Android BrowseHistory 对齐）', async () => {
+    const { recordHistory } = await import('@/lib/tauri');
+    mockedList.mockResolvedValue(makeEntries('Vol.01', 'Vol.02'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    // setRoot 内部已调 fetch('') → recordHistory
+    expect(recordHistory).toHaveBeenCalled();
+    const calls = vi.mocked(recordHistory).mock.calls;
+    const lastCall = calls[calls.length - 1]!;
+    expect(lastCall[0]).toEqual({ type: 'local', rootPath: 'C:/comics' });
+    expect(lastCall[1]).toBe('');  // relPath = ''
+    expect(lastCall[2]).toBe('C:/comics');  // displayName = rootPath
+  });
+
+  it('fetch 失败不调 recordHistory', async () => {
+    const { recordHistory } = await import('@/lib/tauri');
+    mockedList.mockRejectedValue(new Error('io'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    expect(recordHistory).not.toHaveBeenCalled();
+  });
+
+  it('setSortField 写 per-folder override（getDirectorySort null 时）', async () => {
+    const { setDirectorySort } = await import('@/lib/tauri');
+    mockedList.mockResolvedValue(makeEntries('Vol.01'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    store.setSortField('size');  // 同字段切换 → toggle
+    store.setSortField('size');  // toggle 方向
+    expect(setDirectorySort).toHaveBeenCalled();
   });
 });

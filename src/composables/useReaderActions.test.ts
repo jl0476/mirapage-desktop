@@ -1,11 +1,11 @@
 /**
- * useReaderActions.test.ts — v0.1.0-module2.0
+ * useReaderActions.test.ts — v0.1.0-module3.0
  *
  * 验证:
- * - readNow: 调 listHistory → 找不到 → createBook → recordHistory → router.push
- * - readNow: listHistory 找到 → 复用 bookId (不再 createBook)
- * - addToLibrary: 同 readNow 但不 router.push
+ * - readNow: enumerate cover + createBook(favorite=false) → router.push
+ * - addToLibrary: enumerate cover + createBook(favorite=true) → 不 router.push
  * - 非目录: 返回 null 不调 IPC
+ * - createBook 失败: 不 router.push
  * - onLibraryChanged: 调 readNow / addToLibrary 完成后触发
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -14,9 +14,8 @@ vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
   return {
     ...actual,
-    listHistory: vi.fn(),
     createBook: vi.fn(),
-    recordHistory: vi.fn(),
+    listDirectory: vi.fn(),
   };
 });
 
@@ -24,7 +23,7 @@ vi.mock('vue-router', () => ({
   useRouter: () => null,
 }));
 
-import { listHistory, createBook, recordHistory } from '@/lib/tauri';
+import { createBook, listDirectory } from '@/lib/tauri';
 import { useReaderActions } from './useReaderActions';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
@@ -46,81 +45,84 @@ describe('useReaderActions', () => {
     vi.clearAllMocks();
   });
 
-  it('目录: listHistory 找不到 → createBook → recordHistory → router.push', async () => {
-    vi.mocked(listHistory).mockResolvedValue([]);
+  it('readNow: enumerate 封面 + createBook(favorite=false) + router.push', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(42);
-    vi.mocked(recordHistory).mockResolvedValue(undefined);
     const onLibraryChanged = vi.fn();
     const actions = useReaderActions({
-      resolveRootPath: () => '/manga/VOL.01',
+      resolveRootPath: () => '/manga',
       buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
       router: fakeRouter as never,
       onLibraryChanged,
     });
     await actions.readNow(makeEntry(true));
-    expect(listHistory).toHaveBeenCalled();
-    expect(createBook).toHaveBeenCalledWith('VOL.01', { type: 'local', rootPath: '/manga/VOL.01' });
-    expect(recordHistory).toHaveBeenCalledWith({ type: 'local', rootPath: '/manga/VOL.01' }, 42, 0);
+    expect(listDirectory).toHaveBeenCalledWith({ type: 'local', rootPath: '/manga' }, 'VOL.01');
+    expect(createBook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'VOL.01',
+        sourceDescriptor: { type: 'local', rootPath: '/manga' },
+        absolutePath: 'VOL.01',
+        sourceType: 'Local',
+        favorite: false,
+        pageCount: 0,
+      }),
+    );
     expect(fakeRouter.push).toHaveBeenCalledWith('/reader/42');
     expect(onLibraryChanged).toHaveBeenCalled();
   });
 
-  it('目录: listHistory 找到同 rootPath → 复用 bookId, 不调 createBook', async () => {
-    vi.mocked(listHistory).mockResolvedValue([
-      {
-        bookId: 7,
-        sourceDescriptor: { type: 'local', rootPath: '/manga/VOL.01' },
-      } as never,
+  it('readNow: enumerate 有图片 → coverEntryPath/pageCount 填入', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'page2.jpg', path: 'VOL.01/page2.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 } as MediaEntry,
+      { name: 'page1.jpg', path: 'VOL.01/page1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 } as MediaEntry,
     ]);
-    vi.mocked(recordHistory).mockResolvedValue(undefined);
+    vi.mocked(createBook).mockResolvedValue(1);
     const actions = useReaderActions({
-      resolveRootPath: () => '/manga/VOL.01',
+      resolveRootPath: () => '/manga',
       buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
       router: fakeRouter as never,
     });
     await actions.readNow(makeEntry(true));
-    expect(createBook).not.toHaveBeenCalled();
-    expect(recordHistory).toHaveBeenCalledWith(
-      { type: 'local', rootPath: '/manga/VOL.01' },
-      7,
-      0,
+    expect(createBook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        coverEntryPath: 'VOL.01/page1.jpg', // natural-sort: page1 < page2
+        coverEntryName: 'page1.jpg',
+        pageCount: 2,
+      }),
     );
-    expect(fakeRouter.push).toHaveBeenCalledWith('/reader/7');
   });
 
-  it('addToLibrary: 不 router.push, 仅 ensureBookId', async () => {
-    vi.mocked(listHistory).mockResolvedValue([]);
+  it('addToLibrary: 不 router.push, createBook(favorite=true)', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(99);
-    vi.mocked(recordHistory).mockResolvedValue(undefined);
     const actions = useReaderActions({
-      resolveRootPath: () => '/manga/VOL.02',
+      resolveRootPath: () => '/manga',
       buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
       router: fakeRouter as never,
     });
     const result = await actions.addToLibrary(makeEntry(true));
     expect(result).toBe(99);
     expect(fakeRouter.push).not.toHaveBeenCalled();
-    expect(createBook).toHaveBeenCalled();
+    expect(createBook).toHaveBeenCalledWith(expect.objectContaining({ favorite: true }));
   });
 
   it('非目录: 返回 null, 不调 IPC', async () => {
     const actions = useReaderActions({
-      resolveRootPath: () => '/manga/VOL.01/file.jpg',
+      resolveRootPath: () => '/manga',
       buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
       router: fakeRouter as never,
     });
-    const result = await actions.readNow(makeEntry(false));
-    expect(result).toBeUndefined();
-    expect(listHistory).not.toHaveBeenCalled();
+    await actions.readNow(makeEntry(false));
+    expect(listDirectory).not.toHaveBeenCalled();
     expect(createBook).not.toHaveBeenCalled();
     expect(fakeRouter.push).not.toHaveBeenCalled();
   });
 
-  it('createBook 失败: 返回 null, 不 router.push', async () => {
-    vi.mocked(listHistory).mockResolvedValue([]);
+  it('createBook 失败: 不 router.push', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockRejectedValue(new Error('DB locked'));
     const actions = useReaderActions({
-      resolveRootPath: () => '/manga/VOL.99',
+      resolveRootPath: () => '/manga',
       buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
       router: fakeRouter as never,
     });
