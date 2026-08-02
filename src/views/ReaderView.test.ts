@@ -55,7 +55,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { getBook, getProgress } from '@/lib/tauri';
+import { getBook, getProgress, listDirectory } from '@/lib/tauri';
 import ReaderView from './ReaderView.vue';
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
@@ -218,5 +218,60 @@ describe('ReaderView.vue', () => {
     // 应钳到 0 (倒数第二), 不在末 spread
     expect(reader.currentSpreadIndex).toBe(0);
     expect(reader.currentSpreadIndex).toBeLessThan(reader.spreads.length - 1);
+  });
+
+  // v0.1.0-module3.0.2-hotfix2 (H7): absolutePath 回归 — 端到端
+  // getBook 返回 rootPath='/root' + absolutePath='/root/漫画' (子目录)
+  // ReaderView 应该用 absolutePath 枚举图片, 而非 setRoot 到 root
+  it('getBook 返回 absolutePath 子目录时, 正确枚举子目录图片 (不读根目录)', async () => {
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: '漫画 A',
+      sourceDescriptor: { type: 'local', rootPath: '/root' },
+      sourceType: 'Local',
+      absolutePath: '/root/漫画',  // ← 关键: 子目录
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: true,
+    } as never);
+    // listDirectory('/root/漫画')  返回 3 张图
+    // listDirectory('/root')       返回 458 个杂项 (模拟真实用户场景)
+    vi.mocked(listDirectory).mockImplementation(async (_sd, p) => {
+      if ((p as string).includes('漫画')) {
+        return [
+          { name: 'p1.jpg', path: '/root/漫画/p1.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+          { name: 'p2.jpg', path: '/root/漫画/p2.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+          { name: 'p3.jpg', path: '/root/漫画/p3.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        ] as never;
+      }
+      return Array.from({ length: 458 }, (_, i) => ({
+        name: `noise${i}`,
+        path: `/root/noise${i}`,
+        isDirectory: false,
+        isArchive: false,
+        size: 0,
+        modifiedAt: 0,
+      })) as never;
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(w.find('[data-test="reader-error"]').exists()).toBe(false);
+    // 关键断言: 不应读根目录的 458 entries, 应该读 absolutePath 子目录的 3 张图
+    expect(listDirectory).toHaveBeenCalledWith(
+      expect.objectContaining({ rootPath: '/root' }),
+      '/root/漫画',
+    );
   });
 });

@@ -14,7 +14,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { getBook, saveProgress, getProgress } from '@/lib/tauri';
+import { getBook, saveProgress, getProgress, listDirectory } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
@@ -54,57 +54,86 @@ async function loadBook() {
   status.value = 'loading';
   errorMessage.value = '';
   const id = bookId.value;
-  log('[ReaderView] loadBook start, bookId=', id);
+  log('[ReaderView/loadBook] start, bookId=', id, 'route=', route.fullPath);
   if (!id || isNaN(id)) {
+    log('[ReaderView/loadBook] invalid bookId, redirect to /');
     router.push('/');
     return;
   }
   try {
-    log('[ReaderView] calling getBook', id);
+    log('[ReaderView/loadBook] IPC[getBook] →', id);
     const book = await getBook(id);
-    log('[ReaderView] getBook returned', book ? book.title : 'null');
+    log('[ReaderView/loadBook] IPC[getBook] ←', book ? {
+      id: book.id,
+      title: book.title,
+      absolutePath: book.absolutePath,
+      coverEntryPath: book.coverEntryPath,
+      coverEntryName: book.coverEntryName,
+      pageCount: book.pageCount,
+      lastReadAt: book.lastReadAt,
+      isFavorite: book.isFavorite,
+      sourceDescriptor: book.sourceDescriptor,
+      sourceType: book.sourceType,
+    } : 'null');
     if (!book) {
       status.value = 'error';
       errorMessage.value = `找不到 bookId ${id}`;
+      log('[ReaderView/loadBook] ERROR: book is null for id', id);
       return;
     }
     // v0.1.0-module3.0.2: H1 修复后 Rust 端 fields 是 serde_json::Value,
     // IPC 边界自动拆成对象。Defensive parse 仍保留, 兼容老 DB 行 / 跨进程备份.
     // SourceDescriptor 是判别联合, 只 Local 变体有 rootPath.
+    log('[ReaderView/loadBook] parseSourceDescriptor input type:', typeof book.sourceDescriptor);
     const sd = parseSourceDescriptor(book.sourceDescriptor);
+    log('[ReaderView/loadBook] parseSourceDescriptor result:', sd);
     if (!sd || sd.type !== 'local' || !sd.rootPath) {
       status.value = 'error';
       errorMessage.value = 'source descriptor 解析失败或非本地资源';
+      log('[ReaderView/loadBook] ERROR: sourceDescriptor invalid', { sd, rootPath: (sd as { rootPath?: string })?.rootPath });
       return;
     }
     const path = sd.rootPath;
-    log('[ReaderView] resolved path=', path);
-    if (!path) {
-      status.value = 'error';
-      errorMessage.value = 'source descriptor 缺 rootPath';
-      return;
-    }
-    log('[ReaderView] setRoot', path);
+    log('[ReaderView/loadBook] resolved rootPath=', path);
+    // v0.1.0-module3.0.2-hotfix2 (H7): book.absolutePath 才是实际子目录.
+    // sourceDescriptor.rootPath 是根, book.absolutePath 是 (sourceDescriptor, rootPath) 下的子目录.
+    // 错误地用 rootPath setRoot 会拿到根目录 458 个杂项, 过滤图片 0 → '找不到图片'.
+    const targetDir = book.absolutePath && book.absolutePath.length > 0
+      ? book.absolutePath
+      : path;
+    log('[ReaderView/loadBook] targetDir selected:', {
+      rootPath: path,
+      absolutePath: book.absolutePath,
+      effectiveTargetDir: targetDir,
+      fallback: book.absolutePath === '' || book.absolutePath === path,
+    });
+    log('[ReaderView/loadBook] IPC[fileBrowser.setRoot] →', path);
     await fileBrowser.setRoot(path);
-    const entries: MediaEntry[] = fileBrowser.entries;
-    log('[ReaderView] entries from setRoot', entries.length);
+    log('[ReaderView/loadBook] IPC[fileBrowser.setRoot] ← ok, entries=', fileBrowser.entries.length);
+    // 直接列子目录, 绕开 fileBrowser.entries (那是根目录的, 不是 absolutePath 子目录)
+    log('[ReaderView/loadBook] IPC[listDirectory] →', { descriptor: sd, path: targetDir });
+    const targetEntries: MediaEntry[] = await listDirectory(sd, targetDir);
+    log('[ReaderView/loadBook] IPC[listDirectory] ←', targetEntries.length, 'entries; first 3:', targetEntries.slice(0, 3).map((e) => `${e.name}(dir=${e.isDirectory},arc=${e.isArchive})`));
     // v0.1.0-module3.0.2: M1 修复 — 用 lib/mime.isImage 与 lib/naturalSort
     // 与 FileBrowser / useReaderActions.enumerateCover 字节级对齐
-    const imageEntries = entries
+    const imageEntries = targetEntries
       .filter((e) => !e.isDirectory && !e.isArchive && isImage(e.name))
       .map((e) => e.name);
     const sortedNames = naturalSort(imageEntries, (n) => n);
-    log('[ReaderView] imageEntries', sortedNames.length, sortedNames.slice(0, 3));
+    log('[ReaderView/loadBook] imageEntries', sortedNames.length, sortedNames.slice(0, 5));
     if (sortedNames.length === 0) {
       status.value = 'error';
-      errorMessage.value = `${path} 下找不到图片`;
+      errorMessage.value = `${targetDir} 下找不到图片`;
+      log('[ReaderView/loadBook] ERROR: no images at', targetDir, '— targetDir vs rootPath mismatch?', { targetDir, rootPath: path, equal: targetDir === path });
       return;
     }
-    pageUrls.value = sortedNames.map((name) => convertFileSrc(`${path}/${name}`));
-    log('[ReaderView] pageUrls sample', pageUrls.value[0]);
+    pageUrls.value = sortedNames.map((name) => convertFileSrc(`${targetDir}/${name}`));
+    log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
     // v0.1.0-module3.0.2: H5 修复 — 取上次阅读位置
+    log('[ReaderView/loadBook] IPC[getProgress] →', id);
     const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length);
-    log('[ReaderView] initialSpreadIndex=', initialSpreadIndex);
+    log('[ReaderView/loadBook] initialSpreadIndex=', initialSpreadIndex, '(pageCount=', sortedNames.length, ')');
+    log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: book.title, pages: pageUrls.value.length, initialSpreadIndex });
     reader.openBook({
       bookId: id,
       title: book.title || '无标题',
@@ -112,10 +141,10 @@ async function loadBook() {
       spreads: SpreadPlanner.plan(pageUrls.value.length, true),
       initialSpreadIndex,
     });
-    log('[ReaderView] reader.openBook done');
+    log('[ReaderView/loadBook] reader.openBook done, status=ready');
     status.value = 'ready';
   } catch (e) {
-    log('[ReaderView] loadBook error', e);
+    log('[ReaderView/loadBook] EXCEPTION:', e, 'stack:', e instanceof Error ? e.stack : '');
     errorMessage.value = e instanceof Error ? e.message : String(e);
     status.value = 'error';
   }
@@ -180,31 +209,47 @@ async function resolveInitialSpreadIndex(bookId: number, pageCount: number): Pro
  * (不论 settings), 防止 flag 永远 true 死循环
  */
 async function onNextVolume() {
-  if (!slideshow.consumePendingNextVolume()) return;
-  if (settings.continueToNextVolume !== 'auto') return;
-  log('[ReaderView] cross-volume intent (TODO: load next volume)');
+  const flag = slideshow.pendingNextVolume;
+  log('[ReaderView/onNextVolume] entered, pendingNextVolume=', flag, 'continueToNextVolume=', settings.continueToNextVolume);
+  if (!slideshow.consumePendingNextVolume()) {
+    log('[ReaderView/onNextVolume] no flag set, skip');
+    return;
+  }
+  if (settings.continueToNextVolume !== 'auto') {
+    log('[ReaderView/onNextVolume] flag consumed but setting != auto, skip actual load');
+    return;
+  }
+  log('[ReaderView/onNextVolume] cross-volume intent (TODO: load next volume)');
   // v0.1.0-module2.0 暂未集成跨卷加载 — reader store 需扩展 sourceDescriptor / currentBookPath 字段.
   // 末页已 pause, 用户手动按 next-volume 按钮 (9 宫格右下) 或菜单触发.
 }
 
 onMounted(async () => {
+  log('[ReaderView/onMounted] start');
   await loadBook();
   await slideshow.load();
+  log('[ReaderView/onMounted] done; reader.status=', reader.status);
 });
 
 // v0.1.0-module3.0.2: M2 修复 — store 防抖路径存 spreads[start] (page),
 // unmount 路径必须对齐, 否则末页前的 spread 恢复会被 spreadIndex 覆盖.
 function currentReadPage(): number {
   const spread = reader.spreads[reader.currentSpreadIndex];
-  return spread?.start ?? reader.currentSpreadIndex;
+  const page = spread?.start ?? reader.currentSpreadIndex;
+  log('[ReaderView/currentReadPage] spreadIndex=', reader.currentSpreadIndex, 'page=', page, 'spreads.length=', reader.spreads.length);
+  return page;
 }
 
 onUnmounted(() => {
+  log('[ReaderView/onUnmounted] start; bookId=', reader.bookId, 'currentSpreadIndex=', reader.currentSpreadIndex);
   if (reader.bookId !== null) {
-    void saveProgress(reader.bookId, currentReadPage(), 'single');
+    const page = currentReadPage();
+    log('[ReaderView/onUnmounted] IPC[saveProgress] →', { bookId: reader.bookId, page, mode: 'single' });
+    void saveProgress(reader.bookId, page, 'single');
   }
   slideshow.pause();
   reader.closeBook();
+  log('[ReaderView/onUnmounted] done');
 });
 
 const zoneActions = {
@@ -214,7 +259,7 @@ const zoneActions = {
   jumpToFirst: () => { reader.jumpToSpread(0); slideshow.reset(); },
   jumpToLast: () => { reader.jumpToSpread(Math.max(0, reader.spreads.length - 1)); slideshow.reset(); },
   toggleSlideshow: () => { slideshow.toggle(); },
-  prevVolume: () => { log('[ReaderView] TODO prev-volume'); },
+  prevVolume: () => { log('[ReaderView/zoneActions] prevVolume TODO (cross-volume prev)'); },
   nextVolume: () => { onNextVolume(); },
 };
 
@@ -241,7 +286,10 @@ useReaderTouchZones({
 
 watch(
   () => slideshow.pendingNextVolume,
-  (v) => { if (v) void onNextVolume(); },
+  (v) => {
+    log('[ReaderView/watch] pendingNextVolume →', v);
+    if (v) void onNextVolume();
+  },
 );
 </script>
 

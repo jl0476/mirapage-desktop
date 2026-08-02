@@ -46,21 +46,26 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     absPath: string,
   ): Promise<{ coverEntryPath: string | null; coverEntryName: string | null; pageCount: number }> {
     try {
+      log('[useReaderActions/enumerateCover] IPC[listDirectory] →', { descriptor, absPath });
       const entries = await listDirectory(descriptor, absPath);
+      log('[useReaderActions/enumerateCover] IPC[listDirectory] ←', entries.length, 'entries');
       const images = entries
         .filter((e) => !e.isDirectory && isImage(e.name))
         .sort((a, b) => naturalCompare(a.name, b.name));
+      log('[useReaderActions/enumerateCover] filtered images=', images.length, images.slice(0, 3).map((i) => i.name));
       if (images.length === 0) {
+        log('[useReaderActions/enumerateCover] no images at', absPath, '— book will have cover=null, pageCount=0');
         return { coverEntryPath: null, coverEntryName: null, pageCount: 0 };
       }
       const first = images[0]!;
+      log('[useReaderActions/enumerateCover] picked cover=', first.name, 'pageCount=', images.length);
       return {
         coverEntryPath: first.path,
         coverEntryName: first.name,
         pageCount: images.length,
       };
     } catch (e) {
-      log('[useReaderActions] enumerateCover failed', e);
+      log('[useReaderActions/enumerateCover] IPC[listDirectory] failed', absPath, e);
       return { coverEntryPath: null, coverEntryName: null, pageCount: 0 };
     }
   }
@@ -75,15 +80,18 @@ export function useReaderActions(opts: ReaderActionsOptions) {
    */
   async function ensureBookId(entry: MediaEntry, favorite: boolean): Promise<number | null> {
     if (!entry.isDirectory) {
-      log('[useReaderActions] ensureBookId: entry is not a directory', entry.name);
+      log('[useReaderActions/ensureBookId] entry is not a directory, skip', entry.name);
       return null;
     }
     const rootPath = opts.resolveRootPath();
     const absPath = entry.path;
+    log('[useReaderActions/ensureBookId] entry=', entry.name, 'rootPath=', rootPath, 'absPath=', absPath, 'favorite=', favorite);
     const descriptor = opts.buildSourceDescriptor(rootPath);
     const sourceType = descriptor.type === 'local' ? 'Local' : capitalize(descriptor.type);
 
+    log('[useReaderActions/ensureBookId] IPC[listDirectory/enumerateCover] →', { descriptor, absPath });
     const cover = await enumerateCover(descriptor, absPath);
+    log('[useReaderActions/ensureBookId] cover=', cover);
 
     try {
       const args: CreateBookArgs = {
@@ -94,11 +102,12 @@ export function useReaderActions(opts: ReaderActionsOptions) {
         favorite,
         ...cover,
       };
+      log('[useReaderActions/ensureBookId] IPC[createBook] →', args);
       const bookId = await createBook(args);
-      log('[useReaderActions] createBook', favorite ? 'favorite=true' : 'favorite=false', '→ bookId', bookId);
+      log('[useReaderActions/ensureBookId] IPC[createBook] ←', favorite ? 'favorite=true' : 'favorite=false', '→ bookId', bookId);
       return bookId;
     } catch (e) {
-      log('[useReaderActions] createBook failed', e);
+      log('[useReaderActions/ensureBookId] createBook failed', e);
       return null;
     }
   }
