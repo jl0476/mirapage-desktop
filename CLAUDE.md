@@ -141,6 +141,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 7 | SMB 协议层 | ❌ stub（`smb_impl.rs` 多处 `NotImplemented`，`smb = "0.11"` 依赖已加未用） |
 | 8 | WebDAV 协议层 | ✅ 真实现（`reqwest` + PROPFIND + Range GET） |
 | 9 | 跨平台分发 | 🟡 CI 自动化 ✅；代码签名 / macOS `.dmg` / Linux `.AppImage` / 自动更新 ❌（`updater` 插件占位） |
+| 3.0+ | 设置面板完整化 | ✅ `v0.1.0-module3.0-settings`：Settings.vue 重写（5 section + 锚点 nav）+ 9 宫格触控方案 + theme 切换 + i18n 45 keys（spec：`docs/superpowers/specs/2026-08-03-settings-panel-design.md`） |
 
 **构建**：见 [`BUILD.md`](./BUILD.md)。Rust ≥ 1.96 需 `Cargo.toml` 的 `indexmap` 修复（schemars/indexmap 兼容性，详见 BUILD.md §2）。
 
@@ -421,6 +422,11 @@ npm run type-check && npm test -- --run
 # 2. 本地 build portable exe (可选 — 验证新增组件)
 cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\tauri-build-portable.bat"
 
+# 注: tauri-build-portable.bat 自 v0.1.0-module3.0-settings 起已 fix + commit 进 git.
+#   - 自动识别 CARGO_TARGET_DIR (env 设了走 D:\compile\rust_target, 否则 src-tauri\target)
+#   - 启动时检查旧 mirapage-desktop.exe 进程, 存在则 abort
+#   - copy 失败不再静默吞错, 改 errorlevel 判断 + 明确错误
+
 # 3. commit + tag + push
 git add <files>
 git commit -m "..."
@@ -432,9 +438,10 @@ git push github v0.1.0-module1.NN
 **5.4 不要 commit 进 git**
 
 - `mirapage-desktop-local.exe`（本地 build 产物）
-- `tauri-build-portable.bat`（临时脚本，写到本机 D:\compile）
 - `backend.diff / full.diff`（诊断遗留）
 - `tsconfig.tsbuildinfo`（vue-tsc 缓存）
+
+> `tauri-build-portable.bat` **例外**：自 v0.1.0-module3.0-settings 起 commit 进 git（带 `CARGO_TARGET_DIR` 适配 + 旧进程检测 + 错误可见性）。早期版本曾不入仓（"临时脚本写到 D:\compile"），现已统一入仓便于跨机复用。
 
 ### 6. 决策记录（用户拍板）
 

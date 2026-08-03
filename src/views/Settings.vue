@@ -27,7 +27,7 @@ const { activeId, scrollTo } = useSectionAnchors([...sections]);
 const readerModes = [
   { value: 'single', label: t('reader.mode.single') },
   { value: 'double', label: t('reader.mode.double') },
-] as const;
+];
 
 const scaleModes: Array<{ value: ScaleMode; label: string }> = [
   { value: 'fit-screen', label: t('settings.scale.fit-screen') },
@@ -41,30 +41,30 @@ const scaleModes: Array<{ value: ScaleMode; label: string }> = [
 const directions = [
   { value: 'ltr', label: t('settings.direction.ltr') },
   { value: 'rtl', label: t('settings.direction.rtl') },
-] as const;
+];
 
 const continueModes = [
   { value: 'off', label: t('reader.continue.off') },
   { value: 'auto', label: t('reader.continue.auto') },
   { value: 'manual', label: t('reader.continue.manual') },
-] as const;
+];
 
 const themes = [
   { value: 'system', label: t('settings.appearance.themeSystem') },
   { value: 'dark', label: t('settings.appearance.themeDark') },
   { value: 'light', label: t('settings.appearance.themeLight') },
-] as const;
+];
 
 const languages = [
   { value: 'system', label: t('lang.system') },
   { value: 'zh-CN', label: t('lang.zh-CN') },
   { value: 'en-US', label: t('lang.en-US') },
-] as const;
+];
 
 const slideshowDirs = [
   { value: 'forward', label: t('settings.slideshow.directionForward') },
   { value: 'backward', label: t('settings.slideshow.directionBackward') },
-] as const;
+];
 
 const touchActionLabels = computed<Record<TouchAction, string>>(() => ({
   'none': t('settings.touchAction.none'),
