@@ -150,4 +150,10 @@
     outline: 2px solid var(--color-accent);
     outline-offset: 2px;
   }
+
+  /*
+   * v0.1.0-module3.0: html.dark 由 useThemeSync 切换.
+   * 当前默认 (无 .dark class) 仍是 Tokyo Night 暗色 (--color-bg, --color-text-primary 等在 @theme 定义).
+   * 未来 "light" 模式: 在 @layer base 下加 `:root:not(.dark) { --color-bg: #f8fafc; ... }`.
+   */
 }
