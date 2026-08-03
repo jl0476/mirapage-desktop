@@ -60,11 +60,15 @@
 - i18n：本期仅中 / 英两种语言，其他语言为未来工作
 
 > ✅ **已落地**（v0.1.0-module3.0-settings）：
-> - 主题明暗切换（`theme_mode`：system/light/dark → `html.dark` class + Tailwind v4 `dark:` variant，基线仍为 Tokyo Night 暗色）
-> - 阅读器默认值：默认阅读模式 / 默认缩放 / 默认阅读方向 / 翻到末页后
-> - 行为：屏幕常亮 / 界面语言
-> - 幻灯片：间隔（秒）/ 方向 / 循环
-> - **9 宫格触控方案**（11 动作 + master toggle），对齐 PV `TouchScheme.DEFAULT`
+> - **主题明暗切换**（`theme_mode`：system/light/dark → `html.dark` class + Tailwind v4 `dark:` variant）
+> - **浅色主题完整 token**（`tailwind.css` `:root:not(.dark)` 块，1:1 移植自 xplorer-next `apps/client/src/index.css:140-188`）：slate 文本 + 蓝点 accent + 白底 / slate-200 边框。基线仍是 Tokyo Night 暗色（CLAUDE.md §1.1 设计基线不变）
+> - **视觉边框 token 化**（`src/styles/tailwind.css` @layer utilities）：`xp-bd / xp-bdt / xp-bdb / xp-bdl / xp-bdr / xp-bdy / xp-bdx / xp-bd-subtle / xp-divider-v` 替代散落的 `border-white/5` / `border-white/10` / `bg-white/10`（light 模式不可见）。dark: 白/10, light: slate-300
+> - **阅读器默认值**：默认阅读模式 / 默认缩放 / 默认阅读方向 / 翻到末页后
+> - **行为**：屏幕常亮 / 界面语言
+> - **幻灯片**：间隔（秒）/ 方向 / 循环
+> - **9 宫格触控方案**（11 动作 + master toggle `touch_zones_enabled`），对齐 PV `TouchScheme.DEFAULT`
+> - **Settings 面板卡片化**（5 section + 锚点 nav + `gap-6` 间距替代 `<hr>` 分隔线）
+> - **Breadcrumb 去掉内层圆角矩形框**（纯文字 + chevron，nav 仅 `xp-bdb` 分隔条）
 
 ---
 

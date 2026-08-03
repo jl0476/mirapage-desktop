@@ -212,11 +212,12 @@ cargo test -p mirapage-desktop-lib natural_compare
 
 **1.2 工具栏 / 按钮（Xplorer OperationBar 风格）**
 
-- 容器：`bg-surface border-b border-white/5 px-3 py-1.5 flex items-center gap-1 flex-wrap`，**无圆角、无 backdrop-blur**（Xplorer 真实风格）。
+- 容器：`bg-surface xp-bdb px-3 py-1.5 flex items-center gap-1 flex-wrap`，**无圆角、无 backdrop-blur**（Xplorer 真实风格）。
 - 按钮统一 `.tb-btn` class：`text-xs (12px) px-2 py-1 gap-1 text-text-muted hover:bg-surface-light hover:text-text-primary transition-colors`，激活态 `text-accent`。
-- **按钮间的分隔条**：`<span class="w-px h-4 bg-white/10 shrink-0" />`（1px 垂直灰条）。
+- **按钮间的分隔条**：`<span class="xp-divider-v shrink-0" />`（1px 垂直 token 化边，dark: 白/10，light: slate-300）。
 - **图标尺寸**：12px（按钮内的 SVG）；16px（empty state 大图标）；14px（按钮外的列表图标）。
 - 所有 SVG icon 用 `const ICON_X = 'm...lucide path data'` 形式内嵌在父组件 script 顶部，**不**用 lucide-vue-next / lucide-react 包，统一无依赖。
+- **v0.1.0-module3.0-settings 视觉 token 化**：所有 1px 边框用 `xp-bd` / `xp-bdb` / `xp-bdt` / `xp-bdl` / `xp-bdr` / `xp-bdy` / `xp-bdx` utility（src/styles/tailwind.css @layer utilities），底层 var(--color-border-default)，dark/light 双主题自动切换。**禁用** raw `border-white/5` / `border-white/10` / `bg-white/10`（light 模式下不可见）。
 
 **1.3 Dropdown（Xplorer 真实模式）**
 
@@ -226,7 +227,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 <div class="relative" ref="dropdownRef">      ← 容器
   <button @click="open = !open">...</button>   ← trigger
   <div v-if="open" class="absolute left-0 top-full z-50 mt-1
-       min-w-[170px] bg-surface-4 border border-white/10
+       min-w-[170px] bg-surface-4 xp-bd
        rounded-lg py-1 shadow-xl backdrop-blur-xl">
     <button v-for="opt" class="flex w-full items-center px-3 py-1.5
          text-left text-xs hover:bg-surface-light"
@@ -274,12 +275,12 @@ function onMouseDown(e: MouseEvent) {
 **1.7 状态栏（Xplorer 三段式）**
 
 - 左：`X 项 / 已选 Y 项 (Z MB)`；中：当前路径（`truncate` + `title` 是 full path）；右：暂留空（git / free-space 后续模块）。
-- 容器：`bg-surface border-t border-white/5 px-3 h-6 flex items-center justify-between gap-2 text-xs`。
+- 容器：`bg-surface xp-bdt px-3 h-6 flex items-center justify-between gap-2 text-xs`。
 - `role="status" aria-live="polite"`（屏幕阅读器友好）。
 
 **1.8 Empty / Error / Loading**
 
-- Empty state：图标放置在 `w-16 h-16 rounded-2xl bg-surface-1 border border-white/10` 容器内，accent 色 stroke；下方 1 行 hint + 1 个 primary CTA（**主按钮不该是按钮组**，只能 1 个）。
+- Empty state：图标放置在 `w-16 h-16 rounded-2xl bg-surface-1 xp-bd` 容器内，accent 色 stroke；下方 1 行 hint + 1 个 primary CTA（**主按钮不该是按钮组**，只能 1 个）。
 - Error toast：`bg-error/8 border border-error text-error` + `shadow-[0_0_10px_rgba(248,113,113,0.3)]`（Xplorer 错误 glow）。
 - Loading：单独 `<p v-if="fb.loading">` 行，**不要**用 spinner（Xplorer 也不滥用）。
 
@@ -373,6 +374,8 @@ function onMouseDown(e: MouseEvent) {
 - ❌ 编辑类功能（新建 / 重命名 / 删除 / 复制 / 粘贴 / 拖放）—— 用户明确不做。
 - ❌ 在 `tauri::generate_handler!` 自动发现外漏掉注册命令。
 - ❌ hardcode 颜色 / 字体大小（必须用 `@theme` token 或 Tailwind utility）。
+- ❌ raw Tailwind `border-white/*` / `bg-white/*`（light 模式不可见，必须用 `xp-bd` / `xp-bdt` 等 token 化 utility）。
+- ❌ scoped CSS 写 `border: 1px solid #xxx` 等硬编码 hex（与 theme token 切换冲突，应改用 utility class）。
 
 ### 4. 测试约定
 
@@ -460,6 +463,11 @@ git push github v0.1.0-module1.NN
 - **history 重写为 folder-level**（v0.1.0-module3.0）：Android BrowseHistory 直接对齐；旧 per-book 行丢弃
 - **`book` 表重命名为 `library`**（v0.1.0-module3.0）：与 Android LibraryEntity 字节级镜像，简化 backup/restore 对接
 - **per-folder 排序覆盖**（v0.1.0-module3.0）：Android DirectorySortEntity 对齐；`locationKey = JSON.stringify(sourceDescriptor) + "|" + relPath`
+- **9 宫格触控 master toggle**（v0.1.0-module3.0-settings）：用户可在 Settings § Touch 顶部 BooleanRow 启用/关闭整 9 宫格点击（`touch_zones_enabled`，DB key，默认 `true`）。`useReaderTouchZones` 入口守卫 `if (!settings.touchZonesEnabled) return;`。每个区单独的 `none` 动作也可禁用单格。
+- **breadcrumb 不要内层圆角矩形**（v0.1.0-module3.0-settings）：nav 用 `bg-surface xp-bdb px-3 py-1.5` 即可，**不要** inner `xp-bd rounded` 框，段间 chevron + 段按钮 `text-text-muted hover:bg-surface-light hover:text-text-primary` 即可。validation 反馈改用 `inset 2px 0 0 0 var(--color-success|error)` box-shadow 左侧条。
+- **Settings section 卡片化**（v0.1.0-module3.0-settings）：5 个 section 各自 `bg-surface-1 xp-bd rounded-lg p-6`，parent `flex flex-col gap-6 max-w-[800px]` 自带间距；删 `<hr class="border-white/5 my-8">` 暗色专用分隔（light 不可见）。
+- **Bookmarks / 旧 scoped CSS 视图迁移**（v0.1.0-module3.0-settings）：所有 `<style scoped>` 里 hardcoded hex CSS（`#2a2a2a` input bg / `#444` border 等）必须改用 Tailwind utility + xp-bd token。逐个迁移：Bookmarks.vue 已重写。
+- **light theme token 1:1 迁移自 xplorer-next**（v0.1.0-module3.0-settings）：`tailwind.css` 在 `@theme` 块定义暗色 Tokyo Night token，在 `:root:not(.dark)` 块覆写浅色 xplorer-next `.theme-light` 同款 token（`#ffffff` bg、`#1e293b` text-primary、`#3b82f6` accent 等）。`useThemeSync` 切换 `html.dark` class。基线仍是 Tokyo Night 暗色（CLAUDE.md §1.1 设计基线不变）。
 
 ---
 
