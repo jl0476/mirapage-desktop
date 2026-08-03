@@ -348,12 +348,11 @@ function dispatch(store, cmd: ReaderCommand): void {
 
 #### 4.2.3 #8 chrome 自动隐藏
 
-**改动 1：`src/components/reader/ReaderOverlay.vue`**
+**改动 1：`src/components/reader/ReaderOverlay.vue`**（hovered prop 由 ReaderScreen 容器提供，本组件不直接绑 mouseenter）
+
+`ReaderOverlay` 已在 `setup` 里读 `useSlideshowStore()`，无需 props 改动。新增 `autoHide` computed + 控制 `hoveredVisible` 的 timer：
 
 ```ts
-import { useSlideshowStore } from '@/stores/slideshow';
-const slideshow = useSlideshowStore();
-
 const autoHide = computed(() => slideshow.isPlaying);
 
 const hoveredVisible = ref(false);
@@ -367,37 +366,44 @@ function flashOnHover() {
 
 onUnmounted(() => { if (hoverTimer !== null) clearTimeout(hoverTimer); });
 
-const chromeShow = computed(() => chromeVisible.value && !autoHide.value);
+const chromeShow = computed(() => props.chromeVisible && !autoHide.value && (props.hovered || hoveredVisible.value));
 const slideshowControlShow = computed(() =>
-  (slideshow.isPlaying || hoveredVisible.value) && !autoHide.value
+  (slideshow.isPlaying || props.hovered || hoveredVisible.value) && !autoHide.value
 );
 ```
 
-模板：
+模板（仅改 `v-if` 表达式）：
 
 ```vue
-<header v-if="chromeShow" ...>
+<header v-if="chromeShow" class="bg-black/60 ..." ...>
   ...
 </header>
 
-<div v-if="slideshowControlShow" ...>
+<div v-if="slideshowControlShow" class="..." ...>
   ...
 </div>
 
-<footer v-if="chromeShow" ...>
+<footer v-if="chromeShow" class="bg-black/60 ..." ...>
   ...
 </footer>
 ```
 
-**改动 2：`src/components/reader/ReaderScreen.vue`** 不必传 props —— ReaderOverlay 直接从 store 读 `slideshow`。
+**改动 2：`src/components/reader/ReaderScreen.vue`** —— 容器 `mouseenter` / `mouseleave` 把 `hovered` 状态提升为 `ReaderOverlay` 的 `hovered` prop（**已存在**），无需新代码：
 
-**ReaderOverlay 父级容器** `mouseenter` / `mouseleave`：
-
-```vue
-<div ... @mouseenter="flashOnHover" @mouseleave="onLeave">
+```ts
+function onContainerMouseEnter() {
+  hovered.value = true;
+  // 注: ReaderOverlay 内部 flashOnHover 在 props.hovered 变 true 时触发(已合并逻辑)
+}
 ```
 
-或者保留现有 `hovered` prop 来自 ReaderScreen，统一通过 `flashOnHover` 处理。
+实际：ReaderOverlay 接受 props.hovered，把 `props.hovered` 视作 hover 触发器 → 内部 flashOnHover 由 `watch(() => props.hovered)` 触发：
+
+```ts
+watch(() => props.hovered, (v) => {
+  if (v) flashOnHover();
+});
+```
 
 #### 4.2.4 #9 窗口最小尺寸
 
@@ -531,7 +537,9 @@ onMounted(() => {
 });
 ```
 
-`src/components/reader/DoublePageViewer.vue`：内部 2 个 SinglePageViewer，需要 ref 转发 / `defineExpose` 把每个 viewer 暴露出去（或合并为"取第一个 viewer"用于缩放）。
+`src/components/reader/DoublePageViewer.vue`：内部 2 个 SinglePageViewer，`defineExpose` 把每个子 viewer 通过 map 暴露（key 是 slot index），或简化为取**第一个** viewer 的 bounds（双页图片尺寸近似，fit-screen/width/height 用首个即可；stretch / original 取两者的并集 bounds）
+
+折衷方案：暴露 `getBounds(): {x,y,width,height}` 而非 viewer 引用 —— useReaderScale 直接拿 bounds 计算（不再持有 OSD viewer ref），简化集成。
 
 #### 4.3.3 `src/stores/settings.ts`
 
