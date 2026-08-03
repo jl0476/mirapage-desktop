@@ -228,7 +228,7 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   >
     <!-- sticky 表头 (列头可点击排序) -->
     <div
-      class="details-header sticky top-0 z-10 bg-surface/80 backdrop-blur-xl border-b border-white/5 px-3 py-1.5 grid items-center gap-2 text-xs text-text-muted select-none"
+      class="details-header sticky top-0 z-10 bg-surface/80 backdrop-blur-xl xp-bdb px-3 py-1.5 grid items-center gap-2 text-xs text-text-muted select-none"
       style="grid-template-columns: 28px 1fr 160px 120px 100px 110px"
       role="row"
     >

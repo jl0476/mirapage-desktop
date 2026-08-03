@@ -75,12 +75,12 @@ const isDirectory = computed(() => props.entry?.isDirectory === true);
 <template>
   <aside
     v-if="display"
-    class="detail-panel flex flex-col gap-3 p-4 bg-surface-1 border border-white/10 rounded-md text-xs"
+    class="detail-panel flex flex-col gap-3 p-4 bg-surface-1 xp-bd rounded-md text-xs"
     data-test="entry-detail-panel"
     role="complementary"
     :aria-label="t('properties.title')"
   >
-    <header class="flex items-center gap-2 pb-2 border-b border-white/5">
+    <header class="flex items-center gap-2 pb-2 xp-bdb-subtle">
       <h3 class="m-0 text-sm font-semibold text-text-primary">
         {{ t('properties.title') }}
       </h3>
@@ -119,7 +119,7 @@ const isDirectory = computed(() => props.entry?.isDirectory === true);
     <!-- v0.1.0-module2.0: 目录专属 3 CTA (Android 模式移植) -->
     <div
       v-if="isDirectory"
-      class="flex flex-col gap-1.5 pt-3 border-t border-white/5"
+      class="flex flex-col gap-1.5 pt-3 xp-bdt-subtle"
       data-test="entry-detail-actions"
     >
       <button
@@ -136,7 +136,7 @@ const isDirectory = computed(() => props.entry?.isDirectory === true);
       <button
         type="button"
         class="w-full px-3 py-2 rounded text-xs text-text-secondary
-               border border-white/10 bg-surface hover:bg-surface-light hover:text-text-primary
+               xp-bd bg-surface hover:bg-surface-light hover:text-text-primary
                transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="entry-detail-add-to-library"
         :disabled="!isDirectory"
@@ -147,7 +147,7 @@ const isDirectory = computed(() => props.entry?.isDirectory === true);
       <button
         type="button"
         class="w-full px-3 py-2 rounded text-xs text-text-tertiary
-               border border-white/5 bg-surface-1 cursor-not-allowed"
+               xp-bd-subtle bg-surface-1 cursor-not-allowed"
         data-test="entry-detail-download-all"
         disabled
         :title="t('fileBrowser.downloadAllUnavailable')"

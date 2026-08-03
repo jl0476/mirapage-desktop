@@ -258,7 +258,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
       data-test="empty-state"
     >
       <div
-        class="w-16 h-16 rounded-2xl bg-surface-1 border border-white/10 flex items-center justify-center backdrop-blur-md"
+        class="w-16 h-16 rounded-2xl bg-surface-1 xp-bd flex items-center justify-center backdrop-blur-md"
       >
         <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
              stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"
@@ -292,7 +292,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
     <template v-else>
       <!-- Toolbar -->
       <header
-        class="bg-surface border-b border-white/5 px-3 py-1.5 flex items-center gap-1 flex-wrap"
+        class="bg-surface xp-bdb px-3 py-1.5 flex items-center gap-1 flex-wrap"
         data-test="toolbar"
       >
         <button data-test="btn-up" class="tb-btn" :disabled="!canUp" @click="onUp">
@@ -311,7 +311,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           </svg>
           {{ t('fileBrowser.refresh') }}
         </button>
-        <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+        <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <ShortcutDropdown />
         <button data-test="btn-pick" class="tb-btn" @click="onPickRoot">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
@@ -329,7 +329,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           </svg>
           {{ t('fileBrowser.saveAsShortcut') }}
         </button>
-        <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+        <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <button
           data-test="btn-read-now"
           class="tb-btn text-accent"
@@ -344,7 +344,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           </svg>
           {{ t('fileBrowser.readNow') }}
         </button>
-        <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+        <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <button
           data-test="btn-hide-finished"
           class="tb-btn"
@@ -358,7 +358,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
             <path v-else :d="ICON_EYE_OFF" />
           </svg>
         </button>
-        <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+        <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <SortDropdown />
         <ViewModeDropdown />
       </header>
@@ -446,7 +446,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
         data-test="save-dialog"
         @click.self="onSaveCancel"
       >
-        <div class="bg-surface-4 border border-white/10 rounded-lg p-6 flex flex-col gap-4 min-w-[380px] shadow-lg">
+        <div class="bg-surface-4 xp-bd rounded-lg p-6 flex flex-col gap-4 min-w-[380px] shadow-lg">
           <h3 class="m-0 text-base font-semibold text-text-primary flex items-center gap-2">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
                  stroke="#6366f1" stroke-width="2" stroke-linecap="round"
@@ -460,12 +460,12 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
             <input
               v-model="saveLabel"
               data-test="save-label-input"
-              class="px-3 py-2 bg-surface-inset border border-white/10 text-text-primary rounded text-sm transition-[border-color,box-shadow] duration-100 outline-none focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
+              class="px-3 py-2 bg-surface-inset xp-bd text-text-primary rounded text-sm transition-[border-color,box-shadow] duration-100 outline-none focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
             />
           </label>
           <div class="flex justify-end gap-2 mt-2">
             <button
-              class="px-4 py-2 border border-white/10 bg-transparent text-text-secondary rounded cursor-pointer transition-[background,color] duration-100 hover:bg-surface-2 hover:text-text-primary"
+              class="px-4 py-2 xp-bd bg-transparent text-text-secondary rounded cursor-pointer transition-[background,color] duration-100 hover:bg-surface-2 hover:text-text-primary"
               @click="onSaveCancel"
             >
               {{ t('common.cancel') }}

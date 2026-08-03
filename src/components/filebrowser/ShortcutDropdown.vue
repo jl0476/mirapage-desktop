@@ -63,7 +63,7 @@ const currentLabel = () => {
     </button>
     <div
       v-if="open"
-      class="absolute left-0 top-full z-50 mt-1 min-w-[200px] max-h-[280px] overflow-y-auto bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl"
+      class="absolute left-0 top-full z-50 mt-1 min-w-[200px] max-h-[280px] overflow-y-auto bg-surface-4 xp-bd rounded-lg py-1 shadow-xl backdrop-blur-xl"
       role="menu"
       data-test="shortcut-dropdown-menu"
     >
@@ -77,7 +77,7 @@ const currentLabel = () => {
       >
         {{ t('fileBrowser.noShortcut') }}
       </button>
-      <div class="border-t border-white/5 my-1" />
+      <div class="xp-bdt-subtle my-1" />
       <button
         v-for="s in shortcuts.items"
         :key="s.id"

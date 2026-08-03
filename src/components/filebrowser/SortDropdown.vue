@@ -70,7 +70,7 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7M12 5v14';
     </button>
     <div
       v-if="open"
-      class="absolute left-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl"
+      class="absolute left-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 xp-bd rounded-lg py-1 shadow-xl backdrop-blur-xl"
       role="menu"
       data-test="sort-dropdown"
     >

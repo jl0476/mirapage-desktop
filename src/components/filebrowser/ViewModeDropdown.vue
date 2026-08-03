@@ -19,7 +19,7 @@ const ICON_DETAILS = 'M3 4h18M3 9h18M3 14h18M3 19h18';
 
 <template>
   <div
-    class="flex items-center gap-0.5 border border-white/10 rounded p-0.5"
+    class="flex items-center gap-0.5 xp-bd rounded p-0.5"
     data-test="view-mode-toggle"
     role="radiogroup"
     :aria-label="'view mode'"

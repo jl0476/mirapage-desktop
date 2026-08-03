@@ -30,7 +30,7 @@ const selectionSizeLabel = computed(() => formatBytes(props.selectionSizeBytes))
 
 <template>
   <footer
-    class="statusbar bg-surface border-t border-white/5 px-3 h-6 flex items-center justify-between gap-2 text-xs text-text-secondary select-none flex-shrink-0"
+    class="statusbar bg-surface xp-bdt px-3 h-6 flex items-center justify-between gap-2 text-xs text-text-secondary select-none flex-shrink-0"
     data-test="statusbar"
     role="status"
     aria-live="polite"

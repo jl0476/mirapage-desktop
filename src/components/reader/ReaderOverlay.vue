@@ -80,7 +80,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </span>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-white/10 hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-mode"
         @click="emit('toggle-mode')"
       >
@@ -88,7 +88,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-white/10 hover:text-text-primary transition-colors"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
         data-test="btn-menu"
         :aria-label="t('reader.menu.title')"
         @click="emit('open-menu')"
@@ -101,7 +101,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
     <div
       v-if="showSlideshowControl"
       class="absolute bottom-12 left-1/2 -translate-x-1/2 pointer-events-auto
-             bg-surface/80 backdrop-blur-xl border border-white/10 rounded-full
+             bg-surface/80 backdrop-blur-xl xp-bd rounded-full
              px-3 py-1.5 flex items-center gap-2 text-xs shadow-xl"
       data-test="slideshow-control"
       role="toolbar"
@@ -125,7 +125,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
         <span>{{ slideshow.isPlaying ? t('slideshow.pause') : t('slideshow.play') }}</span>
       </button>
 
-      <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+      <span class="xp-divider-v shrink-0" aria-hidden="true" />
 
       <span class="text-text-muted">{{ t('slideshow.interval') }}</span>
       <input
@@ -141,7 +141,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       />
       <span class="font-mono text-text-secondary tabular-nums w-8 text-right">{{ intervalSeconds }}s</span>
 
-      <span class="w-px h-4 bg-white/10 shrink-0" aria-hidden="true" />
+      <span class="xp-divider-v shrink-0" aria-hidden="true" />
 
       <button
         type="button"
@@ -163,7 +163,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
     <footer v-if="chromeVisible" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs" data-test="overlay-bottom">
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-white/10 hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-prev"
         :disabled="currentPage <= 1"
         @click="emit('prev')"
@@ -181,13 +181,13 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
           type="number"
           min="1"
           :max="totalPages"
-          class="w-16 px-2 py-1 rounded bg-surface-1 border border-white/10 text-text-primary text-xs focus:outline-none focus:border-accent"
+          class="w-16 px-2 py-1 rounded bg-surface-1 xp-bd text-text-primary text-xs focus:outline-none focus:border-accent"
         />
         <button type="submit" class="px-2 py-1 rounded text-text-secondary hover:bg-white/10 hover:text-text-primary transition-colors">Go</button>
       </form>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-white/10 hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-next"
         :disabled="currentPage >= totalPages"
         @click="emit('next')"

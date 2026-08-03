@@ -101,7 +101,7 @@ async function onResetProgress() {
   <div
     v-if="visible && entry"
     data-test="row-context-menu"
-    class="fixed z-[1100] bg-surface-4 border border-white/10 rounded-md py-1 shadow-xl backdrop-blur-xl min-w-[160px] text-xs"
+    class="fixed z-[1100] bg-surface-4 xp-bd rounded-md py-1 shadow-xl backdrop-blur-xl min-w-[160px] text-xs"
     :style="{ left: x + 'px', top: y + 'px' }"
   >
     <!-- v0.1.0-module2.0: 目录专属 read-now / add-to-library (Android 风格) -->

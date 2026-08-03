@@ -159,6 +159,26 @@
    */
 }
 
+/* ─── Theme-aware border utility classes ─────────────────────────────────────
+ * 替代 `border-white/5` / `border-white/10`：在 dark mode 是微弱的白色,
+ * 在 light mode 是 slate-200/300. 简单 1px 分隔线 / 卡片边 / dropdown 边 通用.
+ */
+@layer utilities {
+  .xp-bd { border: 1px solid var(--color-border-default); }
+  .xp-bdt { border-top: 1px solid var(--color-border-default); }
+  .xp-bdb { border-bottom: 1px solid var(--color-border-default); }
+  .xp-bdl { border-left: 1px solid var(--color-border-default); }
+  .xp-bdr { border-right: 1px solid var(--color-border-default); }
+  .xp-bdy { border-top: 1px solid var(--color-border-default); border-bottom: 1px solid var(--color-border-default); }
+  .xp-bdx { border-left: 1px solid var(--color-border-default); border-right: 1px solid var(--color-border-default); }
+
+  .xp-bd-subtle { border: 1px solid var(--color-border-subtle); }
+  .xp-bdt-subtle { border-top: 1px solid var(--color-border-subtle); }
+  .xp-bdb-subtle { border-bottom: 1px solid var(--color-border-subtle); }
+
+  .xp-divider-v { width: 1px; height: 16px; background-color: var(--color-border-default); }
+}
+
 /* ─── Light theme token override ────────────────────────────────────────────
  * xplorer-next .theme-light 配色 1:1 迁移. 当 html.dark 不存在时激活.
  * body 渐变 + 滚动条 + selection 等暗色组件细节在下方分别 override.
