@@ -173,9 +173,10 @@ cargo test -p mirapage-desktop-lib natural_compare
 **0.3 9 宫格点击（`useReaderTouchZones.ts`）**
 
 - 3x3 网格：`tl / tm / tr / ml / mm / mr / bl / bm / br`（**全部 3 字母 key，与 Android 端保持一致**）。
-- 默认映射（`DEFAULT_READER_ZONES`）：`tl=first / tm=open-menu / tr=last / ml=prev / mm=open-menu / mr=next / bl=prev-volume / bm=toggle-slideshow / br=next-volume`。
-- 中央 + 顶中 **都**映射 `open-menu` —— 让用户能稳定打开控制面板（任意点击屏幕中部）。
-- `dispatchZoneAction(action, ctx)` 统一派发到 `openMainMenu / prevPage / nextPage / jumpToFirst / jumpToLast / toggleSlideshow / prevVolume / nextVolume` 8 个回调。
+- **v0.1.0-module3.0-settings 起**：动作源从硬编码 `DEFAULT_READER_ZONES` 改为 `settings.touchScheme`（reactive）+ `settings.touchZonesEnabled` master toggle。类型枚举 `TouchAction` 在 `src/lib/readerSettings.ts`，11 个值（**删除** PV 的 `toggle-chrome`）：`none / prev-page / next-page / jump-first / jump-last / open-main-menu / slideshow-toggle / fit-width / folder-prev / folder-next / open-file-browser`。
+- 默认映射（`DEFAULT_TOUCH_SCHEME`，对齐 PV `TouchScheme.DEFAULT`）：`tl=fit-width / tm=open-file-browser / tr=jump-last / ml=prev-page / mm=open-main-menu / mr=next-page / bl=folder-prev / bm=slideshow-toggle / br=folder-next`。
+- 中央 + 顶中 **都**映射 `open-main-menu` —— 让用户能稳定打开控制面板（任意点击屏幕中部）。
+- `dispatchZoneAction(action, ctx)` 统一派发到 11 个回调（新增 `fitWidth` / `openFileBrowser`）。`fitWidth` 当前仅写 store + log（OSG viewer 未 expose），下次开卷生效。
 
 **0.4 桌面端滚轮（`useReaderWheel.ts`）**
 
@@ -193,6 +194,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 - `tick(onAdvance, onPrev, atLast)` 是回调式（**不直接调 reader store**，避免循环依赖）。
 - 末页触发：`pause()` + `pendingNextVolume = true` → ReaderScreen watch 触发 `find_next_volume` IPC（v0.1.0-module2.0 留 TODO 占位，settings.continueToNextVolume 已就绪）。
 - `setInterval` 在 Node / happy-dom 返回类型不一致（`Timeout` vs `number`）—— `let timerId: any = null` 绕过。
+- **v0.1.0-module3.0-settings 起**：interval / direction / loop **全部经 Settings 页 UI 改写**（§11 设置面板），不再是 ReaderMainMenu 单独的临时控件入口。
 
 **0.6 跨卷意图 flag**
 
@@ -347,6 +349,7 @@ function onMouseDown(e: MouseEvent) {
 - **持久化 state**：调用 `useSettingsStore().update('key', value)`，**不**直接调 `setSetting`。store 内统一 `persist('fb_xxx', value)` 包装。
 - **跨视图共享 state**（如 sortField / viewMode / selectedPaths）放专门 store，**不**放组件 local state。
 - **视图临时 state**（如当前 dropdown 是否展开）放组件 `ref`。
+- **域枚举 / 默认值**（v0.1.0-module3.0-settings 起）：阅读器相关枚举（`ScaleMode / ReadDirection / TouchZone / TouchAction`）+ 默认值（`DEFAULT_TOUCH_SCHEME` / `DEFAULT_SCALE_MODE` / `DEFAULT_READ_DIRECTION`）放 `src/lib/readerSettings.ts`，**无 Vue / Pinia / Tauri 依赖**，可独立 vitest。让 store 与 view 都依赖这一个模块，避免重复定义。
 
 **3.4 IPC 桥接 (`src/lib/tauri.ts`)**
 

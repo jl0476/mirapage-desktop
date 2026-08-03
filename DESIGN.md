@@ -54,10 +54,17 @@
 - 横条模式
 - 下载到本地
 - 配置备份 / 导入（与 Android `.pvbackup` 互导为未来工作）
-- 主题切换（深 / 浅 + 4 套色板）
+- **主题配色**（4 套色板 `color_theme`）：已存值，未接 Tailwind（v0.1.0-module3.0-settings 仅落地 `themeMode`）
 - 缩略图网格
 - 远程图加载进度条
 - i18n：本期仅中 / 英两种语言，其他语言为未来工作
+
+> ✅ **已落地**（v0.1.0-module3.0-settings）：
+> - 主题明暗切换（`theme_mode`：system/light/dark → `html.dark` class + Tailwind v4 `dark:` variant，基线仍为 Tokyo Night 暗色）
+> - 阅读器默认值：默认阅读模式 / 默认缩放 / 默认阅读方向 / 翻到末页后
+> - 行为：屏幕常亮 / 界面语言
+> - 幻灯片：间隔（秒）/ 方向 / 循环
+> - **9 宫格触控方案**（11 动作 + master toggle），对齐 PV `TouchScheme.DEFAULT`
 
 ---
 
@@ -976,55 +983,58 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 
 桌面端需实现全部 33 个设置项（与 Android `SettingsRepository.kt:45-85` 镜像）。持久化于 SQLite `settings` 表（key-value）。DataStore 名称 `"settings"`。
 
-| 分组 | Key | 类型 / 默认值 | 文案（中文） | UI 入口 | 控制的行为 |
-|---|---|---|---|---|---|
-| **外观** | `theme_mode` | String/Enum, `SYSTEM` | 主题（跟随系统 / 浅色 / 深色） | 设置 → 外观 | MaterialTheme 浅深（不控阅读区） |
-| 外观 | `color_theme` | String/Enum, `BLUE` | 主题配色（科技蓝 / 优雅紫 / 暖琥珀 / 中性灰） | `ColorThemeList` 色块 + Radio | 色相（与 themeMode 正交） |
-| 外观 | `brightness` | Float, `-1f` (=跟随系统) | 屏幕亮度 | `BrightnessRow` 滑块 | Tauri window `set_brightness`（仅阅读器） |
-| 外观 | `keep_screen_on` | Boolean, `true` | 阅读时保持屏幕常亮 | `SwitchRow` | 翻页器 `video.wake_lock = true` |
-| **阅读默认** | `default_reader_mode` | String/Enum, `SINGLE_PAGE` | 默认阅读模式（单 / 双） | `EnumList` | 首次开卷时初始化容器模式 |
-| 阅读默认 | `default_scale_mode` | String/Enum, `FIT_SCREEN` | 默认缩放模式 | `EnumList` | OpenSeadragon `homeFillsViewport` |
-| 阅读默认 | `default_read_direction` | String/Enum, `LEFT_TO_RIGHT` | 默认阅读方向（LTR / RTL） | `EnumList` | Pager `reverseLayout` |
-| 阅读默认 | `volume_key_paging` | Boolean, `true` | 键盘快捷键翻页（桌面端含义：保留作为全局开关） | `SwitchRow` | 监听键盘 / 鼠标侧键 |
-| **启动** | `startup_screen` | String/Enum, `FILE_BROWSER` | 启动时打开（文件浏览器 / 书架） | `EnumList` | 冷启动路由目标 |
-| **跨目录** | `continue_to_next_directory` | String/Enum, `SWIPE` | 接续下一文件夹（关闭 / 自动 / 滑过末页 / 手动） | `EnumList` | `ReaderViewModel.maybeContinue` 触发条件 |
-| **幻灯片** | `slideshow_interval_ms` | Long, `3000` (≥500) | 自动推进间隔（秒） | `SlideshowSettingsSection` 滑块 | `useSlideshow` `setInterval` |
-| 幻灯片 | `slideshow_direction` | String/Enum, `FORWARD` | 幻灯片方向（正向 / 反向） | `EnumList` | 自动翻页方向 |
-| 幻灯片 | `slideshow_loop` | Boolean, `true` | 循环播放 | `SwitchRow` | 末页行为（停止 vs 回首页） |
-| **文件浏览器** | `fb_sort_field` | String/Enum, `NAME` | 默认排序（名称 / 日期 / 大小） | `EnumList` | `compareBy` |
-| 文件浏览器 | `fb_sort_ascending` | Boolean, `true` | 升序排列 | `SwitchRow` | `NaturalSortComparator` 升降序；FB 工具栏同步 |
-| **SMB / WebDAV** | `smb_archive_strategy` | String/Enum, `DOWNLOAD` | SMB 压缩包加载（下载整包 / 流式） | `CacheSettingsSection` | `ArchiveMediaSource` 加载模式（Phase 7） |
-| SMB / WebDAV | `webdav_archive_strategy` | String/Enum, `STREAM` | WebDAV 压缩包加载 | `EnumList` | 同上（Phase 8） |
-| SMB / WebDAV | `webdav_stream_buffer_kb` | Int, `256` (64-2048) | WebDAV 流式缓冲 (KB) | `NumberInputRow` | Range GET 大小（Phase 8） |
-| SMB / WebDAV | `concurrent_downloads` | Int, `3` (1-10) | 并发下载数 | `NumberInputRow` | `PageCacheManager.setMaxConcurrentDownloads` |
-| **缓存 / 预读** | `page_cache_size_mb` | Int, `512` (100-4096) | 缓存大小（MB） | `NumberInputRow` + chips（显示磁盘占用） | `PageCacheManager.resize` |
-| 缓存 / 预读 | `prefetch_budget_mb` | Int, `8` (0-100) | 预读预算（MB） | `NumberInputRow` | `PrefetchPlanner` 总预算 |
-| 缓存 / 预读 | `archive_cache_size_mb` | Int, `2048` (512-8192) | 压缩包缓存大小（MB） | `NumberInputRow` | `ArchiveCache.resize`（LRU 淘汰） |
-| **下载** | `download_directory` | String?（绝对路径） | 下载目录 | `DownloadSettingsSection` | Phase 5+ 落盘到本地副本 |
-| 下载 | `download_directory_display_name` | String? | 下载目录显示名 | 同上 | UI 文本 |
-| 下载 | `auto_delete_after_finished` | Boolean, `false` | 全部阅读后自动删除 | `SwitchRow` | `DownloadManager` 末态清理 |
-| 下载 | `download_concurrency` | Int, `4` (1-10) | 下载并发数 | `NumberInputRow` | `DownloadManager.setConcurrency` |
-| **触控** | 9 个 `touch_{top,mid,bot}_{left,center,right}` | String/Enum | 屏幕触控分区（3×3） | `TouchSchemeSection` 3×3 cell | `touchRegion()` → `TouchAction` 映射 |
-| **i18n（新增）** | `locale` | String, `system` | 语言（zh-CN / en-US / 跟随系统） | `EnumList` | `vue-i18n` locale 切换 |
-| **搜索（新增）** | `search_mode` | String/Enum, `fuzzy` | 搜索模式（模糊 / 子串） | `EnumList` | fuse.js threshold 配置 |
+> ✅ **落地状态**（v0.1.0-module3.0-settings，2026-08-03）：Settings.vue 重写为 5 section + 左侧锚点导航 + 9 宫格可视化编辑器。**已落地 12 项**（标 ✅ ），**已存 store 但 UI 未暴露 1 项**（`color_theme`，no UI），**未实现 20 项**（SMB/WebDAV/Cache/Download/Backup 等 Desktop 不适用子系统）。spec：`docs/superpowers/specs/2026-08-03-settings-panel-design.md`
 
-**触控 3×3 → 默认动作映射**（来自 `TouchScheme.kt:37-46`，桌面端映射为键盘快捷键，见 §13）：
+| 分组 | Key | 类型 / 默认值 | 文案（中文） | UI 入口 | 控制的行为 | 落地 |
+|---|---|---|---|---|---|---|
+| **外观** | `theme_mode` | String/Enum, `SYSTEM` | 主题（跟随系统 / 浅色 / 深色） | 设置 → 外观 | `html.dark` class + Tailwind v4 `dark:` variant | ✅ |
+| 外观 | `color_theme` | String/Enum, `BLUE` | 主题配色（科技蓝 / 优雅紫 / 暖琥珀 / 中性灰） | **无 UI**（仅 store 存值） | 色相（与 themeMode 正交；未接 Tailwind） | 🟡 |
+| 外观 | `brightness` | Float, `-1f` (=跟随系统) | 屏幕亮度 | `BrightnessRow` 滑块 | Tauri window `set_brightness`（仅阅读器） | ❌ |
+| 外观 | `keep_screen_on` | Boolean, `true` | 阅读时保持屏幕常亮 | 设置 → 行为 | Tauri thread execution_state | ✅ |
+| **阅读默认** | `reader_default_mode` | String/Enum, `SINGLE_PAGE` | 默认阅读模式（单 / 双） | 设置 → 阅读器 | 首次开卷初始化容器模式 | ✅ |
+| 阅读默认 | `default_scale_mode` | String/Enum, `FIT_SCREEN` | 默认缩放（6 mode） | 设置 → 阅读器 | OpenSeadragon `homeFillsViewport`（store 存，下开卷生效） | ✅ |
+| 阅读默认 | `default_read_direction` | String/Enum, `LEFT_TO_RIGHT` | 默认阅读方向（LTR / RTL） | 设置 → 阅读器 | Pager `reverseLayout` | ✅ |
+| 阅读默认 | `volume_key_paging` | Boolean, `true` | 键盘快捷键翻页（桌面端含义：保留作为全局开关） | `SwitchRow` | 监听键盘 / 鼠标侧键 | ❌（无硬件音量键） |
+| **启动** | `startup_screen` | String/Enum, `FILE_BROWSER` | 启动时打开（文件浏览器 / 书架） | `EnumList` | 冷启动路由目标 | ❌ |
+| **跨目录** | `continue_to_next_directory` | String/Enum, `SWIPE` | 接续下一文件夹（关闭 / 自动 / 手动） | 设置 → 阅读器 → "翻到末页后" | `ReaderViewModel.maybeContinue` 触发条件 | ✅（桌面端用 off/auto/manual 3 态，**不**含 PV 的 SWIPE） |
+| **幻灯片** | `slideshow_interval_ms` | Long, `3000` (≥500) | 自动推进间隔（1-30 秒） | 设置 → 幻灯片 | `useSlideshow` `setInterval` | ✅ |
+| 幻灯片 | `slideshow_direction` | String/Enum, `FORWARD` | 幻灯片方向（正向 / 反向） | 设置 → 幻灯片 | 自动翻页方向 | ✅ |
+| 幻灯片 | `slideshow_loop` | Boolean, `true` | 循环播放 | 设置 → 幻灯片 | 末页行为（停止 vs 回首页） | ✅ |
+| **文件浏览器** | `fb_sort_field` | String/Enum, `NAME` | 默认排序（名称 / 日期 / 大小） | `EnumList` | `compareBy`（存在 `fileBrowser` store，未在 Settings 暴露） | 🟡 |
+| 文件浏览器 | `fb_sort_ascending` | Boolean, `true` | 升序排列 | `SwitchRow` | 同上 | 🟡 |
+| **SMB / WebDAV** | `smb_archive_strategy` | String/Enum, `DOWNLOAD` | SMB 压缩包加载（下载整包 / 流式） | `CacheSettingsSection` | `ArchiveMediaSource` 加载模式（Phase 7） | ❌ |
+| SMB / WebDAV | `webdav_archive_strategy` | String/Enum, `STREAM` | WebDAV 压缩包加载 | `EnumList` | 同上（Phase 8） | ❌ |
+| SMB / WebDAV | `webdav_stream_buffer_kb` | Int, `256` (64-2048) | WebDAV 流式缓冲 (KB) | `NumberInputRow` | Range GET 大小（Phase 8） | ❌ |
+| SMB / WebDAV | `concurrent_downloads` | Int, `3` (1-10) | 并发下载数 | `NumberInputRow` | `PageCacheManager.setMaxConcurrentDownloads` | ❌ |
+| **缓存 / 预读** | `page_cache_size_mb` | Int, `512` (100-4096) | 缓存大小（MB） | `NumberInputRow` + chips（显示磁盘占用） | `PageCacheManager.resize` | ❌（无 page cache） |
+| 缓存 / 预读 | `prefetch_budget_mb` | Int, `8` (0-100) | 预读预算（MB） | `NumberInputRow` | `PrefetchPlanner` 总预算 | ❌ |
+| 缓存 / 预读 | `archive_cache_size_mb` | Int, `2048` (512-8192) | 压缩包缓存大小（MB） | `NumberInputRow` | `ArchiveCache.resize`（LRU 淘汰） | ❌ |
+| **下载** | `download_directory` | String?（绝对路径） | 下载目录 | `DownloadSettingsSection` | Phase 5+ 落盘到本地副本 | ❌（无下载管理器） |
+| 下载 | `download_directory_display_name` | String? | 下载目录显示名 | 同上 | UI 文本 | ❌ |
+| 下载 | `auto_delete_after_finished` | Boolean, `false` | 全部阅读后自动删除 | `SwitchRow` | `DownloadManager` 末态清理 | ❌ |
+| 下载 | `download_concurrency` | Int, `4` (1-10) | 下载并发数 | `NumberInputRow` | `DownloadManager.setConcurrency` | ❌ |
+| **触控** | `touch_zones_enabled` | Boolean, `true` | 启用 9 宫格点击 | 设置 → 触控 → 顶部 toggle | `useReaderTouchZones` 入口守卫 | ✅ |
+| 触控 | 9 个 `touch_{top,mid,bot}_{left,center,right}` | String/Enum | 屏幕触控分区（3×3） | 设置 → 触控 → 3×3 cell 下拉 | `touchRegion()` → `TouchAction` 映射 | ✅ |
+| **i18n** | `locale` | String, `system` | 语言（zh-CN / en-US / 跟随系统） | 设置 → 行为 | `vue-i18n` locale 切换 | ✅ |
+| **搜索** | `search_mode` | String/Enum, `fuzzy` | 搜索模式（模糊 / 子串） | 无 UI（仅 store，Search.vue 直接读写） | fuse.js threshold 配置 | 🟡 |
+
+**触控 3×3 → 默认动作映射**（v0.1.0-module3.0-settings 起对齐 PV `TouchScheme.DEFAULT`）：
 
 | 区域 | 默认动作 | 桌面端等价键 |
 |---|---|---|
-| 左上 (TL) | `FIT_WIDTH` | `W` |
-| 中上 (TC) | `OPEN_FILE_BROWSER` | `B` |
-| 右上 (TR) | `JUMP_LAST` | `End` |
-| 左中 (ML) | `PREV_PAGE` | `←` / `PageUp` |
-| 中中 (MC) | `OPEN_MAIN_MENU` | `Esc` / `M` |
-| 右中 (MR) | `NEXT_PAGE` | `→` / `PageDown` / `Space` |
-| 左下 (BL) | `FOLDER_PREV` | `Alt+←` |
-| 中下 (BC) | `SLIDESHOW_TOGGLE` | `P` / `F5` |
-| 右下 (BR) | `FOLDER_NEXT` | `Alt+→` |
+| 左上 (TL) | `fit-width` | `W` |
+| 中上 (TC) | `open-file-browser` | `B` |
+| 右上 (TR) | `jump-last` | `End` |
+| 左中 (ML) | `prev-page` | `←` / `PageUp` |
+| 中中 (MC) | `open-main-menu` | `Esc` / `M` |
+| 右中 (MR) | `next-page` | `→` / `PageDown` / `Space` |
+| 左下 (BL) | `folder-prev` | `Alt+←` |
+| 中下 (BC) | `slideshow-toggle` | `P` / `F5` |
+| 右下 (BR) | `folder-next` | `Alt+→` |
 
-`TouchAction` 枚举完整值：`NONE`, `NEXT_PAGE`, `PREV_PAGE`, `OPEN_MAIN_MENU`, `TOGGLE_CHROME`, `JUMP_FIRST`, `JUMP_LAST`, `SLIDESHOW_TOGGLE`, `FIT_WIDTH`, `FOLDER_NEXT`, `FOLDER_PREV`, `OPEN_FILE_BROWSER`。
+`TouchAction` 枚举（桌面端 11 个，**删除** PV 的 `toggle-chrome`）：`none`, `prev-page`, `next-page`, `jump-first`, `jump-last`, `open-main-menu`, `slideshow-toggle`, `fit-width`, `folder-prev`, `folder-next`, `open-file-browser`。定义在 `src/lib/readerSettings.ts`，DB key 格式 `touch_{top,mid,bot}_{left,center,right}`（与 PV 一致）。
 
-**i18n 文案**（必须走 `$t()`）：
+**i18n 文案**（全部走 `$t()`，新增 `settings.*` namespace 参考 `docs/superpowers/specs/2026-08-03-settings-panel-design.md` §4.5）：
 - `slide.range`（间隔滑块标签）
 - `slide.direction.forward` / `reverse`
 - `slide.loop`
@@ -1038,8 +1048,10 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 - `cache.concurrent`
 - `account.smb.archive.{download,stream}`
 - `account.webdav.archive.{download,stream}`
-- `reader.continue.{off,auto,swipe,manual}`
+- `reader.continue.{off,auto,swipe,manual}`（桌面端用 `off/auto/manual` 3 态，**不**含 SWIPE）
 - `lang.{zh,en,system}`
+
+> v0.1.0-module3.0-settings 起，**设置面板**新增 namespace `settings.*`（45 keys），全文走 `t('settings.*')`。详见 [`docs/superpowers/specs/2026-08-03-settings-panel-design.md` §4.5](./superpowers/specs/2026-08-03-settings-panel-design.md)。
 
 ---
 
@@ -1073,16 +1085,17 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 - **RTL**：LTR 时 N 在左 N+1 在右；RTL 时 N+1 在左 N 在右（`reverseLayout` 整体镜像）
 - **跨卷触发**：复用 `ContinueNextVolume` composable（按 spread 末尾 + 1/3 屏阈值）
 
-### 12.3 跨卷连续阅读（桌面端 4 种模式）
+### 12.3 跨卷连续阅读（桌面端 3 模式）
 
-设置 `continue_to_next_directory`（与 Android 一致，但把 SWIPE 改成 SWIPE / MANUAL 二选一）：
+设置 `continue_to_next_directory`（v0.1.0-module3.0-settings 起与 Android **不一致**——桌面端用 3 态简化，**不**含 PV 的 SWIPE，留 OPEN/CLOSE/AUTO 语义）：
 
 | 模式 | 行为 |
 |---|---|
-| `OFF` | 末页停住，无任何提示 |
-| `AUTO` | 末页自动跳下一本（不等用户操作） |
-| `SWIPE` | 末页静默 arm；继续向"下一本"方向划累计 1/3 屏宽（paged）或 1/5 屏高（webtoon）→ 触发 |
-| `MANUAL` | 末页弹底部药丸"继续读下一本？" + 跳转按钮；点跳转才换书 |
+| `off` | 末页停住，无任何提示 |
+| `auto` | 末页自动跳下一本（不等用户操作） |
+| `manual` | 末页弹底部药丸"继续读下一本？" + 跳转按钮；点跳转才换书 |
+
+> 未来如果用户反馈需要 SWIPE 模式，PV 端语义可加回来（需配合 `useReaderWheel` 累计 1/3 屏宽）。
 
 **算法**（由 `FindNextDirectoryUseCase` 重写为 Rust）：
 - 输入 `(descriptor, currentPath, direction)` → `Result<String?>`
@@ -1365,9 +1378,9 @@ fn detect_touch_capable() -> bool {
 
 桌面端**必须**支持用户自定义键位，因为默认映射无法覆盖所有用户习惯。设计要点：
 
-1. **数据模型**（与 MiraPage Android 的 `TouchScheme` 对齐）：
+1. **数据模型**（v0.1.0-module3.0-settings 起：**3×3 触控方案已落地**，存在 `settings.touch_*` key + `settings.touchZonesEnabled` master toggle；键盘 / 鼠标 / 触控板 的键位自定义**仍待**）：
    ```typescript
-   // src/stores/inputBindings.ts
+   // src/stores/inputBindings.ts（**待** Phase 6+ 落地）
    interface InputBindings {
      // 键盘键位
      keyboard: Record<TouchAction, string[]>;   // action → 多组快捷键
@@ -1391,6 +1404,8 @@ fn detect_touch_capable() -> bool {
    - macOS 显示 `Cmd`（而非 `Ctrl`）
    - Windows 显示 `Ctrl`
    - 通过 `navigator.platform` 检测
+
+> **当前落地**（v0.1.0-module3.0-settings）：3×3 触控方案（11 动作 + master toggle），由 `useReaderTouchZones` 直接读 `settings.touchScheme`。键盘 / 鼠标 / 触控板 的完整自定义编辑器仍在 roadmap。
 
 ### 15.8 输入事件总线（架构）
 
