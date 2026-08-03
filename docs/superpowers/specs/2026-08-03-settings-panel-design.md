@@ -20,6 +20,16 @@ MiraPage Desktop 当前 Settings 视图是 Phase 1 骨架：
 
 **目标**：把 Settings 视图升级到 PV 同等使用面（除 Desktop 不适用的下载 / 缓存概念），让所有 10 个 store 字段都有 UI 入口，新增 11 个 DB key（scale / direction / 9 区触控）。
 
+**范围（明确）**：
+
+| 模块 | 包含 | 不包含 |
+|---|---|---|
+| 主题 | themeMode UI（system / light / dark）+ html.dark class + Tailwind `dark:` variant（首期仅 toggle，无 light token） | colorTheme UI、Tokyo Night 重做 |
+| 阅读器默认值 | readerDefaultMode / defaultScaleMode / defaultReadDirection / continueToNextVolume UI | volume key paging（无硬件键） |
+| 行为 | keepScreenOn UI、locale UI | startupScreen（暂未加） |
+| 幻灯片 | interval / direction / loop UI | — |
+| 9 区触控方案 | 3×3 编辑器 + 11 动作下拉 + Reset 按钮 | toggle-chrome（PV 已弃用） |
+
 **非目标**：
 
 - Backup / Restore（AES 加密 + SAF URI）—— Desktop 无 SAF
@@ -346,6 +356,22 @@ export function useReaderTouchZones(opts: UseReaderTouchZonesOptions): void {
 
 #### 4.4.4 `dispatchZoneAction` 重写
 
+**旧 → 新动作映射表**（避免读老代码误判）：
+
+| 旧 ReaderZoneAction | 新 TouchAction | 函数体 |
+|---|---|---|
+| `open-menu` | `open-main-menu` | 改名不变体 |
+| `first` | `jump-first` | 改名不变体 |
+| `last` | `jump-last` | 改名不变体 |
+| `prev` | `prev-page` | 改名不变体 |
+| `next` | `next-page` | 改名不变体 |
+| `prev-volume` | `folder-prev` | 改名不变体 |
+| `next-volume` | `folder-next` | 改名不变体 |
+| `toggle-slideshow` | `slideshow-toggle` | 改名不变体 |
+| —（无） | `none` | 新增，noop |
+| —（无） | `fit-width` | 新增，调 `ctx.fitWidth()` |
+| —（无） | `open-file-browser` | 新增，调 `ctx.openFileBrowser()` |
+
 ```ts
 export function dispatchZoneAction(
   action: TouchAction,
@@ -517,7 +543,7 @@ namespace `settings.*` 全新（不在 `nav.*` / `reader.*` 等子树），全�
 |---|---|---|
 | 触控默认 PV DEFAULT 与老用户习惯冲突 | 中 | reset 按钮 1 键回滚；首次启动提示（**不做**，用户已知会变） |
 | Tailwind `dark:` 浅色基线未实装 | 低 | 本次仅 class toggle，视觉无变化；后续主题模块再做 |
-| `dispatchZoneAction` 重命名（`open-menu` → `open-main-menu`）| 低 | 全部替换，type-check 兜底 |
+| `dispatchZoneAction` 重命名（`open-menu` → `open-main-menu`）| 低 | 全部替换，type-check 兜底；表 §4.4.4 显式列出 |
 | ReaderView 加 2 个 callback | 低 | store 已有 `defaultScaleMode`；OSG `viewport.goHome` 是公开 API |
 | Anchor nav 在窄屏（< 1024px）挤压 | 低 | 桌面端固定 220px，不处理 |
 
