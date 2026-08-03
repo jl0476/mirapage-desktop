@@ -9,12 +9,14 @@ import { useRoute } from 'vue-router';
 import SideNav from '@/components/layout/SideNav.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useLocaleSync } from '@/composables/useLocaleSync';
+import { useThemeSync } from '@/composables/useThemeSync';
 
 const route = useRoute();
 const settings = useSettingsStore();
 
 const showSideNav = computed(() => route.name !== 'reader');
 
+useThemeSync();
 useLocaleSync();
 onMounted(async () => {
   await settings.load();
