@@ -7,6 +7,10 @@
  * 为什么纯函数？
  * - 单测友好（无 DOM 副作用）
  * - 同一映射可被 useReaderHotkeys composable + SettingsView 的"录制键位" UI 共用
+ *
+ * v0.1.0-module3.0.2-reader-polish (Cluster B #7):
+ * - Escape 从 openMainMenu 移到 closeReader (返回文件浏览器, router.back)
+ * - openMainMenu 仅保留 'm' (中宫点击 + m 键, 不再被 ESC 触发)
  */
 export type ReaderCommand =
   | 'nextPage'
@@ -19,7 +23,8 @@ export type ReaderCommand =
   | 'openFileBrowser'
   | 'folderNext'
   | 'folderPrev'
-  | 'slideshowToggle';
+  | 'slideshowToggle'
+  | 'closeReader';
 
 export interface KeyBindings {
   nextPage: string[];
@@ -33,16 +38,21 @@ export interface KeyBindings {
   folderNext: string[];
   folderPrev: string[];
   slideshowToggle: string[];
+  closeReader: string[];
 }
 
 /**
  * 默认键位（与 Android TouchScheme 映射一致；macOS / Win / Linux 通用）
  * 详见 DESIGn §15.9 完整映射表
+ *
+ * v0.1.0-module3.0.2-reader-polish:
+ * - Escape 改映射 closeReader (was: openMainMenu)
+ * - m 仍 openMainMenu (中宫点击)
  */
 export const defaultKeyBindings: KeyBindings = {
   nextPage: ['ArrowRight', 'PageDown'],
   prevPage: ['ArrowLeft', 'PageUp'],
-  openMainMenu: ['Escape', 'm'],
+  openMainMenu: ['m'],
   toggleChrome: ['c', 'Ctrl+h'],
   jumpFirst: ['Home'],
   jumpLast: ['End'],
@@ -51,6 +61,7 @@ export const defaultKeyBindings: KeyBindings = {
   folderNext: ['Alt+ArrowRight'],
   folderPrev: ['Alt+ArrowLeft'],
   slideshowToggle: [' ', 'p', 'F5'],
+  closeReader: ['Escape'],
 };
 
 /** 把 KeyboardEvent 归一化为 "Ctrl+Alt+Shift+key" 字符串（与 bindings key 比对） */

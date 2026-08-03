@@ -295,6 +295,7 @@ export default {
     touch: {
       title: 'Screen 9-zone',
       hint: 'Tap a cell to remap its action; 3×3 grid mirrors the screen',
+      enabled: 'Enable 9-zone tapping',
       reset: 'Reset to classic layout',
       resetConfirm: 'Reset all 9 zones to defaults?',
     },

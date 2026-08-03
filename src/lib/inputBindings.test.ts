@@ -51,8 +51,10 @@ describe('defaultKeyBindings', () => {
     expect(defaultKeyBindings.prevPage).toContain('ArrowLeft');
     expect(defaultKeyBindings.prevPage).toContain('PageUp');
     expect(defaultKeyBindings.toggleChrome).toContain('c');
-    expect(defaultKeyBindings.openMainMenu).toContain('Escape');
+    // v0.1.0-module3.0.2-reader-polish: Escape 移到 closeReader
     expect(defaultKeyBindings.openMainMenu).toContain('m');
+    expect(defaultKeyBindings.openMainMenu).not.toContain('Escape');
+    expect(defaultKeyBindings.closeReader).toContain('Escape');
     expect(defaultKeyBindings.jumpFirst).toContain('Home');
     expect(defaultKeyBindings.jumpLast).toContain('End');
     expect(defaultKeyBindings.fitWidth).toContain('w');
@@ -81,10 +83,14 @@ describe('resolveHotkey — keyboard', () => {
     expect(resolveHotkey(keyboardEvent('End'), defaultKeyBindings)).toBe('jumpLast');
   });
 
-  it('maps Escape and m to openMainMenu (case insensitive)', () => {
-    expect(resolveHotkey(keyboardEvent('Escape'), defaultKeyBindings)).toBe('openMainMenu');
+  it('maps m to openMainMenu (case insensitive)', () => {
     expect(resolveHotkey(keyboardEvent('m'), defaultKeyBindings)).toBe('openMainMenu');
     expect(resolveHotkey(keyboardEvent('M'), defaultKeyBindings)).toBe('openMainMenu');
+  });
+
+  // v0.1.0-module3.0.2-reader-polish (#7): Escape 改映射 closeReader (was: openMainMenu)
+  it('maps Escape to closeReader (router.back to file browser)', () => {
+    expect(resolveHotkey(keyboardEvent('Escape'), defaultKeyBindings)).toBe('closeReader');
   });
 
   it('maps c / Ctrl+h to toggleChrome', () => {

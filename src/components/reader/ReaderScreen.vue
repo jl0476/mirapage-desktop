@@ -19,10 +19,18 @@
  * 事件:
  * - back:用户返回文件浏览器
  * - toggle-mode:用户点模式切换(single↔double)
+ *
+ * v0.1.0-module3.0.2-reader-polish (Cluster C):
+ *  - useReaderScale 接线: 单/双页 viewer 暴露 getBounds, 父级 setScaleMode
+ *    触发 watcher 调 applyScale.
+ *  - 当前 spread 切换 (prev/next/jump) → 重 apply 当前 scale (因为 OSD
+ *    viewport 在新图加载后还在用旧 transform).
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
+import { useSettingsStore } from '@/stores/settings';
+import { useReaderScale, type OSDViewerLike } from '@/composables/useReaderScale';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { log } from '@/lib/logger';
 import SinglePageViewer from './SinglePageViewer.vue';
@@ -50,8 +58,42 @@ const emit = defineEmits<Emits>();
 
 const store = useReaderStore();
 const slideshow = useSlideshowStore();
+const settings = useSettingsStore();
 const containerRef = ref<HTMLElement | null>(null);
 const hovered = ref(false);
+const singleViewerRef = ref<InstanceType<typeof SinglePageViewer> | null>(null);
+const doubleViewerRef = ref<InstanceType<typeof DoublePageViewer> | null>(null);
+
+/** Cluster C: useReaderScale — 监听 settings.currentScaleMode 变化 → applyScale
+ *  viewerRef 通过 ref 函数从 SinglePageViewer / DoublePageViewer 拿.
+ *  注: mode 必须是可写 ref (settings 字段直接 ref, computed 是 readonly). */
+const scaleViewerRef = ref<OSDViewerLike | null>(null);
+const scaleModeRef = ref(settings.currentScaleMode);
+// 同步 settings.currentScaleMode → scaleModeRef, 让 useReaderScale watcher 触发
+watch(() => settings.currentScaleMode, (m) => { scaleModeRef.value = m; });
+useReaderScale({ viewerRef: scaleViewerRef, mode: scaleModeRef });
+
+/** Cluster C: 翻页后重 apply 当前 scale (新图加载完 OSD viewport 还在旧 transform) */
+watch(
+  () => store.currentSpreadIndex,
+  () => {
+    // 让子组件暴露 viewer 之后下一 tick 重 apply
+    setTimeout(() => {
+      const newViewer = props.mode === 'single'
+        ? singleViewerRef.value && typeof (singleViewerRef.value as { getViewer?: () => OSDViewerLike | null }).getViewer === 'function'
+          ? (singleViewerRef.value as { getViewer: () => OSDViewerLike | null }).getViewer()
+          : null
+        : null;  // double mode 通过 getBounds 间接应用 (未来扩展)
+      if (newViewer) {
+        scaleViewerRef.value = newViewer;
+        // 触发 watcher 重 apply (直接写 modeRef.value 会触发)
+        const cur = scaleModeRef.value;
+        scaleModeRef.value = 'fit-screen';
+        scaleModeRef.value = cur;
+      }
+    }, 50);
+  },
+);
 
 // 派生 spreads: 如果 props 没传,从 pageUrls + 默认 coverStandalone = true 算
 const finalSpreads = computed(() => {
@@ -74,6 +116,27 @@ onMounted(() => {
     });
   }
 });
+
+// v0.1.0-module3.0.2-reader-polish (Cluster C):
+// singleViewerRef 挂上后, 让 scaleViewerRef = getViewer() 触发 useReaderScale watcher
+watch(singleViewerRef, (el) => {
+  if (el && typeof (el as { getViewer?: () => OSDViewerLike | null }).getViewer === 'function') {
+    const viewer = (el as { getViewer: () => OSDViewerLike | null }).getViewer();
+    if (viewer) {
+      scaleViewerRef.value = viewer;
+      // 触发初始 apply
+      const cur = scaleModeRef.value;
+      scaleModeRef.value = 'fit-screen';
+      scaleModeRef.value = cur;
+    }
+  }
+}, { flush: 'post' });
+
+watch(doubleViewerRef, (el) => {
+  // 双页模式: 通过 getBounds 计算 (但 useReaderScale 需要 viewer 实例)
+  // 简化: 暂不支持双页 scale, 仅单页生效 (Cluster C #6 范围限定)
+  if (el) log('[ReaderScreen] double viewer mounted, scale not applied (Cluster C #6: single-only)');
+}, { flush: 'post' });
 
 // 父级 props 变化时 (mode 切换 / 跳页) 同步更新 store
 watch(
@@ -163,10 +226,15 @@ function onContainerMouseLeave() {
     @mouseenter="onContainerMouseEnter"
     @mouseleave="onContainerMouseLeave"
   >
-    <!-- viewer -->
-    <SinglePageViewer v-if="mode === 'single'" :image-url="singlePageUrl" />
+    <!-- viewer (Cluster C: 单页用 ref, 双页用 ref) -->
+    <SinglePageViewer
+      v-if="mode === 'single'"
+      :ref="(el: unknown) => { singleViewerRef = el as InstanceType<typeof SinglePageViewer> | null }"
+      :image-url="singlePageUrl"
+    />
     <DoublePageViewer
       v-else
+      :ref="(el: unknown) => { doubleViewerRef = el as InstanceType<typeof DoublePageViewer> | null }"
       :page-urls="props.pageUrls"
       :spreads="finalSpreads"
       :current-spread-index="store.currentSpreadIndex"

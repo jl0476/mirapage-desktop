@@ -296,6 +296,7 @@ export default {
     touch: {
       title: '屏幕 9 宫格',
       hint: '点击格子映射动作，3×3 网格对齐屏幕分区',
+      enabled: '启用 9 宫格点击',
       reset: '恢复经典布局',
       resetConfirm: '将 9 区动作恢复为默认？',
     },

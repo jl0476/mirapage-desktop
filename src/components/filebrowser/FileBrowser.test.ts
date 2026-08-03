@@ -24,6 +24,16 @@ vi.mock('@/lib/tauri', () => ({
   listProgressFinished: vi.fn(async () => ({})),
   markFinished: vi.fn(async () => undefined),
   saveProgress: vi.fn(async () => undefined),
+  // Cluster A 测试用
+  createBook: vi.fn(async () => 42),
+  recordHistory: vi.fn(async () => undefined),
+}));
+
+// Cluster A: spy on router.push
+const routerPushSpy = vi.fn(async () => undefined);
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ push: routerPushSpy }),
+  RouterLink: { template: '<a><slot /></a>' },
 }));
 
 const mockedList = vi.mocked(listDirectory);
@@ -429,6 +439,97 @@ describe('FileBrowser — FileList @open (双击进入)', () => {
     // open 事件应被 emit (虽然测试里 wrapper.vm.$emit 被 spy 覆盖,
     // FileBrowser.vue 的 emit() 是 vue emit,实际 emit 到 instance 上,
     // 测试只能验证子调路径)
+  });
+});
+
+// ─── Cluster A: 双击图片 / 选中图片立即阅读 (issue #1 / #3) ───
+
+describe('FileBrowser — 立即阅读入口 (Cluster A)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    routerPushSpy.mockClear();
+  });
+
+  it('选中图片 (.jpg) 时, 立即阅读按钮可点 + 标题无 disabled', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 单击图片行 → select
+    const row = wrapper.find('[data-test="row"]');
+    await row.trigger('click');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('选中文件夹时, 立即阅读按钮可点 (已有行为, 不退化)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'VOL.01', path: 'VOL.01', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const row = wrapper.find('[data-test="row"]');
+    await row.trigger('click');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('双击图片行 → 调 readFromImage (走父目录 + ?at=imageName)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'page1.jpg', path: 'page1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+      { name: 'page2.jpg', path: 'page2.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+      { name: 'page3.jpg', path: 'page3.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const rows = wrapper.findAll('[data-test="row"]');
+    expect(rows.length).toBe(3);
+    // 双击 page2.jpg
+    await rows[1].trigger('dblclick');
+    await flushPromises();
+
+    // router.push 应被调,带 ?at=page2.jpg
+    expect(routerPushSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: '/reader/42',
+        query: { at: 'page2.jpg' },
+      }),
+    );
+    // currentPath 不变 (双击图片不进入目录)
+    expect(fb.currentPath).toBe('');
+  });
+
+  it('双击非图片文件 (.cbz) → no-op (仍走原行为)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'manga.cbz', path: 'manga.cbz', isDirectory: false, isArchive: true, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const row = wrapper.find('[data-test="row"]');
+    await row.trigger('dblclick');
+    await flushPromises();
+
+    expect(routerPushSpy).not.toHaveBeenCalled();
+    expect(fb.currentPath).toBe('');
   });
 });
 

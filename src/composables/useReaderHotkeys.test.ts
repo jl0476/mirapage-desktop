@@ -2,6 +2,9 @@
  * useReaderHotkeys composable 测试
  * - onMounted 注册 keydown / wheel / mousedown listener
  * - 派发到 reader store action(nextPage/prevPage/toggleChrome 等)
+ *
+ * v0.1.0-module3.0.2-reader-polish (Cluster B #7):
+ * - Escape → closeReader → router.back()
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
@@ -16,6 +19,20 @@ vi.mock('vue', async () => {
     onBeforeUnmount: () => undefined,
   };
 });
+
+// Cluster B #7: 模拟 useRouter/useRoute, 让 closeReader dispatch 可被 spy
+const routerBackSpy = vi.fn();
+const routerPushSpy = vi.fn();
+let currentPath = '/reader/7';
+vi.mock('vue-router', () => ({
+  useRouter: () => ({
+    back: routerBackSpy,
+    push: routerPushSpy,
+  }),
+  useRoute: () => ({
+    get fullPath() { return currentPath; },
+  }),
+}));
 
 import { useReaderHotkeys } from './useReaderHotkeys';
 
@@ -33,6 +50,9 @@ describe('useReaderHotkeys', () => {
     keyHandler = null;
     wheelHandler = null;
     mouseHandler = null;
+    routerBackSpy.mockClear();
+    routerPushSpy.mockClear();
+    currentPath = '/reader/7';
     vi.spyOn(window, 'addEventListener').mockImplementation((event: any, handler: any) => {
       if (event === 'keydown') keyHandler = handler;
       // v0.1.0-module3.0.2-hotfix6 (H12): 不再监听 wheel — useReaderWheel 接管
@@ -130,5 +150,33 @@ describe('useReaderHotkeys', () => {
     expect(slideshow.isPlaying).toBe(true);
     keyHandler!(new KeyboardEvent('keydown', { key: ' ' }) as unknown as KeyboardEvent);
     expect(slideshow.isPlaying).toBe(false);
+  });
+
+  // Cluster B #7: Escape → router.back() (返回文件浏览器)
+  it('Escape key → closeReader → router.back()', () => {
+    useReaderHotkeys();
+    keyHandler!(new KeyboardEvent('keydown', { key: 'Escape' }) as unknown as KeyboardEvent);
+    expect(routerBackSpy).toHaveBeenCalled();
+  });
+
+  it('Escape key 不应触发 reader.toggleChrome (openMainMenu 改用 m)', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1, title: 't', pages: ['a.jpg'], spreads: [{ start: 0, end: 1 }], initialSpreadIndex: 0,
+    });
+    const chromeBefore = r.chromeVisible;
+    useReaderHotkeys();
+    keyHandler!(new KeyboardEvent('keydown', { key: 'Escape' }) as unknown as KeyboardEvent);
+    expect(r.chromeVisible).toBe(chromeBefore);  // 没被 toggle
+  });
+
+  it('m key 仍触发 openMainMenu (= toggleChrome)', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1, title: 't', pages: ['a.jpg'], spreads: [{ start: 0, end: 1 }], initialSpreadIndex: 0,
+    });
+    useReaderHotkeys();
+    keyHandler!(new KeyboardEvent('keydown', { key: 'm' }) as unknown as KeyboardEvent);
+    expect(r.chromeVisible).toBe(!true);  // toggle 一次, 从 true → false
   });
 });

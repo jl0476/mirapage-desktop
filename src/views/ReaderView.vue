@@ -48,6 +48,14 @@ const showMainMenu = ref(false);
 
 const bookId = computed(() => Number(route.params.bookId));
 
+// Cluster A: route.query.at 是双击图片 / 选中图片立即阅读时携带的起始图片名
+// (useReaderActions.readFromImage 写入). ReaderView 优先用此图所在 spread,
+// 而不是 saved progress. 用户显式选择 — 不做末页钳位 (避免"刚开就跨卷"逻辑仅适用于自动恢复).
+const initialImageName = computed<string | null>(() => {
+  const v = route.query.at;
+  return typeof v === 'string' ? decodeURIComponent(v) : null;
+});
+
 async function loadBook() {
   status.value = 'loading';
   errorMessage.value = '';
@@ -136,7 +144,7 @@ async function loadBook() {
     pageUrls.value = sortedNames.map((name) => convertFileSrc(joinPath(absDir, name)));
     log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
     log('[ReaderView/loadBook] IPC[getProgress] →', id);
-    const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length, isSinglePage);
+    const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length, isSinglePage, sortedNames);
     log('[ReaderView/loadBook] initialSpreadIndex=', initialSpreadIndex, '(pageCount=', sortedNames.length, ')');
     log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: book.title, pages: pageUrls.value.length, initialSpreadIndex, isSinglePage });
     reader.openBook({
@@ -147,7 +155,6 @@ async function loadBook() {
       initialSpreadIndex,
     });
     log('[ReaderView/loadBook] reader.openBook done, status=ready');
-    status.value = 'ready';
   } catch (e) {
     log('[ReaderView/loadBook] EXCEPTION:', e, 'stack:', e instanceof Error ? e.stack : '');
     errorMessage.value = e instanceof Error ? e.message : String(e);
@@ -221,21 +228,43 @@ function joinPath(...parts: string[]): string {
  *  - 修法: 把 initialSpreadIndex 钳到 last - 1 (倒数第二页),
  *    让用户先正常翻页, 而不是看到跨卷 flag 触发.
  *  - 多 spread 的漫画钳到 last - 1; 单 spread 的极端情况不动 (无 last - 1).
+ *
+ * v0.1.0-module3.0.2-reader-polish (Cluster A): 优先 ?at=imageName
+ *  - 双击图片 / 选中图片立即阅读时, 用 imageEntry.name 在 sortedNames 找 index
+ *  - page→spread 映射同 saved progress 路径
+ *  - 末页钳位仍生效
  */
-async function resolveInitialSpreadIndex(bookId: number, pageCount: number, singlePage: boolean = false): Promise<number> {
+async function resolveInitialSpreadIndex(
+  bookId: number,
+  pageCount: number,
+  singlePage: boolean = false,
+  imageNames: string[] = [],
+): Promise<number> {
+  // 优先: Cluster A 入口 (双击/选中图片) — 用户显式选择, 不做末页钳位
+  const atName = initialImageName.value;
+  if (atName && imageNames.includes(atName)) {
+    const idx = imageNames.indexOf(atName);
+    const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
+    const last = spreads.length - 1;
+    if (last < 0) return 0;
+    const target = SpreadPlanner.spreadIndexForPage(idx, spreads);
+    const clamped = Math.max(0, Math.min(target, last));
+    log('[ReaderView/resolveInitialSpreadIndex] from ?at=', atName, '→ idx=', idx, '→ spread=', clamped, '(last=', last, ') [no last-clamp for explicit choice]');
+    return clamped;
+  }
+  // 缺省: 读 saved progress (H5)
   try {
     const progress = await getProgress(bookId);
     if (!progress) return 0;
-    // v0.1.0-module3.0.2-hotfix7 (H13): singlePage 参数
     const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
     const last = spreads.length - 1;
     if (last < 0) return 0;
     const idx = SpreadPlanner.spreadIndexForPage(progress.page, spreads);
     const clamped = Math.max(0, Math.min(idx, last));
-    // 末页钳位: 不在末 spread (last - 1)
+    log('[ReaderView/resolveInitialSpreadIndex] from saved progress page=', progress.page, '→ spread=', clamped, '(last=', last, ')');
     return clamped >= last ? Math.max(0, last - 1) : clamped;
   } catch (e) {
-    log('[ReaderView] resolveInitialSpreadIndex fallback 0:', e);
+    log('[ReaderView/resolveInitialSpreadIndex] fallback 0:', e);
     return 0;
   }
 }
@@ -299,9 +328,8 @@ const zoneActions = {
   nextVolume: () => { onNextVolume(); },
   // v0.1.0-module3.0: 新增 fit-width + open-file-browser 回调
   fitWidth: () => {
-    settings.defaultScaleMode = 'fit-width';
-    void settings.update('default_scale_mode', 'fit-width');
-    log('[ReaderView/zoneActions/fitWidth] persisted fit-width; takes effect on next book open');
+    // Cluster C: 调 setScaleMode 立即 apply + 持久化 (was: 只写 defaultScaleMode 下次生效)
+    void settings.setScaleMode('fit-width');
   },
   openFileBrowser: () => { router.push('/'); },
 };

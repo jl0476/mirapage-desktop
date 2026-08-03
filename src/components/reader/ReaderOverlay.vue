@@ -12,8 +12,15 @@
  * **数据来源**:
  * - 受控 props: title / currentPage / totalPages / mode / chromeVisible
  * - 自管: slideshow.isPlaying / intervalMs / direction (从 useSlideshowStore 拿)
+ *
+ * v0.1.0-module3.0.2-reader-polish:
+ *  - Cluster B #5: pointer-events 修复 — 外层 div pointer-events-none,
+ *    每个 button / input / form 加 pointer-events-auto, 让 click 穿透到 OSD canvas
+ *    不被 overlay 容器拦截, 同时保证按钮仍可点.
+ *  - Cluster B #8: chrome 随 slideshow.isPlaying 自动隐藏 — autoHide = isPlaying.
+ *    hovered 时解除 autoHide 临时显示, 2s 后重新隐藏.
  */
-import { ref, computed } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSlideshowStore } from '@/stores/slideshow';
 
@@ -59,8 +66,36 @@ async function onDirectionToggle() {
   await slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward');
 }
 
-/** 轮播控制条可见性: 播放中常驻, 或 hover 时显示 */
-const showSlideshowControl = computed(() => slideshow.isPlaying || props.hovered);
+/** Cluster B #8: autoHide = isPlaying. 播放时 chrome 全部隐藏, 避免遮挡. */
+const autoHide = computed(() => slideshow.isPlaying);
+
+/** hover 触发: props.hovered 变 true 时点亮 hoveredVisible, 2s 后重置 */
+const hoveredVisible = ref(false);
+let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flashOnHover(): void {
+  hoveredVisible.value = true;
+  if (hoverTimer !== null) clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => { hoveredVisible.value = false; }, 2000);
+}
+
+watch(() => props.hovered, (v) => {
+  if (v) flashOnHover();
+});
+
+onUnmounted(() => {
+  if (hoverTimer !== null) clearTimeout(hoverTimer);
+});
+
+/** Cluster B #8: chrome 可见 = chromeVisible && !autoHide && (hovered || hoveredVisible) */
+const chromeShow = computed(() =>
+  props.chromeVisible && !autoHide.value && (props.hovered || hoveredVisible.value)
+);
+
+/** 轮播控制条: 播放中常驻, 或 hovered/hoveredVisible. (Cluster B #8 与 chrome 一起隐藏但保留显示语义) */
+const slideshowControlShow = computed(() =>
+  slideshow.isPlaying || props.hovered || hoveredVisible.value
+);
 
 /** 间隔 slider 当前值 (1-30s, 步长 0.5s) */
 const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
@@ -72,8 +107,8 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
     data-test="overlay"
     data-test-ignore-touch-zones
   >
-    <!-- 顶栏 -->
-    <header v-if="chromeVisible" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs" data-test="overlay-top">
+    <!-- 顶栏 (Cluster B #5 pointer-events-auto + #8 chromeShow 替换 chromeVisible) -->
+    <header v-if="chromeShow" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto" data-test="overlay-top">
       <span class="flex-1 font-semibold truncate" data-test="title">{{ title }}</span>
       <span class="font-mono text-text-secondary tabular-nums" data-test="page-indicator">
         {{ currentPage }} / {{ totalPages }}
@@ -97,9 +132,9 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
     </header>
 
-    <!-- 轮播控制条 (独立 chrome) — 播放中常驻 / hover 时显示 -->
+    <!-- 轮播控制条 (Cluster B #8: 跟随 isPlaying/hover, #5 pointer-events-auto 已存在) -->
     <div
-      v-if="showSlideshowControl"
+      v-if="slideshowControlShow"
       class="absolute bottom-12 left-1/2 -translate-x-1/2 pointer-events-auto
              bg-surface/80 backdrop-blur-xl xp-bd rounded-full
              px-3 py-1.5 flex items-center gap-2 text-xs shadow-xl"
@@ -159,8 +194,8 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
     </div>
 
-    <!-- 底栏 -->
-    <footer v-if="chromeVisible" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs" data-test="overlay-bottom">
+    <!-- 底栏 (Cluster B #5/#8: pointer-events-auto + chromeShow) -->
+    <footer v-if="chromeShow" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto" data-test="overlay-bottom">
       <button
         type="button"
         class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -171,7 +206,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
         ← {{ t('reader.prev') }}
       </button>
       <form
-        class="flex-1 flex items-center justify-center gap-2"
+        class="flex-1 flex items-center justify-center gap-2 pointer-events-auto"
         data-test="jump-input"
         @submit="submitJump"
       >

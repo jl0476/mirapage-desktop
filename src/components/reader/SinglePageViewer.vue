@@ -11,6 +11,7 @@
 import OpenSeadragon from 'openseadragon';
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { log } from '@/lib/logger';
+import type { OSDViewerLike } from '@/composables/useReaderScale';
 
 interface Props {
   imageUrl: string;
@@ -19,6 +20,24 @@ const props = defineProps<Props>();
 
 const containerRef = ref<HTMLDivElement | null>(null);
 let viewer: OpenSeadragon.Viewer | null = null;
+
+// Cluster C: 暴露 viewer + bounds 给父 (ReaderScreen → useReaderScale 应用缩放)
+defineExpose({
+  /** 获取 OSD viewer 实例 (供 useReaderScale 调用 viewport API) */
+  getViewer: (): OSDViewerLike | null => {
+    if (!viewer) return null;
+    // OSD viewer 自带 viewport / world API, 类型结构匹配 OSDViewerLike
+    return viewer as unknown as OSDViewerLike;
+  },
+  /** 获取当前图项 bounds (Point2D → 转 OSDBounds). 加载未完成时返回 null. */
+  getBounds: () => {
+    if (!viewer) return null;
+    const item = viewer.world.getItemAt(0);
+    if (!item) return null;
+    const b = item.getBounds();
+    return { x: b.x, y: b.y, width: b.width, height: b.height };
+  },
+});
 
 onMounted(() => {
   if (!containerRef.value) {
@@ -30,6 +49,10 @@ onMounted(() => {
     element: containerRef.value,
     tileSources: { type: 'image', url: props.imageUrl },
     showNavigator: false,
+    // v0.1.0-module3.0.2-reader-polish (#5/#7): 关闭 OSD 默认 nav 控件
+    // (左上 zoom in/out/home/fullscreen 按钮). WebView2 加载图标失败显示 "X"
+    // 占位, 不仅视觉破碎, 还拦截 pointer events 阻碍 ReaderOverlay 按钮.
+    showNavigationControl: false,
     // v0.1.0-module3.0.2 (M5): 关掉 OSD 滚轮缩放, 改由 ReaderView 的
     // useReaderWheel 接管翻页. 否则滚轮先被 OSD 缩吞, 翻页不响应.
     gestureSettingsMouse: { scrollToZoom: false },

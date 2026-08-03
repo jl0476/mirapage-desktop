@@ -83,6 +83,21 @@ function makeRouter() {
   return router;
 }
 
+/** Cluster A 测试用: 支持自定义 query (例如 ?at=imageName).
+ *  使用 LocationAsObject 而非 URL 字符串, 避免 createMemoryHistory 对
+ *  query string 解析不一致的问题. */
+function makeRouterWithQuery(path: string, query?: Record<string, string>) {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', name: 'home', component: { template: '<div />' } },
+      { path: '/reader/:bookId', name: 'reader', component: ReaderView },
+    ],
+  });
+  router.push({ path, query });
+  return router;
+}
+
 describe('ReaderView.vue', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -332,5 +347,132 @@ describe('ReaderView.vue', () => {
     expect(url).not.toContain('%25');
     // URL 必须含单层 encode 的 UTF-8 (林 = %E6%9E%97) 或 (1) = %281%29
     expect(url).toMatch(/%E6%9E%97|%28/);
+  });
+
+  // ─── Cluster A: route.query.at → 从指定 image 开始 ───
+  // 注: file-level mockImplementation 被前面 'getBook 返回 absolutePath' /
+  // 'pageUrls 特殊字符' 测试设为持久实现, 不被 vi.clearAllMocks 清除.
+  // 新测试需显式 mockReset listDirectory + 重设默认实现, 否则拿到上一次的返回.
+
+  it('route.query.at=b.jpg → initialSpreadIndex 指向 b.jpg 所在 spread (单页模式 3 张图 → spread 1)', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouterWithQuery('/reader/7', { at: 'b.jpg' });
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // b.jpg 是第 2 张 (0-indexed=1) → singlePage spread = page 1
+    expect(reader.currentSpreadIndex).toBe(1);
+  });
+
+  it('route.query.at=不存在的图片名 → 回退到 saved progress', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    // saved progress = page 0
+    vi.mocked(getProgress).mockResolvedValueOnce({
+      bookId: 7, page: 0, readerMode: 'single', updatedAt: 100,
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouterWithQuery('/reader/7', { at: 'nonexistent.jpg' });
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // fallback 到 saved progress page=0 → spread 0
+    expect(reader.currentSpreadIndex).toBe(0);
+  });
+
+  it('route.query.at 含特殊字符 (encodeURIComponent) → 正确解析到对应 spread', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c (1).jpg', path: '/test/manga/c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c (1).jpg', path: '/test/manga/c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    // 'c (1).jpg' encodeURIComponent = 'c%20(1).jpg', but 在 route.query 里是 decode 后的原值
+    const router = makeRouterWithQuery('/reader/7', { at: 'c (1).jpg' });
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 'c (1).jpg' 是 index 2 → singlePage spread = page 2
+    expect(reader.currentSpreadIndex).toBe(2);
   });
 });

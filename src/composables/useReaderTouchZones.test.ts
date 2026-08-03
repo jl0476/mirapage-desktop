@@ -116,6 +116,28 @@ describe('useReaderTouchZones — live update from store', () => {
     btn.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: 150, clientY: 150 }));
     expect(actions).toEqual([]);
   });
+
+  it('master toggle off: ignores all clicks', async () => {
+    const el = makeContainer();
+    const actions: string[] = [];
+    const containerRef = ref<HTMLElement | null>(el);
+    let store: ReturnType<typeof useSettingsStore>;
+
+    mount(defineComponent({
+      setup() {
+        store = useSettingsStore();
+        useReaderTouchZones({ containerRef, onAction: (a) => actions.push(a) });
+        return () => h('div');
+      },
+    }));
+    await nextTick();
+
+    store!.touchZonesEnabled = false;
+    await nextTick();
+    clickAt(el, 0.1, 0.1);
+    clickAt(el, 0.5, 0.5);
+    expect(actions).toEqual([]);
+  });
 });
 
 describe('dispatchZoneAction — 11 actions', () => {

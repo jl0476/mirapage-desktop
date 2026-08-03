@@ -22,6 +22,7 @@ import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
 import { useReaderActions } from '@/composables/useReaderActions';
+import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
@@ -40,6 +41,10 @@ const readStatus = useReadStatusStore();
 const readerActions = useReaderActions({
   resolveRootPath: () => fb.rootPath ?? '',
   buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
+  // Cluster A: readFromImage 需要父目录路径 (= 当前列表所在目录).
+  // root 级别 (fb.currentPath='') 时,父目录就是 rootPath. 子目录级别用 currentPath.
+  // 列表渲染前的瞬间 lastFetchedPath 可能为 '' 但 readFromImage 会容错放弃.
+  getLastFetchedPath: () => fb.currentPath || fb.rootPath || '',
   onLibraryChanged: async () => {
     await readStatus.refresh();
   },
@@ -171,6 +176,8 @@ function errorMessage(kind: string, msg: string): string {
  *  - toolbar 立即阅读按钮
  *  - EntryDetailPanel CTA
  *  - 右键菜单 readNow
+ * v0.1.0-module3.0.2-reader-polish (Cluster A): 双击图片 → useReaderActions.readFromImage
+ *  (从该图开始阅读, route 带 ?at=imageName)
  */
 async function onEntryOpen(entry: MediaEntry) {
   log('[FileBrowser] onEntryOpen', entry.name, 'isDirectory=', entry.isDirectory, 'lastFetchedPath=', fb.lastFetchedPath);
@@ -181,8 +188,13 @@ async function onEntryOpen(entry: MediaEntry) {
     await fb.navigate(newPath);
     return;
   }
-  // 文件行: 双击也无操作 (避免误触发)
-  log('[FileBrowser] double-click on file is no-op (use right-click → read-now on containing folder)');
+  if (isImage(entry.name)) {
+    log('[FileBrowser] onEntryOpen: image file → readerActions.readFromImage');
+    await readerActions.readFromImage(entry);
+    return;
+  }
+  // 非图片非目录 (e.g. .cbz archive): 双击 no-op
+  log('[FileBrowser] double-click on non-image file is no-op');
 }
 
 /** FileList @select handler (单击) → 走 store.selectFile 区分单选/Ctrl/Shift */
@@ -222,14 +234,24 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
 //  保留 emit 类型仅出于向后兼容 — 不再 emit
 
 // selectedEntry 已在前面声明 (line 46, 复用 store.selectedPaths + sortedEntries)
-const canReadNow = computed(() => selectedEntry.value?.isDirectory === true);
+// Cluster A: 选中图片时立即阅读按钮也可点 (issue #3)
+const canReadNow = computed(() => {
+  const e = selectedEntry.value;
+  if (!e) return false;
+  return e.isDirectory === true || isImage(e.name);
+});
 
 function onReadNowClick() {
   log('[FileBrowser] onReadNowClick fired', selectedEntry.value?.name, 'canReadNow=', canReadNow.value);
-  if (selectedEntry.value) {
+  if (!selectedEntry.value) {
+    log('[FileBrowser] onReadNowClick: no selectedEntry');
+    return;
+  }
+  if (selectedEntry.value.isDirectory) {
     void readerActions.readNow(selectedEntry.value);
   } else {
-    log('[FileBrowser] onReadNowClick: no selectedEntry');
+    // Cluster A: 图片 entry 走 readFromImage (从该图开始)
+    void readerActions.readFromImage(selectedEntry.value);
   }
 }
 function onAddToLibraryClick() {
@@ -242,7 +264,8 @@ function onAddToLibraryClick() {
 }
 
 function onReadNowFromCtx(entry: MediaEntry) {
-  void readerActions.readNow(entry);
+  if (entry.isDirectory) void readerActions.readNow(entry);
+  else void readerActions.readFromImage(entry);
 }
 function onAddToLibraryFromCtx(entry: MediaEntry) {
   void readerActions.addToLibrary(entry);

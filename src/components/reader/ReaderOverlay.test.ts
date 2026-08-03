@@ -46,40 +46,42 @@ describe('ReaderOverlay.vue', () => {
     setActivePinia(createPinia());
   });
 
+  // 现有测试现在依赖 hovered=true 才能显示 chrome (Cluster B #8 chromeShow 语义)
+
   it('renders title and page indicator when chrome visible', () => {
-    const w = makeWrapper();
+    const w = makeWrapper({ hovered: true });
     expect(w.find('[data-test="title"]').text()).toBe('漫画 A');
     expect(w.find('[data-test="page-indicator"]').text()).toContain('5');
     expect(w.find('[data-test="page-indicator"]').text()).toContain('24');
   });
 
   it('renders nothing when chrome not visible', () => {
-    const w = makeWrapper({ chromeVisible: false });
+    const w = makeWrapper({ chromeVisible: false, hovered: true });
     expect(w.find('[data-test="overlay-top"]').exists()).toBe(false);
     expect(w.find('[data-test="overlay-bottom"]').exists()).toBe(false);
   });
 
   it('emits "next" when next button clicked', async () => {
-    const w = makeWrapper();
+    const w = makeWrapper({ hovered: true });
     await w.find('[data-test="btn-next"]').trigger('click');
     expect(w.emitted('next')).toBeTruthy();
     expect(w.emitted('next')).toHaveLength(1);
   });
 
   it('emits "prev" when prev button clicked', async () => {
-    const w = makeWrapper();
+    const w = makeWrapper({ hovered: true });
     await w.find('[data-test="btn-prev"]').trigger('click');
     expect(w.emitted('prev')).toBeTruthy();
   });
 
   it('emits "toggle-mode" when mode button clicked', async () => {
-    const w = makeWrapper();
+    const w = makeWrapper({ hovered: true });
     await w.find('[data-test="btn-mode"]').trigger('click');
     expect(w.emitted('toggle-mode')).toBeTruthy();
   });
 
   it('emits "jump" with page number when input submitted', async () => {
-    const w = makeWrapper();
+    const w = makeWrapper({ hovered: true });
     const form = w.find('[data-test="jump-input"]');
     await form.find('input').setValue('12');
     await form.trigger('submit');
@@ -88,14 +90,68 @@ describe('ReaderOverlay.vue', () => {
   });
 
   it('displays current mode label (i18n)', () => {
-    const wSingle = makeWrapper({ mode: 'single' });
+    const wSingle = makeWrapper({ mode: 'single', hovered: true });
     expect(wSingle.find('[data-test="btn-mode"]').text()).toContain('单页');
-    const wDouble = makeWrapper({ mode: 'double' });
+    const wDouble = makeWrapper({ mode: 'double', hovered: true });
     expect(wDouble.find('[data-test="btn-mode"]').text()).toContain('双页');
   });
 
   it('不显示轮播控制条 (isPlaying=false 且未 hover)', () => {
     const w = makeWrapper({ hovered: false });
     expect(w.find('[data-test="slideshow-control"]').exists()).toBe(false);
+  });
+
+  // ─── Cluster B #5/#8: pointer-events + chromeShow 逻辑 ───
+
+  it('Cluster B #5: outer overlay div has pointer-events-none class (click-through)', () => {
+    const w = makeWrapper();
+    const overlay = w.find('[data-test="overlay"]');
+    expect(overlay.classes()).toContain('pointer-events-none');
+  });
+
+  it('Cluster B #5: header element has pointer-events-auto (buttons clickable)', () => {
+    const w = makeWrapper({ hovered: true });
+    const header = w.find('[data-test="overlay-top"]');
+    expect(header.classes()).toContain('pointer-events-auto');
+  });
+
+  it('Cluster B #5: footer element has pointer-events-auto', () => {
+    const w = makeWrapper({ hovered: true });
+    const footer = w.find('[data-test="overlay-bottom"]');
+    expect(footer.classes()).toContain('pointer-events-auto');
+  });
+
+  it('Cluster B #5: jump-input form has pointer-events-auto', () => {
+    const w = makeWrapper({ hovered: true });
+    const form = w.find('[data-test="jump-input"]');
+    expect(form.classes()).toContain('pointer-events-auto');
+  });
+
+  // Cluster B #8: chromeShow 需 (chromeVisible && !autoHide && (hovered || hoveredVisible))
+  // autoHide = slideshow.isPlaying (mock 固定 false)
+  // hovered 单独控制:
+  it('Cluster B #8: chrome 显示当 hovered=true (默认 chromeVisible=true)', () => {
+    const w = makeWrapper({ hovered: true });
+    expect(w.find('[data-test="overlay-top"]').exists()).toBe(true);
+    expect(w.find('[data-test="overlay-bottom"]').exists()).toBe(true);
+  });
+
+  it('Cluster B #8: chrome 隐藏当 chromeVisible=false', () => {
+    const w = makeWrapper({ chromeVisible: false, hovered: true });
+    expect(w.find('[data-test="overlay-top"]').exists()).toBe(false);
+    expect(w.find('[data-test="overlay-bottom"]').exists()).toBe(false);
+  });
+
+  it('Cluster B #8: chrome 显示当 hovered=false 但 chromeVisible=true (依赖 hoveredVisible, 2s timeout 不可测)', () => {
+    // 注: hoveredVisible 在 mount 时默认 false, 2s 后也 false.
+    // 所以 chromeShow = chromeVisible(true) && !autoHide && (hovered(false) || hoveredVisible(false)) = false.
+    const w = makeWrapper({ hovered: false });
+    // 实际 prod 行为: 不显示 (需要鼠标 hover 才能显示)
+    expect(w.find('[data-test="overlay-top"]').exists()).toBe(false);
+  });
+
+  it('Cluster B #8: 轮播控制条 显示当 hovered=true (isPlaying=false)', () => {
+    const w = makeWrapper({ hovered: true });
+    expect(w.find('[data-test="slideshow-control"]').exists()).toBe(true);
   });
 });

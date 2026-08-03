@@ -33,6 +33,11 @@ export const useSettingsStore = defineStore('settings', () => {
   // v0.1.0-module3.0: 新增字段
   const defaultScaleMode = ref<ScaleMode>(DEFAULT_SCALE_MODE);
   const defaultReadDirection = ref<ReadDirection>(DEFAULT_READ_DIRECTION);
+  // v0.1.0-module3.0.2-reader-polish (Cluster C):
+  // currentScaleMode = 阅读中当前生效的缩放 (runtime, 随用户切换变化, 持久化为 scale_mode)
+  // defaultScaleMode = 新书打开时的初始化缩放 (持久化为 default_scale_mode, 已存在)
+  const currentScaleMode = ref<ScaleMode>(DEFAULT_SCALE_MODE);
+  const touchZonesEnabled = ref<boolean>(true);  // master toggle for 9-zone
   const touchScheme = reactive<Record<TouchZone, TouchAction>>({ ...DEFAULT_TOUCH_SCHEME });
 
   const initialized = ref(false);
@@ -51,7 +56,9 @@ export const useSettingsStore = defineStore('settings', () => {
       ['slideshow_direction', (v) => (slideshowDirection.value = v as 'forward' | 'backward')],
       ['keep_screen_on', (v) => (keepScreenOn.value = v === '1')],
       ['default_scale_mode', (v) => (defaultScaleMode.value = v as ScaleMode)],
+      ['scale_mode', (v) => (currentScaleMode.value = v as ScaleMode)],
       ['default_read_direction', (v) => (defaultReadDirection.value = v as ReadDirection)],
+      ['touch_zones_enabled', (v) => (touchZonesEnabled.value = v === '1')],
       ...TOUCH_ZONES.map((z) =>
         [`touch_${TOUCH_ZONE_KEY[z]}`, (v) => (touchScheme[z] = v as TouchAction)] as [string, (v: string) => void],
       ),
@@ -69,6 +76,16 @@ export const useSettingsStore = defineStore('settings', () => {
   async function update<T extends string | number | boolean>(key: string, value: T): Promise<void> {
     const strValue = typeof value === 'boolean' ? (value ? '1' : '0') : String(value);
     await setSetting(key, strValue);
+  }
+
+  /**
+   * Cluster C: 设置当前缩放模式 (runtime + 持久化).
+   *  - 改 currentScaleMode (OSD useReaderScale watch 触发 applyScale)
+   *  - 持久化到 scale_mode DB key
+   */
+  async function setScaleMode(mode: ScaleMode): Promise<void> {
+    currentScaleMode.value = mode;
+    await update('scale_mode', mode);
   }
 
   /** 设置单个触控分区动作 */
@@ -99,11 +116,14 @@ export const useSettingsStore = defineStore('settings', () => {
     keepScreenOn,
     defaultScaleMode,
     defaultReadDirection,
+    currentScaleMode,
+    touchZonesEnabled,
     touchScheme,
     initialized,
     // 方法
     load,
     update,
+    setScaleMode,
     setTouchAction,
     resetTouchScheme,
   };

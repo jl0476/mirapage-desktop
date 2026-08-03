@@ -28,6 +28,7 @@ export function useReaderTouchZones(opts: UseReaderTouchZonesOptions): void {
   function onClick(e: MouseEvent): void {
     const el = opts.containerRef.value;
     if (!el) return;
+    if (!settings.touchZonesEnabled) return;  // master toggle off
     if (opts.ignoreSelector) {
       const target = e.target as Element | null;
       if (target && target.closest(opts.ignoreSelector)) return;

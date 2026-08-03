@@ -62,8 +62,10 @@ describe('ReaderScreen.vue', () => {
     setActivePinia(createPinia());
   });
 
-  it('renders title and page indicator', () => {
+  it('renders title and page indicator', async () => {
     const w = mountReader();
+    // Cluster B #8: chrome 显示需 hovered=true (或 hoveredVisible)
+    await w.find('[data-test="reader-screen"]').trigger('mouseenter');
     expect(w.text()).toContain('漫画 A');
     expect(w.text()).toMatch(/1.*\/.*3/);
   });
@@ -103,6 +105,7 @@ describe('ReaderScreen.vue', () => {
 
   it('emits toggle-mode when mode button clicked', async () => {
     const w = mountReader();
+    await w.find('[data-test="reader-screen"]').trigger('mouseenter');
     const modeBtn = w.find('[data-test="btn-mode"]');
     await modeBtn.trigger('click');
     expect(w.emitted('toggle-mode')).toBeTruthy();
