@@ -1042,6 +1042,8 @@ cd F:/WorkSpaceCollection/git/mirapage-desktop && npx vitest run src/views/Reade
 
 - [ ] **步骤 4：ReaderView 加 2 个 callback**
 
+**重要约束**：`SinglePageViewer` / `DoublePageViewer` 的 OpenSeadragon viewer 在 setup 内部 `let viewer` 中持有，**未通过 `defineExpose` 暴露**。fit-width 的 UI 反馈本期简化为：写 store + log，下次打开新书自然按新 scale 渲染。OSG 实时切换留作后续 reader 重构。
+
 修改 `src/views/ReaderView.vue` 的 `<script setup>`：
 
 1. 在 `import { useRouter }` 等 import 后**新增**：
@@ -1054,12 +1056,13 @@ import { useSettingsStore } from '@/stores/settings';
 
 ```ts
 const router = useRouter();
-const osgViewer = ref<any>(null);  // SinglePageViewer / DoublePageViewer expose
 
 function fitWidth(): void {
+  // v0.1.0-module3.0 简化: 仅写 store + log, 不动 OSG (OSG viewer 未 expose).
+  // 下次打开新书时, ReaderView.openBook 会读 defaultScaleMode 渲染.
   settings.defaultScaleMode = 'fit-width';
   void settings.update('default_scale_mode', 'fit-width');
-  osgViewer.value?.viewport?.goHome?.();
+  log('[ReaderView/fitWidth] persisted fit-width; takes effect on next book open');
 }
 
 function openFileBrowser(): void {
@@ -1085,6 +1088,8 @@ dispatchZoneAction(action, {
 ```
 
 具体行号由 `grep -n "dispatchZoneAction" src/views/ReaderView.vue` 定位后插入。
+
+确认 `log` 已 import：`grep -q "from '@/lib/logger'" src/views/ReaderView.vue`，未导入则在顶部加 `import { log } from '@/lib/logger';`。
 
 - [ ] **步骤 5：运行测试验证通过**
 
@@ -1333,14 +1338,7 @@ vi.mock('@/lib/tauri', () => ({
 
 import Settings from './Settings.vue';
 import { useSettingsStore } from '@/stores/settings';
-import zh from '@/locales/zh-CN';
-import en from '@/locales/en-US';
-
-const i18n = createI18n({
-  legacy: false,
-  locale: 'zh-CN',
-  messages: { 'zh-CN': zh, 'en-US': en },
-});
+import { i18n } from '@/locales';  // 用项目 i18n 实例, 避免 createI18n 重复
 
 beforeEach(() => {
   setActivePinia(createPinia());
@@ -1578,6 +1576,7 @@ const touchGridRows: TouchZone[][] = [
             :data-test="`anchor-${s}`"
             class="w-full text-left text-sm rounded-md px-3 py-1.5 hover:bg-surface-2 transition-colors"
             :class="activeId === s ? 'bg-surface-2 text-accent font-medium' : 'text-text-secondary'"
+            data-test="section-anchor"
             @click="scrollTo(s)"
           >
             {{ t(`settings.section.${s}`) }}
@@ -1596,7 +1595,7 @@ const touchGridRows: TouchZone[][] = [
       </header>
 
       <!-- Reader defaults -->
-      <section id="reader" :data-test="`section-${'reader'}`" class="mb-10 scroll-mt-4">
+      <section id="reader" data-test="section-reader" class="mb-10 scroll-mt-4">
         <h3 class="text-sm font-semibold text-accent uppercase tracking-wider mb-3">
           {{ t('settings.section.reader') }}
         </h3>
