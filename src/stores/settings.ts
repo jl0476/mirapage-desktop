@@ -2,8 +2,14 @@
 // 读 / 写 settings 表（通过 Tauri IPC 桥接到 SQLite）
 
 import { defineStore } from 'pinia';
-import { ref } from 'vue';
+import { reactive, ref } from 'vue';
 import { getSetting, setSetting } from '@/lib/tauri';
+import {
+  TOUCH_ZONES, TOUCH_ZONE_KEY, DEFAULT_TOUCH_SCHEME,
+  DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION,
+  type ScaleMode, type ReadDirection,
+  type TouchZone, type TouchAction,
+} from '@/lib/readerSettings';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type ColorTheme = 'blue' | 'purple' | 'amber' | 'neutral';
@@ -24,6 +30,11 @@ export const useSettingsStore = defineStore('settings', () => {
   const slideshowDirection = ref<'forward' | 'backward'>('forward');
   const keepScreenOn = ref(true);
 
+  // v0.1.0-module3.0: 新增字段
+  const defaultScaleMode = ref<ScaleMode>(DEFAULT_SCALE_MODE);
+  const defaultReadDirection = ref<ReadDirection>(DEFAULT_READ_DIRECTION);
+  const touchScheme = reactive<Record<TouchZone, TouchAction>>({ ...DEFAULT_TOUCH_SCHEME });
+
   const initialized = ref(false);
 
   /** 加载所有 settings（启动时调用） */
@@ -39,6 +50,11 @@ export const useSettingsStore = defineStore('settings', () => {
       ['slideshow_loop', (v) => (slideshowLoop.value = v === '1')],
       ['slideshow_direction', (v) => (slideshowDirection.value = v as 'forward' | 'backward')],
       ['keep_screen_on', (v) => (keepScreenOn.value = v === '1')],
+      ['default_scale_mode', (v) => (defaultScaleMode.value = v as ScaleMode)],
+      ['default_read_direction', (v) => (defaultReadDirection.value = v as ReadDirection)],
+      ...TOUCH_ZONES.map((z) =>
+        [`touch_${TOUCH_ZONE_KEY[z]}`, (v) => (touchScheme[z] = v as TouchAction)] as [string, (v: string) => void],
+      ),
     ];
 
     for (const [key, apply] of keys) {
@@ -55,6 +71,20 @@ export const useSettingsStore = defineStore('settings', () => {
     await setSetting(key, strValue);
   }
 
+  /** 设置单个触控分区动作 */
+  async function setTouchAction(zone: TouchZone, action: TouchAction): Promise<void> {
+    touchScheme[zone] = action;
+    await update(`touch_${TOUCH_ZONE_KEY[zone]}`, action);
+  }
+
+  /** 恢复 PV 经典 9 区布局 */
+  async function resetTouchScheme(): Promise<void> {
+    for (const z of TOUCH_ZONES) {
+      touchScheme[z] = DEFAULT_TOUCH_SCHEME[z];
+      await update(`touch_${TOUCH_ZONE_KEY[z]}`, DEFAULT_TOUCH_SCHEME[z]);
+    }
+  }
+
   return {
     // 状态
     themeMode,
@@ -67,9 +97,14 @@ export const useSettingsStore = defineStore('settings', () => {
     slideshowLoop,
     slideshowDirection,
     keepScreenOn,
+    defaultScaleMode,
+    defaultReadDirection,
+    touchScheme,
     initialized,
     // 方法
     load,
     update,
+    setTouchAction,
+    resetTouchScheme,
   };
 });

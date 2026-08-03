@@ -19,6 +19,13 @@ export const TOUCH_ZONES: TouchZone[] = [
   'bl', 'bm', 'br',
 ] as const;
 
+/** Full-name mapping for DB key (e.g. 'tl' → 'top_left'). Aligns with PV export key names. */
+export const TOUCH_ZONE_KEY: Record<TouchZone, string> = {
+  tl: 'top_left', tm: 'top_center', tr: 'top_right',
+  ml: 'mid_left', mm: 'mid_center', mr: 'mid_right',
+  bl: 'bot_left', bm: 'bot_center', br: 'bot_right',
+};
+
 /** 11 个对外可选动作（toggle-chrome 已弃用） */
 export type TouchAction =
   | 'none'

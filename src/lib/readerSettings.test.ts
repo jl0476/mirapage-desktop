@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  TOUCH_ZONES, TOUCH_ACTIONS,
+  TOUCH_ZONES, TOUCH_ACTIONS, TOUCH_ZONE_KEY,
   DEFAULT_TOUCH_SCHEME,
   DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION,
 } from './readerSettings';
@@ -10,6 +10,12 @@ describe('readerSettings', () => {
     expect(TOUCH_ZONES).toEqual([
       'tl','tm','tr','ml','mm','mr','bl','bm','br',
     ]);
+  });
+
+  it('TOUCH_ZONE_KEY maps each zone to its full DB key suffix', () => {
+    expect(TOUCH_ZONE_KEY.tl).toBe('top_left');
+    expect(TOUCH_ZONE_KEY.mm).toBe('mid_center');
+    expect(TOUCH_ZONE_KEY.br).toBe('bot_right');
   });
 
   it('TOUCH_ACTIONS exposes 11 actions (toggle-chrome hidden)', () => {
