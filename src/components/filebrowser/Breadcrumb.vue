@@ -152,13 +152,13 @@ const ICON_HARD_DRIVE = 'M22 12H2M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-
 
 <template>
   <nav
-    class="bg-surface xp-bdb px-3 py-1"
+    class="bg-surface xp-bdb px-3 py-1.5"
     aria-label="Breadcrumb"
   >
     <div
-      class="bg-bg xp-bd relative flex min-w-0 items-center rounded px-2 py-0.5 transition-[border-color] duration-200"
+      class="relative flex min-w-0 items-center px-1 transition-shadow duration-200"
       :class="validation !== 'idle' && validation !== 'checking' ? (
-        validation === 'valid' ? 'border-success' : 'border-error'
+        validation === 'valid' ? 'shadow-[inset_2px_0_0_0_var(--color-success)]' : 'shadow-[inset_2px_0_0_0_var(--color-error)]'
       ) : ''"
       @click.self="startEditing"
     >
