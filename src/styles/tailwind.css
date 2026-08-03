@@ -111,7 +111,7 @@
     font-size: 13px;
     line-height: 1.5;
     color: var(--color-text-primary);
-    background-color: #0a0a1a;
+    background-color: var(--color-bg);
     background-image: var(--bg-gradient);
     background-attachment: fixed;
     -webkit-font-smoothing: antialiased;
@@ -127,7 +127,7 @@
     color: inherit;
   }
 
-  /* Glassmorphism 滚动条 */
+  /* Glassmorphism 滚动条 (dark 模式) */
   ::-webkit-scrollbar {
     width: 8px;
     height: 8px;
@@ -152,8 +152,87 @@
   }
 
   /*
-   * v0.1.0-module3.0: html.dark 由 useThemeSync 切换.
-   * 当前默认 (无 .dark class) 仍是 Tokyo Night 暗色 (--color-bg, --color-text-primary 等在 @theme 定义).
-   * 未来 "light" 模式: 在 @layer base 下加 `:root:not(.dark) { --color-bg: #f8fafc; ... }`.
+   * v0.1.0-module3.0-settings: html.dark 由 useThemeSync 切换.
+   * 当前默认 (无 .dark class) 是 Tokyo Night 暗色 (@theme 块定义).
+   * 浅色模式: useThemeSync 移除 html.dark class, 走 :root:not(.dark) 块重写 token.
+   * token 集对齐 xplorer-next .theme-light (apps/client/src/index.css:140-188).
    */
+}
+
+/* ─── Light theme token override ────────────────────────────────────────────
+ * xplorer-next .theme-light 配色 1:1 迁移. 当 html.dark 不存在时激活.
+ * body 渐变 + 滚动条 + selection 等暗色组件细节在下方分别 override.
+ */
+:root:not(.dark) {
+  /* 表面 */
+  --color-surface-0: transparent;
+  --color-surface-1: #ffffff;
+  --color-surface-2: #f8fafc;
+  --color-surface-light: #f1f5f9;
+  --color-surface-3: #f1f5f9;
+  --color-surface-4: #ffffff;
+  --color-surface-inset: #f1f5f9;
+
+  /* Border */
+  --color-border-subtle: #e2e8f0;
+  --color-border-default: #cbd5e1;
+  --color-border-strong: #94a3b8;
+
+  /* 文本 (slate-800 / 600 / 400 / 300) */
+  --color-text-primary: #1e293b;
+  --color-text-secondary: #64748b;
+  --color-text-tertiary: #94a3b8;
+  --color-text-disabled: #cbd5e1;
+
+  /* Accent (blue-500 / 600 / 700) */
+  --color-accent: #3b82f6;
+  --color-accent-hover: #2563eb;
+  --color-accent-press: #1d4ed8;
+  --color-accent-soft: rgba(59, 130, 246, 0.12);
+
+  /* 文件类型色 */
+  --color-file-folder: #6366f1;
+  --color-file-image: #16a34a;
+  --color-file-archive: #ea580c;
+  --color-file-video: #ec4899;
+  --color-file-audio: #a78bfa;
+  --color-file-default: #94a3b8;
+
+  /* 语义色 */
+  --color-success: #16a34a;
+  --color-warning: #ca8a04;
+  --color-error: #dc2626;
+  --color-info: #0891b2;
+
+  /* 阅读状态 */
+  --color-status-finished: #16a34a;
+  --color-status-reading: #3b82f6;
+
+  /* 阴影 (subtle vs neon) */
+  --shadow-accent: 0 0 0 3px rgba(59, 130, 246, 0.18);
+  --shadow-glow-accent: 0 0 8px rgba(59, 130, 246, 0.25);
+  --shadow-glow-accent-strong: 0 0 12px rgba(59, 130, 246, 0.4);
+  --shadow-glow-error: 0 0 8px rgba(220, 38, 38, 0.3);
+  --shadow-glass-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-glass-md: 0 2px 8px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-glass-lg: 0 8px 24px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(0, 0, 0, 0.06);
+}
+
+/* 浅色模式 body 详情: 无渐变 + 白底 */
+:root:not(.dark) body {
+  background-color: #ffffff;
+  background-image: none;
+  color: #1e293b;
+}
+
+/* 浅色模式滚动条 */
+:root:not(.dark) ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+:root:not(.dark) ::-webkit-scrollbar-thumb:hover {
+  background: #3b82f6;
+}
+:root:not(.dark) ::selection {
+  background-color: rgba(59, 130, 246, 0.25);
+  color: #1e293b;
 }
