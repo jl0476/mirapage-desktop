@@ -297,6 +297,13 @@ const zoneActions = {
   toggleSlideshow: () => { slideshow.toggle(); },
   prevVolume: () => { log('[ReaderView/zoneActions] prevVolume TODO (cross-volume prev)'); },
   nextVolume: () => { onNextVolume(); },
+  // v0.1.0-module3.0: 新增 fit-width + open-file-browser 回调
+  fitWidth: () => {
+    settings.defaultScaleMode = 'fit-width';
+    void settings.update('default_scale_mode', 'fit-width');
+    log('[ReaderView/zoneActions/fitWidth] persisted fit-width; takes effect on next book open');
+  },
+  openFileBrowser: () => { router.push('/'); },
 };
 
 // v0.1.0-module3.0.2: M5 修复 — 把写好的 useReaderWheel 实际挂上 (containerRef),
