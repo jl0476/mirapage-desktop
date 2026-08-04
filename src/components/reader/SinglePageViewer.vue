@@ -56,6 +56,9 @@ onMounted(() => {
     // v0.1.0-module3.0.2 (M5): 关掉 OSD 滚轮缩放, 改由 ReaderView 的
     // useReaderWheel 接管翻页. 否则滚轮先被 OSD 缩吞, 翻页不响应.
     gestureSettingsMouse: { scrollToZoom: false },
+    // 需求3: 关闭 OSD 内置点击缩放，让 click 完全交给 useReaderTouchZones 9 宫格
+    clickToZoom: false,
+    dblClickDragToZoom: false,
     animationTime: 0.3,
   });
   // v0.1.0-module3.0.2-hotfix3: OSD tile load 失败/成功 hook — 便于诊断特殊字符 URL
