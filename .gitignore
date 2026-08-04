@@ -57,3 +57,7 @@ coverage/
 .cache/
 .tmp/
 temp/
+
+# Local test sample data (PNG 样本, 本地开发 / 阅读器联调用, 不入仓)
+samples/
+test_manga/

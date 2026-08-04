@@ -19,8 +19,16 @@
  *    不被 overlay 容器拦截, 同时保证按钮仍可点.
  *  - Cluster B #8: chrome 随 slideshow.isPlaying 自动隐藏 — autoHide = isPlaying.
  *    hovered 时解除 autoHide 临时显示, 2s 后重新隐藏.
+ *
+ * v0.1.0-reader-review-fix-3:
+ *  - **彻底改 chrome 配色策略**: 弃用 mix-blend-difference (在各种底图色上表现都不稳).
+ *    改用 bg-surface/90 backdrop-blur-xl (实色 + 模糊): 在 dark theme 下 chrome 是
+ *    半透深蓝紫 + 模糊, text-text-primary 白字始终可读. light theme 自动切浅色.
+ *  - 间隔 slider @change → @input (实时跟手)
+ *  - 缩放下拉 border-white/10 → xp-bd
+ *  - 缩放下拉加 role="menu" + aria-haspopup/expanded
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSlideshowStore } from '@/stores/slideshow';
 import type { ScaleMode } from '@/lib/readerSettings';
@@ -31,12 +39,16 @@ interface Props {
   totalPages: number;
   mode: 'single' | 'double';
   chromeVisible: boolean;
+  /** v0.1.0-reader-review-fix-13: 鼠标 hover 状态 (父级控制, 同步给 watermark) */
+  hovered: boolean;
+  /** v0.1.0-reader-review-fix-13: 2s timer 后的悬停态 (鼠标移开 2s 内仍 visible) */
+  hoveredVisible?: boolean;
   /** 鼠标在 reader 容器内 (hover 时) — 控制轮播控制条显示 */
-  hovered?: boolean;
+  hoveredLegacy?: boolean;
   /** 当前缩放模式 (受控; 切换时 emit scale-change) */
   scaleMode?: ScaleMode;
 }
-const props = withDefaults(defineProps<Props>(), { hovered: false, scaleMode: 'fit-screen' });
+const props = withDefaults(defineProps<Props>(), { hoveredLegacy: false, scaleMode: 'fit-screen', hoveredVisible: false });
 
 type Emits = {
   (e: 'next'): void;
@@ -46,6 +58,8 @@ type Emits = {
   (e: 'back-to-list'): void;       // 原 open-menu 改名 (需求5)
   (e: 'open-main-menu'): void;     // 需求4: chrome 完整菜单按钮 → 唤出 ReaderMainMenu
   (e: 'scale-change', mode: ScaleMode): void;
+  (e: 'chrome-hover-enter'): void;   // v0.1.0-reader-review-fix-7: chrome 自身 hover 维持显示
+  (e: 'chrome-hover-leave'): void;
 };
 const emit = defineEmits<Emits>();
 
@@ -54,6 +68,12 @@ const SCALE_MODES: ScaleMode[] = [
   'fit-screen', 'fit-width', 'fit-height',
   'original', 'full-screen', 'stretch',
 ];
+
+/** enum 值 → i18n key: kebab ('fit-screen') → camel ('fitScreen') */
+function scaleLabel(m: ScaleMode): string {
+  const camel = m.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
+  return t('reader.scale.' + camel);
+}
 
 // 缩放下拉 (CLAUDE.md §1.3 三层结构 + click-outside)
 const scaleOpen = ref(false);
@@ -82,7 +102,9 @@ function submitJump(ev: Event) {
 }
 
 async function onIntervalChange(ev: Event) {
-  const ms = Number((ev.target as HTMLInputElement).value);
+  // @input 触发: 实时跟手同步, 拖动期间也写入 store. slider 范围 1-30 步长 1,
+  // 每次 IPC 是简单的 setSetting('slideshow_interval_ms') + DB UPDATE, 桌面端可接受.
+  const ms = Number((ev.target as HTMLInputElement).value) * 1000;
   await slideshow.updateIntervalMs(ms);
 }
 
@@ -90,85 +112,68 @@ async function onDirectionToggle() {
   await slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward');
 }
 
-/** Cluster B #8: autoHide = isPlaying. 播放时 chrome 全部隐藏, 避免遮挡. */
-const autoHide = computed(() => slideshow.isPlaying);
+/** v0.1.0-reader-review-fix-13: chrome 默认隐藏, 仅 hovered / hoveredVisible 时显示.
+ *  - hovered + hoveredVisible 都是 props (父级 ReaderScreen 控制 timer)
+ *  - chromeVisible=false 仍然 override (父级控制)
+ */
+const chromeShow = computed(() => props.chromeVisible && (props.hovered || props.hoveredVisible));
 
-/** hover 触发: props.hovered 变 true 时点亮 hoveredVisible, 2s 后重置 */
-const hoveredVisible = ref(false);
-let hoverTimer: ReturnType<typeof setTimeout> | null = null;
-
-function flashOnHover(): void {
-  hoveredVisible.value = true;
-  if (hoverTimer !== null) clearTimeout(hoverTimer);
-  hoverTimer = setTimeout(() => { hoveredVisible.value = false; }, 2000);
-}
-
-watch(() => props.hovered, (v) => {
-  if (v) flashOnHover();
-});
-
-onMounted(() => document.addEventListener('mousedown', onScaleMouseDown));
-onUnmounted(() => {
-  if (hoverTimer !== null) clearTimeout(hoverTimer);
-  document.removeEventListener('mousedown', onScaleMouseDown);
-});
-
-/** Cluster B #8: chrome 可见 = chromeVisible && !autoHide && (hovered || hoveredVisible) */
-const chromeShow = computed(() =>
-  props.chromeVisible && !autoHide.value && (props.hovered || hoveredVisible.value)
-);
-
-/** 轮播控制条: 播放中常驻, 或 hovered/hoveredVisible. (Cluster B #8 与 chrome 一起隐藏但保留显示语义) */
-const slideshowControlShow = computed(() =>
-  slideshow.isPlaying || props.hovered || hoveredVisible.value
-);
+/** 轮播控制条: 同 chrome 逻辑 */
+const slideshowControlShow = computed(() => props.chromeVisible && (props.hovered || props.hoveredVisible));
 
 /** 间隔 slider 当前值 (1-30s, 步长 0.5s) */
 const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
+
+onMounted(() => document.addEventListener('mousedown', onScaleMouseDown));
+onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
 </script>
 
 <template>
   <div
-    class="absolute inset-0 pointer-events-none flex flex-col justify-between text-text-primary select-none"
+    class="absolute inset-0 pointer-events-none flex flex-col justify-between text-white select-none"
     data-test="overlay"
     data-test-ignore-touch-zones
   >
-    <!-- 顶栏 (Cluster B #5 pointer-events-auto + #8 chromeShow 替换 chromeVisible) -->
-    <header v-if="chromeShow" class="bg-black/40 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto mix-blend-difference" data-test="overlay-top">
-      <span class="flex-1 font-semibold truncate mix-blend-difference" data-test="title">{{ title }}</span>
-      <span class="font-mono text-text-secondary tabular-nums mix-blend-difference" data-test="page-indicator">
+    <!-- 顶栏 (fix-8: text-white + drop-shadow, 字号 text-sm) -->
+    <header v-if="chromeShow" class="bg-surface/90 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-sm text-white pointer-events-auto shadow-lg" data-test="overlay-top" @mouseenter="emit('chrome-hover-enter')" @mouseleave="emit('chrome-hover-leave')">
+      <span class="flex-1 font-semibold truncate" data-test="title">{{ title }}</span>
+      <span class="font-mono tabular-nums" data-test="page-indicator">
         {{ currentPage }} / {{ totalPages }}
       </span>
       <div class="relative" ref="scaleDropdownRef">
         <button
           type="button"
-          class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors"
           data-test="scale-trigger"
-          :aria-label="t('reader.menu.scale')"
+          :aria-label="scaleLabel(props.scaleMode)"
+          aria-haspopup="menu"
+          :aria-expanded="scaleOpen"
           @click="scaleOpen = !scaleOpen"
         >
-          {{ props.scaleMode }}
+          {{ scaleLabel(props.scaleMode) }}
         </button>
         <div
           v-if="scaleOpen"
-          class="absolute right-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl isolate"
+          class="absolute right-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 xp-bd rounded-lg py-1 shadow-xl backdrop-blur-xl isolate"
+          role="menu"
         >
           <button
             v-for="m in SCALE_MODES"
             :key="m"
             type="button"
             class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light"
-            :class="m === props.scaleMode ? 'text-accent' : 'text-text-secondary'"
+            :class="m === props.scaleMode ? 'text-accent' : 'text-white'"
             data-test="scale-option"
+            role="menuitem"
             @click="onScaleSelect(m)"
           >
-            <span>{{ m }}</span>
+            <span>{{ scaleLabel(m) }}</span>
           </button>
         </div>
       </div>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-mode"
         @click="emit('toggle-mode')"
       >
@@ -176,7 +181,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors mix-blend-difference"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors"
         data-test="btn-back"
         :aria-label="t('reader.menu.back')"
         @click="emit('back-to-list')"
@@ -189,7 +194,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors mix-blend-difference"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors"
         data-test="btn-menu"
         :aria-label="t('reader.menu.title')"
         @click="emit('open-main-menu')"
@@ -204,19 +209,21 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
     </header>
 
-    <!-- 轮播控制条 (Cluster B #8: 跟随 isPlaying/hover, #5 pointer-events-auto 已存在) -->
+    <!-- 轮播控制条 (fix-7: 自身 hover 维持显示) -->
     <div
       v-if="slideshowControlShow"
       class="absolute bottom-12 left-1/2 -translate-x-1/2 pointer-events-auto
-             bg-surface/80 backdrop-blur-xl xp-bd rounded-full
-             px-3 py-1.5 flex items-center gap-2 text-xs shadow-xl"
+             bg-surface/90 backdrop-blur-xl rounded-full
+             px-3 py-1.5 flex items-center gap-2 text-sm text-white shadow-xl"
       data-test="slideshow-control"
       role="toolbar"
       :aria-label="t('slideshow.control')"
+      @mouseenter="emit('chrome-hover-enter')"
+      @mouseleave="emit('chrome-hover-leave')"
     >
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors flex items-center gap-1"
+        class="px-2 py-1 rounded hover:bg-surface-light transition-colors flex items-center gap-1"
         :class="{ 'text-accent': slideshow.isPlaying }"
         data-test="slideshow-toggle"
         :aria-label="slideshow.isPlaying ? t('slideshow.pause') : t('slideshow.play')"
@@ -234,7 +241,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
 
       <span class="xp-divider-v shrink-0" aria-hidden="true" />
 
-      <span class="text-text-muted">{{ t('slideshow.interval') }}</span>
+      <span>{{ t('slideshow.interval') }}</span>
       <input
         type="range"
         class="w-20 accent-accent cursor-pointer"
@@ -244,15 +251,15 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
         :value="intervalSeconds"
         data-test="slideshow-interval"
         :aria-label="t('slideshow.interval')"
-        @change="onIntervalChange"
+        @input="onIntervalChange"
       />
-      <span class="font-mono text-text-secondary tabular-nums w-8 text-right">{{ intervalSeconds }}s</span>
+      <span class="font-mono tabular-nums w-8 text-right">{{ intervalSeconds }}s</span>
 
       <span class="xp-divider-v shrink-0" aria-hidden="true" />
 
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+        class="px-2 py-1 rounded hover:bg-surface-light transition-colors"
         data-test="slideshow-direction"
         :aria-label="t('slideshow.direction')"
         @click="onDirectionToggle"
@@ -266,11 +273,11 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
     </div>
 
-    <!-- 底栏 (Cluster B #5/#8: pointer-events-auto + chromeShow) -->
-    <footer v-if="chromeShow" class="bg-black/40 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto mix-blend-difference" data-test="overlay-bottom">
+    <!-- 底栏 (fix-8: text-white + shadow-lg) -->
+    <footer v-if="chromeShow" class="bg-surface/90 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-sm text-white pointer-events-auto shadow-lg" data-test="overlay-bottom" @mouseenter="emit('chrome-hover-enter')" @mouseleave="emit('chrome-hover-leave')">
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-prev"
         :disabled="currentPage <= 1"
         @click="emit('prev')"
@@ -282,19 +289,19 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
         data-test="jump-input"
         @submit="submitJump"
       >
-        <label class="text-text-muted">{{ t('reader.jumpTo') }}</label>
+        <label>{{ t('reader.jumpTo') }}</label>
         <input
           v-model.number="jumpValue"
           type="number"
           min="1"
           :max="totalPages"
-          class="w-16 px-2 py-1 rounded bg-surface-1 xp-bd text-text-primary text-xs focus:outline-none focus:border-accent"
+          class="w-16 px-2 py-1 rounded bg-surface-1 xp-bd text-white text-xs focus:outline-none focus:border-accent"
         />
-        <button type="submit" class="px-2 py-1 rounded text-text-secondary hover:bg-white/10 hover:text-text-primary transition-colors">Go</button>
+        <button type="submit" class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors">Go</button>
       </form>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-next"
         :disabled="currentPage >= totalPages"
         @click="emit('next')"

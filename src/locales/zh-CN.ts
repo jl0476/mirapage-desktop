@@ -45,6 +45,8 @@ export default {
       fitWidth: '适宽',
       fitHeight: '适高',
       original: '原始大小',
+      fullScreen: '全屏显示',
+      stretch: '拉伸',
     },
     continue: {
       off: '关闭',
@@ -100,6 +102,7 @@ export default {
     play: '播放',
     pause: '暂停',
     control: '轮播控制',
+    toggle: '切换幻灯片',
   },
   fileBrowser: {
     title: '文件浏览器',

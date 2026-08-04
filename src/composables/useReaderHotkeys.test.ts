@@ -1,10 +1,15 @@
 /**
  * useReaderHotkeys composable 测试
- * - onMounted 注册 keydown / wheel / mousedown listener
+ * - onMounted 注册 keydown listener
  * - 派发到 reader store action(nextPage/prevPage/toggleChrome 等)
  *
  * v0.1.0-module3.0.2-reader-polish (Cluster B #7):
  * - Escape → closeReader → router.back()
+ *
+ * v0.1.0-reader-review-fix:
+ * - 不再监听 window mousedown (与 9 宫格 useReaderTouchZones + chrome 按钮 click
+ *   冲突; 用户报告点 btn-mode 后变成下一页).
+ * - mouse 位置派发由 9 宫格接管.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
@@ -56,15 +61,16 @@ describe('useReaderHotkeys', () => {
     vi.spyOn(window, 'addEventListener').mockImplementation((event: any, handler: any) => {
       if (event === 'keydown') keyHandler = handler;
       // v0.1.0-module3.0.2-hotfix6 (H12): 不再监听 wheel — useReaderWheel 接管
-      if (event === 'mousedown') mouseHandler = handler;
+      // v0.1.0-reader-review-fix: 不再监听 mousedown — 与 9 宫格冲突
     });
     vi.spyOn(window, 'removeEventListener').mockImplementation(() => undefined);
   });
 
-  it('registers keydown / mousedown listeners on mount (不再监听 wheel)', () => {
+  it('registers only keydown listener (不再监听 wheel + mousedown)', () => {
     useReaderHotkeys();
     expect(keyHandler).not.toBeNull();
-    expect(mouseHandler).not.toBeNull();
+    expect(wheelHandler).toBeNull();
+    expect(mouseHandler).toBeNull();  // 9 宫格接管鼠标位置派发
   });
 
   it('ArrowRight on keyboard calls reader.nextPage()', () => {
@@ -122,7 +128,7 @@ describe('useReaderHotkeys', () => {
     expect(r.currentSpreadIndex).toBe(1);
   });
 
-  it('left mouse click in left 1/3 calls reader.prevPage()', () => {
+  it('window mousedown 不再派发 prev/next (review-fix: 9 宫格接管)', () => {
     Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true });
     Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true });
     const r = useReaderStore();
@@ -137,8 +143,11 @@ describe('useReaderHotkeys', () => {
       initialSpreadIndex: 1,
     });
     useReaderHotkeys();
-    mouseHandler!(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 400 }));
-    expect(r.currentSpreadIndex).toBe(0);
+    // mouseHandler 现在永远 null (review-fix 移除 mousedown listener)
+    expect(mouseHandler).toBeNull();
+    // 即使 dispatch mousedown, 也不应 prevPage (由 9 宫格接管)
+    window.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 400 }));
+    expect(r.currentSpreadIndex).toBe(1);  // 不动
   });
 
   it('Space key toggles slideshow (slideshowToggle command)', async () => {

@@ -14,6 +14,14 @@
  * 3. 阅读组: 模式 / 方向 / 缩放(下拉) / 幻灯片 / 幻灯片方向
  * 4. 书库工具组: 加入书库 / 喜欢 / 加书签 / 打开书签 / 显示触控区
  * 5. 关闭
+ *
+ * v0.1.0-reader-review fixes:
+ *  - onJumpPage 改为 emit('open-jump-input') — 父级打开跳页 dialog
+ *  - onShowTouchRegions emit('show-touch-regions') — 父级切换触控区可视化
+ *  - mode/direction/scale/slideshowDirection 走 t() (CLAUDE.md §2.5)
+ *  - bg-white/10 分隔条 → xp-divider-h (light 模式可见)
+ *  - 5 个 lib 按钮 data-test 独立 id (测试靠 index 取会因 reorder 崩)
+ *  - role="dialog" 加 aria-modal="true"
  */
 <script setup lang="ts">
 import { ref, watch } from 'vue';
@@ -46,7 +54,8 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   (e: 'update:show', v: boolean): void;
   (e: 'back'): void;
-  (e: 'jump-page', index: number): void;
+  (e: 'open-jump-input'): void;           // 跳页 — 父级打开 dialog
+  (e: 'show-touch-regions'): void;        // 显示触控区可视化
   (e: 'cycle-mode'): void;
   (e: 'cycle-direction'): void;
   (e: 'scale-change', m: ScaleMode): void;
@@ -70,9 +79,16 @@ const SCALE_MODES: ScaleMode[] = [
 ];
 const scaleOpen = ref(false);
 
+/** enum 值 → i18n key: kebab ('fit-screen') → camel ('fitScreen') */
+function scaleLabel(m: ScaleMode): string {
+  const camel = m.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
+  return t('reader.scale.' + camel);
+}
+
 function close(): void { localShow.value = false; }
 function onBack(): void { close(); emit('back'); }
-function onJumpPage(): void { close(); emit('jump-page', 0); }
+function onJumpPage(): void { close(); emit('open-jump-input'); }
+function onShowTouchRegions(): void { close(); emit('show-touch-regions'); }
 function onCycleMode(): void { emit('cycle-mode'); }
 function onCycleDirection(): void { emit('cycle-direction'); }
 function onScaleChange(m: ScaleMode): void { emit('scale-change', m); scaleOpen.value = false; }
@@ -109,6 +125,7 @@ function onOpenBookmarks(): void {
       class="fixed inset-0 z-[1100] bg-black/88 backdrop-blur-sm
              flex flex-col items-stretch p-8 gap-4 overflow-y-auto"
       role="dialog"
+      aria-modal="true"
       :aria-label="t('reader.menu.title')"
       data-test="reader-main-menu"
     >
@@ -147,7 +164,7 @@ function onOpenBookmarks(): void {
         >{{ t(n.key) }}</button>
       </section>
 
-      <div class="h-px bg-white/10" />
+      <div class="xp-divider-h" />
 
       <!-- 3. 阅读组 -->
       <section class="flex flex-col gap-1">
@@ -156,25 +173,28 @@ function onOpenBookmarks(): void {
           data-test="menu-mode"
           @click="onCycleMode"
         >
-          {{ t('reader.menu.mode') }} · {{ mode }}
+          {{ t('reader.menu.mode') }} · {{ t('reader.mode.' + mode) }}
         </button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="menu-direction"
           @click="onCycleDirection"
         >
-          {{ t('reader.menu.direction') }} · {{ direction }}
+          {{ t('reader.menu.direction') }} · {{ t('reader.direction.' + direction) }}
         </button>
         <div class="relative" data-test="menu-scale">
           <button
             class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+            :aria-haspopup="'menu'"
+            :aria-expanded="scaleOpen"
             @click="scaleOpen = !scaleOpen"
           >
-            {{ t('reader.menu.scale') }} · {{ scaleMode }}
+            {{ t('reader.menu.scale') }} · {{ scaleLabel(scaleMode) }}
           </button>
           <div
             v-if="scaleOpen"
             class="ml-3 flex flex-col gap-1 mt-1"
+            role="menu"
           >
             <button
               v-for="m in SCALE_MODES"
@@ -182,52 +202,55 @@ function onOpenBookmarks(): void {
               class="text-left px-3 py-1.5 rounded text-xs hover:bg-surface-light hover:text-text-primary transition-colors"
               :class="m === scaleMode ? 'text-accent' : 'text-text-secondary'"
               data-test="menu-scale-option"
+              role="menuitem"
               @click="onScaleChange(m)"
-            >{{ m }}</button>
+            >{{ scaleLabel(m) }}</button>
           </div>
         </div>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-slideshow"
           @click="onToggleSlideshow"
         >
           {{ isSlideshowPlaying ? t('slideshow.pause') : t('slideshow.play') }}
         </button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-slideshow-direction"
           @click="onToggleSlideshowDirection"
         >
-          {{ t('slideshow.direction') }} · {{ slideshowDirection }}
+          {{ t('slideshow.direction') }} · {{ t('slideshow.direction' + slideshowDirection.charAt(0).toUpperCase() + slideshowDirection.slice(1)) }}
         </button>
       </section>
 
-      <div class="h-px bg-white/10" />
+      <div class="xp-divider-h" />
 
-      <!-- 4. 书库工具组 -->
+      <!-- 4. 书库工具组 (data-test 独立 id, 测试按 id 选而非 index) -->
       <section class="flex flex-col gap-1">
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-          data-test="menu-lib"
+          data-test="menu-lib-add"
           @click="onAddToLibrary"
         >{{ t('fileBrowser.addToLibrary') }}</button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-          data-test="menu-lib"
+          data-test="menu-lib-like"
           @click="onToggleLike"
         >{{ isLiked ? t('reader.unlike') : t('reader.like') }}</button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-          data-test="menu-lib"
+          data-test="menu-lib-bookmark"
           @click="onAddBookmark"
         >{{ t('bookmarks.add') }}</button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-          data-test="menu-lib"
+          data-test="menu-lib-bookmarks"
           @click="onOpenBookmarks"
         >{{ t('reader.openBookmarks') }}</button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-          data-test="menu-lib"
-          @click="close"
+          data-test="menu-lib-regions"
+          @click="onShowTouchRegions"
         >{{ t('reader.showTouchRegions') }}</button>
       </section>
 

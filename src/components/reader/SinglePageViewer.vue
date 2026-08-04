@@ -17,9 +17,18 @@ interface Props {
   imageUrl: string;
 }
 const props = defineProps<Props>();
+const emit = defineEmits<{
+  (e: 'image-loaded'): void;  // v0.1.0-reader-review-fix-17: OSD open 事件 → 父级异步预加载 lookahead
+}>();
 
 const containerRef = ref<HTMLDivElement | null>(null);
 let viewer: OpenSeadragon.Viewer | null = null;
+
+// v0.1.0-reader-review-fix-18: OSD 切换黑屏淡入.
+//  - OSD viewer.open(newUrl) 会清屏 → 异步加载 → 渲染. 中间是黑屏, 双页两个 OSD 同时切 = 整屏黑刺眼.
+//  - 用 imageReady 控制 outer opacity: 切图时先 opacity-0 (淡出) → OSD 内部 load → 'open' 事件 → opacity-100 (淡入).
+//  - 200ms transition 让切换平滑, 不刺眼.
+const imageReady = ref(false);
 
 // Cluster C: 暴露 viewer + bounds 给父 (ReaderScreen → useReaderScale 应用缩放)
 defineExpose({
@@ -57,7 +66,7 @@ onMounted(() => {
     // useReaderWheel 接管翻页. 否则滚轮先被 OSD 缩吞, 翻页不响应.
     // 需求3: 关闭 OSD 内置滚轮缩放 + 点击缩放，让 click 完全交给 useReaderTouchZones 9 宫格
     gestureSettingsMouse: { scrollToZoom: false, clickToZoom: false, dblClickToZoom: false },
-    animationTime: 0.3,
+    animationTime: 0,  // v0.1.0-reader-review-fix-12: 关掉 OSD 内部动画, 缩放/翻页 instant, 减少重渲染延迟
   });
   // v0.1.0-module3.0.2-hotfix3: OSD tile load 失败/成功 hook — 便于诊断特殊字符 URL
   viewer.addHandler('open-failed', (event) => {
@@ -69,6 +78,8 @@ onMounted(() => {
   });
   viewer.addHandler('open', () => {
     log('[SinglePageViewer] OSD open ok');
+    imageReady.value = true;  // fix-18: OSD 完成加载, 淡入显示
+    emit('image-loaded');
   });
 });
 
@@ -80,6 +91,7 @@ watch(
       log('[SinglePageViewer] watch: viewer is null, skip open');
       return;
     }
+    imageReady.value = false;  // fix-18: 切图先淡出, OSD.open 清屏期间 outer 透明
     viewer.open({ type: 'image', url });
   },
 );
@@ -91,11 +103,18 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
+  <!-- fix-18: outer 加 opacity transition, 切图时淡入淡出遮盖 OSD 清屏黑屏 -->
   <div
-    ref="containerRef"
-    data-test="viewer-container"
-    class="single-page-viewer"
-  />
+    class="single-page-viewer transition-opacity duration-200"
+    :class="{ 'opacity-0': !imageReady }"
+    data-test="viewer-wrapper"
+  >
+    <div
+      ref="containerRef"
+      data-test="viewer-container"
+      class="single-page-viewer"
+    />
+  </div>
 </template>
 
 <style scoped>

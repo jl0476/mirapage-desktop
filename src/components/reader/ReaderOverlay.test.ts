@@ -142,12 +142,12 @@ describe('ReaderOverlay.vue', () => {
     expect(w.find('[data-test="overlay-bottom"]').exists()).toBe(false);
   });
 
-  it('Cluster B #8: chrome 显示当 hovered=false 但 chromeVisible=true (依赖 hoveredVisible, 2s timeout 不可测)', () => {
-    // 注: hoveredVisible 在 mount 时默认 false, 2s 后也 false.
-    // 所以 chromeShow = chromeVisible(true) && !autoHide && (hovered(false) || hoveredVisible(false)) = false.
+  it('Cluster B #8: chrome 默认隐藏 (hovered=false 时), 只有 hover 才显示', () => {
+    // v0.1.0-reader-review-fix-5: chromeShow = chromeVisible && (hovered || hoveredVisible)
+    // 默认 (hovered=false, hoveredVisible=false) → 不显示
     const w = makeWrapper({ hovered: false });
-    // 实际 prod 行为: 不显示 (需要鼠标 hover 才能显示)
     expect(w.find('[data-test="overlay-top"]').exists()).toBe(false);
+    expect(w.find('[data-test="overlay-bottom"]').exists()).toBe(false);
   });
 
   it('Cluster B #8: 轮播控制条 显示当 hovered=true (isPlaying=false)', () => {
@@ -157,36 +157,53 @@ describe('ReaderOverlay.vue', () => {
 
   // ─── 需求1: chrome 配色 (mix-blend-mode + 强化模糊) ───
 
-  it('顶栏含 backdrop-blur-xl 与 mix-blend-difference class', () => {
+  // v0.1.0-reader-review-fix-4: chrome 改实色 bg-surface/90 (dark theme 下深蓝紫半透,
+  // text-text-primary 白字始终可读). 不再用 mix-blend-difference (在各种底图色
+  // 表现都不稳). 去掉 xp-bd (避免白边框), 字号 text-sm (14px 更清晰).
+  it('顶栏含 backdrop-blur-xl + bg-surface/90 (实色 bg, text-sm 字号)', () => {
     const w = makeWrapper({ hovered: true });
     const top = w.find('[data-test="overlay-top"]');
     expect(top.classes()).toContain('backdrop-blur-xl');
-    expect(top.classes()).toContain('mix-blend-difference');
-    // 标题 span 含 mix-blend-difference
+    expect(top.classes()).toContain('bg-surface/90');
+    expect(top.classes()).toContain('text-sm');
+    // 不再用 xp-bd (fix-4: 避免白边框)
+    expect(top.classes()).not.toContain('xp-bd');
+    // 标题 span 实色 text-text-primary
     const titleSpan = top.find('[data-test="title"]');
-    expect(titleSpan.classes()).toContain('mix-blend-difference');
+    expect(titleSpan.classes()).not.toContain('mix-blend-difference');
   });
 
-  it('底栏同样含 backdrop-blur-xl 与 mix-blend-difference', () => {
+  it('顶栏 icon (btn-back / btn-menu) 实色 + hover 高亮', () => {
+    const w = makeWrapper({ hovered: true });
+    const top = w.find('[data-test="overlay-top"]');
+    expect(top.find('[data-test="btn-back"]').classes()).not.toContain('mix-blend-difference');
+    expect(top.find('[data-test="btn-menu"]').classes()).not.toContain('mix-blend-difference');
+  });
+
+  it('底栏同样含 backdrop-blur-xl + bg-surface/90 (无 xp-bd)', () => {
     const w = makeWrapper({ hovered: true });
     const bottom = w.find('[data-test="overlay-bottom"]');
     expect(bottom.classes()).toContain('backdrop-blur-xl');
-    expect(bottom.classes()).toContain('mix-blend-difference');
+    expect(bottom.classes()).toContain('bg-surface/90');
+    expect(bottom.classes()).not.toContain('xp-bd');
   });
 
-  it('页码 indicator 含 mix-blend-difference', () => {
+  it('页码 indicator 实色 text-text-secondary (无 mix-blend)', () => {
     const w = makeWrapper({ hovered: true });
     const indicator = w.find('[data-test="page-indicator"]');
-    expect(indicator.classes()).toContain('mix-blend-difference');
+    expect(indicator.classes()).not.toContain('mix-blend-difference');
   });
 
   // ─── 需求2: 顶栏缩放下拉 (6 种 ScaleMode) ───
+  // v0.1.0-reader-review (Minor #4): scale trigger 文案走 t('reader.scale.*')
+  // 不再显示 raw enum "fit-screen".
 
-  it('点击缩放 trigger 展开 6 个选项', async () => {
+  it('点击缩放 trigger 展开 6 个选项 (trigger 文案 i18n: 适应屏幕)', async () => {
     const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
     const trigger = w.find('[data-test="scale-trigger"]');
     expect(trigger.exists()).toBe(true);
-    expect(trigger.text()).toContain('fit-screen');
+    expect(trigger.text()).toContain('适应屏幕');
+    expect(trigger.text()).not.toContain('fit-screen');
 
     await trigger.trigger('click');
     const opts = w.findAll('[data-test="scale-option"]');
@@ -219,10 +236,10 @@ describe('ReaderOverlay.vue', () => {
     expect(w.find('[data-test="scale-option"]').exists()).toBe(false);
   });
 
-  it('未传 scaleMode 时默认 fit-screen', () => {
+  it('未传 scaleMode 时默认 fit-screen (trigger 文案 i18n: 适应屏幕)', () => {
     const w = makeWrapper({ hovered: true });
     const trigger = w.find('[data-test="scale-trigger"]');
-    expect(trigger.text()).toContain('fit-screen');
+    expect(trigger.text()).toContain('适应屏幕');
   });
 });
 

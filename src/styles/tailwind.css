@@ -177,6 +177,7 @@
   .xp-bdb-subtle { border-bottom: 1px solid var(--color-border-subtle); }
 
   .xp-divider-v { width: 1px; height: 16px; background-color: var(--color-border-default); }
+  .xp-divider-h { height: 1px; background-color: var(--color-border-default); }
 }
 
 /* ─── Light theme token override ────────────────────────────────────────────

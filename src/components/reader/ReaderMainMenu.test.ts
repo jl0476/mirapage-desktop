@@ -1,11 +1,18 @@
 /**
  * ReaderMainMenu.vue 测试 — v0.1.0-module3.0.2 + 需求4-C PV 全套菜单
  * 覆盖:
- *  - 老的 4 emit 事件 (back / jump-page / cycle-mode / cycle-direction / update:show)
+ *  - 老的 emit 事件 (back / cycle-mode / cycle-direction / update:show)
+ *  - 跳页改为 emit('open-jump-input') (父级打开 dialog)
  *  - 新增 PV 全套: 导航组(navigate) / 缩放下拉(scale-change) / 幻灯片(toggle-slideshow,
  *    toggle-slideshow-direction) / 书库工具组(add-to-library, toggle-like, add-bookmark,
- *    打开书签走 navigate(/bookmarks))
+ *    打开书签走 navigate(/bookmarks), show-touch-regions)
  *  + props + i18n + Teleport + 不自动 fade
+ *
+ * v0.1.0-reader-review:
+ *  - jump 事件改为 open-jump-input (修复: 之前 emit('jump-page', 0) 总跳到封面)
+ *  - 5 个 lib 按钮用独立 data-test id (menu-lib-add/like/bookmark/bookmarks/regions)
+ *    测试按 id 取, 不再靠 positional index (reorder 安全)
+ *  - aria-modal="true" 验证
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
@@ -62,7 +69,14 @@ describe('ReaderMainMenu.vue', () => {
     expect(menu?.textContent).toMatch(/3.*\/.*10/); // currentSpreadIndex + 1 / totalSpreads
   });
 
-  it('点击 back → emit back', async () => {
+  it('role=dialog + aria-modal=true', () => {
+    mountMenu();
+    const menu = findInBody('reader-main-menu');
+    expect(menu?.getAttribute('role')).toBe('dialog');
+    expect(menu?.getAttribute('aria-modal')).toBe('true');
+  });
+
+  it('点击 back → emit back + 关闭', async () => {
     const w = mountMenu();
     (findInBody('menu-back') as HTMLElement).click();
     await w.vm.$nextTick();
@@ -71,11 +85,16 @@ describe('ReaderMainMenu.vue', () => {
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
-  it('点击 jump → emit jump-page(0) + 关闭', async () => {
+  // v0.1.0-reader-review: jump 改为 emit('open-jump-input') 让父级打开 dialog.
+  // 之前 emit('jump-page', 0) 硬编码 index=0 导致点击永远跳到封面.
+  it('点击 jump → emit open-jump-input + 关闭 (不再硬编码 jump-page(0))', async () => {
     const w = mountMenu();
     (findInBody('menu-jump') as HTMLElement).click();
     await w.vm.$nextTick();
-    expect(w.emitted('jump-page')?.[0]).toEqual([0]);
+    expect(w.emitted('open-jump-input')).toBeTruthy();
+    // 必须不带任何 payload (旧版是 [0])
+    expect(w.emitted('open-jump-input')?.[0]).toEqual([]);
+    expect(w.emitted('jump-page')).toBeFalsy(); // 旧事件已废弃
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
@@ -88,12 +107,30 @@ describe('ReaderMainMenu.vue', () => {
     expect(w.emitted('update:show')).toBeFalsy();
   });
 
+  it('mode=single 时 cycle-mode 按钮文案走 reader.mode.single', () => {
+    mountMenu({ mode: 'single' });
+    const btn = findInBody('menu-mode');
+    expect(btn?.textContent).toContain('单页');
+  });
+
+  it('mode=double 时 cycle-mode 按钮文案走 reader.mode.double', () => {
+    mountMenu({ mode: 'double' });
+    const btn = findInBody('menu-mode');
+    expect(btn?.textContent).toContain('双页');
+  });
+
   it('点击 cycle-direction → emit cycle-direction (不关闭菜单)', async () => {
     const w = mountMenu();
     (findInBody('menu-direction') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('cycle-direction')).toBeTruthy();
     expect(w.emitted('update:show')).toBeFalsy();
+  });
+
+  it('direction=ltr 时 cycle-direction 按钮文案走 reader.direction.ltr', () => {
+    mountMenu({ direction: 'ltr' });
+    const btn = findInBody('menu-direction');
+    expect(btn?.textContent).toContain('从左到右');
   });
 
   it('点击 close → emit update:show(false)', async () => {
@@ -142,14 +179,19 @@ describe('ReaderMainMenu.vue', () => {
     expect(w.emitted('navigate')?.[0]).toEqual(['/settings']);
   });
 
-  it('渲染书库工具组 5 项', () => {
+  // v0.1.0-reader-review: 5 个 lib 按钮用独立 data-test id
+  it('渲染书库工具组 5 项 (独立 id: add/like/bookmark/bookmarks/regions)', () => {
     mountMenu();
-    expect(findAllInBody('menu-lib').length).toBe(5);
+    expect(findInBody('menu-lib-add')).toBeTruthy();
+    expect(findInBody('menu-lib-like')).toBeTruthy();
+    expect(findInBody('menu-lib-bookmark')).toBeTruthy();
+    expect(findInBody('menu-lib-bookmarks')).toBeTruthy();
+    expect(findInBody('menu-lib-regions')).toBeTruthy();
   });
 
   it('点加入书库 → emit add-to-library + 关闭', async () => {
     const w = mountMenu();
-    (findAllInBody('menu-lib')[0] as HTMLElement).click();
+    (findInBody('menu-lib-add') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('add-to-library')).toBeTruthy();
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
@@ -157,7 +199,7 @@ describe('ReaderMainMenu.vue', () => {
 
   it('点喜欢 → emit toggle-like + 关闭', async () => {
     const w = mountMenu({ isLiked: false });
-    (findAllInBody('menu-lib')[1] as HTMLElement).click();
+    (findInBody('menu-lib-like') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('toggle-like')).toBeTruthy();
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
@@ -165,14 +207,13 @@ describe('ReaderMainMenu.vue', () => {
 
   it('isLiked=true 时喜欢按钮文案为 unlike', () => {
     mountMenu({ isLiked: true });
-    const lib = findAllInBody('menu-lib');
-    // 第二项是 toggle-like; isLiked=true 应显示取消喜欢文案
-    expect(lib[1].textContent).toContain('取消喜欢');
+    const btn = findInBody('menu-lib-like');
+    expect(btn?.textContent).toContain('取消喜欢');
   });
 
   it('点加书签 → emit add-bookmark + 关闭', async () => {
     const w = mountMenu();
-    (findAllInBody('menu-lib')[2] as HTMLElement).click();
+    (findInBody('menu-lib-bookmark') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('add-bookmark')).toBeTruthy();
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
@@ -180,9 +221,18 @@ describe('ReaderMainMenu.vue', () => {
 
   it('点打开书签 → emit navigate(/bookmarks) + 关闭', async () => {
     const w = mountMenu();
-    (findAllInBody('menu-lib')[3] as HTMLElement).click();
+    (findInBody('menu-lib-bookmarks') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('navigate')?.[0]).toEqual(['/bookmarks']);
+    expect(w.emitted('update:show')?.[0]).toEqual([false]);
+  });
+
+  // v0.1.0-reader-review: 显示触控区不再是 stub (之前只 close)
+  it('点显示触控区 → emit show-touch-regions + 关闭', async () => {
+    const w = mountMenu();
+    (findInBody('menu-lib-regions') as HTMLElement).click();
+    await w.vm.$nextTick();
+    expect(w.emitted('show-touch-regions')).toBeTruthy();
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
@@ -210,25 +260,24 @@ describe('ReaderMainMenu.vue', () => {
     expect(findAllInBody('menu-scale-option').length).toBe(0);
   });
 
+  // v0.1.0-reader-review: scale 按钮文案走 t('reader.scale.*') 而非 raw enum
+  it('scale 按钮文案显示中文翻译 (适应屏幕), 非 raw enum "fit-screen"', () => {
+    mountMenu({ scaleMode: 'fit-screen' });
+    const btn = findInBody('menu-scale')?.querySelector('button');
+    expect(btn?.textContent).toContain('适应屏幕');
+    expect(btn?.textContent).not.toContain('fit-screen');
+  });
+
   it('点击幻灯片播放按钮 → emit toggle-slideshow', async () => {
     const w = mountMenu({ isSlideshowPlaying: false });
-    // 阅读组里第4个按钮 (mode/direction/scale/slideshow); 通过 trigger click 找 slideshow
-    // 简化策略: 直接 query teleported DOM 找含"播放"文本的按钮并点击
-    const buttons = Array.from(document.body.querySelectorAll('button'));
-    const playBtn = buttons.find((b) => b.textContent?.includes('播放'));
-    expect(playBtn).toBeTruthy();
-    playBtn!.click();
+    (findInBody('menu-slideshow') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('toggle-slideshow')).toBeTruthy();
   });
 
   it('点击幻灯片方向按钮 → emit toggle-slideshow-direction', async () => {
     const w = mountMenu();
-    const buttons = Array.from(document.body.querySelectorAll('button'));
-    // 方向按钮文案包含"幻灯片方向"
-    const dirBtn = buttons.find((b) => b.textContent?.includes('幻灯片方向'));
-    expect(dirBtn).toBeTruthy();
-    dirBtn!.click();
+    (findInBody('menu-slideshow-direction') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('toggle-slideshow-direction')).toBeTruthy();
   });

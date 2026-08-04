@@ -1,7 +1,14 @@
 /**
- * useReaderHotkeys — 阅读器全局键盘 / 鼠标 / 滚轮绑定
+ * useReaderHotkeys — 阅读器全局键盘绑定
  *
- * - onMounted 注册 window.addEventListener('keydown' | 'wheel' | 'mousedown')
+ * v0.1.0-reader-review-fix: 移除 window 上的 mousedown listener.
+ *  - 原 onMousedown 在 window 上监听所有 mousedown → 按鼠标位置派发 prev/next,
+ *    与 9 宫格 useReaderTouchZones + 顶栏/底栏按钮 click 冲突 (用户报告:
+ *    点击 btn-mode 后变成下一页).
+ *  - 鼠标位置派发逻辑与 9 宫格重复 (9 宫格已接管屏幕分区点击).
+ *  - 仅保留 keyboard + wheel (后者由 useReaderWheel 在容器内独立处理).
+ *
+ * - onMounted 注册 window.addEventListener('keydown')
  * - 通过 resolveHotkey(event, defaultKeyBindings, ctx) → ReaderCommand
  * - 派发到 reader store action
  * - onBeforeUnmount 解绑所有 listener
@@ -86,26 +93,18 @@ export function useReaderHotkeys(): void {
     if (cmd) dispatch(store, cmd);
   }
 
-  function onMousedown(e: MouseEvent): void {
-    const cmd = resolveHotkey(e, defaultKeyBindings, {
-      kind: 'mouse',
-      width: window.innerWidth,
-      height: window.innerHeight,
-    });
-    if (cmd) dispatch(store, cmd);
-  }
-
   onMounted(() => {
     // v0.1.0-module3.0.2-hotfix6 (H12): 删 wheel listener
     // useReaderWheel 已接管 wheel 翻页 (containerRef 范围, 节流 250ms).
     // 老代码 wheel 同时挂 window (热键 dispatch) + containerRef (useReaderWheel),
     // 一次滚动触发 2 次 nextPage (从 spread 0 → spread 2, 单页模式跳 2 张).
+    //
+    // v0.1.0-reader-review-fix: 删 mousedown listener.
+    // 与 9 宫格 click + chrome 按钮 click 冲突 (见上方注释).
     window.addEventListener('keydown', onKeydown);
-    window.addEventListener('mousedown', onMousedown);
   });
 
   onBeforeUnmount(() => {
     window.removeEventListener('keydown', onKeydown);
-    window.removeEventListener('mousedown', onMousedown);
   });
 }

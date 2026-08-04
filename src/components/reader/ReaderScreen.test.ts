@@ -64,8 +64,8 @@ describe('ReaderScreen.vue', () => {
 
   it('renders title and page indicator', async () => {
     const w = mountReader();
-    // Cluster B #8: chrome 显示需 hovered=true (或 hoveredVisible)
-    await w.find('[data-test="reader-screen"]').trigger('mouseenter');
+    // v0.1.0-reader-review-fix-7: chrome 默认隐藏, 由 trigger zone hover 触发
+    await w.find('[data-test="trigger-zone-top"]').trigger('mouseenter');
     expect(w.text()).toContain('漫画 A');
     expect(w.text()).toMatch(/1.*\/.*3/);
   });
@@ -84,6 +84,7 @@ describe('ReaderScreen.vue', () => {
 
   it('emits back when overlay back button clicked', async () => {
     const w = mountReader();
+    await w.find('[data-test="trigger-zone-top"]').trigger('mouseenter');
     const buttons = w.findAll('button');
     const backBtn = buttons.find((b) => b.text().includes('返') || b.text().includes('Back'));
     if (backBtn) {
@@ -105,7 +106,7 @@ describe('ReaderScreen.vue', () => {
 
   it('emits toggle-mode when mode button clicked', async () => {
     const w = mountReader();
-    await w.find('[data-test="reader-screen"]').trigger('mouseenter');
+    await w.find('[data-test="trigger-zone-top"]').trigger('mouseenter');
     const modeBtn = w.find('[data-test="btn-mode"]');
     await modeBtn.trigger('click');
     expect(w.emitted('toggle-mode')).toBeTruthy();

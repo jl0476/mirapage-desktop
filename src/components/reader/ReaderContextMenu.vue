@@ -4,6 +4,13 @@
  * 参照 RowContextMenu dropdown 风格。项：
  *   缩放(子菜单) / 模式 / 方向 / 幻灯片 / 跳页 / 返回
  * 点击空白或 ESC 关闭。
+ *
+ * v0.1.0-reader-review fixes:
+ *  - mode/direction/scale 走 t() (CLAUDE.md §2.5)
+ *  - border-white/10 → xp-bd (light 模式可见)
+ *  - bg-white/10 分隔 → xp-divider-h
+ *  - slideshow.control (工具栏名) → slideshow.toggle (动作动词)
+ *  - 子菜单加 role="menu" + Escape 关闭
  */
 import { onMounted, onUnmounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -35,6 +42,12 @@ const SCALE_MODES: ScaleMode[] = [
   'fit-screen', 'fit-width', 'fit-height',
   'original', 'full-screen', 'stretch',
 ];
+
+/** enum 值 → i18n key: kebab ('fit-screen') → camel ('fitScreen') */
+function scaleLabel(m: ScaleMode): string {
+  const camel = m.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase());
+  return t('reader.scale.' + camel);
+}
 
 function onScaleSelect(m: ScaleMode): void {
   emit('scale-change', m);
@@ -74,7 +87,7 @@ onUnmounted(() => {
 
 <template>
   <div
-    class="fixed z-[1200] min-w-[180px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl"
+    class="fixed z-[1200] min-w-[180px] bg-surface-4 xp-bd rounded-lg py-1 shadow-xl backdrop-blur-xl"
     :style="{ left: `${props.x}px`, top: `${props.y}px` }"
     data-test="reader-context-menu"
     role="menu"
@@ -88,14 +101,18 @@ onUnmounted(() => {
       <button
         data-test="ctx-item"
         class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary"
+        :aria-haspopup="'menu'"
+        :aria-expanded="scaleOpen"
       >
         <span>{{ t('reader.menu.scale') }}</span>
-        <span class="text-text-muted">{{ props.scaleMode }}</span>
+        <span class="text-text-muted">{{ scaleLabel(props.scaleMode) }}</span>
       </button>
       <div
         v-if="scaleOpen"
-        class="absolute left-full top-0 ml-1 min-w-[150px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl"
+        class="absolute left-full top-0 ml-1 min-w-[150px] bg-surface-4 xp-bd rounded-lg py-1 shadow-xl"
+        role="menu"
         @click.stop
+        @keydown.escape="scaleOpen = false"
       >
         <button
           v-for="m in SCALE_MODES"
@@ -103,27 +120,28 @@ onUnmounted(() => {
           class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light"
           :class="m === props.scaleMode ? 'text-accent' : 'text-text-secondary'"
           data-test="ctx-scale-option"
+          role="menuitem"
           @click.stop="onScaleSelect(m)"
-        >{{ m }}</button>
+        >{{ scaleLabel(m) }}</button>
       </div>
     </div>
 
-    <div class="my-1 h-px bg-white/10" />
+    <div class="my-1 xp-divider-h" />
 
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('cycle-mode')">
-      <span>{{ t('reader.menu.mode') }}</span><span class="text-text-muted">{{ props.mode }}</span>
+      <span>{{ t('reader.menu.mode') }}</span><span class="text-text-muted">{{ t('reader.mode.' + props.mode) }}</span>
     </button>
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('cycle-direction')">
-      <span>{{ t('reader.menu.direction') }}</span><span class="text-text-muted">{{ props.direction }}</span>
+      <span>{{ t('reader.menu.direction') }}</span><span class="text-text-muted">{{ t('reader.direction.' + props.direction) }}</span>
     </button>
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('toggle-slideshow')">
-      <span>{{ t('slideshow.control') }}</span><span class="text-text-muted">{{ props.isSlideshowPlaying ? t('slideshow.pause') : t('slideshow.play') }}</span>
+      <span>{{ t('slideshow.toggle') }}</span><span class="text-text-muted">{{ props.isSlideshowPlaying ? t('slideshow.pause') : t('slideshow.play') }}</span>
     </button>
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('jump-page')">
       <span>{{ t('reader.menu.jump') }}</span>
     </button>
 
-    <div class="my-1 h-px bg-white/10" />
+    <div class="my-1 xp-divider-h" />
 
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('back')">
       <span>← {{ t('reader.menu.back') }}</span>

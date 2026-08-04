@@ -25,6 +25,12 @@
  *    触发 watcher 调 applyScale.
  *  - 当前 spread 切换 (prev/next/jump) → 重 apply 当前 scale (因为 OSD
  *    viewport 在新图加载后还在用旧 transform).
+ *
+ * v0.1.0-reader-review fixes:
+ *  - 接入 showTouchRegions prop, 条件渲染 TouchRegionsOverlay (9 宫格可视化)
+ *  - 删除 (singleViewerRef.value as { getViewer?: ... }) 类型断言 —
+ *    SinglePageViewer.vue defineExpose 已返回完整 OSDViewerLike 类型,
+ *    直接 .value?.getViewer?.() 即可, 断言绕过 TS 检查不安全
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useReaderStore } from '@/stores/reader';
@@ -36,6 +42,7 @@ import { log } from '@/lib/logger';
 import SinglePageViewer from './SinglePageViewer.vue';
 import DoublePageViewer from './DoublePageViewer.vue';
 import ReaderOverlay from './ReaderOverlay.vue';
+import TouchRegionsOverlay from './TouchRegionsOverlay.vue';
 
 interface Props {
   title: string;
@@ -43,27 +50,97 @@ interface Props {
   spreads?: Array<{ start: number; end: number }>;
   initialSpreadIndex?: number;
   mode?: 'single' | 'double';
+  /** v0.1.0-reader-review: 显示 9 宫格触控区可视化 (主菜单"显示触控区"触发) */
+  showTouchRegions?: boolean;
+  /** v0.1.0-reader-review-fix: 阅读方向 (传给 DoublePageViewer 用于 RTL 镜像) */
+  direction?: 'ltr' | 'rtl';
 }
 const props = withDefaults(defineProps<Props>(), {
   spreads: undefined,
   initialSpreadIndex: 0,
   mode: 'single',
+  showTouchRegions: false,
+  direction: 'ltr',
 });
 
 interface Emits {
   (e: 'back'): void;
   (e: 'toggle-mode'): void;
   (e: 'open-main-menu'): void;   // 需求4: chrome 菜单按钮透传 → ReaderView
+  (e: 'chrome-hover-enter'): void;  // v0.1.0-reader-review-fix-7: chrome 元素自身 hover
+  (e: 'chrome-hover-leave'): void;
 }
 const emit = defineEmits<Emits>();
 
 const store = useReaderStore();
 const slideshow = useSlideshowStore();
 const settings = useSettingsStore();
+// v0.1.0-reader-review-fix-17: 异步预加载策略.
+//  - 不在 watch (pageUrls/mode/spreadIndex) 同步触发预加载 (会与 OSD 当前图加载抢带宽)
+//  - 而是在 OSD 'open' 事件后 (首图已加载并 paint 完), 父级监听 image-loaded 异步触发 lookahead
+//  - 翻页时: OSD 加载新首图 → image-loaded → 再预加载新 ±2 范围
+//  - 缓存张数: 5 spread × 单页 1 张 / 双页 2 张 = 5-10 张 (单页 ~40MB, 双页 ~80MB)
+const PRELOAD_RANGE = 2;
+
+function preloadSpreadRange(): void {
+  const total = props.pageUrls.length;
+  if (total === 0) return;
+  const singlePage = settings.readerDefaultMode === 'single';
+  const spreads = SpreadPlanner.plan(total, true, singlePage);
+  const idx = store.currentSpreadIndex;
+  const startIdx = Math.max(0, idx - PRELOAD_RANGE);
+  const endIdx = Math.min(spreads.length - 1, idx + PRELOAD_RANGE);
+  let count = 0;
+  for (let s = startIdx; s <= endIdx; s++) {
+    const spread = spreads[s];
+    if (!spread) continue;
+    for (let p = spread.start; p < spread.end && p < total; p++) {
+      const url = props.pageUrls[p];
+      if (!url) continue;
+      // fix-19: img.decode() 提前 async decode (浏览器 Image decode 在主线程同步,
+      // 不 await decode 会让 OSD.open 时同步 decode → 阻塞 UI → "卡住".
+      // decode() 返回 Promise, 不阻塞主线程, decode 完后图片已 decoded.
+      // OSD.open 时图已 decoded → drawImage 几乎 instant, 无卡顿.
+      const img = new Image();
+      img.src = url;
+      img.decode().catch(() => undefined);
+      count++;
+    }
+  }
+  log('[ReaderScreen/preload] preloaded', count, 'images around spread', idx);
+}
+
+/** OSD 首图加载完后 (image-loaded emit), 延迟 100ms 让 paint 完成, 再触发 lookahead */
+function onFirstImageLoaded(): void {
+  setTimeout(() => {
+    log('[ReaderScreen] first image loaded, start async preload lookahead');
+    preloadSpreadRange();
+  }, 100);
+}
+
 const containerRef = ref<HTMLElement | null>(null);
 const hovered = ref(false);
 const singleViewerRef = ref<InstanceType<typeof SinglePageViewer> | null>(null);
 const doubleViewerRef = ref<InstanceType<typeof DoublePageViewer> | null>(null);
+
+// v0.1.0-reader-review-fix-7: chrome hover 仅由 trigger zone + chrome 自身控制.
+// 之前容器 mouseenter/mouseleave 太宽 (整个 reader 都触发), 用户希望只在
+// chrome/slideshow 区域 hover 才显示. 现在 trigger zone 顶/底各 40px (v-if="!hovered"
+// 让 chrome 显示时消失, 避免遮挡按钮).
+// fix-13: hoveredVisible 提升到 ReaderScreen 共享, 让 watermark 跟 chrome 同步 (避免重叠)
+const hoveredVisible = ref(false);
+let hoverTimer: ReturnType<typeof setTimeout> | null = null;
+function flashOnHover(): void {
+  hoveredVisible.value = true;
+  if (hoverTimer !== null) clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => { hoveredVisible.value = false; }, 2000);
+}
+function onTriggerEnter(): void { hovered.value = true; flashOnHover(); }
+function onChromeHoverEnter(): void { hovered.value = true; flashOnHover(); }
+function onChromeHoverLeave(): void {
+  hovered.value = false;
+  // 2s 内如果不再 hover, hoveredVisible 自动 false (timer 已设)
+}
 
 /** Cluster C: useReaderScale — 监听 settings.currentScaleMode 变化 → applyScale
  *  viewerRef 通过 ref 函数从 SinglePageViewer / DoublePageViewer 拿.
@@ -81,9 +158,7 @@ watch(
     // 让子组件暴露 viewer 之后下一 tick 重 apply
     setTimeout(() => {
       const newViewer = props.mode === 'single'
-        ? singleViewerRef.value && typeof (singleViewerRef.value as { getViewer?: () => OSDViewerLike | null }).getViewer === 'function'
-          ? (singleViewerRef.value as { getViewer: () => OSDViewerLike | null }).getViewer()
-          : null
+        ? singleViewerRef.value?.getViewer?.() ?? null
         : null;  // double mode 通过 getBounds 间接应用 (未来扩展)
       if (newViewer) {
         scaleViewerRef.value = newViewer;
@@ -119,30 +194,70 @@ onMounted(() => {
 });
 
 // v0.1.0-module3.0.2-reader-polish (Cluster C):
-// singleViewerRef 挂上后, 让 scaleViewerRef = getViewer() 触发 useReaderScale watcher
-watch(singleViewerRef, (el) => {
-  if (el && typeof (el as { getViewer?: () => OSDViewerLike | null }).getViewer === 'function') {
-    const viewer = (el as { getViewer: () => OSDViewerLike | null }).getViewer();
-    if (viewer) {
-      scaleViewerRef.value = viewer;
-      // 触发初始 apply
-      const cur = scaleModeRef.value;
-      scaleModeRef.value = 'fit-screen';
-      scaleModeRef.value = cur;
-    }
+// singleViewerRef 挂上后, 让 scaleViewerRef = getViewer() 触发 useReaderScale watcher.
+// v0.1.0-reader-review-fix: 加 retry 机制 — Vue 生命周期中 ref 函数可能在 child
+// onMounted 之前调用, 此时 OSD viewer 变量未赋值. 轮询 getViewer 直到非 null.
+let scaleViewerRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function trySetScaleViewerRef(el: InstanceType<typeof SinglePageViewer> | null, attempt: number = 0): void {
+  if (!el) return;
+  const viewer = el.getViewer?.() ?? null;
+  if (viewer) {
+    scaleViewerRef.value = viewer;
+    // 触发初始 apply (用 toggle 触发 watch)
+    const cur = scaleModeRef.value;
+    scaleModeRef.value = 'fit-screen';
+    scaleModeRef.value = cur;
+    log('[ReaderScreen] scaleViewerRef set, attempt=', attempt);
+  } else if (attempt < 30) {
+    scaleViewerRetryTimer = setTimeout(() => trySetScaleViewerRef(el, attempt + 1), 50);
+  } else {
+    log('[ReaderScreen] getViewer still null after 30 attempts, give up');
   }
+}
+watch(singleViewerRef, (el) => {
+  if (scaleViewerRetryTimer !== null) {
+    clearTimeout(scaleViewerRetryTimer);
+    scaleViewerRetryTimer = null;
+  }
+  trySetScaleViewerRef(el);
 }, { flush: 'post' });
 
+// v0.1.0-reader-review-fix: 双页模式支持 scale + getViewer
 watch(doubleViewerRef, (el) => {
-  // 双页模式: 通过 getBounds 计算 (但 useReaderScale 需要 viewer 实例)
-  // 简化: 暂不支持双页 scale, 仅单页生效 (Cluster C #6 范围限定)
-  if (el) log('[ReaderScreen] double viewer mounted, scale not applied (Cluster C #6: single-only)');
+  if (!el) return;
+  log('[ReaderScreen] double viewer mounted, set scaleViewerRef');
+  // 双页 viewer 通过 getViewer() 暴露首个 page slot 的 OSD instance
+  const viewer = (el as { getViewer?: () => unknown }).getViewer?.() ?? null;
+  if (viewer) {
+    scaleViewerRef.value = viewer as OSDViewerLike;
+    const cur = scaleModeRef.value;
+    scaleModeRef.value = 'fit-screen';
+    scaleModeRef.value = cur;
+  } else {
+    // 重试 (子组件 SinglePageViewer onMounted 可能晚于父级 flush:post watcher)
+    let attempt = 0;
+    const retry = setInterval(() => {
+      attempt++;
+      const v = (el as { getViewer?: () => unknown }).getViewer?.() ?? null;
+      if (v) {
+        clearInterval(retry);
+        scaleViewerRef.value = v as OSDViewerLike;
+        const cur = scaleModeRef.value;
+        scaleModeRef.value = 'fit-screen';
+        scaleModeRef.value = cur;
+        log('[ReaderScreen] double getViewer retry ok, attempt=', attempt);
+      } else if (attempt > 30) {
+        clearInterval(retry);
+      }
+    }, 50);
+  }
 }, { flush: 'post' });
 
 // 父级 props 变化时 (mode 切换 / 跳页) 同步更新 store
 watch(
   () => [props.mode, props.initialSpreadIndex],
   () => {
+    log('[ReaderScreen] props watcher: mode=', props.mode, 'initialSpreadIndex=', props.initialSpreadIndex, 'currentSpreadIndex=', store.currentSpreadIndex);
     if (props.initialSpreadIndex !== store.currentSpreadIndex) {
       store.jumpToSpread(props.initialSpreadIndex);
     }
@@ -211,10 +326,10 @@ function onBack() {
   emit('back');
 }
 
-function onContainerMouseEnter() {
-  hovered.value = true;
+function onContainerMouseEnter(): void {
+  // 保留但不做任何事 (fix-7: hover 由 trigger zone 控制, 不靠容器整体)
 }
-function onContainerMouseLeave() {
+function onContainerMouseLeave(): void {
   hovered.value = false;
 }
 </script>
@@ -227,19 +342,27 @@ function onContainerMouseLeave() {
     @mouseenter="onContainerMouseEnter"
     @mouseleave="onContainerMouseLeave"
   >
-    <!-- viewer (Cluster C: 单页用 ref, 双页用 ref) -->
-    <SinglePageViewer
-      v-if="mode === 'single'"
-      :ref="(el: unknown) => { singleViewerRef = el as InstanceType<typeof SinglePageViewer> | null }"
-      :image-url="singlePageUrl"
-    />
-    <DoublePageViewer
-      v-else
-      :ref="(el: unknown) => { doubleViewerRef = el as InstanceType<typeof DoublePageViewer> | null }"
-      :page-urls="props.pageUrls"
-      :spreads="finalSpreads"
-      :current-spread-index="store.currentSpreadIndex"
-    />
+    <!-- viewer (Cluster C: 单页用 ref, 双页用 ref; v0.1.0-reader-review-fix: 加 :key 强制 re-mount on mode change) -->
+    <!-- v0.1.0-reader-review-fix-12: KeepAlive 缓存 viewer, mode 切换不重建 OSD -->
+    <KeepAlive>
+      <SinglePageViewer
+        v-if="mode === 'single'"
+        :key="`single-${mode}`"
+        :ref="(el: unknown) => { singleViewerRef = el as InstanceType<typeof SinglePageViewer> | null }"
+        :image-url="singlePageUrl"
+        @image-loaded="onFirstImageLoaded"
+      />
+      <DoublePageViewer
+        v-else
+        :key="`double-${mode}`"
+        :ref="(el: unknown) => { doubleViewerRef = el as InstanceType<typeof DoublePageViewer> | null }"
+        :page-urls="props.pageUrls"
+        :spreads="finalSpreads"
+        :current-spread-index="store.currentSpreadIndex"
+        :direction="props.direction"
+        @image-loaded="onFirstImageLoaded"
+      />
+    </KeepAlive>
 
     <!-- overlay (隐藏 chrome 时不渲染; 轮播控制条独立 hover 控) -->
     <ReaderOverlay
@@ -249,6 +372,7 @@ function onContainerMouseLeave() {
       :mode="props.mode"
       :chrome-visible="store.chromeVisible"
       :hovered="hovered"
+      :hovered-visible="hoveredVisible"
       :scale-mode="settings.currentScaleMode"
       @next="onNext"
       @prev="onPrev"
@@ -257,6 +381,41 @@ function onContainerMouseLeave() {
       @back-to-list="onBack"
       @open-main-menu="emit('open-main-menu')"
       @scale-change="(m) => settings.setScaleMode(m)"
+      @chrome-hover-enter="onChromeHoverEnter"
+      @chrome-hover-leave="onChromeHoverLeave"
     />
+
+    <!-- v0.1.0-reader-review-fix-7: 屏幕顶/底 trigger zone (各 40px).
+         fix-8: v-if="!hovered" 让 chrome 显示时 trigger zone 消失 (避免遮挡按钮).
+         默认 (hovered=false) trigger zone 存在 → mouseenter 触发 hovered=true → 显示 chrome;
+         trigger zone 此时被 v-if 移除, 鼠标移到 chrome (已经在屏幕顶部) → chrome-hover-enter 维持. -->
+    <div
+      v-if="!hovered"
+      class="absolute top-0 inset-x-0 h-10 z-30"
+      data-test="trigger-zone-top"
+      @mouseenter="onTriggerEnter"
+    ></div>
+    <div
+      v-if="!hovered"
+      class="absolute bottom-0 inset-x-0 h-10 z-30"
+      data-test="trigger-zone-bottom"
+      @mouseenter="onTriggerEnter"
+    ></div>
+
+    <!-- v0.1.0-reader-review-fix-11: watermark — chrome 隐藏时显示书名 + 页码.
+         fix-13: 用 hoveredVisible 而非 !hovered, 与 chrome 显示同步
+         (chrome 显示 = hovered || hoveredVisible; watermark 隐藏 = !(!hovered && !hoveredVisible))
+         永远 pointer-events-none, 不拦截 OSD 点击 -->
+    <div
+      v-if="!hovered && !hoveredVisible"
+      class="absolute top-3 inset-x-3 flex justify-between pointer-events-none text-xs text-white drop-shadow-md z-20"
+      data-test="watermark"
+    >
+      <span class="font-semibold truncate" data-test="watermark-title">{{ props.title }}</span>
+      <span class="font-mono tabular-nums shrink-0 ml-3" data-test="watermark-page">{{ currentPage }} / {{ totalPages }}</span>
+    </div>
+
+    <!-- 触控区可视化 (pointer-events-none, 不拦截点击) -->
+    <TouchRegionsOverlay v-if="props.showTouchRegions" />
   </div>
 </template>

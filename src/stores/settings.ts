@@ -4,6 +4,7 @@
 import { defineStore } from 'pinia';
 import { reactive, ref } from 'vue';
 import { getSetting, setSetting } from '@/lib/tauri';
+import { log } from '@/lib/logger';
 import {
   TOUCH_ZONES, TOUCH_ZONE_KEY, DEFAULT_TOUCH_SCHEME,
   DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION,
@@ -88,6 +89,37 @@ export const useSettingsStore = defineStore('settings', () => {
     await update('scale_mode', mode);
   }
 
+  /**
+   * v0.1.0-reader-review-fix-9: 切换 reader_default_mode (in-memory + 持久化).
+   *  - 修复 settings.update() 只持久化不更新 in-memory 的 bug
+   *  - 用 store.$patch 强制触发 Pinia 响应 (替代直接 ref.value = X,
+   *    后者在 setup store 中某些边缘情况不传播到 proxy getter)
+   *  - 调用方: ReaderMainMenu / ReaderContextMenu 的 cycle-mode handler
+   */
+  async function cycleReaderMode(): Promise<void> {
+    const next: ReaderMode = readerDefaultMode.value === 'single' ? 'double' : 'single';
+    log('[settings] cycleReaderMode →', next, '(was', readerDefaultMode.value, ')');
+    // 用 $patch 强制 Pinia 触发响应 + 同步 DB
+    const store = useSettingsStore();
+    store.$patch({ readerDefaultMode: next });
+    await update('reader_default_mode', next);
+    log('[settings] cycleReaderMode done, current=', readerDefaultMode.value);
+  }
+
+  /**
+   * v0.1.0-reader-review-fix-9: 切换 default_read_direction (in-memory + 持久化).
+   *  - 同上用 $patch 强制 Pinia 响应
+   *  - 调用方: ReaderMainMenu / ReaderContextMenu 的 cycle-direction handler
+   */
+  async function cycleReadDirection(): Promise<void> {
+    const next: ReadDirection = defaultReadDirection.value === 'ltr' ? 'rtl' : 'ltr';
+    log('[settings] cycleReadDirection →', next, '(was', defaultReadDirection.value, ')');
+    const store = useSettingsStore();
+    store.$patch({ defaultReadDirection: next });
+    await update('default_read_direction', next);
+    log('[settings] cycleReadDirection done, current=', defaultReadDirection.value);
+  }
+
   /** 设置单个触控分区动作 */
   async function setTouchAction(zone: TouchZone, action: TouchAction): Promise<void> {
     touchScheme[zone] = action;
@@ -124,6 +156,8 @@ export const useSettingsStore = defineStore('settings', () => {
     load,
     update,
     setScaleMode,
+    cycleReaderMode,
+    cycleReadDirection,
     setTouchAction,
     resetTouchScheme,
   };

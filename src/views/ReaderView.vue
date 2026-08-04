@@ -8,9 +8,16 @@
  * - 9 宫格 click (useReaderTouchZones) → 派发 reader store actions
  * - 跨卷 (pendingNextVolume) watch 处理
  * - 滚轮 / 鼠标按键 已 useReaderHotkeys() 接管 (内含 wheel listener)
+ *
+ * v0.1.0-reader-review fixes:
+ *  - 新增 jumpDialog + openJumpDialog 处理 main menu 的 open-jump-input 事件
+ *  - cycle-direction 改为切换 settings.defaultReadDirection (之前误改 slideshow.direction)
+ *  - ctx menu direction 从 settings.defaultReadDirection 派生 (之前误用 slideshow.direction)
+ *  - 显示触控区 ref 接入 + 透传给 ReaderScreen
+ *  - 错误返回按钮 border-white/10 → xp-bd (light 模式可见)
  */
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
@@ -52,6 +59,11 @@ const showMainMenu = ref(false);
 const book = ref<Awaited<ReturnType<typeof getBook>> | null>(null);
 // 需求4-A: 右键轻量上下文菜单
 const ctxMenu = ref({ visible: false, x: 0, y: 0 });
+// v0.1.0-reader-review: 跳页 dialog (主菜单"跳页"按钮 / 右键"跳页"都打开它)
+const jumpDialogRef = ref<HTMLDialogElement | null>(null);
+const jumpDialogValue = ref(1);
+// v0.1.0-reader-review: 触控区可视化 overlay
+const showTouchRegions = ref(false);
 
 function onContextMenu(e: MouseEvent): void {
   // 只在 ready 状态 + reader 容器内触发；阻止浏览器默认菜单
@@ -67,11 +79,13 @@ function onCtxScaleChange(m: ScaleMode): void {
   closeCtxMenu();
 }
 function onCtxCycleMode(): void {
-  settings.update('reader_default_mode', settings.readerDefaultMode === 'single' ? 'double' : 'single');
+  // 修复: settings.update() 只持久化不更新 in-memory — 用专用 cycle 方法
+  void settings.cycleReaderMode();
   closeCtxMenu();
 }
 function onCtxCycleDirection(): void {
-  slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward');
+  // 修复: 同上, 用 cycleReadDirection() 同时更新 in-memory + 持久化
+  void settings.cycleReadDirection();
   closeCtxMenu();
 }
 function onCtxToggleSlideshow(): void {
@@ -79,14 +93,51 @@ function onCtxToggleSlideshow(): void {
   closeCtxMenu();
 }
 function onCtxJumpPage(): void {
-  // 复用主菜单的 jump-page 流程：打开主菜单让用户选页
-  showMainMenu.value = true;
-  slideshow.pause();
+  // 修复: 直接打开跳页 dialog, 不再绕路回主菜单
+  openJumpDialog();
   closeCtxMenu();
 }
 function onCtxBack(): void {
   router.push('/');
   closeCtxMenu();
+}
+
+// v0.1.0-reader-review-fix-5: 模板 @event="expr()" 会立即求值得到 Promise, 把 Promise 当 handler (错).
+// Vue 期望 handler 是函数. @event="funcName" 会让 Vue 自动调 funcName($event).
+// @event="() => func()" 用箭头函数包裹, 每次点击才调 — async 函数推荐.
+function onToggleSlideshowDirection(): void {
+  void slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward');
+}
+
+// v0.1.0-reader-review: 跳页 dialog
+function openJumpDialog(): void {
+  jumpDialogValue.value = reader.currentSpreadIndex + 1;
+  jumpDialogRef.value?.showModal();
+  // 自动 focus input (showModal 后需 nextTick 才能 querySelector)
+  void nextTick(() => {
+    jumpDialogRef.value?.querySelector<HTMLInputElement>('input[type="number"]')?.focus();
+  });
+}
+function closeJumpDialog(): void {
+  jumpDialogRef.value?.close();
+}
+function submitJumpDialog(ev: Event): void {
+  ev.preventDefault();
+  const page = Number(jumpDialogValue.value);
+  if (!Number.isFinite(page) || page < 1) return;
+  const total = pageUrls.value.length;
+  if (total === 0) return;
+  const target = Math.min(Math.max(1, Math.floor(page)), total) - 1;
+  const singlePage = settings.readerDefaultMode === 'single';
+  const spreads = SpreadPlanner.plan(total, true, singlePage);
+  const idx = SpreadPlanner.spreadIndexForPage(target, spreads);
+  reader.jumpToSpread(idx);
+  slideshow.reset();
+  closeJumpDialog();
+}
+
+function onShowTouchRegions(): void {
+  showTouchRegions.value = !showTouchRegions.value;
 }
 
 const bookId = computed(() => Number(route.params.bookId));
@@ -339,6 +390,30 @@ async function onNextVolume() {
   // 末页已 pause, 用户手动按 next-volume 按钮 (9 宫格右下) 或菜单触发.
 }
 
+/**
+ * v0.1.0-reader-review-fix-10: mode 切换时重算 spreads + 保持当前页码.
+ *  - 双页 spreads = {0,1},{1,3},{3,5},... size=2
+ *  - 单页 spreads = {0,1},{1,2},{2,3},... size=1
+ *  - 不重算 → wheel nextPage 跳 2 张图 (spread 是双页 size)
+ *  - 同时按当前页号 (old spread.start) 在新 spreads 里找对应 spread, 重设 spreadIndex.
+ *    否则同一 spreadIndex 在新 spreads 里指向不同页号 (用户报告: 单页第8切双页变14)
+ */
+function recomputeSpreadsForMode(): void {
+  const total = pageUrls.value.length;
+  if (total === 0) return;
+  const singlePage = settings.readerDefaultMode === 'single';
+  const oldSpreads = reader.spreads;
+  // 找到当前页 (0-indexed) 在旧 spreads 里的位置
+  const oldSpread = oldSpreads[reader.currentSpreadIndex];
+  const currentPage0 = oldSpread?.start ?? reader.currentSpreadIndex;
+  const newSpreads = SpreadPlanner.plan(total, true, singlePage);
+  // 在新 spreads 里找包含 currentPage0 的 spread
+  const newIndex = SpreadPlanner.spreadIndexForPage(currentPage0, newSpreads);
+  reader.spreads = newSpreads;
+  reader.currentSpreadIndex = newIndex;
+  log('[ReaderView/recomputeSpreadsForMode] mode=', settings.readerDefaultMode, 'page=', currentPage0 + 1, '→ spreadIndex=', newIndex, '(spreads.length=', newSpreads.length, ')');
+}
+
 onMounted(async () => {
   log('[ReaderView/onMounted] start');
   await loadBook();
@@ -412,6 +487,16 @@ watch(
     if (v) void onNextVolume();
   },
 );
+
+// v0.1.0-reader-review-fix-7: mode 切换重算 spreads (双页 ↔ 单页 size 不同)
+// + 加 log 验证 Pinia 反应. settings.$subscribe 也可作为 fallback 触发.
+watch(
+  () => settings.readerDefaultMode,
+  (newMode, oldMode) => {
+    log('[ReaderView/watch] readerDefaultMode', oldMode, '→', newMode);
+    recomputeSpreadsForMode();
+  },
+);
 </script>
 
 <template>
@@ -432,7 +517,7 @@ watch(
     >
       <p class="text-error text-sm">{{ errorMessage }}</p>
       <button
-        class="px-3 py-1.5 rounded border border-white/10 bg-surface-1 text-text-secondary text-xs hover:bg-surface-light hover:text-text-primary transition-colors"
+        class="px-3 py-1.5 rounded xp-bd bg-surface-1 text-text-secondary text-xs hover:bg-surface-light hover:text-text-primary transition-colors"
         data-test="reader-back-btn"
         @click="router.push('/')"
       >
@@ -448,8 +533,10 @@ watch(
       :initial-spread-index="reader.currentSpreadIndex"
       :mode="settings.readerDefaultMode"
       :title="reader.title"
+      :show-touch-regions="showTouchRegions"
+      :direction="settings.defaultReadDirection"
       @back="router.push('/')"
-      @toggle-mode="settings.readerDefaultMode === 'single' ? settings.update('reader_default_mode', 'double') : settings.update('reader_default_mode', 'single')"
+      @toggle-mode="() => settings.cycleReaderMode()"
       @open-main-menu="showMainMenu = true"
     />
 
@@ -464,13 +551,14 @@ watch(
       :is-slideshow-playing="slideshow.isPlaying"
       :slideshow-direction="slideshow.direction"
       :is-liked="(book?.isFavorite ?? false)"
-      @jump-page="(i: number) => reader.jumpToSpread(i)"
+      @open-jump-input="openJumpDialog"
+      @show-touch-regions="onShowTouchRegions"
       @back="router.push('/')"
-      @cycle-mode="settings.update('reader_default_mode', settings.readerDefaultMode === 'single' ? 'double' : 'single')"
-      @cycle-direction="slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward')"
+      @cycle-mode="() => settings.cycleReaderMode()"
+      @cycle-direction="() => settings.cycleReadDirection()"
       @scale-change="(m: ScaleMode) => settings.setScaleMode(m)"
-      @toggle-slideshow="slideshow.toggle()"
-      @toggle-slideshow-direction="slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward')"
+      @toggle-slideshow="() => slideshow.toggle()"
+      @toggle-slideshow-direction="onToggleSlideshowDirection"
       @navigate="(p: string) => router.push(p)"
       @add-to-library="book?.id != null && setFavorite(book.id, true)"
       @toggle-like="book?.id != null && toggleLike(book.id)"
@@ -484,7 +572,7 @@ watch(
       :y="ctxMenu.y"
       :scale-mode="settings.currentScaleMode"
       :mode="settings.readerDefaultMode"
-      :direction="slideshow.direction === 'forward' ? 'ltr' : 'rtl'"
+      :direction="settings.defaultReadDirection"
       :is-slideshow-playing="slideshow.isPlaying"
       @close="closeCtxMenu"
       @scale-change="onCtxScaleChange"
@@ -494,5 +582,41 @@ watch(
       @jump-page="onCtxJumpPage"
       @back="onCtxBack"
     />
+
+    <!-- 跳页 dialog (主菜单"跳页" / 右键"跳页" 都打开) -->
+    <dialog
+      ref="jumpDialogRef"
+      class="bg-surface-1 xp-bd rounded-lg p-6 backdrop:bg-black/60 text-text-primary"
+      data-test="jump-dialog"
+    >
+      <form class="flex flex-col gap-3" @submit="submitJumpDialog">
+        <h3 class="text-base font-semibold">{{ t('reader.menu.jump') }}</h3>
+        <label class="flex items-center gap-2 text-xs text-text-secondary">
+          <span>{{ t('reader.jumpTo') }}</span>
+          <input
+            v-model.number="jumpDialogValue"
+            type="number"
+            min="1"
+            :max="pageUrls.length"
+            class="w-20 px-2 py-1 rounded bg-surface-inset xp-bd text-text-primary text-sm focus:outline-none focus:border-accent"
+            data-test="jump-dialog-input"
+          />
+          <span class="text-text-muted">/ {{ pageUrls.length }}</span>
+        </label>
+        <div class="flex justify-end gap-2 mt-2">
+          <button
+            type="button"
+            class="px-3 py-1.5 rounded text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+            data-test="jump-dialog-cancel"
+            @click="closeJumpDialog"
+          >{{ t('common.cancel') }}</button>
+          <button
+            type="submit"
+            class="px-3 py-1.5 rounded text-xs bg-accent text-white hover:bg-accent-hover transition-colors"
+            data-test="jump-dialog-go"
+          >Go</button>
+        </div>
+      </form>
+    </dialog>
   </main>
 </template>

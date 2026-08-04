@@ -44,6 +44,8 @@ export default {
       fitWidth: 'Fit Width',
       fitHeight: 'Fit Height',
       original: 'Original',
+      fullScreen: 'Full Screen',
+      stretch: 'Stretch',
     },
     continue: {
       off: 'Off',
@@ -99,6 +101,7 @@ export default {
     play: 'Play',
     pause: 'Pause',
     control: 'Slideshow controls',
+    toggle: 'Toggle slideshow',
   },
   fileBrowser: {
     title: 'File Browser',
