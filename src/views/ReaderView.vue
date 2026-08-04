@@ -155,6 +155,7 @@ async function loadBook() {
       initialSpreadIndex,
     });
     log('[ReaderView/loadBook] reader.openBook done, status=ready');
+    status.value = 'ready';
   } catch (e) {
     log('[ReaderView/loadBook] EXCEPTION:', e, 'stack:', e instanceof Error ? e.stack : '');
     errorMessage.value = e instanceof Error ? e.message : String(e);
