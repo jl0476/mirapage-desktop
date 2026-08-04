@@ -20,9 +20,10 @@
  *  - Cluster B #8: chrome 随 slideshow.isPlaying 自动隐藏 — autoHide = isPlaying.
  *    hovered 时解除 autoHide 临时显示, 2s 后重新隐藏.
  */
-import { computed, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSlideshowStore } from '@/stores/slideshow';
+import type { ScaleMode } from '@/lib/readerSettings';
 
 interface Props {
   title: string;
@@ -32,8 +33,10 @@ interface Props {
   chromeVisible: boolean;
   /** 鼠标在 reader 容器内 (hover 时) — 控制轮播控制条显示 */
   hovered?: boolean;
+  /** 当前缩放模式 (受控; 切换时 emit scale-change) */
+  scaleMode?: ScaleMode;
 }
-const props = withDefaults(defineProps<Props>(), { hovered: false });
+const props = withDefaults(defineProps<Props>(), { hovered: false, scaleMode: 'fit-screen' });
 
 type Emits = {
   (e: 'next'): void;
@@ -41,8 +44,28 @@ type Emits = {
   (e: 'toggle-mode'): void;
   (e: 'jump', page: number): void;
   (e: 'open-menu'): void;
+  (e: 'scale-change', mode: ScaleMode): void;
 };
 const emit = defineEmits<Emits>();
+
+/** 6 种缩放模式 (对齐 PV ScaleMenuRow) */
+const SCALE_MODES: ScaleMode[] = [
+  'fit-screen', 'fit-width', 'fit-height',
+  'original', 'full-screen', 'stretch',
+];
+
+// 缩放下拉 (CLAUDE.md §1.3 三层结构 + click-outside)
+const scaleOpen = ref(false);
+const scaleDropdownRef = ref<HTMLElement | null>(null);
+
+function onScaleSelect(m: ScaleMode): void {
+  emit('scale-change', m);
+  scaleOpen.value = false;
+}
+
+function onScaleMouseDown(e: MouseEvent): void {
+  if (!scaleDropdownRef.value?.contains(e.target as Node)) scaleOpen.value = false;
+}
 
 const { t } = useI18n();
 const slideshow = useSlideshowStore();
@@ -83,8 +106,10 @@ watch(() => props.hovered, (v) => {
   if (v) flashOnHover();
 });
 
+onMounted(() => document.addEventListener('mousedown', onScaleMouseDown));
 onUnmounted(() => {
   if (hoverTimer !== null) clearTimeout(hoverTimer);
+  document.removeEventListener('mousedown', onScaleMouseDown);
 });
 
 /** Cluster B #8: chrome 可见 = chromeVisible && !autoHide && (hovered || hoveredVisible) */
@@ -113,6 +138,33 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       <span class="font-mono text-text-secondary tabular-nums mix-blend-difference" data-test="page-indicator">
         {{ currentPage }} / {{ totalPages }}
       </span>
+      <div class="relative" ref="scaleDropdownRef">
+        <button
+          type="button"
+          class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="scale-trigger"
+          :aria-label="t('reader.menu.scale')"
+          @click="scaleOpen = !scaleOpen"
+        >
+          {{ props.scaleMode }}
+        </button>
+        <div
+          v-if="scaleOpen"
+          class="absolute right-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl"
+        >
+          <button
+            v-for="m in SCALE_MODES"
+            :key="m"
+            type="button"
+            class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light"
+            :class="m === props.scaleMode ? 'text-accent' : 'text-text-secondary'"
+            data-test="scale-option"
+            @click="onScaleSelect(m)"
+          >
+            <span>{{ m }}</span>
+          </button>
+        </div>
+      </div>
       <button
         type="button"
         class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"

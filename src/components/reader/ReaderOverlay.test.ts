@@ -179,4 +179,49 @@ describe('ReaderOverlay.vue', () => {
     const indicator = w.find('[data-test="page-indicator"]');
     expect(indicator.classes()).toContain('mix-blend-difference');
   });
+
+  // ─── 需求2: 顶栏缩放下拉 (6 种 ScaleMode) ───
+
+  it('点击缩放 trigger 展开 6 个选项', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
+    const trigger = w.find('[data-test="scale-trigger"]');
+    expect(trigger.exists()).toBe(true);
+    expect(trigger.text()).toContain('fit-screen');
+
+    await trigger.trigger('click');
+    const opts = w.findAll('[data-test="scale-option"]');
+    expect(opts.length).toBe(6);
+  });
+
+  it('选某项 emit scale-change', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
+    await w.find('[data-test="scale-trigger"]').trigger('click');
+    await w.findAll('[data-test="scale-option"]')[2].trigger('click');
+    expect(w.emitted('scale-change')?.[0]).toEqual(['fit-height']);
+  });
+
+  it('当前 scaleMode 对应选项高亮 (text-accent)', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-width' });
+    await w.find('[data-test="scale-trigger"]').trigger('click');
+    const opts = w.findAll('[data-test="scale-option"]');
+    // fit-width 是 SCALE_MODES[1]
+    expect(opts[1].classes()).toContain('text-accent');
+    expect(opts[0].classes()).not.toContain('text-accent');
+  });
+
+  it('点击外部关闭 dropdown', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
+    await w.find('[data-test="scale-trigger"]').trigger('click');
+    expect(w.find('[data-test="scale-option"]').exists()).toBe(true);
+    // 模拟点击外部 — 触发 document mousedown
+    document.dispatchEvent(new MouseEvent('mousedown'));
+    await w.vm.$nextTick();
+    expect(w.find('[data-test="scale-option"]').exists()).toBe(false);
+  });
+
+  it('未传 scaleMode 时默认 fit-screen', () => {
+    const w = makeWrapper({ hovered: true });
+    const trigger = w.find('[data-test="scale-trigger"]');
+    expect(trigger.text()).toContain('fit-screen');
+  });
 });
