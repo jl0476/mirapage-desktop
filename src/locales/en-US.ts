@@ -69,6 +69,10 @@ export default {
     prev: 'Previous',
     next: 'Next',
     jumpTo: 'Jump to',
+    like: 'Like',
+    unlike: 'Unlike',
+    openBookmarks: 'Open bookmarks',
+    showTouchRegions: 'Show touch regions',
     menu: {
       back: 'Back',
       title: 'Reader controls',

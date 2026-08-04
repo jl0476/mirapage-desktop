@@ -70,6 +70,10 @@ export default {
     prev: '上一页',
     next: '下一页',
     jumpTo: '跳页',
+    like: '喜欢',
+    unlike: '取消喜欢',
+    openBookmarks: '打开书签',
+    showTouchRegions: '显示触控区',
     menu: {
       back: '返回',
       title: '阅读控制',

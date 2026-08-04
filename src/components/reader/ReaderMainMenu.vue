@@ -1,26 +1,46 @@
 /**
- * ReaderMainMenu.vue — v0.1.0-module2.0 全屏阅读控制 Dialog
+ * ReaderMainMenu.vue — 全屏阅读控制 Dialog（v0.1.0-module3.0.2 + 需求4-C）
  *
- * 参考 Perfect-Viewer `ReaderMainMenu.kt`:
+ * 参考 PerfectViewer `ReaderMainMenu.kt` 全套 5 组菜单项:
  * - 全屏半透明黑色 (bg-black/88)
  * - 不常驻 toolbar, 不自动 fade
  * - 中央 / 顶中 触发 (useReaderTouchZones 派发 openMenu)
  * - 切换模式/方向/缩放保持打开
  * - 跳页 / 路由 / 关闭按钮 关闭
+ *
+ * 5 组:
+ * 1. 顶栏: 返回 + 标题 + 页码 + 跳页
+ * 2. 导航组: 文件浏览器 / 书库 / 历史 / 账户 / 设置
+ * 3. 阅读组: 模式 / 方向 / 缩放(下拉) / 幻灯片 / 幻灯片方向
+ * 4. 书库工具组: 加入书库 / 喜欢 / 加书签 / 打开书签 / 显示触控区
+ * 5. 关闭
  */
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
+import type { ScaleMode } from '@/lib/readerSettings';
 
 interface Props {
   show: boolean;
   title?: string;
   currentSpreadIndex: number;
   totalSpreads: number;
+  scaleMode?: ScaleMode;
+  mode?: 'single' | 'double';
+  direction?: 'ltr' | 'rtl';
+  isSlideshowPlaying?: boolean;
+  slideshowDirection?: 'forward' | 'backward';
+  isLiked?: boolean;
 }
 const props = withDefaults(defineProps<Props>(), {
   title: '',
   totalSpreads: 0,
+  scaleMode: 'fit-screen',
+  mode: 'single',
+  direction: 'ltr',
+  isSlideshowPlaying: false,
+  slideshowDirection: 'forward',
+  isLiked: false,
 });
 
 const emit = defineEmits<{
@@ -29,6 +49,14 @@ const emit = defineEmits<{
   (e: 'jump-page', index: number): void;
   (e: 'cycle-mode'): void;
   (e: 'cycle-direction'): void;
+  (e: 'scale-change', m: ScaleMode): void;
+  (e: 'toggle-slideshow'): void;
+  (e: 'toggle-slideshow-direction'): void;
+  (e: 'navigate', path: string): void;
+  (e: 'add-to-library'): void;
+  (e: 'toggle-like'): void;
+  (e: 'add-bookmark'): void;
+  (e: 'open-bookmarks'): void;
 }>();
 
 const { t } = useI18n();
@@ -37,11 +65,43 @@ const localShow = ref(props.show);
 watch(() => props.show, (v) => { localShow.value = v; });
 watch(localShow, (v) => { emit('update:show', v); });
 
+const SCALE_MODES: ScaleMode[] = [
+  'fit-screen', 'fit-width', 'fit-height',
+  'original', 'full-screen', 'stretch',
+];
+const scaleOpen = ref(false);
+
 function close(): void { localShow.value = false; }
 function onBack(): void { close(); emit('back'); }
 function onJumpPage(): void { close(); emit('jump-page', 0); }
 function onCycleMode(): void { emit('cycle-mode'); }
 function onCycleDirection(): void { emit('cycle-direction'); }
+function onScaleChange(m: ScaleMode): void { emit('scale-change', m); scaleOpen.value = false; }
+function onToggleSlideshow(): void { emit('toggle-slideshow'); }
+function onToggleSlideshowDirection(): void { emit('toggle-slideshow-direction'); }
+
+interface NavItem { path: string; key: string }
+const NAV_ITEMS: NavItem[] = [
+  { path: '/', key: 'nav.fileBrowser' },
+  { path: '/library', key: 'nav.library' },
+  { path: '/history', key: 'nav.history' },
+  { path: '/accounts', key: 'nav.accounts' },
+  { path: '/settings', key: 'nav.settings' },
+];
+
+function onNav(path: string): void {
+  close();
+  emit('navigate', path);
+}
+
+function onAddToLibrary(): void { close(); emit('add-to-library'); }
+function onToggleLike(): void { close(); emit('toggle-like'); }
+function onAddBookmark(): void { close(); emit('add-bookmark'); }
+function onOpenBookmarks(): void {
+  close();
+  emit('open-bookmarks');
+  emit('navigate', '/bookmarks');
+}
 </script>
 
 <template>
@@ -54,6 +114,7 @@ function onCycleDirection(): void { emit('cycle-direction'); }
       :aria-label="t('reader.menu.title')"
       data-test="reader-main-menu"
     >
+      <!-- 1. 顶栏 -->
       <header class="flex items-center justify-between gap-3">
         <button
           class="px-3 py-1.5 rounded text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
@@ -77,23 +138,102 @@ function onCycleDirection(): void { emit('cycle-direction'); }
         </button>
       </header>
 
+      <!-- 2. 导航组 -->
+      <section class="flex flex-col gap-1">
+        <button
+          v-for="n in NAV_ITEMS"
+          :key="n.path"
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-nav"
+          @click="onNav(n.path)"
+        >{{ t(n.key) }}</button>
+      </section>
+
+      <div class="h-px bg-white/10" />
+
+      <!-- 3. 阅读组 -->
       <section class="flex flex-col gap-1">
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="menu-mode"
           @click="onCycleMode"
         >
-          {{ t('reader.menu.mode') }}
+          {{ t('reader.menu.mode') }} · {{ mode }}
         </button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="menu-direction"
           @click="onCycleDirection"
         >
-          {{ t('reader.menu.direction') }}
+          {{ t('reader.menu.direction') }} · {{ direction }}
+        </button>
+        <div class="relative" data-test="menu-scale">
+          <button
+            class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+            @click="scaleOpen = !scaleOpen"
+          >
+            {{ t('reader.menu.scale') }} · {{ scaleMode }}
+          </button>
+          <div
+            v-if="scaleOpen"
+            class="ml-3 flex flex-col gap-1 mt-1"
+          >
+            <button
+              v-for="m in SCALE_MODES"
+              :key="m"
+              class="text-left px-3 py-1.5 rounded text-xs hover:bg-surface-light hover:text-text-primary transition-colors"
+              :class="m === scaleMode ? 'text-accent' : 'text-text-secondary'"
+              data-test="menu-scale-option"
+              @click="onScaleChange(m)"
+            >{{ m }}</button>
+          </div>
+        </div>
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          @click="onToggleSlideshow"
+        >
+          {{ isSlideshowPlaying ? t('slideshow.pause') : t('slideshow.play') }}
+        </button>
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          @click="onToggleSlideshowDirection"
+        >
+          {{ t('slideshow.direction') }} · {{ slideshowDirection }}
         </button>
       </section>
 
+      <div class="h-px bg-white/10" />
+
+      <!-- 4. 书库工具组 -->
+      <section class="flex flex-col gap-1">
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-lib"
+          @click="onAddToLibrary"
+        >{{ t('fileBrowser.addToLibrary') }}</button>
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-lib"
+          @click="onToggleLike"
+        >{{ isLiked ? t('reader.unlike') : t('reader.like') }}</button>
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-lib"
+          @click="onAddBookmark"
+        >{{ t('bookmarks.add') }}</button>
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-lib"
+          @click="onOpenBookmarks"
+        >{{ t('reader.openBookmarks') }}</button>
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-lib"
+          @click="close"
+        >{{ t('reader.showTouchRegions') }}</button>
+      </section>
+
+      <!-- 5. 关闭 -->
       <div class="mt-auto flex justify-end">
         <button
           class="px-4 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
