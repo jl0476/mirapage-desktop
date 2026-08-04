@@ -4,7 +4,7 @@
  *  - 老的 4 emit 事件 (back / jump-page / cycle-mode / cycle-direction / update:show)
  *  - 新增 PV 全套: 导航组(navigate) / 缩放下拉(scale-change) / 幻灯片(toggle-slideshow,
  *    toggle-slideshow-direction) / 书库工具组(add-to-library, toggle-like, add-bookmark,
- *    open-bookmarks)
+ *    打开书签走 navigate(/bookmarks))
  *  + props + i18n + Teleport + 不自动 fade
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -178,12 +178,12 @@ describe('ReaderMainMenu.vue', () => {
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
-  it('点打开书签 → emit open-bookmark + navigate(/bookmarks)', async () => {
+  it('点打开书签 → emit navigate(/bookmarks) + 关闭', async () => {
     const w = mountMenu();
     (findAllInBody('menu-lib')[3] as HTMLElement).click();
     await w.vm.$nextTick();
-    expect(w.emitted('open-bookmarks')).toBeTruthy();
     expect(w.emitted('navigate')?.[0]).toEqual(['/bookmarks']);
+    expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
   it('缩放下拉展开显示全部 ScaleMode', async () => {

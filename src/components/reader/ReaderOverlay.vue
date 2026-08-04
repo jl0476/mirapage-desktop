@@ -150,7 +150,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
         </button>
         <div
           v-if="scaleOpen"
-          class="absolute right-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl"
+          class="absolute right-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl isolate"
         >
           <button
             v-for="m in SCALE_MODES"

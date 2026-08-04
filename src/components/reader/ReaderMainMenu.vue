@@ -56,7 +56,6 @@ const emit = defineEmits<{
   (e: 'add-to-library'): void;
   (e: 'toggle-like'): void;
   (e: 'add-bookmark'): void;
-  (e: 'open-bookmarks'): void;
 }>();
 
 const { t } = useI18n();
@@ -99,7 +98,6 @@ function onToggleLike(): void { close(); emit('toggle-like'); }
 function onAddBookmark(): void { close(); emit('add-bookmark'); }
 function onOpenBookmarks(): void {
   close();
-  emit('open-bookmarks');
   emit('navigate', '/bookmarks');
 }
 </script>
