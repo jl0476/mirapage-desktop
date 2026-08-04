@@ -1,4 +1,4 @@
-# CLAUDE.md
+/res/# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -142,10 +142,11 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 8 | WebDAV 协议层 | ✅ 真实现（`reqwest` + PROPFIND + Range GET） |
 | 9 | 跨平台分发 | 🟡 CI 自动化 ✅；代码签名 / macOS `.dmg` / Linux `.AppImage` / 自动更新 ❌（`updater` 插件占位） |
 | 3.0+ | 设置面板完整化 | ✅ `v0.1.0-module3.0-settings`：Settings.vue 重写（5 section + 锚点 nav）+ 9 宫格触控方案 + theme 切换 + i18n 45 keys（spec：`docs/superpowers/specs/2026-08-03-settings-panel-design.md`） |
+| 3.0.2 | 阅读器打磨 + 立即阅读入口 | ✅ `v0.1.0-module3.0.2-reader-polish` 3 cluster（spec：`docs/superpowers/specs/2026-08-04-reader-polish-design.md`）：<br>**A 立即阅读入口** — `useReaderActions.readFromImage(image)` 双击图片 / 选中图片立即阅读（从该图开始）；`?at=imageName` query 携带起始图；FileBrowser `canReadNow` 扩到图片；ReaderView `route.query.at` 解析后优先用该图所在 spread（不做末页钳位）<br>**B 阅读器 UI 修复** — OSD `showNavigationControl: false` 修 #7 左上 X 图标 + #5 按钮被拦截；`inputBindings.closeReader: ['Escape']` + `useReaderHotkeys.dispatch` → `router.back()`；`ReaderOverlay` pointer-events 修复（外层 `pointer-events-none` + 按钮 `pointer-events-auto`）；`chromeShow = chromeVisible && !autoHide && (hovered || hoveredVisible)`（autoHide = isPlaying）实现 #8 幻灯片时隐藏 + hover 2s 临时显示；`tauri.conf.json` `minWidth: 800→480, minHeight: 600→360`<br>**C 6 种缩放** — `useReaderScale` composable + `settings.currentScaleMode` + `setScaleMode(mode)` 持久化为 `scale_mode` DB key；SinglePageViewer / DoublePageViewer `defineExpose({ getViewer/getBounds })` 给父级取 OSD 实例；6 mode 全接（fit-screen / fit-width / fit-height / original / full-screen / stretch）；9 宫格 `fitWidth` 改调 `setScaleMode`（立即 apply + 持久化）<br>Bugfix: `8c04c34` 恢复 `status.value = 'ready'`（被 Cluster A 改动误删，导致"加载中...卡住"）；`83cc3d0` reader 排序与 file browser 一致（`effectiveSortField` + `sortEntries`，含 per-folder override；`?at=` 按 name 找 index 不受排序影响） |
 
 **构建**：见 [`BUILD.md`](./BUILD.md)。Rust ≥ 1.96 需 `Cargo.toml` 的 `indexmap` 修复（schemars/indexmap 兼容性，详见 BUILD.md §2）。
 
-**CI 自动化**：GitHub Actions 已端到端验证打包链路——`.github/workflows/verify.yml`（push/PR 触发：前端 type-check + test + build + 后端 `cargo check`）和 `.github/workflows/release.yml`（push `v*` tag 或手动触发：完整 release 构建 + 上传 portable exe 到 GitHub Release）。3 个 Release tag 已发布：`v0.1.0-ci-test`（MSI + NSIS 安装包）、`v0.1.0-ci-portable-v2`（portable 单 exe，当前可用）。完整描述、产物路径、tag 发版命令见 [BUILD.md §5.3](./BUILD.md)。
+**CI 自动化**：GitHub Actions 已端到端验证打包链路——`.github/workflows/verify.yml`（push/PR 触发：前端 type-check + test + build + 后端 `cargo check`）和 `.github/workflows/release.yml`（push `v*` tag 或手动触发：完整 release 构建 + 上传 portable exe 到 GitHub Release）。4 个 Release tag 已发布：`v0.1.0-ci-test`（MSI + NSIS 安装包）、`v0.1.0-ci-portable-v2`（portable 单 exe，当前可用）、`v0.1.0-module3.0-settings`、`v0.1.0-module3.0.2-reader-polish`。完整描述、产物路径、tag 发版命令见 [BUILD.md §5.3](./BUILD.md)。
 
 **待验证**：本地 Windows 原生环境的首次直接 `cargo check` / `cargo build` / `tauri build` 仍有待验证——CI 跑通不等于本地一定能跑（Rust 工具链版本、MSVC Build Tools 完整性、文件路径等因素都可能影响）。
 
@@ -402,7 +403,7 @@ vi.mock('@/lib/tauri', async () => {
 **4.4 必须测试**
 
 - 所有 `*.test.ts` 文件**先写测试**（TDD 风格）。
-- 单测跑：220 → 259 用例（v0.1.0-module1.22 增量），目标 0 fail。
+- 单测跑：220 → 259 → 393 → **397** 用例（v0.1.0-module3.0.2-reader-polish 增 4 条 reader 排序测试），目标 0 fail。
 - 任何新组件至少 1 个 default + 1 个 edge case（null / empty / disabled）。
 
 ### 5. Tag / Commit / Branch 约定
@@ -468,6 +469,8 @@ git push github v0.1.0-module1.NN
 - **Settings section 卡片化**（v0.1.0-module3.0-settings）：5 个 section 各自 `bg-surface-1 xp-bd rounded-lg p-6`，parent `flex flex-col gap-6 max-w-[800px]` 自带间距；删 `<hr class="border-white/5 my-8">` 暗色专用分隔（light 不可见）。
 - **Bookmarks / 旧 scoped CSS 视图迁移**（v0.1.0-module3.0-settings）：所有 `<style scoped>` 里 hardcoded hex CSS（`#2a2a2a` input bg / `#444` border 等）必须改用 Tailwind utility + xp-bd token。逐个迁移：Bookmarks.vue 已重写。
 - **light theme token 1:1 迁移自 xplorer-next**（v0.1.0-module3.0-settings）：`tailwind.css` 在 `@theme` 块定义暗色 Tokyo Night token，在 `:root:not(.dark)` 块覆写浅色 xplorer-next `.theme-light` 同款 token（`#ffffff` bg、`#1e293b` text-primary、`#3b82f6` accent 等）。`useThemeSync` 切换 `html.dark` class。基线仍是 Tokyo Night 暗色（CLAUDE.md §1.1 设计基线不变）。
+- **reader 排序与 file browser 一致**（v0.1.0-module3.0.2-reader-polish, `83cc3d0`）：`ReaderView.loadBook` 用 `useFileBrowserStore().effectiveSortField / .effectiveSortAscending` 替代硬编码 `naturalSort(name)`，复用 `lib/fileSort.sortEntries`；含 per-folder override（`directorySort` store 自动 resolve）。`?at=` 仍按 name 找 spread index，不受排序影响。**不要**在 reader 里单独定义 `sortEntries` 逻辑，**必须**复用 fileSort。
+- **status.value = 'ready' 不能漏**（v0.1.0-module3.0.2-reader-polish, `8c04c34` 修复）：`openBook` 之后必须 `status.value = 'ready'`，否则 ReaderScreen v-else-if 永远不挂载。CLAUDE.md §0.1 注释强调过此约束（"给 openBook 之前准备 holds，openBook 之后立刻 ready"）。Contributors 改 loadBook 时务必保留此行。
 
 ---
 

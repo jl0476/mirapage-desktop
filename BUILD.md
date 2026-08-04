@@ -343,8 +343,16 @@ git push github v0.1.0
 | `v0.1.0-module2.1` | `mirapage-desktop.exe` | Tauri 2 IPC 嵌套 args + asset protocol + history sourceDescriptor 修复 |
 | `v0.1.0-module3.0` | `mirapage-desktop.exe` | 书库 / 阅览记录 / directory_sort 重写（Android schema 对齐） |
 | `v0.1.0-module3.0.1` | `mirapage-desktop.exe` | 3 个反馈 bug 修复（history 仅 reader 触发 / readStatus 走 history∩progress / Library 路由 path param） |
+| `v0.1.0-module3.0-settings` | `mirapage-desktop.exe` | Settings 5 section + 9 宫格触控方案 + theme 切换 + i18n 45 keys |
+| `v0.1.0-module3.0.2-reader-polish` | `mirapage-desktop.exe` | 阅读器打磨 3 cluster：立即阅读入口（双击图片 + `?at=`）+ UI 修复（OSD nav 关闭 / ESC closeReader / chrome autoHide / pointer-events / 窗口 480×360）+ 6 种缩放 + reader 排序与 file browser 一致 |
 
-> **当前状态**：本地 `scripts/build-portable.ps1` 已端到端验证通过（17.98 MB / MD5 一致）。后续模块首选本地脚本验证，CI 作为最后一道关。
+> **当前状态**：本地 `tauri -- build --no-bundle` 流程已端到端验证通过（17.95 MB / MD5 一致，参考 §5.1 末段命令）。后续模块首选本地构建验证，CI 作为最后一道关。
+>
+> **v0.1.0-module3.0.2-reader-polish 关键 fix 记录**：
+> - `8c04c34` 恢复 `status.value = 'ready'`（Cluster A 改动误删，导致"加载中...卡住"）
+> - `83cc3d0` reader 排序改用 `useFileBrowserStore().effectiveSortField` + `sortEntries`（与 file browser 完全一致，含 per-folder override）
+> - 单元测试：397 全过（393 + 4 新增 reader 排序测试）
+> - 本地 exe MD5 `1f753a594d026a8c303697b4e375930c`
 
 ---
 

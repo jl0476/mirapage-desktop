@@ -70,6 +70,12 @@
 > - **Settings 面板卡片化**（5 section + 锚点 nav + `gap-6` 间距替代 `<hr>` 分隔线）
 > - **Breadcrumb 去掉内层圆角矩形框**（纯文字 + chevron，nav 仅 `xp-bdb` 分隔条）
 
+> ✅ **已落地**（v0.1.0-module3.0.2-reader-polish，spec：`docs/superpowers/specs/2026-08-04-reader-polish-design.md`）：
+> - **立即阅读入口（双击图片）** — `useReaderActions.readFromImage(image)` 用父目录合成 MediaEntry 调 `ensureBookId(favorite=false)`，路由 `?at=imageName` 携带起始图。ReaderView 解析 `route.query.at` 优先用该图所在 spread（显式选择不做末页钳位）。FileBrowser `canReadNow` 扩到图片（之前仅 isDirectory）。
+> - **阅读器 UI 修复** — OSD `showNavigationControl:false` 修 #7 左上 X 图标 + #5 按钮拦截；`inputBindings.closeReader:['Escape']` + `useReaderHotkeys.dispatch → router.back()`（无 history 时 fallback `push('/')`）；`ReaderOverlay` pointer-events 修复（外层 `none` + 按钮 `auto`）；`chromeShow = chromeVisible && !autoHide && (hovered || hoveredVisible)`（`autoHide = slideshow.isPlaying`）实现 #8 幻灯片时隐藏 + hover 2s 临时显示；窗口 `minWidth 800→480, minHeight 600→360`。
+> - **6 种缩放**（`fit-screen / fit-width / fit-height / original / full-screen / stretch`）— `useReaderScale` composable 监听 `settings.currentScaleMode` 变化 → `applyScale`（fit-* 用 OSD `fitBoundsWithAlignment`，`original` 1:1 + 居中，`stretch` 取 `max(widthRatio, heightRatio)`）。SinglePageViewer / DoublePageViewer `defineExpose({ getViewer/getBounds })` 暴露给父级。9 宫格 `fitWidth` 改调 `setScaleMode`（立即 apply + 持久化）。
+> - **reader 排序与 file browser 一致** — `ReaderView.loadBook` 用 `useFileBrowserStore().effectiveSortField / .effectiveSortAscending`（含 per-folder override via `directorySort`）替代硬编码 `naturalSort(name)`，复用 `lib/fileSort.sortEntries`。`?at=` 仍按 name 找 spread index 不受排序影响。
+
 ---
 
 ## 2. 技术栈
@@ -988,6 +994,12 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 桌面端需实现全部 33 个设置项（与 Android `SettingsRepository.kt:45-85` 镜像）。持久化于 SQLite `settings` 表（key-value）。DataStore 名称 `"settings"`。
 
 > ✅ **落地状态**（v0.1.0-module3.0-settings，2026-08-03）：Settings.vue 重写为 5 section + 左侧锚点导航 + 9 宫格可视化编辑器。**已落地 12 项**（标 ✅ ），**已存 store 但 UI 未暴露 1 项**（`color_theme`，no UI），**未实现 20 项**（SMB/WebDAV/Cache/Download/Backup 等 Desktop 不适用子系统）。spec：`docs/superpowers/specs/2026-08-03-settings-panel-design.md`
+>
+> ✅ **v0.1.0-module3.0.2-reader-polish 增量**（spec：`docs/superpowers/specs/2026-08-04-reader-polish-design.md`）：
+> - `scale_mode` DB key 新增（与 `default_scale_mode` 区分；runtime scale 由 `setScaleMode(mode)` 持久化）
+> - reader 排序与 file browser 一致：`ReaderView.loadBook` 用 `useFileBrowserStore().effectiveSortField / .effectiveSortAscending`（含 per-folder override via `directorySort`）替代硬编码 `naturalSort(name)`
+> - 6 种缩放全接（fit-screen / fit-width / fit-height / original / full-screen / stretch）通过 `useReaderScale` composable 应用
+> - 立即阅读入口（双击图片）：`useReaderActions.readFromImage(image)` + 路由 `?at=imageName`
 
 | 分组 | Key | 类型 / 默认值 | 文案（中文） | UI 入口 | 控制的行为 | 落地 |
 |---|---|---|---|---|---|---|
