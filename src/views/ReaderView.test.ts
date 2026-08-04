@@ -475,4 +475,112 @@ describe('ReaderView.vue', () => {
     // 'c (1).jpg' 是 index 2 → singlePage spread = page 2
     expect(reader.currentSpreadIndex).toBe(2);
   });
+
+  // ─── Cluster A 增强: reader 排序与 file browser 排序一致 ───
+  // 当用户在 file browser 改了排序 (按 modifiedAt / size, ascending / descending),
+  // reader 打开同一文件夹时图片顺序应当一致 (而非总是按 name 字母序).
+
+  it('reader 排序跟随 fileBrowser.effectiveSortField=name (默认) → 按 name 字母序', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'z.jpg', path: '/test/manga/z.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
+      { name: 'm.jpg', path: '/test/manga/m.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
+    ] as never);
+    const fb = useFileBrowserStore();
+    fb.effectiveSortField = 'name';
+    fb.effectiveSortAscending = true;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 按 name 字母升序: a, m, z
+    const urls = reader.pages;
+    expect(urls[0]).toContain('a.jpg');
+    expect(urls[1]).toContain('m.jpg');
+    expect(urls[2]).toContain('z.jpg');
+  });
+
+  it('reader 排序跟随 fileBrowser.effectiveSortField=modifiedAt,ascending=true → 按修改时间正序', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
+    ] as never);
+    const fb = useFileBrowserStore();
+    fb.effectiveSortField = 'modifiedAt';
+    fb.effectiveSortAscending = true;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // modifiedAt 升序: b(100), c(200), a(300)
+    const urls = reader.pages;
+    expect(urls[0]).toContain('b.jpg');
+    expect(urls[1]).toContain('c.jpg');
+    expect(urls[2]).toContain('a.jpg');
+  });
+
+  it('reader 排序跟随 fileBrowser.effectiveSortField=size,ascending=false → 按大小倒序', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
+    ] as never);
+    const fb = useFileBrowserStore();
+    fb.effectiveSortField = 'size';
+    fb.effectiveSortAscending = false;  // 倒序
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // size 倒序: b(300), c(200), a(100)
+    const urls = reader.pages;
+    expect(urls[0]).toContain('b.jpg');
+    expect(urls[1]).toContain('c.jpg');
+    expect(urls[2]).toContain('a.jpg');
+  });
+
+  it('排序变化时 ?at= 仍指向双击的图片 (新顺序中的 spread index)', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
+    ] as never);
+    vi.mocked(getProgress).mockReset();
+    vi.mocked(getProgress).mockResolvedValue(null);
+    const fb = useFileBrowserStore();
+    fb.effectiveSortField = 'size';
+    fb.effectiveSortAscending = false;  // 倒序: b, c, a
+    const reader = useReaderStore();
+    useSlideshowStore();
+    // 双击 c.jpg (在新顺序中 index=1, spread=1)
+    const router = makeRouterWithQuery('/reader/7', { at: 'c.jpg' });
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 排序 b,c,a → c 的 spread = 1
+    expect(reader.currentSpreadIndex).toBe(1);
+  });
 });

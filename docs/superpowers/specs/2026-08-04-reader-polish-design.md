@@ -55,6 +55,7 @@
 | **chrome 自动隐藏触发** | `autoHide = slideshow.isPlaying` | 与 #8 描述"播放幻灯片时"精确对应；hover 解除 |
 | **缩放 6 模式全接** | fit-screen / fit-width / fit-height / original / full-screen / stretch | 用户明确选 6 模式 |
 | **OSD viewer 暴露** | `defineExpose({ viewer })` + `ref` 冒泡 | 无 provide/inject 间接层；测试时 mock `applyScale` 简单 |
+| **reader 排序** | `useFileBrowserStore().effectiveSortField / .effectiveSortAscending` | 与 FileList 完全一致（含 per-folder override via `directorySort`）。`?at=` 按 name 找 index 不受排序影响 |
 | **缩放运行时态 vs 默认值** | `currentScaleMode`（runtime）+ `defaultScaleMode`（新书初始值） | 双字段各司其职，避免 conflict |
 | **窗口最小尺寸** | `minWidth: 480, minHeight: 360` | 接近典型 4:3 漫画页比例；不破坏 sidebar/toolbar |
 
