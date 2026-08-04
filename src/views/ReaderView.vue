@@ -447,6 +447,7 @@ watch(
       :title="reader.title"
       @back="router.push('/')"
       @toggle-mode="settings.readerDefaultMode === 'single' ? settings.update('reader_default_mode', 'double') : settings.update('reader_default_mode', 'single')"
+      @open-main-menu="showMainMenu = true"
     />
 
     <ReaderMainMenu
