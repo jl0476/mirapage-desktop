@@ -108,9 +108,9 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
     data-test-ignore-touch-zones
   >
     <!-- 顶栏 (Cluster B #5 pointer-events-auto + #8 chromeShow 替换 chromeVisible) -->
-    <header v-if="chromeShow" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto" data-test="overlay-top">
-      <span class="flex-1 font-semibold truncate" data-test="title">{{ title }}</span>
-      <span class="font-mono text-text-secondary tabular-nums" data-test="page-indicator">
+    <header v-if="chromeShow" class="bg-black/40 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto mix-blend-difference" data-test="overlay-top">
+      <span class="flex-1 font-semibold truncate mix-blend-difference" data-test="title">{{ title }}</span>
+      <span class="font-mono text-text-secondary tabular-nums mix-blend-difference" data-test="page-indicator">
         {{ currentPage }} / {{ totalPages }}
       </span>
       <button
@@ -195,7 +195,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
     </div>
 
     <!-- 底栏 (Cluster B #5/#8: pointer-events-auto + chromeShow) -->
-    <footer v-if="chromeShow" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto" data-test="overlay-bottom">
+    <footer v-if="chromeShow" class="bg-black/40 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto mix-blend-difference" data-test="overlay-bottom">
       <button
         type="button"
         class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"

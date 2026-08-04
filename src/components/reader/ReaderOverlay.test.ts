@@ -154,4 +154,29 @@ describe('ReaderOverlay.vue', () => {
     const w = makeWrapper({ hovered: true });
     expect(w.find('[data-test="slideshow-control"]').exists()).toBe(true);
   });
+
+  // ─── 需求1: chrome 配色 (mix-blend-mode + 强化模糊) ───
+
+  it('顶栏含 backdrop-blur-xl 与 mix-blend-difference class', () => {
+    const w = makeWrapper({ hovered: true });
+    const top = w.find('[data-test="overlay-top"]');
+    expect(top.classes()).toContain('backdrop-blur-xl');
+    expect(top.classes()).toContain('mix-blend-difference');
+    // 标题 span 含 mix-blend-difference
+    const titleSpan = top.find('[data-test="title"]');
+    expect(titleSpan.classes()).toContain('mix-blend-difference');
+  });
+
+  it('底栏同样含 backdrop-blur-xl 与 mix-blend-difference', () => {
+    const w = makeWrapper({ hovered: true });
+    const bottom = w.find('[data-test="overlay-bottom"]');
+    expect(bottom.classes()).toContain('backdrop-blur-xl');
+    expect(bottom.classes()).toContain('mix-blend-difference');
+  });
+
+  it('页码 indicator 含 mix-blend-difference', () => {
+    const w = makeWrapper({ hovered: true });
+    const indicator = w.find('[data-test="page-indicator"]');
+    expect(indicator.classes()).toContain('mix-blend-difference');
+  });
 });
