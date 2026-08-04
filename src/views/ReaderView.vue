@@ -32,6 +32,8 @@ import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
+import ReaderContextMenu from '@/components/reader/ReaderContextMenu.vue';
+import type { ScaleMode } from '@/lib/readerSettings';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 const route = useRoute();
@@ -46,6 +48,44 @@ const errorMessage = ref('');
 const pageUrls = ref([] as string[]);
 const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
+// 需求4-A: 右键轻量上下文菜单
+const ctxMenu = ref({ visible: false, x: 0, y: 0 });
+
+function onContextMenu(e: MouseEvent): void {
+  // 只在 ready 状态 + reader 容器内触发；阻止浏览器默认菜单
+  if (status.value !== 'ready') return;
+  e.preventDefault();
+  ctxMenu.value = { visible: true, x: e.clientX, y: e.clientY };
+}
+function closeCtxMenu(): void {
+  ctxMenu.value.visible = false;
+}
+function onCtxScaleChange(m: ScaleMode): void {
+  void settings.setScaleMode(m);
+  closeCtxMenu();
+}
+function onCtxCycleMode(): void {
+  settings.update('reader_default_mode', settings.readerDefaultMode === 'single' ? 'double' : 'single');
+  closeCtxMenu();
+}
+function onCtxCycleDirection(): void {
+  slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward');
+  closeCtxMenu();
+}
+function onCtxToggleSlideshow(): void {
+  slideshow.toggle();
+  closeCtxMenu();
+}
+function onCtxJumpPage(): void {
+  // 复用主菜单的 jump-page 流程：打开主菜单让用户选页
+  showMainMenu.value = true;
+  slideshow.pause();
+  closeCtxMenu();
+}
+function onCtxBack(): void {
+  router.push('/');
+  closeCtxMenu();
+}
 
 const bookId = computed(() => Number(route.params.bookId));
 
@@ -376,6 +416,7 @@ watch(
     ref="containerRef"
     class="flex h-full bg-bg select-none"
     data-test="reader-view"
+    @contextmenu="onContextMenu"
   >
     <p v-if="status === 'loading'" class="m-auto text-text-muted text-sm">
       {{ t('common.loading') }}
@@ -419,5 +460,22 @@ watch(
       @cycle-direction="slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward')"
     >
     </ReaderMainMenu>
+
+    <ReaderContextMenu
+      v-if="ctxMenu.visible"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :scale-mode="settings.currentScaleMode"
+      :mode="settings.readerDefaultMode"
+      :direction="slideshow.direction === 'forward' ? 'ltr' : 'rtl'"
+      :is-slideshow-playing="slideshow.isPlaying"
+      @close="closeCtxMenu"
+      @scale-change="onCtxScaleChange"
+      @cycle-mode="onCtxCycleMode"
+      @cycle-direction="onCtxCycleDirection"
+      @toggle-slideshow="onCtxToggleSlideshow"
+      @jump-page="onCtxJumpPage"
+      @back="onCtxBack"
+    />
   </main>
 </template>
