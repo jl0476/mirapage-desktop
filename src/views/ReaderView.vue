@@ -474,7 +474,7 @@ watch(
       @navigate="(p: string) => router.push(p)"
       @add-to-library="book?.id != null && setFavorite(book.id, true)"
       @toggle-like="book?.id != null && toggleLike(book.id)"
-      @add-bookmark="book?.id != null && addBookmark(book.id, reader.currentSpreadIndex, null)"
+      @add-bookmark="book?.id != null && addBookmark(book.id, currentReadPage(), null)"
     >
     </ReaderMainMenu>
 
