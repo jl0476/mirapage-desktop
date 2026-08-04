@@ -88,16 +88,17 @@ describe('SinglePageViewer.vue', () => {
 });
 
 describe('SinglePageViewer OSD config', () => {
-  it('clickToZoom 与 dblClickDragToZoom 均为 false（不拦截 9 宫格 click）', () => {
+  it('clickToZoom 与 dblClickToZoom 均为 false（不拦截 9 宫格 click）', () => {
     (OpenSeadragon as unknown as { _reset: () => void })._reset();
     const w = mount(SinglePageViewer, {
       props: { imageUrl: 'file:///a.jpg' },
       attachTo: document.body,
     });
     const opts = getViewers()[0].opts;
-    expect((opts.gestureSettingsMouse as { scrollToZoom: boolean }).scrollToZoom).toBe(false);
-    expect(opts.clickToZoom).toBe(false);
-    expect(opts.dblClickDragToZoom).toBe(false);
+    const gMouse = opts.gestureSettingsMouse as { scrollToZoom: boolean; clickToZoom: boolean; dblClickToZoom: boolean };
+    expect(gMouse.scrollToZoom).toBe(false);
+    expect(gMouse.clickToZoom).toBe(false);
+    expect(gMouse.dblClickToZoom).toBe(false);
     w.unmount();
   });
 });
