@@ -241,8 +241,11 @@ describe('ReaderOverlay 返回按钮（需求5）', () => {
     });
     const btn = wrapper.find('[data-test="btn-back"]');
     expect(btn.exists()).toBe(true);
-    // 不再有 btn-menu 汉堡
-    expect(wrapper.find('[data-test="btn-menu"]').exists()).toBe(false);
+    // 需求4: chrome 完整菜单按钮 (汉堡 ☰) 唤出 ReaderMainMenu
+    const menuBtn = wrapper.find('[data-test="btn-menu"]');
+    expect(menuBtn.exists()).toBe(true);
+    await menuBtn.trigger('click');
+    expect(wrapper.emitted('open-main-menu')).toBeTruthy();
     await btn.trigger('click');
     expect(wrapper.emitted('back-to-list')).toBeTruthy();
   });

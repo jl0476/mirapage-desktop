@@ -44,6 +44,7 @@ type Emits = {
   (e: 'toggle-mode'): void;
   (e: 'jump', page: number): void;
   (e: 'back-to-list'): void;       // 原 open-menu 改名 (需求5)
+  (e: 'open-main-menu'): void;     // 需求4: chrome 完整菜单按钮 → 唤出 ReaderMainMenu
   (e: 'scale-change', mode: ScaleMode): void;
 };
 const emit = defineEmits<Emits>();
@@ -184,6 +185,21 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
              stroke="currentColor" stroke-width="2" stroke-linecap="round"
              stroke-linejoin="round" aria-hidden="true">
           <path d="M19 12H5M12 19l-7-7 7-7" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors mix-blend-difference"
+        data-test="btn-menu"
+        :aria-label="t('reader.menu.title')"
+        @click="emit('open-main-menu')"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6" />
+          <line x1="3" y1="12" x2="21" y2="12" />
+          <line x1="3" y1="18" x2="21" y2="18" />
         </svg>
       </button>
     </header>
