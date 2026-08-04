@@ -14,7 +14,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { getBook, saveProgress, getProgress, listDirectory } from '@/lib/tauri';
+import { getBook, saveProgress, getProgress, listDirectory, toggleLike, addBookmark, setFavorite } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { sortEntries } from '@/lib/fileSort';
@@ -32,6 +32,8 @@ import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
+import ReaderContextMenu from '@/components/reader/ReaderContextMenu.vue';
+import type { ScaleMode } from '@/lib/readerSettings';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 const route = useRoute();
@@ -46,6 +48,46 @@ const errorMessage = ref('');
 const pageUrls = ref([] as string[]);
 const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
+// 需求4-C: 模板访问 book.isFavorite / book.id, loadBook 写入此 ref
+const book = ref<Awaited<ReturnType<typeof getBook>> | null>(null);
+// 需求4-A: 右键轻量上下文菜单
+const ctxMenu = ref({ visible: false, x: 0, y: 0 });
+
+function onContextMenu(e: MouseEvent): void {
+  // 只在 ready 状态 + reader 容器内触发；阻止浏览器默认菜单
+  if (status.value !== 'ready') return;
+  e.preventDefault();
+  ctxMenu.value = { visible: true, x: e.clientX, y: e.clientY };
+}
+function closeCtxMenu(): void {
+  ctxMenu.value.visible = false;
+}
+function onCtxScaleChange(m: ScaleMode): void {
+  void settings.setScaleMode(m);
+  closeCtxMenu();
+}
+function onCtxCycleMode(): void {
+  settings.update('reader_default_mode', settings.readerDefaultMode === 'single' ? 'double' : 'single');
+  closeCtxMenu();
+}
+function onCtxCycleDirection(): void {
+  slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward');
+  closeCtxMenu();
+}
+function onCtxToggleSlideshow(): void {
+  slideshow.toggle();
+  closeCtxMenu();
+}
+function onCtxJumpPage(): void {
+  // 复用主菜单的 jump-page 流程：打开主菜单让用户选页
+  showMainMenu.value = true;
+  slideshow.pause();
+  closeCtxMenu();
+}
+function onCtxBack(): void {
+  router.push('/');
+  closeCtxMenu();
+}
 
 const bookId = computed(() => Number(route.params.bookId));
 
@@ -69,20 +111,21 @@ async function loadBook() {
   }
   try {
     log('[ReaderView/loadBook] IPC[getBook] →', id);
-    const book = await getBook(id);
-    log('[ReaderView/loadBook] IPC[getBook] ←', book ? {
-      id: book.id,
-      title: book.title,
-      absolutePath: book.absolutePath,
-      coverEntryPath: book.coverEntryPath,
-      coverEntryName: book.coverEntryName,
-      pageCount: book.pageCount,
-      lastReadAt: book.lastReadAt,
-      isFavorite: book.isFavorite,
-      sourceDescriptor: book.sourceDescriptor,
-      sourceType: book.sourceType,
+    book.value = await getBook(id);
+    const b = book.value;
+    log('[ReaderView/loadBook] IPC[getBook] ←', b ? {
+      id: b.id,
+      title: b.title,
+      absolutePath: b.absolutePath,
+      coverEntryPath: b.coverEntryPath,
+      coverEntryName: b.coverEntryName,
+      pageCount: b.pageCount,
+      lastReadAt: b.lastReadAt,
+      isFavorite: b.isFavorite,
+      sourceDescriptor: b.sourceDescriptor,
+      sourceType: b.sourceType,
     } : 'null');
-    if (!book) {
+    if (!b) {
       status.value = 'error';
       errorMessage.value = `找不到 bookId ${id}`;
       log('[ReaderView/loadBook] ERROR: book is null for id', id);
@@ -91,8 +134,8 @@ async function loadBook() {
     // v0.1.0-module3.0.2: H1 修复后 Rust 端 fields 是 serde_json::Value,
     // IPC 边界自动拆成对象。Defensive parse 仍保留, 兼容老 DB 行 / 跨进程备份.
     // SourceDescriptor 是判别联合, 只 Local 变体有 rootPath.
-    log('[ReaderView/loadBook] parseSourceDescriptor input type:', typeof book.sourceDescriptor);
-    const sd = parseSourceDescriptor(book.sourceDescriptor);
+    log('[ReaderView/loadBook] parseSourceDescriptor input type:', typeof b.sourceDescriptor);
+    const sd = parseSourceDescriptor(b.sourceDescriptor);
     log('[ReaderView/loadBook] parseSourceDescriptor result:', sd);
     if (!sd || sd.type !== 'local' || !sd.rootPath) {
       status.value = 'error';
@@ -102,18 +145,18 @@ async function loadBook() {
     }
     const path = sd.rootPath;
     log('[ReaderView/loadBook] resolved rootPath=', path);
-    // v0.1.0-module3.0.2-hotfix5 (H10): book.absolutePath 是相对 rootPath 的子目录路径
+    // v0.1.0-module3.0.2-hotfix5 (H10): b.absolutePath 是相对 rootPath 的子目录路径
     // (useReaderActions 传 entry.path = 裸子目录名), 不是绝对路径. convertFileSrc
     // 内部期望绝对路径 (Rust fs::read), 必须拼 rootPath 前缀.
     // 兼容历史数据: 如果 absolutePath 已包含盘符 ('Q:\xxx'), 视为已绝对.
     const rootPath = path.replace(/[\\/]+$/, '');
-    const isAlreadyAbs = book.absolutePath && /^[A-Za-z]:[\\/]/.test(book.absolutePath);
-    const absDir = book.absolutePath && book.absolutePath.length > 0
-      ? (isAlreadyAbs ? book.absolutePath : joinPath(rootPath, book.absolutePath))
+    const isAlreadyAbs = b.absolutePath && /^[A-Za-z]:[\\/]/.test(b.absolutePath);
+    const absDir = b.absolutePath && b.absolutePath.length > 0
+      ? (isAlreadyAbs ? b.absolutePath : joinPath(rootPath, b.absolutePath))
       : rootPath;
     log('[ReaderView/loadBook] absDir computed:', {
       rootPath,
-      absolutePath: book.absolutePath,
+      absolutePath: b.absolutePath,
       isAlreadyAbs,
       absDir,
     });
@@ -152,10 +195,10 @@ async function loadBook() {
     log('[ReaderView/loadBook] IPC[getProgress] →', id);
     const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length, isSinglePage, sortedNames);
     log('[ReaderView/loadBook] initialSpreadIndex=', initialSpreadIndex, '(pageCount=', sortedNames.length, ')');
-    log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: book.title, pages: pageUrls.value.length, initialSpreadIndex, isSinglePage });
+    log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: b.title, pages: pageUrls.value.length, initialSpreadIndex, isSinglePage });
     reader.openBook({
       bookId: id,
-      title: book.title || '无标题',
+      title: b.title || '无标题',
       pages: pageUrls.value,
       spreads: SpreadPlanner.plan(pageUrls.value.length, true, isSinglePage),
       initialSpreadIndex,
@@ -376,6 +419,7 @@ watch(
     ref="containerRef"
     class="flex h-full bg-bg select-none"
     data-test="reader-view"
+    @contextmenu="onContextMenu"
   >
     <p v-if="status === 'loading'" class="m-auto text-text-muted text-sm">
       {{ t('common.loading') }}
@@ -406,6 +450,7 @@ watch(
       :title="reader.title"
       @back="router.push('/')"
       @toggle-mode="settings.readerDefaultMode === 'single' ? settings.update('reader_default_mode', 'double') : settings.update('reader_default_mode', 'single')"
+      @open-main-menu="showMainMenu = true"
     />
 
     <ReaderMainMenu
@@ -413,11 +458,41 @@ watch(
       :title="reader.title"
       :current-spread-index="reader.currentSpreadIndex"
       :total-spreads="reader.spreads.length"
+      :scale-mode="settings.currentScaleMode"
+      :mode="settings.readerDefaultMode"
+      :direction="settings.defaultReadDirection"
+      :is-slideshow-playing="slideshow.isPlaying"
+      :slideshow-direction="slideshow.direction"
+      :is-liked="(book?.isFavorite ?? false)"
       @jump-page="(i: number) => reader.jumpToSpread(i)"
       @back="router.push('/')"
       @cycle-mode="settings.update('reader_default_mode', settings.readerDefaultMode === 'single' ? 'double' : 'single')"
       @cycle-direction="slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward')"
+      @scale-change="(m: ScaleMode) => settings.setScaleMode(m)"
+      @toggle-slideshow="slideshow.toggle()"
+      @toggle-slideshow-direction="slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward')"
+      @navigate="(p: string) => router.push(p)"
+      @add-to-library="book?.id != null && setFavorite(book.id, true)"
+      @toggle-like="book?.id != null && toggleLike(book.id)"
+      @add-bookmark="book?.id != null && addBookmark(book.id, currentReadPage(), null)"
     >
     </ReaderMainMenu>
+
+    <ReaderContextMenu
+      v-if="ctxMenu.visible"
+      :x="ctxMenu.x"
+      :y="ctxMenu.y"
+      :scale-mode="settings.currentScaleMode"
+      :mode="settings.readerDefaultMode"
+      :direction="slideshow.direction === 'forward' ? 'ltr' : 'rtl'"
+      :is-slideshow-playing="slideshow.isPlaying"
+      @close="closeCtxMenu"
+      @scale-change="onCtxScaleChange"
+      @cycle-mode="onCtxCycleMode"
+      @cycle-direction="onCtxCycleDirection"
+      @toggle-slideshow="onCtxToggleSlideshow"
+      @jump-page="onCtxJumpPage"
+      @back="onCtxBack"
+    />
   </main>
 </template>

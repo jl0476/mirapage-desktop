@@ -20,9 +20,10 @@
  *  - Cluster B #8: chrome 随 slideshow.isPlaying 自动隐藏 — autoHide = isPlaying.
  *    hovered 时解除 autoHide 临时显示, 2s 后重新隐藏.
  */
-import { computed, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSlideshowStore } from '@/stores/slideshow';
+import type { ScaleMode } from '@/lib/readerSettings';
 
 interface Props {
   title: string;
@@ -32,17 +33,40 @@ interface Props {
   chromeVisible: boolean;
   /** 鼠标在 reader 容器内 (hover 时) — 控制轮播控制条显示 */
   hovered?: boolean;
+  /** 当前缩放模式 (受控; 切换时 emit scale-change) */
+  scaleMode?: ScaleMode;
 }
-const props = withDefaults(defineProps<Props>(), { hovered: false });
+const props = withDefaults(defineProps<Props>(), { hovered: false, scaleMode: 'fit-screen' });
 
 type Emits = {
   (e: 'next'): void;
   (e: 'prev'): void;
   (e: 'toggle-mode'): void;
   (e: 'jump', page: number): void;
-  (e: 'open-menu'): void;
+  (e: 'back-to-list'): void;       // 原 open-menu 改名 (需求5)
+  (e: 'open-main-menu'): void;     // 需求4: chrome 完整菜单按钮 → 唤出 ReaderMainMenu
+  (e: 'scale-change', mode: ScaleMode): void;
 };
 const emit = defineEmits<Emits>();
+
+/** 6 种缩放模式 (对齐 PV ScaleMenuRow) */
+const SCALE_MODES: ScaleMode[] = [
+  'fit-screen', 'fit-width', 'fit-height',
+  'original', 'full-screen', 'stretch',
+];
+
+// 缩放下拉 (CLAUDE.md §1.3 三层结构 + click-outside)
+const scaleOpen = ref(false);
+const scaleDropdownRef = ref<HTMLElement | null>(null);
+
+function onScaleSelect(m: ScaleMode): void {
+  emit('scale-change', m);
+  scaleOpen.value = false;
+}
+
+function onScaleMouseDown(e: MouseEvent): void {
+  if (!scaleDropdownRef.value?.contains(e.target as Node)) scaleOpen.value = false;
+}
 
 const { t } = useI18n();
 const slideshow = useSlideshowStore();
@@ -83,8 +107,10 @@ watch(() => props.hovered, (v) => {
   if (v) flashOnHover();
 });
 
+onMounted(() => document.addEventListener('mousedown', onScaleMouseDown));
 onUnmounted(() => {
   if (hoverTimer !== null) clearTimeout(hoverTimer);
+  document.removeEventListener('mousedown', onScaleMouseDown);
 });
 
 /** Cluster B #8: chrome 可见 = chromeVisible && !autoHide && (hovered || hoveredVisible) */
@@ -108,11 +134,38 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
     data-test-ignore-touch-zones
   >
     <!-- 顶栏 (Cluster B #5 pointer-events-auto + #8 chromeShow 替换 chromeVisible) -->
-    <header v-if="chromeShow" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto" data-test="overlay-top">
-      <span class="flex-1 font-semibold truncate" data-test="title">{{ title }}</span>
-      <span class="font-mono text-text-secondary tabular-nums" data-test="page-indicator">
+    <header v-if="chromeShow" class="bg-black/40 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto mix-blend-difference" data-test="overlay-top">
+      <span class="flex-1 font-semibold truncate mix-blend-difference" data-test="title">{{ title }}</span>
+      <span class="font-mono text-text-secondary tabular-nums mix-blend-difference" data-test="page-indicator">
         {{ currentPage }} / {{ totalPages }}
       </span>
+      <div class="relative" ref="scaleDropdownRef">
+        <button
+          type="button"
+          class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="scale-trigger"
+          :aria-label="t('reader.menu.scale')"
+          @click="scaleOpen = !scaleOpen"
+        >
+          {{ props.scaleMode }}
+        </button>
+        <div
+          v-if="scaleOpen"
+          class="absolute right-0 top-full z-50 mt-1 min-w-[170px] bg-surface-4 border border-white/10 rounded-lg py-1 shadow-xl backdrop-blur-xl isolate"
+        >
+          <button
+            v-for="m in SCALE_MODES"
+            :key="m"
+            type="button"
+            class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light"
+            :class="m === props.scaleMode ? 'text-accent' : 'text-text-secondary'"
+            data-test="scale-option"
+            @click="onScaleSelect(m)"
+          >
+            <span>{{ m }}</span>
+          </button>
+        </div>
+      </div>
       <button
         type="button"
         class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
@@ -123,12 +176,31 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors mix-blend-difference"
+        data-test="btn-back"
+        :aria-label="t('reader.menu.back')"
+        @click="emit('back-to-list')"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M19 12H5M12 19l-7-7 7-7" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors mix-blend-difference"
         data-test="btn-menu"
         :aria-label="t('reader.menu.title')"
-        @click="emit('open-menu')"
+        @click="emit('open-main-menu')"
       >
-        ☰
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6" />
+          <line x1="3" y1="12" x2="21" y2="12" />
+          <line x1="3" y1="18" x2="21" y2="18" />
+        </svg>
       </button>
     </header>
 
@@ -195,7 +267,7 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
     </div>
 
     <!-- 底栏 (Cluster B #5/#8: pointer-events-auto + chromeShow) -->
-    <footer v-if="chromeShow" class="bg-black/60 backdrop-blur-md px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto" data-test="overlay-bottom">
+    <footer v-if="chromeShow" class="bg-black/40 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-xs pointer-events-auto mix-blend-difference" data-test="overlay-bottom">
       <button
         type="button"
         class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"

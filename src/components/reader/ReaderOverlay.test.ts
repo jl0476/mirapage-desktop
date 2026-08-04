@@ -154,4 +154,99 @@ describe('ReaderOverlay.vue', () => {
     const w = makeWrapper({ hovered: true });
     expect(w.find('[data-test="slideshow-control"]').exists()).toBe(true);
   });
+
+  // ─── 需求1: chrome 配色 (mix-blend-mode + 强化模糊) ───
+
+  it('顶栏含 backdrop-blur-xl 与 mix-blend-difference class', () => {
+    const w = makeWrapper({ hovered: true });
+    const top = w.find('[data-test="overlay-top"]');
+    expect(top.classes()).toContain('backdrop-blur-xl');
+    expect(top.classes()).toContain('mix-blend-difference');
+    // 标题 span 含 mix-blend-difference
+    const titleSpan = top.find('[data-test="title"]');
+    expect(titleSpan.classes()).toContain('mix-blend-difference');
+  });
+
+  it('底栏同样含 backdrop-blur-xl 与 mix-blend-difference', () => {
+    const w = makeWrapper({ hovered: true });
+    const bottom = w.find('[data-test="overlay-bottom"]');
+    expect(bottom.classes()).toContain('backdrop-blur-xl');
+    expect(bottom.classes()).toContain('mix-blend-difference');
+  });
+
+  it('页码 indicator 含 mix-blend-difference', () => {
+    const w = makeWrapper({ hovered: true });
+    const indicator = w.find('[data-test="page-indicator"]');
+    expect(indicator.classes()).toContain('mix-blend-difference');
+  });
+
+  // ─── 需求2: 顶栏缩放下拉 (6 种 ScaleMode) ───
+
+  it('点击缩放 trigger 展开 6 个选项', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
+    const trigger = w.find('[data-test="scale-trigger"]');
+    expect(trigger.exists()).toBe(true);
+    expect(trigger.text()).toContain('fit-screen');
+
+    await trigger.trigger('click');
+    const opts = w.findAll('[data-test="scale-option"]');
+    expect(opts.length).toBe(6);
+  });
+
+  it('选某项 emit scale-change', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
+    await w.find('[data-test="scale-trigger"]').trigger('click');
+    await w.findAll('[data-test="scale-option"]')[2].trigger('click');
+    expect(w.emitted('scale-change')?.[0]).toEqual(['fit-height']);
+  });
+
+  it('当前 scaleMode 对应选项高亮 (text-accent)', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-width' });
+    await w.find('[data-test="scale-trigger"]').trigger('click');
+    const opts = w.findAll('[data-test="scale-option"]');
+    // fit-width 是 SCALE_MODES[1]
+    expect(opts[1].classes()).toContain('text-accent');
+    expect(opts[0].classes()).not.toContain('text-accent');
+  });
+
+  it('点击外部关闭 dropdown', async () => {
+    const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
+    await w.find('[data-test="scale-trigger"]').trigger('click');
+    expect(w.find('[data-test="scale-option"]').exists()).toBe(true);
+    // 模拟点击外部 — 触发 document mousedown
+    document.dispatchEvent(new MouseEvent('mousedown'));
+    await w.vm.$nextTick();
+    expect(w.find('[data-test="scale-option"]').exists()).toBe(false);
+  });
+
+  it('未传 scaleMode 时默认 fit-screen', () => {
+    const w = makeWrapper({ hovered: true });
+    const trigger = w.find('[data-test="scale-trigger"]');
+    expect(trigger.text()).toContain('fit-screen');
+  });
+});
+
+describe('ReaderOverlay 返回按钮（需求5）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('右上角按钮是返回箭头图标，emit back-to-list', async () => {
+    const wrapper = mount(ReaderOverlay, {
+      props: {
+        title: 't', currentPage: 1, totalPages: 10,
+        mode: 'single', chromeVisible: true, hovered: true,
+      },
+      global: { plugins: [i18n] },
+    });
+    const btn = wrapper.find('[data-test="btn-back"]');
+    expect(btn.exists()).toBe(true);
+    // 需求4: chrome 完整菜单按钮 (汉堡 ☰) 唤出 ReaderMainMenu
+    const menuBtn = wrapper.find('[data-test="btn-menu"]');
+    expect(menuBtn.exists()).toBe(true);
+    await menuBtn.trigger('click');
+    expect(wrapper.emitted('open-main-menu')).toBeTruthy();
+    await btn.trigger('click');
+    expect(wrapper.emitted('back-to-list')).toBeTruthy();
+  });
 });

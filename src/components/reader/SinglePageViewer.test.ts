@@ -10,7 +10,7 @@ import { mount } from '@vue/test-utils';
 
 interface MockViewer {
   id: number;
-  opts: { tileSources: unknown; element: HTMLElement };
+  opts: Record<string, unknown>;
   open: ReturnType<typeof vi.fn>;
   destroy: ReturnType<typeof vi.fn>;
   addHandler: ReturnType<typeof vi.fn>;
@@ -84,5 +84,21 @@ describe('SinglePageViewer.vue', () => {
     const viewer = getViewers()[0];
     w.unmount();
     expect(viewer.destroy).toHaveBeenCalled();
+  });
+});
+
+describe('SinglePageViewer OSD config', () => {
+  it('clickToZoom 与 dblClickToZoom 均为 false（不拦截 9 宫格 click）', () => {
+    (OpenSeadragon as unknown as { _reset: () => void })._reset();
+    const w = mount(SinglePageViewer, {
+      props: { imageUrl: 'file:///a.jpg' },
+      attachTo: document.body,
+    });
+    const opts = getViewers()[0].opts;
+    const gMouse = opts.gestureSettingsMouse as { scrollToZoom: boolean; clickToZoom: boolean; dblClickToZoom: boolean };
+    expect(gMouse.scrollToZoom).toBe(false);
+    expect(gMouse.clickToZoom).toBe(false);
+    expect(gMouse.dblClickToZoom).toBe(false);
+    w.unmount();
   });
 });

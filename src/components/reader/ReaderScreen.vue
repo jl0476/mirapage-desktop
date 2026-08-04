@@ -53,6 +53,7 @@ const props = withDefaults(defineProps<Props>(), {
 interface Emits {
   (e: 'back'): void;
   (e: 'toggle-mode'): void;
+  (e: 'open-main-menu'): void;   // 需求4: chrome 菜单按钮透传 → ReaderView
 }
 const emit = defineEmits<Emits>();
 
@@ -248,11 +249,14 @@ function onContainerMouseLeave() {
       :mode="props.mode"
       :chrome-visible="store.chromeVisible"
       :hovered="hovered"
+      :scale-mode="settings.currentScaleMode"
       @next="onNext"
       @prev="onPrev"
       @toggle-mode="onToggleMode"
       @jump="onJump"
-      @open-menu="onBack"
+      @back-to-list="onBack"
+      @open-main-menu="emit('open-main-menu')"
+      @scale-change="(m) => settings.setScaleMode(m)"
     />
   </div>
 </template>
