@@ -43,7 +43,7 @@ type Emits = {
   (e: 'prev'): void;
   (e: 'toggle-mode'): void;
   (e: 'jump', page: number): void;
-  (e: 'open-menu'): void;
+  (e: 'back-to-list'): void;       // 原 open-menu 改名 (需求5)
   (e: 'scale-change', mode: ScaleMode): void;
 };
 const emit = defineEmits<Emits>();
@@ -175,12 +175,16 @@ const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
       </button>
       <button
         type="button"
-        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-        data-test="btn-menu"
-        :aria-label="t('reader.menu.title')"
-        @click="emit('open-menu')"
+        class="px-2 py-1 rounded text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors mix-blend-difference"
+        data-test="btn-back"
+        :aria-label="t('reader.menu.back')"
+        @click="emit('back-to-list')"
       >
-        ☰
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M19 12H5M12 19l-7-7 7-7" />
+        </svg>
       </button>
     </header>
 

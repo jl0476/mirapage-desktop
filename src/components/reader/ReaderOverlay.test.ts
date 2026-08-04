@@ -225,3 +225,25 @@ describe('ReaderOverlay.vue', () => {
     expect(trigger.text()).toContain('fit-screen');
   });
 });
+
+describe('ReaderOverlay 返回按钮（需求5）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('右上角按钮是返回箭头图标，emit back-to-list', async () => {
+    const wrapper = mount(ReaderOverlay, {
+      props: {
+        title: 't', currentPage: 1, totalPages: 10,
+        mode: 'single', chromeVisible: true, hovered: true,
+      },
+      global: { plugins: [i18n] },
+    });
+    const btn = wrapper.find('[data-test="btn-back"]');
+    expect(btn.exists()).toBe(true);
+    // 不再有 btn-menu 汉堡
+    expect(wrapper.find('[data-test="btn-menu"]').exists()).toBe(false);
+    await btn.trigger('click');
+    expect(wrapper.emitted('back-to-list')).toBeTruthy();
+  });
+});

@@ -252,7 +252,7 @@ function onContainerMouseLeave() {
       @prev="onPrev"
       @toggle-mode="onToggleMode"
       @jump="onJump"
-      @open-menu="onBack"
+      @back-to-list="onBack"
     />
   </div>
 </template>
