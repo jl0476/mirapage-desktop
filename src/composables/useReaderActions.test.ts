@@ -395,4 +395,72 @@ describe('useReaderActions', () => {
     expect(saveNavigationContext).toHaveBeenCalledTimes(1);
     expect(callOrder).toEqual(['saveNavigationContext', 'router.push']);
   });
+
+  // ─── v0.1.0-module3.0.3-hotfix2: race condition 回归 ───
+  // 现象: 双击 260715 触发 fileBrowser.navigate, navigate 同步更新 currentPath
+  //   但 entries / lastFetchedPath 要等 fetch 成功才更新. 用户在 fetch 期间点
+  //   「立即阅读」时, getCurrentPath() 应反映 entries 的真实基准 (= lastFetchedPath),
+  //   而不是 currentPath (用户"想去"的位置).
+  // 旧 fix 用 currentPath → 在 race 期间拼出 'output/260715/260715' (double 260715).
+  // 新 fix 用 lastFetchedPath → race 期间仍是 'output', 正确拼出 'output/260715'.
+
+  it('race condition: getCurrentPath=lastFetchedPath (≠ currentPath) → absPath 仍正确', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(99);
+    const actions = useReaderActions({
+      resolveRootPath: () => 'U:/H/AI',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => 'output',         // race 期间: entries 仍来自 output
+      getCurrentPath: () => 'output',              // 应跟 lastFetchedPath 一致
+      router: fakeRouter as never,
+    });
+    // 模拟用户在 fetch(output/260715) 期间点立即阅读
+    const entryFromOldList: MediaEntry = {
+      name: '260715',
+      path: '260715',  // 来自旧 output/ 列表, 相对 lastFetchedPath='output'
+      isDirectory: true,
+      isArchive: false,
+      size: 0,
+      modifiedAt: 0,
+    };
+    await actions.readNow(entryFromOldList);
+    expect(listDirectory).toHaveBeenCalledWith({ type: 'local', rootPath: 'U:/H/AI' }, 'output/260715');
+    expect(createBook).toHaveBeenCalledWith(
+      expect.objectContaining({ absolutePath: 'output/260715' }),
+    );
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'U:/H/AI' },
+      'output/260715',
+      '260715',
+      99,
+    );
+  });
+
+  it('race condition 文档化: 旧 fix 用 currentPath 会出错 (防止回退)', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(99);
+    const actions = useReaderActions({
+      resolveRootPath: () => 'U:/H/AI',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => 'output',
+      // ⚠️ 故意模拟旧的 buggy 映射 (currentPath 已被 navigate 改成 'output/260715',
+      //   但 entries 还来自 'output'). absPath 会错位成 'output/260715/260715'.
+      getCurrentPath: () => 'output/260715',
+      router: fakeRouter as never,
+    });
+    await actions.readNow({
+      name: '260715',
+      path: '260715',
+      isDirectory: true,
+      isArchive: false,
+      size: 0,
+      modifiedAt: 0,
+    });
+    // 此断言记录了 bug 行为. 修这个 bug 的关键是 FileBrowser.vue 传 lastFetchedPath,
+    // 不是把 useReaderActions 内部逻辑改成用 currentPath.
+    expect(listDirectory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'U:/H/AI' },
+      'output/260715/260715',  // 错位 — 这是需要避免的
+    );
+  });
 });

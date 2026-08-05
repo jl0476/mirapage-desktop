@@ -41,14 +41,21 @@ const readStatus = useReadStatusStore();
 const readerActions = useReaderActions({
   resolveRootPath: () => fb.rootPath ?? '',
   buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
-  // Cluster A: readFromImage 需要父目录路径 (= 当前列表所在目录).
-  // root 级别 (fb.currentPath='') 时,父目录就是 rootPath. 子目录级别用 currentPath.
-  // 列表渲染前的瞬间 lastFetchedPath 可能为 '' 但 readFromImage 会容错放弃.
-  getLastFetchedPath: () => fb.currentPath || fb.rootPath || '',
-  // v0.1.0-module3.0.3-hotfix (Bug 1): ensureBookId 拼 absPath 需要 currentPath.
-  // readFromImage 不读此值 — 它显式传 parentPath 作为 override.
-  getCurrentPath: () => fb.currentPath,
+  // v0.1.0-module3.0.3-hotfix2: 用 lastFetchedPath 而非 currentPath.
+  // fileBrowser store 中:
+  //   - currentPath: navigate() 同步更新 (用户在视觉上"想去"的位置)
+  //   - lastFetchedPath: fetch 成功后更新 (entries 真正来源, = entry.path 的基准)
+  // 之前用 currentPath 在 race condition 下出错 (双击 260715 触发 navigate → currentPath
+  // 立即变 output/260715, 但 fetch 9613 文件期间 entries 仍是 output/; 用户在 1.7s
+  // 内点立即阅读, entry.path='260715' (相对 output/) 拼上 currentPath='output/260715'
+  // → absPath='output/260715/260715' 错位). 用 lastFetchedPath 避免此竞争.
+  getLastFetchedPath: () => fb.lastFetchedPath || fb.rootPath || '',
+  // ensureBookId 用 lastFetchedPath (entry.path 的基准) + entry.path 拼出 absPath
+  getCurrentPath: () => fb.lastFetchedPath,
   // v0.1.0-module3.0.3-hotfix (Bug 2): reader 退出时恢复 currentPath.
+  // 注意: 这里仍用 currentPath (= 用户想去的位置), 不是 lastFetchedPath.
+  // 退出时如果 fetch 已成功, 两者一致; 若 fetch 在 navigate 后失败, 恢复 currentPath
+  // 会让 FileBrowser 重 fetch (用户主动选择的目录).
   saveNavigationContext: () => fb.saveNavigationContext(),
   onLibraryChanged: async () => {
     await readStatus.refresh();
