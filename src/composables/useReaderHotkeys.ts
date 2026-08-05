@@ -20,19 +20,20 @@
  * v0.1.0-module3.0.2-reader-polish (Cluster B #7):
  * - Escape → closeReader → router.back() (was: openMainMenu = store.toggleChrome)
  *
- * v0.1.0-module3.0.3-hotfix3:
- * - Escape fallback 不再调 restoreNavigationContext (避免双 fetch).
- *   FileBrowser.onMounted 会消费 saved context, 嵌套目录阅读后退回 output.
+ * v0.1.0-module3.0.3-hotfix5:
+ * - Escape 一律回文件浏览器 (router.push('/')), 不再 router.back().
+ *   之前从 library/bookmarks 进 reader 时, Escape 会回到 library 不符合预期.
+ *   useFileBrowserStore 的 savedNavigationContext 由 FileBrowser.onMounted 消费,
+ *   恢复嵌套目录 (output/260715) 正确.
  */
 import { onBeforeUnmount, onMounted } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { useRouter, type Router } from 'vue-router';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { resolveHotkey, defaultKeyBindings, type ReaderCommand } from '@/lib/inputBindings';
 
-function dispatch(store: ReturnType<typeof useReaderStore>, cmd: ReaderCommand): void {
+function dispatch(store: ReturnType<typeof useReaderStore>, router: Router, cmd: ReaderCommand): void {
   const slideshow = useSlideshowStore();
-  const router = useRouter();
   switch (cmd) {
     case 'nextPage':
       store.nextPage();
@@ -60,20 +61,13 @@ function dispatch(store: ReturnType<typeof useReaderStore>, cmd: ReaderCommand):
       slideshow.toggle();
       break;
     case 'closeReader':
-      // Cluster B #7: Escape → 返回上一个路由 (有 history 时) 或首页
+      // v0.1.0-module3.0.3-hotfix5: Escape 一律回文件浏览器, 不再 router.back()
+      // (router.back 在「library/bookmarks → reader」场景会回到 library, 用户期望
+      // 一律回到 file browser). useFileBrowserStore 的 savedNavigationContext 会被
+      // FileBrowser.onMounted 自动消费, 嵌套目录 (如 output/260715) 正确恢复.
       // useRouter 不存在 (单测 / SSR) 时容错 no-op
       if (router) {
-        const route = useRoute();
-        const before = route.fullPath;
-        router.back();
-        // 给一个 tick 让 router 处理 (Vue Router 4 是 async-ish)
-        setTimeout(() => {
-          if (route.fullPath === before) {
-            // 没有 history, push 首页. FileBrowser.onMounted 会消费 saved context
-            // 并恢复 (rootPath, currentPath), 这里不再重复处理.
-            router.push('/');
-          }
-        }, 0);
+        router.push('/');
       }
       break;
     case 'fitWidth':
@@ -87,10 +81,14 @@ function dispatch(store: ReturnType<typeof useReaderStore>, cmd: ReaderCommand):
 
 export function useReaderHotkeys(): void {
   const store = useReaderStore();
+  // v0.1.0-module3.0.3-hotfix6: 在 setup 阶段捕获 router (有 Vue inject 上下文),
+  // 传入 dispatch. 之前在 dispatch 内调 useRouter() 在 window listener 上下文执行,
+  // 拿不到 inject → router undefined → Escape 静默 no-op.
+  const router = useRouter();
 
   function onKeydown(e: KeyboardEvent): void {
     const cmd = resolveHotkey(e, defaultKeyBindings);
-    if (cmd) dispatch(store, cmd);
+    if (cmd) dispatch(store, router, cmd);
   }
 
   onMounted(() => {

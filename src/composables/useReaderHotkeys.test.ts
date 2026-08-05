@@ -161,11 +161,13 @@ describe('useReaderHotkeys', () => {
     expect(slideshow.isPlaying).toBe(false);
   });
 
-  // Cluster B #7: Escape → router.back() (返回文件浏览器)
-  it('Escape key → closeReader → router.back()', () => {
+  // v0.1.0-module3.0.3-hotfix5: Escape 一律 push('/') 回文件浏览器 (不再 router.back(),
+  // 避免 library/bookmarks 进 reader 时 Escape 回 library 的问题).
+  it('Escape key → closeReader → router.push("/")', () => {
     useReaderHotkeys();
     keyHandler!(new KeyboardEvent('keydown', { key: 'Escape' }) as unknown as KeyboardEvent);
-    expect(routerBackSpy).toHaveBeenCalled();
+    expect(routerPushSpy).toHaveBeenCalledWith('/');
+    expect(routerBackSpy).not.toHaveBeenCalled();
   });
 
   it('Escape key 不应触发 reader.toggleChrome (openMainMenu 改用 m)', () => {
