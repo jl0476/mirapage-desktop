@@ -469,11 +469,14 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   font-size: 11px;
   line-height: 1.3;
   border-radius: 4px;
-  white-space: nowrap;
-  /* 限宽防溢出右侧 */
-  max-width: min(60ch, calc(100vw - 32px));
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* v0.1.0-module3.0.3-hotfix16: 长文件名支持 — 改 white-space:normal 允许换行,
+     限 max-width 为屏幕宽 - 32px (避开屏幕边缘), max-height 8 行溢出滚动.
+     之前 nowrap + max-width:60ch + ellipsis 把长名截成「xxx...」, 用户看不到完整路径. */
+  white-space: normal;
+  word-break: break-all;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
   z-index: 100;
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
   border: 1px solid var(--color-border-default);
