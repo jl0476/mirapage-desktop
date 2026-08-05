@@ -373,6 +373,7 @@ function onMouseDown(e: MouseEvent) {
 - ❌ 在组件里写 `console.log` 调试（用 `src/lib/logger.ts` 的 `log()` 写文件日志）。
 - ❌ 在 commits 里写 `🤖 Generated with Claude Code`。
 - ❌ 编辑类功能（新建 / 重命名 / 删除 / 复制 / 粘贴 / 拖放）—— 用户明确不做。
+- ❌ 验证功能时截图（验证靠 type-check + 单测 + 本地 build，不依赖视觉截图；`screenshots/` 目录不入仓，.gitignore 已隐式不跟踪空目录）。
 - ❌ 在 `tauri::generate_handler!` 自动发现外漏掉注册命令。
 - ❌ hardcode 颜色 / 字体大小（必须用 `@theme` token 或 Tailwind utility）。
 - ❌ raw Tailwind `border-white/*` / `bg-white/*`（light 模式不可见，必须用 `xp-bd` / `xp-bdt` 等 token 化 utility）。
