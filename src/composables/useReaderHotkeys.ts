@@ -20,14 +20,13 @@
  * v0.1.0-module3.0.2-reader-polish (Cluster B #7):
  * - Escape → closeReader → router.back() (was: openMainMenu = store.toggleChrome)
  *
- * v0.1.0-module3.0.3-hotfix (Bug 2):
- * - Escape fallback push('/') 改为先 restoreNavigationContext 再 push,
- *   嵌套目录 (output/260715) 阅读后退回到 output 而非 rootPath.
+ * v0.1.0-module3.0.3-hotfix3:
+ * - Escape fallback 不再调 restoreNavigationContext (避免双 fetch).
+ *   FileBrowser.onMounted 会消费 saved context, 嵌套目录阅读后退回 output.
  */
 import { onBeforeUnmount, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useReaderStore } from '@/stores/reader';
-import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { resolveHotkey, defaultKeyBindings, type ReaderCommand } from '@/lib/inputBindings';
 
@@ -64,25 +63,15 @@ function dispatch(store: ReturnType<typeof useReaderStore>, cmd: ReaderCommand):
       // Cluster B #7: Escape → 返回上一个路由 (有 history 时) 或首页
       // useRouter 不存在 (单测 / SSR) 时容错 no-op
       if (router) {
-        // 检查当前路由来源, 优先 back, 没有 history 时 push('/')
         const route = useRoute();
-        // Vue Router 不暴露 history stack; 用 location 判断 (heuristic)
-        // 直接 router.back() 在没有历史时根据 Vue Router 行为 fallback 到 '/'
-        // (vue-router 4 在 memory history 下 back() 静默 no-op)
-        // 安全起见: 先尝试 back, 然后判断 location 是否仍是 reader 路由
         const before = route.fullPath;
         router.back();
         // 给一个 tick 让 router 处理 (Vue Router 4 是 async-ish)
         setTimeout(() => {
           if (route.fullPath === before) {
-            // 没有 history, push 首页. 嵌套目录时需先恢复 (rootPath, currentPath).
-            const fb = useFileBrowserStore();
-            void fb.restoreNavigationContext().then((restored) => {
-              if (!restored && fb.rootPath) {
-                void fb.refresh();
-              }
-              router.push('/');
-            });
+            // 没有 history, push 首页. FileBrowser.onMounted 会消费 saved context
+            // 并恢复 (rootPath, currentPath), 这里不再重复处理.
+            router.push('/');
           }
         }, 0);
       }

@@ -96,14 +96,19 @@ onMounted(async () => {
     log('[FileBrowser] restored navigation context, skip setRoot');
     return;
   }
-  // #1 启动时读上次根目录, 自动加载 (默认行为: 应用首次启动 / 刷新页面后)
-  try {
-    const stored = await getSetting(LAST_ROOT_KEY);
-    if (stored && typeof stored === 'string' && stored.length > 0) {
-      await fb.setRoot(stored);
+  // v0.1.0-module3.0.3-hotfix3 (Bug 4): 仅在 rootPath 为空时 (应用首次启动 / 刷新页面)
+  // 才从 settings 恢复. Pinia store 同一会话内 rootPath 持续保留, setRoot 会抹掉
+  // currentPath, 导致从 reader 退回时丢失滚动位置 — 哪怕 restoreNavigationContext 返回
+  // false (例如使用快捷入口进入 reader 没保存上下文), 保留当前 rootPath 也比无脑重置好.
+  if (fb.rootPath === null) {
+    try {
+      const stored = await getSetting(LAST_ROOT_KEY);
+      if (stored && typeof stored === 'string' && stored.length > 0) {
+        await fb.setRoot(stored);
+      }
+    } catch {
+      // 静默回退: 显示 empty state
     }
-  } catch {
-    // 静默回退: 显示 empty state
   }
 });
 

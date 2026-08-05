@@ -60,6 +60,8 @@ const showMainMenu = ref(false);
 const book = ref<Awaited<ReturnType<typeof getBook>> | null>(null);
 // 需求4-A: 右键轻量上下文菜单
 const ctxMenu = ref({ visible: false, x: 0, y: 0 });
+// v0.1.0-module3.0.3-hotfix3 (Bug 4): back btn 视觉反馈, 防止双击 & 让用户知道在跳转
+const isGoingBack = ref(false);
 // v0.1.0-reader-review: 跳页 dialog (主菜单"跳页"按钮 / 右键"跳页"都打开它)
 const jumpDialogRef = ref<HTMLDialogElement | null>(null);
 const jumpDialogValue = ref(1);
@@ -103,17 +105,20 @@ function onCtxBack(): void {
 }
 
 // v0.1.0-module3.0.3-hotfix (Bug 2): 集中封装「reader → file browser」回退逻辑.
-// 先调 fb.restoreNavigationContext 恢复 (rootPath, currentPath), 再 router.push('/').
-// 没有保存上下文时 fallback 到 fb.refresh() (刷新当前 rootPath).
+// v0.1.0-module3.0.3-hotfix3 (Bug 4): 不在这里调 restoreNavigationContext (双 fetch),
+// 只 router.push('/'). FileBrowser.onMounted 会消费 saved context 并恢复 currentPath.
+// 没有保存上下文 (从 library/bookmarks 进入 reader 的情况) 时, FileBrowser.onMounted
+// fallthrough 到 setRoot(LAST_ROOT_KEY) 也能正确加载.
 async function goBackToFileBrowser(): Promise<void> {
-  const fb = useFileBrowserStore();
-  const restored = await fb.restoreNavigationContext();
-  if (!restored && fb.rootPath) {
-    // 没有上下文 = 没经过 useReaderActions 进入 (例如从 library/bookmarks 直接进来).
-    // 回退行为: 刷一下 rootPath 根目录, 行为与原 router.push('/') 等价.
-    await fb.refresh();
+  if (isGoingBack.value) return;  // 防双击
+  isGoingBack.value = true;
+  try {
+    await router.push('/');
+  } finally {
+    // router.push 是异步的, 完成后组件已 unmount. 但保险起见延迟复位,
+    // 防止用户连点 / 多次触发.
+    setTimeout(() => { isGoingBack.value = false; }, 1000);
   }
-  await router.push('/');
 }
 
 // v0.1.0-reader-review-fix-5: 模板 @event="expr()" 会立即求值得到 Promise, 把 Promise 当 handler (错).
@@ -535,11 +540,12 @@ watch(
     >
       <p class="text-error text-sm">{{ errorMessage }}</p>
       <button
-        class="px-3 py-1.5 rounded xp-bd bg-surface-1 text-text-secondary text-xs hover:bg-surface-light hover:text-text-primary transition-colors"
+        class="px-3 py-1.5 rounded xp-bd bg-surface-1 text-text-secondary text-xs hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-50 disabled:cursor-wait"
+        :disabled="isGoingBack"
         data-test="reader-back-btn"
         @click="goBackToFileBrowser()"
       >
-        ← {{ t('common.back') }}
+        {{ isGoingBack ? '...' : '← ' + t('common.back') }}
       </button>
     </div>
 

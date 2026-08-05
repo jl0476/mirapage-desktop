@@ -96,6 +96,30 @@ describe('FileBrowser — main view (rootPath 有值)', () => {
     expect((saveBtn.element as HTMLButtonElement).disabled).toBe(false);
   });
 
+  // ─── v0.1.0-module3.0.3-hotfix3 (Bug 4): onMounted 不无脑 setRoot ───
+  // 现象: 之前 rootPath 已有值 (从 reader 退回) 时, onMounted 仍调 setRoot(LAST_ROOT_KEY),
+  //   抹掉 currentPath. 现在仅在 rootPath===null (首次启动 / 刷新) 才恢复.
+  it('onMounted: rootPath 已设值时不再 setRoot (保留 currentPath)', async () => {
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    mockedList.mockClear();
+    mockedList.mockResolvedValue(makeEntries('output'));
+    await fb.setRoot('C:/comics');
+    await fb.navigate('output');
+    await flushPromises();
+    // 卸载 + 重新挂载 (模拟从 reader 退回)
+    wrapper.unmount();
+    mockedList.mockClear();
+    mockedList.mockResolvedValue(makeEntries('chapter1', 'manga.cbz'));
+    // 重 mount — rootPath 已 'C:/comics', currentPath 已 'output', 应保留
+    await mountFileBrowser();
+    await flushPromises();
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentPath).toBe('output');
+    // 不应再触发 listDirectory (因为没 setRoot, 也没 restore)
+    expect(mockedList).not.toHaveBeenCalled();
+  });
+
   it('currentPath="" 时 Up 按钮禁用 (canUp=false)', async () => {
     const wrapper = await mountFileBrowser();
     const fb = useFileBrowserStore();
