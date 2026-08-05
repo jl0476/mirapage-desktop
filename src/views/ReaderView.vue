@@ -24,7 +24,8 @@ import { useI18n } from 'vue-i18n';
 import { getBook, saveProgress, getProgress, listDirectory, toggleLike, addBookmark, setFavorite } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
-import { sortEntries } from '@/lib/fileSort';
+import { useDirectorySortStore } from '@/stores/directorySort';
+import { sortEntries, type SortField } from '@/lib/fileSort';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
@@ -244,14 +245,29 @@ async function loadBook() {
     log('[ReaderView/loadBook] IPC[listDirectory] ←', targetEntries.length, 'entries; first 3:', targetEntries.slice(0, 3).map((e) => `${e.name}(dir=${e.isDirectory},arc=${e.isArchive})`));
     // v0.1.0-module3.0.2-reader-polish (issue: reader 排序应与 file browser 一致):
     // 之前用 naturalSort(name) 硬编码字母序, 忽略用户在 file browser 改的排序 (modifiedAt / size, asc/desc).
-    // 现用 fileBrowser.effectiveSortField / .effectiveSortAscending (含 per-folder override),
-    // 与 FileList 渲染顺序完全一致; ?at= 仍按 name 找 index, 不受排序影响.
+    // v0.1.0-module3.0.3-hotfix4: 不能用 fb.effectiveSortField —— 那是 fileBrowser
+    //   最后 fetch 的目录排序 (例如 output/ DESC), 不是 book 自身目录 (例如
+    //   output/260715 ASC). 用户反馈: 进入 260715 设 ASC 后立即阅读, reader 用
+    //   父目录 DESC, 错位. 修复: 直接用 directorySort.resolve(sd, b.absolutePath)
+    //   查 book 目录的 per-folder override; fallback 到 settings (sortField / sortAscending).
     const fb = useFileBrowserStore();
+    const dsStore = useDirectorySortStore();
+    let bookSortField: SortField = fb.sortField;
+    let bookSortAscending: boolean = fb.sortAscending;
+    try {
+      const override = await dsStore.resolve(sd, b.absolutePath);
+      if (override) {
+        bookSortField = override.sortField as SortField;
+        bookSortAscending = override.ascending;
+      }
+    } catch {
+      // 容错: 用 settings 默认
+    }
     const imageEntries: MediaEntry[] = targetEntries
       .filter((e) => !e.isDirectory && !e.isArchive && isImage(e.name));
-    const sortedEntries = sortEntries(imageEntries, fb.effectiveSortField, fb.effectiveSortAscending);
+    const sortedEntries = sortEntries(imageEntries, bookSortField, bookSortAscending);
     const sortedNames = sortedEntries.map((e) => e.name);
-    log('[ReaderView/loadBook] imageEntries', sortedNames.length, sortedNames.slice(0, 5), '(sort=', fb.effectiveSortField, fb.effectiveSortAscending, ')');
+    log('[ReaderView/loadBook] imageEntries', sortedNames.length, sortedNames.slice(0, 5), '(sort=', bookSortField, bookSortAscending, ', path=', b.absolutePath, ')');
     if (sortedNames.length === 0) {
       status.value = 'error';
       errorMessage.value = `${absDir} 下找不到图片`;

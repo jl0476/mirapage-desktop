@@ -488,8 +488,11 @@ describe('ReaderView.vue', () => {
       { name: 'm.jpg', path: '/test/manga/m.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
     ] as never);
     const fb = useFileBrowserStore();
-    fb.effectiveSortField = 'name';
-    fb.effectiveSortAscending = true;
+    // v0.1.0-module3.0.3-hotfix4: ReaderView 现在用 directorySort.resolve(sd, absPath),
+    // fallback 到 fb.sortField / fb.sortAscending (settings). 不用 effectiveSortField
+    // 因为那是 fileBrowser 最后 fetch 的目录排序, 不一定是 book 目录.
+    fb.sortField = 'name';
+    fb.sortAscending = true;
     const reader = useReaderStore();
     useSlideshowStore();
     const router = makeRouter();
@@ -506,7 +509,7 @@ describe('ReaderView.vue', () => {
     expect(urls[2]).toContain('z.jpg');
   });
 
-  it('reader 排序跟随 fileBrowser.effectiveSortField=modifiedAt,ascending=true → 按修改时间正序', async () => {
+  it('reader 排序跟随 fileBrowser.sortField=modifiedAt,sortAscending=true → 按修改时间正序', async () => {
     vi.mocked(listDirectory).mockReset();
     vi.mocked(listDirectory).mockResolvedValue([
       { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
@@ -514,8 +517,8 @@ describe('ReaderView.vue', () => {
       { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
     ] as never);
     const fb = useFileBrowserStore();
-    fb.effectiveSortField = 'modifiedAt';
-    fb.effectiveSortAscending = true;
+    fb.sortField = 'modifiedAt';
+    fb.sortAscending = true;
     const reader = useReaderStore();
     useSlideshowStore();
     const router = makeRouter();
@@ -532,7 +535,7 @@ describe('ReaderView.vue', () => {
     expect(urls[2]).toContain('a.jpg');
   });
 
-  it('reader 排序跟随 fileBrowser.effectiveSortField=size,ascending=false → 按大小倒序', async () => {
+  it('reader 排序跟随 fileBrowser.sortField=size,sortAscending=false → 按大小倒序', async () => {
     vi.mocked(listDirectory).mockReset();
     vi.mocked(listDirectory).mockResolvedValue([
       { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
@@ -540,8 +543,8 @@ describe('ReaderView.vue', () => {
       { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
     ] as never);
     const fb = useFileBrowserStore();
-    fb.effectiveSortField = 'size';
-    fb.effectiveSortAscending = false;  // 倒序
+    fb.sortField = 'size';
+    fb.sortAscending = false;  // 倒序
     const reader = useReaderStore();
     useSlideshowStore();
     const router = makeRouter();
@@ -568,8 +571,8 @@ describe('ReaderView.vue', () => {
     vi.mocked(getProgress).mockReset();
     vi.mocked(getProgress).mockResolvedValue(null);
     const fb = useFileBrowserStore();
-    fb.effectiveSortField = 'size';
-    fb.effectiveSortAscending = false;  // 倒序: b, c, a
+    fb.sortField = 'size';
+    fb.sortAscending = false;  // 倒序: b, c, a
     const reader = useReaderStore();
     useSlideshowStore();
     // 双击 c.jpg (在新顺序中 index=1, spread=1)
@@ -582,5 +585,53 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     // 排序 b,c,a → c 的 spread = 1
     expect(reader.currentSpreadIndex).toBe(1);
+  });
+
+  // v0.1.0-module3.0.3-hotfix4: book 目录排序独立于 fileBrowser 上次 fetch.
+  // 之前用 effectiveSortField (fileBrowser 上次 fetch 的目录排序), 错把父目录排序
+  // 应用到子目录 book. 现在直接用 directorySort.resolve(book 目录的绝对路径).
+  it('reader 排序使用 book 目录的 per-folder override (与 fileBrowser 上次 fetch 无关)', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockResolvedValue({
+      id: 7,
+      title: 'manga',
+      absolutePath: '/test/manga',  // book 目录是 /test/manga
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      isFavorite: false,
+      sourceDescriptor: { type: 'local', rootPath: 'C:/root' },
+      sourceType: 'Local',
+    } as never);
+    const { useDirectorySortStore } = await import('@/stores/directorySort');
+    const ds = useDirectorySortStore();
+    // 给 book 目录 /test/manga 设 ASC (覆盖默认)
+    await ds.set({ type: 'local', rootPath: 'C:/root' }, '/test/manga', { sortField: 'modifiedAt', ascending: true });
+    // fb 默认 sortField 是 modifiedAt 倒序 — 模拟父目录的设置
+    const fb = useFileBrowserStore();
+    fb.sortField = 'modifiedAt';
+    fb.sortAscending = false;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 应该用 book 目录的 ASC (modifiedAt 升序): b(100), c(200), a(300)
+    // 而不是 fb 的 DESC: a(300), c(200), b(100)
+    const urls = reader.pages;
+    expect(urls[0]).toContain('b.jpg');
+    expect(urls[1]).toContain('c.jpg');
+    expect(urls[2]).toContain('a.jpg');
   });
 });
