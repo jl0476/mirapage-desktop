@@ -371,7 +371,11 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 .details-row {
   border-bottom: 1px solid transparent;
   transition: background 120ms var(--ease-out);
-  overflow: hidden;  /* hotfix8: 防 grid 列溢出到属性框 */
+  /* v0.1.0-module3.0.3-hotfix9: 改 overflow-x: hidden 单独约束水平, 保留 y: visible
+     让 .name-tooltip (定位在 name-wrap 下方) 能溢出显示. 原来 overflow: hidden
+     会裁掉 tooltip. */
+  overflow-x: hidden;
+  overflow-y: visible;
 }
 .details-row:hover {
   background: var(--color-surface-light);

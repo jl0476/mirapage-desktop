@@ -14,6 +14,8 @@ import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatBytes, formatDate } from '@/locales/helpers';
 import { useSettingsStore } from '@/stores/settings';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
+import { PathUtils } from '@/lib/path';
 import { extensionOf, mimeFromName, getMimeCategory } from '@/lib/mime';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
@@ -29,6 +31,7 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const settings = useSettingsStore();
+const fb = useFileBrowserStore();
 
 const display = computed(() => {
   if (!props.entry) return null;
@@ -53,8 +56,15 @@ const display = computed(() => {
           if (cat === 'text') return t('properties.typeText');
           return t('properties.typeFile');
         })();
+  // v0.1.0-module3.0.3-hotfix10: location 拼 currentPath 上下文. 之前只用 rootPath + e.path
+  // 丢失 currentPath (e.g. 用户在 output/ 看 260301 应为 U:/H/AI/output/260301 不是
+  // U:/H/AI/260301). 用 lastFetchedPath 而非 currentPath (避免 navigate race condition
+  // 与 useReaderActions 一致). PathUtils.join 只接 2 个参数, 嵌套二次拼接.
+  const currentPath = fb.lastFetchedPath;
   const location = props.rootPath
-    ? `${props.rootPath}/${e.path}`
+    ? (currentPath
+      ? PathUtils.join(PathUtils.join(props.rootPath, currentPath), e.path)
+      : PathUtils.join(props.rootPath, e.path))
     : e.path;
   return {
     name: e.name,
