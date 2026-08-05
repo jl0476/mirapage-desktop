@@ -71,3 +71,7 @@ tsconfig.tsbuildinfo
 
 # 本地打包脚本 (硬编码本机路径, 每台机器不同, 不入仓; 之前曾例外入仓但路径冲突, 改回忽略)
 tauri-build-portable.bat
+
+# 诊断遗留 diff (git diff 输出、问题排查归档, 不入仓)
+backend.diff
+full.diff
