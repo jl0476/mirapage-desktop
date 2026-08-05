@@ -68,3 +68,6 @@ scripts/tmp/
 # 本地构建产物 / 类型检查缓存 (CLAUDE.md §5.4 不入仓)
 mirapage-desktop-local.exe
 tsconfig.tsbuildinfo
+
+# 本地打包脚本 (硬编码本机路径, 每台机器不同, 不入仓; 之前曾例外入仓但路径冲突, 改回忽略)
+tauri-build-portable.bat

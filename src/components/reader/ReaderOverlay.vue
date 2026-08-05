@@ -84,8 +84,10 @@ function onScaleSelect(m: ScaleMode): void {
   scaleOpen.value = false;
 }
 
-function onScaleMouseDown(e: MouseEvent): void {
-  if (!scaleDropdownRef.value?.contains(e.target as Node)) scaleOpen.value = false;
+function onScalePointerDown(e: PointerEvent): void {
+  // pointerdown: OSD 开启 Pointer Events 时图像区域只发 pointerdown 不发 mousedown
+  const t = e.target as Node | null;
+  if (!scaleDropdownRef.value?.contains(t)) scaleOpen.value = false;
 }
 
 const { t } = useI18n();
@@ -124,8 +126,8 @@ const slideshowControlShow = computed(() => props.chromeVisible && (props.hovere
 /** 间隔 slider 当前值 (1-30s, 步长 0.5s) */
 const intervalSeconds = computed(() => Math.round(slideshow.intervalMs / 1000));
 
-onMounted(() => document.addEventListener('mousedown', onScaleMouseDown));
-onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
+onMounted(() => window.addEventListener('pointerdown', onScalePointerDown, true));
+onUnmounted(() => window.removeEventListener('pointerdown', onScalePointerDown, true));
 </script>
 
 <template>
@@ -143,7 +145,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
       <div class="relative" ref="scaleDropdownRef">
         <button
           type="button"
-          class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors"
+          class="px-2 py-1 rounded text-white hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="scale-trigger"
           :aria-label="scaleLabel(props.scaleMode)"
           aria-haspopup="menu"
@@ -161,8 +163,8 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
             v-for="m in SCALE_MODES"
             :key="m"
             type="button"
-            class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light"
-            :class="m === props.scaleMode ? 'text-accent' : 'text-white'"
+            class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light hover:text-text-primary"
+            :class="m === props.scaleMode ? 'text-accent' : 'text-text-secondary'"
             data-test="scale-option"
             role="menuitem"
             @click="onScaleSelect(m)"
@@ -173,7 +175,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
       </div>
       <button
         type="button"
-        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-mode"
         @click="emit('toggle-mode')"
       >
@@ -181,7 +183,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
       </button>
       <button
         type="button"
-        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light hover:text-text-primary transition-colors"
         data-test="btn-back"
         :aria-label="t('reader.menu.back')"
         @click="emit('back-to-list')"
@@ -194,7 +196,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
       </button>
       <button
         type="button"
-        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light hover:text-text-primary transition-colors"
         data-test="btn-menu"
         :aria-label="t('reader.menu.title')"
         @click="emit('open-main-menu')"
@@ -223,7 +225,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
     >
       <button
         type="button"
-        class="px-2 py-1 rounded hover:bg-surface-light transition-colors flex items-center gap-1"
+        class="px-2 py-1 rounded hover:bg-surface-light hover:text-text-primary transition-colors flex items-center gap-1"
         :class="{ 'text-accent': slideshow.isPlaying }"
         data-test="slideshow-toggle"
         :aria-label="slideshow.isPlaying ? t('slideshow.pause') : t('slideshow.play')"
@@ -259,7 +261,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
 
       <button
         type="button"
-        class="px-2 py-1 rounded hover:bg-surface-light transition-colors"
+        class="px-2 py-1 rounded hover:bg-surface-light hover:text-text-primary transition-colors"
         data-test="slideshow-direction"
         :aria-label="t('slideshow.direction')"
         @click="onDirectionToggle"
@@ -277,7 +279,7 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
     <footer v-if="chromeShow" class="bg-surface/90 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-sm text-white pointer-events-auto shadow-lg" data-test="overlay-bottom" @mouseenter="emit('chrome-hover-enter')" @mouseleave="emit('chrome-hover-leave')">
       <button
         type="button"
-        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-prev"
         :disabled="currentPage <= 1"
         @click="emit('prev')"
@@ -295,13 +297,13 @@ onUnmounted(() => document.removeEventListener('mousedown', onScaleMouseDown));
           type="number"
           min="1"
           :max="totalPages"
-          class="w-16 px-2 py-1 rounded bg-surface-1 xp-bd text-white text-xs focus:outline-none focus:border-accent"
+          class="w-16 px-2 py-1 rounded bg-surface-1 xp-bd text-text-primary text-xs focus:outline-none focus:border-accent"
         />
-        <button type="submit" class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors">Go</button>
+        <button type="submit" class="px-2 py-1 rounded text-white hover:bg-surface-light hover:text-text-primary transition-colors">Go</button>
       </form>
       <button
         type="button"
-        class="px-2 py-1 rounded text-white hover:bg-surface-light transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        class="px-2 py-1 rounded text-white hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="btn-next"
         :disabled="currentPage >= totalPages"
         @click="emit('next')"

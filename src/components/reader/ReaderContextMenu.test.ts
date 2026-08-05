@@ -15,6 +15,7 @@ function mountMenu(propsOverride: Record<string, unknown> = {}) {
       mode: 'single',
       direction: 'ltr',
       isSlideshowPlaying: false,
+      totalPages: 100,
       ...propsOverride,
     },
     global: { plugins: [i18n] },

@@ -230,8 +230,8 @@ describe('ReaderOverlay.vue', () => {
     const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
     await w.find('[data-test="scale-trigger"]').trigger('click');
     expect(w.find('[data-test="scale-option"]').exists()).toBe(true);
-    // 模拟点击外部 — 触发 document mousedown
-    document.dispatchEvent(new MouseEvent('mousedown'));
+    // 模拟点击外部 — 触发 window pointerdown (OSD Pointer Events 下 mousedown 被抑制)
+    window.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true }));
     await w.vm.$nextTick();
     expect(w.find('[data-test="scale-option"]').exists()).toBe(false);
   });

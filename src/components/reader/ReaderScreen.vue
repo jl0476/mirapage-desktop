@@ -337,7 +337,7 @@ function onContainerMouseLeave(): void {
 <template>
   <div
     ref="containerRef"
-    class="reader-screen relative w-full h-full overflow-hidden bg-black"
+    class="reader-screen relative w-full h-full overflow-hidden bg-black text-white"
     data-test="reader-screen"
     @mouseenter="onContainerMouseEnter"
     @mouseleave="onContainerMouseLeave"

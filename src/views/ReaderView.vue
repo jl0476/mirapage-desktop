@@ -92,9 +92,8 @@ function onCtxToggleSlideshow(): void {
   slideshow.toggle();
   closeCtxMenu();
 }
-function onCtxJumpPage(): void {
-  // 修复: 直接打开跳页 dialog, 不再绕路回主菜单
-  openJumpDialog();
+function onCtxJumpPage(page: number): void {
+  doJumpToPage(page);
   closeCtxMenu();
 }
 function onCtxBack(): void {
@@ -121,9 +120,8 @@ function openJumpDialog(): void {
 function closeJumpDialog(): void {
   jumpDialogRef.value?.close();
 }
-function submitJumpDialog(ev: Event): void {
-  ev.preventDefault();
-  const page = Number(jumpDialogValue.value);
+/** 跳页核心: 页码 → spread → jumpToSpread. 主菜单 dialog 和右键子菜单共用. */
+function doJumpToPage(page: number): void {
   if (!Number.isFinite(page) || page < 1) return;
   const total = pageUrls.value.length;
   if (total === 0) return;
@@ -133,6 +131,11 @@ function submitJumpDialog(ev: Event): void {
   const idx = SpreadPlanner.spreadIndexForPage(target, spreads);
   reader.jumpToSpread(idx);
   slideshow.reset();
+}
+
+function submitJumpDialog(ev: Event): void {
+  ev.preventDefault();
+  doJumpToPage(Number(jumpDialogValue.value));
   closeJumpDialog();
 }
 
@@ -574,6 +577,7 @@ watch(
       :mode="settings.readerDefaultMode"
       :direction="settings.defaultReadDirection"
       :is-slideshow-playing="slideshow.isPlaying"
+      :total-pages="pageUrls.length"
       @close="closeCtxMenu"
       @scale-change="onCtxScaleChange"
       @cycle-mode="onCtxCycleMode"
@@ -586,7 +590,7 @@ watch(
     <!-- 跳页 dialog (主菜单"跳页" / 右键"跳页" 都打开) -->
     <dialog
       ref="jumpDialogRef"
-      class="bg-surface-1 xp-bd rounded-lg p-6 backdrop:bg-black/60 text-text-primary"
+      class="m-auto inset-0 bg-surface-1 xp-bd rounded-lg p-6 backdrop:bg-black/60 text-text-primary"
       data-test="jump-dialog"
     >
       <form class="flex flex-col gap-3" @submit="submitJumpDialog">

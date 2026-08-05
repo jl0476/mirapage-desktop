@@ -23,8 +23,10 @@ interface Props {
   mode: 'single' | 'double';
   direction: 'ltr' | 'rtl';
   isSlideshowPlaying: boolean;
+  /** 总页数 (跳页子菜单显示 "n / total") */
+  totalPages: number;
 }
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), { totalPages: 0 });
 
 const emit = defineEmits<{
   (e: 'close'): void;
@@ -32,12 +34,14 @@ const emit = defineEmits<{
   (e: 'cycle-mode'): void;
   (e: 'cycle-direction'): void;
   (e: 'toggle-slideshow'): void;
-  (e: 'jump-page'): void;
+  (e: 'jump-page', page: number): void;
   (e: 'back'): void;
 }>();
 
 const { t } = useI18n();
 const scaleOpen = ref(false);
+const jumpOpen = ref(false);
+const jumpValue = ref(1);
 const SCALE_MODES: ScaleMode[] = [
   'fit-screen', 'fit-width', 'fit-height',
   'original', 'full-screen',
@@ -55,19 +59,26 @@ function onScaleSelect(m: ScaleMode): void {
   emit('close');
 }
 
-function onItemClick(action: 'cycle-mode' | 'cycle-direction' | 'toggle-slideshow' | 'jump-page' | 'back'): void {
+function onItemClick(action: 'cycle-mode' | 'cycle-direction' | 'toggle-slideshow' | 'back'): void {
   switch (action) {
     case 'cycle-mode': emit('cycle-mode'); break;
     case 'cycle-direction': emit('cycle-direction'); break;
     case 'toggle-slideshow': emit('toggle-slideshow'); break;
-    case 'jump-page': emit('jump-page'); break;
     case 'back': emit('back'); break;
   }
   emit('close');
 }
 
-function onMouseDown(e: MouseEvent): void {
-  // 点击菜单外关闭
+function onJumpSubmit(ev: Event): void {
+  ev.preventDefault();
+  emit('jump-page', Number(jumpValue.value));
+  jumpOpen.value = false;
+  emit('close');
+}
+
+function onPointerDown(e: PointerEvent): void {
+  // 点击菜单外关闭. 用 pointerdown 而非 mousedown: OSD 开启 Pointer Events 时
+  // 图像区域点击只发 pointerdown (preventDefault 抑制合成 mousedown), mousedown 监听收不到.
   const el = e.target as HTMLElement;
   if (!el.closest('[data-test="reader-context-menu"]')) emit('close');
 }
@@ -76,12 +87,12 @@ function onKeydown(e: KeyboardEvent): void {
 }
 
 onMounted(() => {
-  document.addEventListener('mousedown', onMouseDown);
-  document.addEventListener('keydown', onKeydown);
+  window.addEventListener('pointerdown', onPointerDown, true);
+  window.addEventListener('keydown', onKeydown);
 });
 onUnmounted(() => {
-  document.removeEventListener('mousedown', onMouseDown);
-  document.removeEventListener('keydown', onKeydown);
+  window.removeEventListener('pointerdown', onPointerDown, true);
+  window.removeEventListener('keydown', onKeydown);
 });
 </script>
 
@@ -117,7 +128,7 @@ onUnmounted(() => {
         <button
           v-for="m in SCALE_MODES"
           :key="m"
-          class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light"
+          class="flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-surface-light hover:text-text-primary"
           :class="m === props.scaleMode ? 'text-accent' : 'text-text-secondary'"
           data-test="ctx-scale-option"
           role="menuitem"
@@ -137,9 +148,46 @@ onUnmounted(() => {
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('toggle-slideshow')">
       <span>{{ t('slideshow.toggle') }}</span><span class="text-text-muted">{{ props.isSlideshowPlaying ? t('slideshow.pause') : t('slideshow.play') }}</span>
     </button>
-    <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('jump-page')">
-      <span>{{ t('reader.menu.jump') }}</span>
-    </button>
+    <!-- 跳页（子菜单，吸附右侧） -->
+    <div
+      class="relative"
+      data-test="ctx-jump"
+      @click="jumpOpen = !jumpOpen"
+    >
+      <button
+        data-test="ctx-item"
+        class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary"
+        :aria-haspopup="'menu'"
+        :aria-expanded="jumpOpen"
+      >
+        <span>{{ t('reader.menu.jump') }}</span>
+        <span class="text-text-muted">›</span>
+      </button>
+      <form
+        v-if="jumpOpen"
+        class="absolute left-full top-0 ml-1 min-w-[160px] bg-surface-4 xp-bd rounded-lg py-2 px-2 shadow-xl flex items-center gap-2"
+        role="menu"
+        @submit.prevent="onJumpSubmit"
+        @click.stop
+        @keydown.escape="jumpOpen = false"
+      >
+        <input
+          v-model.number="jumpValue"
+          type="number"
+          min="1"
+          :max="totalPages"
+          class="w-16 px-2 py-1 rounded bg-surface-1 xp-bd text-text-primary text-xs focus:outline-none focus:border-accent"
+          data-test="ctx-jump-input"
+          aria-label="jump"
+        />
+        <span class="text-xs text-text-muted font-mono shrink-0">/ {{ totalPages }}</span>
+        <button
+          type="submit"
+          class="px-2 py-1 rounded text-xs bg-accent text-white hover:bg-accent-hover transition-colors shrink-0"
+          data-test="ctx-jump-go"
+        >Go</button>
+      </form>
+    </div>
 
     <div class="my-1 xp-divider-h" />
 
