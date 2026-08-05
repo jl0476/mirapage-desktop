@@ -101,6 +101,8 @@ export default {
     pause: 'Pause',
     control: 'Slideshow controls',
     toggle: 'Toggle slideshow',
+    statusStarted: 'Slideshow started',
+    statusPaused: 'Slideshow paused',
   },
   fileBrowser: {
     title: 'File Browser',

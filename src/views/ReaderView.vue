@@ -40,6 +40,7 @@ import { log } from '@/lib/logger';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
 import ReaderContextMenu from '@/components/reader/ReaderContextMenu.vue';
+import SlideshowToast from '@/components/reader/SlideshowToast.vue';
 import type { ScaleMode } from '@/lib/readerSettings';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
@@ -622,5 +623,8 @@ watch(
         </div>
       </form>
     </dialog>
+
+    <!-- v0.1.0-module3.0.3: 幻灯片切换提示胶囊 (监听 isPlaying flip; 自带 1500ms auto-hide) -->
+    <SlideshowToast />
   </main>
 </template>

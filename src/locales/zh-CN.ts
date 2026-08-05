@@ -102,6 +102,8 @@ export default {
     pause: '暂停',
     control: '轮播控制',
     toggle: '切换幻灯片',
+    statusStarted: '已开始播放',
+    statusPaused: '已暂停',
   },
   fileBrowser: {
     title: '文件浏览器',
