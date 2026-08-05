@@ -29,7 +29,7 @@ import { createBook, listDirectory, recordHistory } from '@/lib/tauri';
 import { useReaderActions } from './useReaderActions';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
-const fakeRouter = { push: vi.fn() } as unknown as { push: (path: string | { path: string; query?: Record<string, string> }) => Promise<void> };
+const fakeRouter = { push: vi.fn() } as unknown as { push: (path: string | { path: string; query?: Record<string, string> | undefined }) => Promise<void> } & { push: { mockImplementation: (fn: (path: string | { path: string; query?: Record<string, string> }) => Promise<void>) => void } };
 
 function makeEntry(isDirectory: boolean, name = 'VOL.01'): MediaEntry {
   return {
@@ -257,5 +257,142 @@ describe('useReaderActions', () => {
       modifiedAt: 0,
     });
     expect(fakeRouter.push).not.toHaveBeenCalled();
+  });
+
+  // ─── 嵌套目录路径修复 (v0.1.0-module3.0.3-hotfix) ───
+  // Bug 1: MediaEntry.path 是相对 currentPath 的, 但 ensureBookId 之前误用为
+  // 相对 rootPath, 嵌套目录下 listDirectory / recordHistory / createBook 全错.
+  // 修复: 加 getCurrentPath 选项, ensureBookId 用 PathUtils.join 拼出 absPath.
+
+  it('readNow 嵌套目录: currentPath="output" + entry.path="260715" → absPath="output/260715"', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(7);
+    const actions = useReaderActions({
+      resolveRootPath: () => 'U:/H/AI',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'output',  // 嵌套目录
+      router: fakeRouter as never,
+    });
+    const nestedEntry: MediaEntry = {
+      name: '260715',
+      path: '260715',  // 相对 currentPath='output', 真实绝对 = U:/H/AI/output/260715
+      isDirectory: true,
+      isArchive: false,
+      size: 0,
+      modifiedAt: 0,
+    };
+    await actions.readNow(nestedEntry);
+    expect(listDirectory).toHaveBeenCalledWith({ type: 'local', rootPath: 'U:/H/AI' }, 'output/260715');
+    expect(createBook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '260715',
+        sourceDescriptor: { type: 'local', rootPath: 'U:/H/AI' },
+        absolutePath: 'output/260715',
+        sourceType: 'Local',
+        favorite: false,
+      }),
+    );
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'U:/H/AI' },
+      'output/260715',
+      '260715',
+      7,
+    );
+    expect(fakeRouter.push).toHaveBeenCalledWith('/reader/7');
+  });
+
+  it('addToLibrary 嵌套目录: enumerate cover + createBook.absolutePath 拼接 currentPath', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'p1.jpg', path: 'output/260715/p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 } as MediaEntry,
+      { name: 'p2.jpg', path: 'output/260715/p2.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 } as MediaEntry,
+    ]);
+    vi.mocked(createBook).mockResolvedValue(33);
+    const actions = useReaderActions({
+      resolveRootPath: () => 'U:/H/AI',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'output',
+      router: fakeRouter as never,
+    });
+    const result = await actions.addToLibrary({
+      name: '260715',
+      path: '260715',
+      isDirectory: true,
+      isArchive: false,
+      size: 0,
+      modifiedAt: 0,
+    });
+    expect(result).toBe(33);
+    expect(listDirectory).toHaveBeenCalledWith({ type: 'local', rootPath: 'U:/H/AI' }, 'output/260715');
+    expect(createBook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '260715',
+        absolutePath: 'output/260715',
+        favorite: true,
+        coverEntryPath: 'output/260715/p1.jpg',
+        coverEntryName: 'p1.jpg',
+        pageCount: 2,
+      }),
+    );
+    expect(recordHistory).not.toHaveBeenCalled();
+  });
+
+  it('readFromImage 嵌套目录: parentPath="output/VOL.01" → absPath 拼到 currentPath', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(8);
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => 'output/VOL.01',
+      getCurrentPath: () => 'output/VOL.01',  // 双层嵌套
+      router: fakeRouter as never,
+    });
+    await actions.readFromImage({
+      name: 'page1.jpg',
+      path: 'page1.jpg',  // 相对 currentPath='output/VOL.01'
+      isDirectory: false,
+      isArchive: false,
+      size: 0,
+      modifiedAt: 0,
+    });
+    expect(listDirectory).toHaveBeenCalledWith({ type: 'local', rootPath: '/manga' }, 'output/VOL.01');
+    expect(createBook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'VOL.01',  // parentPath 最后一段
+        absolutePath: 'output/VOL.01',
+        favorite: false,
+      }),
+    );
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/manga' },
+      'output/VOL.01',
+      'VOL.01',
+      8,
+    );
+    expect(fakeRouter.push).toHaveBeenCalledWith({
+      path: '/reader/8',
+      query: { at: 'page1.jpg' },
+    });
+  });
+
+  it('readNow: 保存导航上下文 (saveNavigationContext) 在 router.push 前调', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(1);
+    const saveNavigationContext = vi.fn();
+    const callOrder: string[] = [];
+    saveNavigationContext.mockImplementation(() => callOrder.push('saveNavigationContext'));
+    fakeRouter.push.mockImplementation(async () => { callOrder.push('router.push'); });
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'output',
+      saveNavigationContext,
+      router: fakeRouter as never,
+    });
+    await actions.readNow({ name: '260715', path: '260715', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 });
+    expect(saveNavigationContext).toHaveBeenCalledTimes(1);
+    expect(callOrder).toEqual(['saveNavigationContext', 'router.push']);
   });
 });

@@ -32,6 +32,10 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
   const currentPath = ref<string>('');
   const lastFetchedPath = ref<string>('');
+  // v0.1.0-module3.0.3-hotfix (Bug 2): 保存「进入 reader 前」的导航上下文.
+  // ReaderView 退出时调 restoreNavigationContext, FileBrowser.onMounted 优先恢复.
+  // 取代之前的「每次 onMounted 都 setRoot(LAST_ROOT_KEY) 抹掉 currentPath」反模式.
+  const savedNavigationContext = ref<{ rootPath: string; currentPath: string } | null>(null);
   const entries = ref<MediaEntry[]>([]);
   const loading = ref(false);
   const error = ref<FileBrowserError | null>(null);
@@ -109,6 +113,34 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     parts.pop();
     currentPath.value = parts.join('/');
     await fetch(currentPath.value);
+  }
+
+  // ─── v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复 ───
+  // useReaderActions.readNow/readFromImage 在 router.push 前调 saveNavigationContext
+  // 记下 (rootPath, currentPath); FileBrowser.onMounted / ReaderView 退出时调
+  // restoreNavigationContext 把上下文还原. 返回 true = 成功恢复, false = 无上下文.
+
+  function saveNavigationContext(): void {
+    if (rootPath.value === null) return;
+    savedNavigationContext.value = {
+      rootPath: rootPath.value,
+      currentPath: currentPath.value,
+    };
+    log('[fileBrowser] saveNavigationContext', savedNavigationContext.value);
+  }
+
+  async function restoreNavigationContext(): Promise<boolean> {
+    const ctx = savedNavigationContext.value;
+    if (!ctx) return false;
+    savedNavigationContext.value = null;
+    log('[fileBrowser] restoreNavigationContext', ctx);
+    if (rootPath.value !== ctx.rootPath) {
+      await setRoot(ctx.rootPath);
+    }
+    if (ctx.currentPath) {
+      await navigate(ctx.currentPath);
+    }
+    return true;
   }
 
   // ─── v0.1.0-module1.22: sort/viewMode/hideFinished actions ──
@@ -283,6 +315,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     navigate,
     refresh,
     up,
+    // v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复
+    saveNavigationContext,
+    restoreNavigationContext,
     // sort/viewMode/hideFinished
     setSortField,
     toggleSortOrder,

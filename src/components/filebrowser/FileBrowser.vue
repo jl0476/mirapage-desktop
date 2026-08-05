@@ -45,6 +45,11 @@ const readerActions = useReaderActions({
   // root 级别 (fb.currentPath='') 时,父目录就是 rootPath. 子目录级别用 currentPath.
   // 列表渲染前的瞬间 lastFetchedPath 可能为 '' 但 readFromImage 会容错放弃.
   getLastFetchedPath: () => fb.currentPath || fb.rootPath || '',
+  // v0.1.0-module3.0.3-hotfix (Bug 1): ensureBookId 拼 absPath 需要 currentPath.
+  // readFromImage 不读此值 — 它显式传 parentPath 作为 override.
+  getCurrentPath: () => fb.currentPath,
+  // v0.1.0-module3.0.3-hotfix (Bug 2): reader 退出时恢复 currentPath.
+  saveNavigationContext: () => fb.saveNavigationContext(),
   onLibraryChanged: async () => {
     await readStatus.refresh();
   },
@@ -77,7 +82,14 @@ onMounted(async () => {
   await readStatus.refresh();
   // v0.1.0-module1.22: 加载 sortField/sortAscending/viewMode/hideFinished 持久化
   await fb.loadLayout();
-  // #1 启动时读上次根目录, 自动加载
+  // v0.1.0-module3.0.3-hotfix (Bug 2): 如果 reader 退出时已保存了导航上下文,
+  // 先恢复 (rootPath + currentPath) 再决定是否走默认的 LAST_ROOT_KEY 路径.
+  // 之前无脑 setRoot(stored) 会抹掉 currentPath, 导致嵌套目录下阅读后退回到 root.
+  if (await fb.restoreNavigationContext()) {
+    log('[FileBrowser] restored navigation context, skip setRoot');
+    return;
+  }
+  // #1 启动时读上次根目录, 自动加载 (默认行为: 应用首次启动 / 刷新页面后)
   try {
     const stored = await getSetting(LAST_ROOT_KEY);
     if (stored && typeof stored === 'string' && stored.length > 0) {

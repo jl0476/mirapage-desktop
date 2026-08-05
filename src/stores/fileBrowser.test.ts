@@ -115,6 +115,56 @@ describe('fileBrowser store — 基础', () => {
     await store.setRoot('C:/missing');
     expect(store.error?.kind).toBe('io');
   });
+
+  // ─── 导航上下文保存/恢复 (v0.1.0-module3.0.3-hotfix Bug 2) ───
+
+  it('saveNavigationContext → restoreNavigationContext: 嵌套路径保存恢复 (rootPath 不变, currentPath 恢复)', async () => {
+    mockedList.mockResolvedValue(makeEntries('260715'));
+    const store = useFileBrowserStore();
+    await store.setRoot('U:/H/AI');
+    mockedList.mockResolvedValue(makeEntries('260301', '260501', '260715'));
+    await store.navigate('output');
+    expect(store.currentPath).toBe('output');
+    // 进入 reader 前保存上下文
+    store.saveNavigationContext();
+    // 模拟 reader 期间 store 仍保持 (但 UI 假设 FileBrowser 卸载后 store 还在)
+    // 重新挂载 FileBrowser 时调用 restore
+    mockedList.mockResolvedValue(makeEntries('260301', '260501', '260715'));
+    const restored = await store.restoreNavigationContext();
+    expect(restored).toBe(true);
+    expect(store.rootPath).toBe('U:/H/AI');
+    expect(store.currentPath).toBe('output');
+    // restore 后应清空 saved 上下文 (二次调用返回 false)
+    const restoredAgain = await store.restoreNavigationContext();
+    expect(restoredAgain).toBe(false);
+  });
+
+  it('restoreNavigationContext: rootPath 不同时先 setRoot 再 navigate', async () => {
+    mockedList.mockResolvedValue(makeEntries('manga'));
+    const store = useFileBrowserStore();
+    await store.setRoot('U:/H/AI');
+    mockedList.mockResolvedValue(makeEntries('260715'));
+    await store.navigate('output');
+    // 保存 (rootPath='U:/H/AI', currentPath='output')
+    store.saveNavigationContext();
+    // 模拟重启 / 切换根: 用户在另一处换了 rootPath
+    mockedList.mockResolvedValue(makeEntries('photos'));
+    await store.setRoot('D:/backup');
+    expect(store.rootPath).toBe('D:/backup');
+    expect(store.currentPath).toBe('');
+    // 现在 restore → 应切回 U:/H/AI/output
+    mockedList.mockResolvedValue(makeEntries('260301', '260501', '260715'));
+    const restored = await store.restoreNavigationContext();
+    expect(restored).toBe(true);
+    expect(store.rootPath).toBe('U:/H/AI');
+    expect(store.currentPath).toBe('output');
+  });
+
+  it('restoreNavigationContext: 无保存上下文时返回 false', async () => {
+    const store = useFileBrowserStore();
+    const restored = await store.restoreNavigationContext();
+    expect(restored).toBe(false);
+  });
 });
 
 describe('fileBrowser store — sortedEntries (dir-first)', () => {

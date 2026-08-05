@@ -10,11 +10,20 @@
  * **不做** (plan §6 决策):
  * - ❌ 下载全部按钮 (本地文件无下载需求)
  * - ❌ 编辑类 (新建/重命名/删除/拖放)
+ *
+ * v0.1.0-module3.0.3-hotfix:
+ * - Bug 1: MediaEntry.path 相对 currentPath, 但 ensureBookId 之前误用为相对 rootPath,
+ *   嵌套目录场景 listDirectory / recordHistory / createBook 全错. 修复: 加 getCurrentPath
+ *   选项 + ensureBookId(parentPathOverride) 显式覆盖, 用 PathUtils.join 拼 absPath.
+ * - Bug 2: 阅读完 router.push('/') 回到 rootPath, 丢失 currentPath. 修复: 加
+ *   saveNavigationContext 选项, readNow/readFromImage 在 router.push 前存 (rootPath,
+ *   currentPath), ReaderView 退出时 restore. FileBrowser.onMounted 优先 restore.
  */
 import { useRouter } from 'vue-router';
 import { createBook, listDirectory, recordHistory, type CreateBookArgs } from '@/lib/tauri';
 import { isImage } from '@/lib/mime';
 import { naturalCompare } from '@/lib/naturalSort';
+import { PathUtils } from '@/lib/path';
 import { log } from '@/lib/logger';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 import type { Router } from 'vue-router';
@@ -30,6 +39,20 @@ export interface ReaderActionsOptions {
    * 缺省或空字符串时 readFromImage 容错放弃 (不 router.push).
    */
   getLastFetchedPath: () => string;
+  /**
+   * v0.1.0-module3.0.3-hotfix: 当前列表所在的目录路径 (fb.currentPath, 相对 rootPath).
+   * ensureBookId 用此值 + entry.path 拼出 absPath (相对 rootPath 的 IPC 路径).
+   * readFromImage 不读此值 — 它显式把 parentPath 作为覆盖传给 ensureBookId,
+   * 保证「图片所在目录 = 当前目录」语义绝对正确.
+   */
+  getCurrentPath?: () => string;
+  /**
+   * v0.1.0-module3.0.3-hotfix (Bug 2): 保存导航上下文 (rootPath + currentPath),
+   * ReaderView 退出时调用. 通常 readNow / readFromImage 内部调用一次,
+   * 在 router.push 前; 也可让 FileBrowser 显式传入.
+   * 不传则跳过保存 (保持旧行为)。
+   */
+  saveNavigationContext?: () => void;
   /** 可选 router, 测试时手动传入; 缺省时尝试 useRouter() */
   router?: Router;
   /** 数据变化后回调 (UI 刷新 Reading/Finished 标记 / book 列表) */
@@ -85,15 +108,26 @@ export function useReaderActions(opts: ReaderActionsOptions) {
   /**
    * 复用 / 创建 bookId (Android LibraryRepository.importFromSource 行为)
    * favorite=true → is_favorite=1（Library 可见）；false → is_favorite=0（Library 不可见）
+   *
+   * v0.1.0-module3.0.3-hotfix:
+   * - 改返回 { bookId, absPath } — recordHistory 需要 absPath (相对 rootPath 的 IPC 路径)
+   * - absPath = entry.path ? PathUtils.join(currentPath, entry.path) : currentPath
+   *   其中 currentPath 优先取 parentPathOverride (readFromImage 用), 否则 opts.getCurrentPath() ?? ''
+   * - readFromImage 合成 parentDir.path = '' → absPath 直接 = currentPath (即 parentPath)
    */
-  async function ensureBookId(entry: MediaEntry, favorite: boolean): Promise<number | null> {
+  async function ensureBookId(
+    entry: MediaEntry,
+    favorite: boolean,
+    parentPathOverride?: string,
+  ): Promise<{ bookId: number | null; absPath: string }> {
     if (!entry.isDirectory) {
       log('[useReaderActions/ensureBookId] entry is not a directory, skip', entry.name);
-      return null;
+      return { bookId: null, absPath: '' };
     }
     const rootPath = opts.resolveRootPath();
-    const absPath = entry.path;
-    log('[useReaderActions/ensureBookId] entry=', entry.name, 'rootPath=', rootPath, 'absPath=', absPath, 'favorite=', favorite);
+    const currentPath = parentPathOverride ?? opts.getCurrentPath?.() ?? '';
+    const absPath = entry.path ? PathUtils.join(currentPath, entry.path) : currentPath;
+    log('[useReaderActions/ensureBookId] entry=', entry.name, 'rootPath=', rootPath, 'currentPath=', currentPath, 'absPath=', absPath, 'favorite=', favorite);
     const descriptor = opts.buildSourceDescriptor(rootPath);
     const sourceType = descriptor.type === 'local' ? 'Local' : capitalize(descriptor.type);
 
@@ -113,16 +147,16 @@ export function useReaderActions(opts: ReaderActionsOptions) {
       log('[useReaderActions/ensureBookId] IPC[createBook] →', args);
       const bookId = await createBook(args);
       log('[useReaderActions/ensureBookId] IPC[createBook] ←', favorite ? 'favorite=true' : 'favorite=false', '→ bookId', bookId);
-      return bookId;
+      return { bookId, absPath };
     } catch (e) {
       log('[useReaderActions/ensureBookId] createBook failed', e);
-      return null;
+      return { bookId: null, absPath };
     }
   }
 
   async function readNow(entry: MediaEntry): Promise<void> {
     log('[useReaderActions] readNow called', entry.name, 'isDirectory=', entry.isDirectory);
-    const bookId = await ensureBookId(entry, /*favorite=*/false);
+    const { bookId, absPath } = await ensureBookId(entry, /*favorite=*/false);
     if (bookId === null) {
       log('[useReaderActions] readNow: bookId is null, abort');
       return;
@@ -132,7 +166,7 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     try {
       const rootPath = opts.resolveRootPath();
       const descriptor = opts.buildSourceDescriptor(rootPath);
-      await recordHistory(descriptor, entry.path, entry.name, bookId);
+      await recordHistory(descriptor, absPath, entry.name, bookId);
     } catch (e) {
       log('[useReaderActions] recordHistory failed (容错)', e);
     }
@@ -141,6 +175,14 @@ export function useReaderActions(opts: ReaderActionsOptions) {
         await opts.onLibraryChanged();
       } catch (e) {
         log('[useReaderActions] onLibraryChanged failed', e);
+      }
+    }
+    // Bug 2 修复: 在 router.push 前保存导航上下文, ReaderView 退出时恢复
+    if (opts.saveNavigationContext) {
+      try {
+        opts.saveNavigationContext();
+      } catch (e) {
+        log('[useReaderActions] saveNavigationContext failed (容错)', e);
       }
     }
     if (router) {
@@ -154,7 +196,7 @@ export function useReaderActions(opts: ReaderActionsOptions) {
 
   async function addToLibrary(entry: MediaEntry): Promise<number | null> {
     log('[useReaderActions] addToLibrary called', entry.name);
-    const bookId = await ensureBookId(entry, /*favorite=*/true);
+    const { bookId } = await ensureBookId(entry, /*favorite=*/true);
     if (bookId !== null && opts.onLibraryChanged) {
       try {
         await opts.onLibraryChanged();
@@ -171,6 +213,13 @@ export function useReaderActions(opts: ReaderActionsOptions) {
    * 父目录 = opts.getLastFetchedPath() (FileBrowser 当前列表所在路径).
    * 用 parent dir 合成 MediaEntry 走 ensureBookId(favorite=false),与 readNow 一致.
    * router.push 时带 ?at=imageName (encodeURIComponent),ReaderView 解析后从该图开始.
+   *
+   * v0.1.0-module3.0.3-hotfix:
+   * - parentDir.path 改为 '' (旧值 parentPath 会让 PathUtils.join 重复拼).
+   *   ensureBookId 内部 `entry.path ? join(...) : currentPath` 走 fallback 分支,
+   *   absPath = currentPath = parentPath (读 From Image 时这就是图片所在目录).
+   * - ensureBookId 加 parentPathOverride 显式覆盖 currentPath, 不依赖 opts.getCurrentPath().
+   *   即使 FileBrowser.currentPath 尚未更新, readFromImage 也能保证 absPath 正确.
    */
   async function readFromImage(imageEntry: MediaEntry): Promise<void> {
     log('[useReaderActions] readFromImage called', imageEntry.name);
@@ -182,13 +231,13 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     const parentName = parentPath.split(/[\\/]/).filter(Boolean).pop() ?? imageEntry.name;
     const parentDir: MediaEntry = {
       name: parentName,
-      path: parentPath,
+      path: '',  // 改: 之前是 parentPath, 现在用空串走 ensureBookId fallback = currentPath
       isDirectory: true,
       isArchive: false,
       size: 0,
     };
 
-    const bookId = await ensureBookId(parentDir, /*favorite=*/false);
+    const { bookId, absPath } = await ensureBookId(parentDir, /*favorite=*/false, parentPath);
     if (bookId === null) {
       log('[useReaderActions] readFromImage: bookId is null, abort');
       return;
@@ -196,7 +245,7 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     try {
       const rootPath = opts.resolveRootPath();
       const descriptor = opts.buildSourceDescriptor(rootPath);
-      await recordHistory(descriptor, parentPath, parentName, bookId);
+      await recordHistory(descriptor, absPath, parentName, bookId);
     } catch (e) {
       log('[useReaderActions] readFromImage: recordHistory failed (容错)', e);
     }
@@ -205,6 +254,14 @@ export function useReaderActions(opts: ReaderActionsOptions) {
         await opts.onLibraryChanged();
       } catch (e) {
         log('[useReaderActions] readFromImage: onLibraryChanged failed', e);
+      }
+    }
+    // Bug 2 修复: 在 router.push 前保存导航上下文
+    if (opts.saveNavigationContext) {
+      try {
+        opts.saveNavigationContext();
+      } catch (e) {
+        log('[useReaderActions] readFromImage: saveNavigationContext failed (容错)', e);
       }
     }
     if (router) {

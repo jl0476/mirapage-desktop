@@ -98,8 +98,22 @@ function onCtxJumpPage(page: number): void {
   closeCtxMenu();
 }
 function onCtxBack(): void {
-  router.push('/');
+  void goBackToFileBrowser();
   closeCtxMenu();
+}
+
+// v0.1.0-module3.0.3-hotfix (Bug 2): 集中封装「reader → file browser」回退逻辑.
+// 先调 fb.restoreNavigationContext 恢复 (rootPath, currentPath), 再 router.push('/').
+// 没有保存上下文时 fallback 到 fb.refresh() (刷新当前 rootPath).
+async function goBackToFileBrowser(): Promise<void> {
+  const fb = useFileBrowserStore();
+  const restored = await fb.restoreNavigationContext();
+  if (!restored && fb.rootPath) {
+    // 没有上下文 = 没经过 useReaderActions 进入 (例如从 library/bookmarks 直接进来).
+    // 回退行为: 刷一下 rootPath 根目录, 行为与原 router.push('/') 等价.
+    await fb.refresh();
+  }
+  await router.push('/');
 }
 
 // v0.1.0-reader-review-fix-5: 模板 @event="expr()" 会立即求值得到 Promise, 把 Promise 当 handler (错).
@@ -161,7 +175,7 @@ async function loadBook() {
   log('[ReaderView/loadBook] start, bookId=', id, 'route=', route.fullPath);
   if (!id || isNaN(id)) {
     log('[ReaderView/loadBook] invalid bookId, redirect to /');
-    router.push('/');
+    void goBackToFileBrowser();
     return;
   }
   try {
@@ -460,7 +474,7 @@ const zoneActions = {
     // Cluster C: 调 setScaleMode 立即 apply + 持久化 (was: 只写 defaultScaleMode 下次生效)
     void settings.setScaleMode('fit-width');
   },
-  openFileBrowser: () => { router.push('/'); },
+  openFileBrowser: () => { void goBackToFileBrowser(); },
 };
 
 // v0.1.0-module3.0.2: M5 修复 — 把写好的 useReaderWheel 实际挂上 (containerRef),
@@ -523,7 +537,7 @@ watch(
       <button
         class="px-3 py-1.5 rounded xp-bd bg-surface-1 text-text-secondary text-xs hover:bg-surface-light hover:text-text-primary transition-colors"
         data-test="reader-back-btn"
-        @click="router.push('/')"
+        @click="goBackToFileBrowser()"
       >
         ← {{ t('common.back') }}
       </button>
@@ -539,7 +553,7 @@ watch(
       :title="reader.title"
       :show-touch-regions="showTouchRegions"
       :direction="settings.defaultReadDirection"
-      @back="router.push('/')"
+      @back="goBackToFileBrowser()"
       @toggle-mode="() => settings.cycleReaderMode()"
       @open-main-menu="showMainMenu = true"
     />
@@ -557,7 +571,7 @@ watch(
       :is-liked="(book?.isFavorite ?? false)"
       @open-jump-input="openJumpDialog"
       @show-touch-regions="onShowTouchRegions"
-      @back="router.push('/')"
+      @back="goBackToFileBrowser()"
       @cycle-mode="() => settings.cycleReaderMode()"
       @cycle-direction="() => settings.cycleReadDirection()"
       @scale-change="(m: ScaleMode) => settings.setScaleMode(m)"

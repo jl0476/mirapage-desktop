@@ -19,10 +19,15 @@
  *
  * v0.1.0-module3.0.2-reader-polish (Cluster B #7):
  * - Escape → closeReader → router.back() (was: openMainMenu = store.toggleChrome)
+ *
+ * v0.1.0-module3.0.3-hotfix (Bug 2):
+ * - Escape fallback push('/') 改为先 restoreNavigationContext 再 push,
+ *   嵌套目录 (output/260715) 阅读后退回到 output 而非 rootPath.
  */
 import { onBeforeUnmount, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useReaderStore } from '@/stores/reader';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { resolveHotkey, defaultKeyBindings, type ReaderCommand } from '@/lib/inputBindings';
 
@@ -70,8 +75,14 @@ function dispatch(store: ReturnType<typeof useReaderStore>, cmd: ReaderCommand):
         // 给一个 tick 让 router 处理 (Vue Router 4 是 async-ish)
         setTimeout(() => {
           if (route.fullPath === before) {
-            // 没有 history, push 首页
-            router.push('/');
+            // 没有 history, push 首页. 嵌套目录时需先恢复 (rootPath, currentPath).
+            const fb = useFileBrowserStore();
+            void fb.restoreNavigationContext().then((restored) => {
+              if (!restored && fb.rootPath) {
+                void fb.refresh();
+              }
+              router.push('/');
+            });
           }
         }, 0);
       }
