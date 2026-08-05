@@ -253,6 +253,9 @@ const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9
 const ICON_STAR = 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z';
 const ICON_FOLDER_OPEN = 'M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2';
 const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01';
+// v0.1.0-module3.0.3-hotfix11: 加入书库 + 下载全部 移到 toolbar (一处可见, 跨视图复用).
+const ICON_LIBRARY_PLUS = 'M12 6v6M12 12H6M12 12h6M12 12v6M4 6h16v14H4zM16 6L9 6L7.5 4h-3A2 2 0 0 0 2.5 5.5v12A2.5 2.5 0 0 0 5 20h14a2 2 0 0 0 2-2v-3';
+const ICON_DOWNLOAD = 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3';
 
 // v0.1.0-module2.0: emit 'open' 已废弃 (双击只进目录, 触发阅读走 useReaderActions)
 //  保留 emit 类型仅出于向后兼容 — 不再 emit
@@ -264,6 +267,12 @@ const canReadNow = computed(() => {
   if (!e) return false;
   return e.isDirectory === true || isImage(e.name);
 });
+
+// v0.1.0-module3.0.3-hotfix11: toolbar 加的「加入书库」/「下载全部」按钮
+// 启用条件: 选中目录 (与详情面板一致).
+const canAddToLibrary = computed(() => selectedEntry.value?.isDirectory === true);
+// 下载全部: 暂 stub, 与 EntryDetailPanel 行为一致 — 本地文件无需下载, 永远 disabled
+const canDownloadAll = computed(() => false);
 
 function onReadNowClick() {
   log('[FileBrowser] onReadNowClick fired', selectedEntry.value?.name, 'canReadNow=', canReadNow.value);
@@ -285,6 +294,10 @@ function onAddToLibraryClick() {
   } else {
     log('[FileBrowser] onAddToLibraryClick: no selectedEntry');
   }
+}
+// v0.1.0-module3.0.3-hotfix11: 下载全部 stub handler (与 EntryDetailPanel 一致 — 本地文件无需下载)
+function onDownloadAllClick() {
+  log('[FileBrowser] onDownloadAllClick: stub (本地文件无需下载)');
 }
 
 function onReadNowFromCtx(entry: MediaEntry) {
@@ -391,6 +404,37 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           </svg>
           {{ t('fileBrowser.readNow') }}
         </button>
+        <!-- v0.1.0-module3.0.3-hotfix11: 加入书库 / 下载全部 提到顶栏, 跨视图复用.
+             详情 (details) 视图已把属性显示在列上, attribute panel 隐藏; 但这两个
+             action 按钮保留在 toolbar. -->
+        <button
+          data-test="btn-add-to-library"
+          class="tb-btn"
+          :disabled="!canAddToLibrary"
+          :title="t('fileBrowser.addToLibrary')"
+          @click="onAddToLibraryClick"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_LIBRARY_PLUS" />
+          </svg>
+          {{ t('fileBrowser.addToLibrary') }}
+        </button>
+        <button
+          data-test="btn-download-all"
+          class="tb-btn"
+          :disabled="!canDownloadAll"
+          :title="t('fileBrowser.downloadAllUnavailable')"
+          @click="onDownloadAllClick"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_DOWNLOAD" />
+          </svg>
+          {{ t('fileBrowser.downloadAll') }}
+        </button>
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <button
           data-test="btn-hide-finished"
@@ -465,7 +509,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           @contextmenu="onRowContextMenu"
         />
         <EntryDetailPanel
-          v-if="selectedEntry"
+          v-if="selectedEntry && fb.viewMode !== 'details'"
           :entry="selectedEntry"
           :root-path="fb.rootPath"
           class="w-72 shrink-0 overflow-y-auto"

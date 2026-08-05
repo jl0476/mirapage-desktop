@@ -324,18 +324,19 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
         </span>
         <span class="name-wrap">
           <span class="name-cell truncate text-text-primary">{{ entry.name }}</span>
-          <!-- hover tooltip: 名字被截断时显示全名, 比浏览器 title 快 200ms -->
+          <!-- hover tooltip: 名字被截断时显示全名, 比浏览器 title 快 200ms.
+               name-wrap 不能 overflow:hidden (否则 tooltip 被裁), name-cell 单独 truncate. -->
           <span class="name-tooltip" role="tooltip">{{ entry.name }}</span>
         </span>
-        <span class="text-right text-text-secondary font-mono">
+        <span class="text-right text-text-secondary font-mono truncate">
           {{ entry.modifiedAt ? formatDate(entry.modifiedAt * 1000, settings.locale) : '—' }}
         </span>
         <span
-          class="text-center text-text-secondary"
+          class="text-center text-text-secondary truncate"
           :data-test="`details-type-${entry.path}`"
         >{{ getTypeLabel(entry) }}</span>
         <span
-          class="text-right text-text-secondary font-mono"
+          class="text-right text-text-secondary font-mono truncate"
           :data-test="`details-size-${entry.path}`"
         >{{ entry.isDirectory ? '—' : formatBytes(entry.size) }}</span>
         <span class="text-right">
@@ -386,14 +387,17 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   outline: 1px solid var(--color-accent);
   outline-offset: -1px;
 }
-/* hotfix8: 各列默认 truncate, grid 列窄时自动 ellipsis (不会撑开) */
-.details-header > *,
-.details-row > * {
+/* hotfix8: 各列默认 truncate, grid 列窄时自动 ellipsis (不会撑开)
+   注意: 不给 .name-wrap 加 overflow:hidden, 否则 .name-tooltip (绝对定位
+   在 name-wrap 内部) 会被裁掉. 只给数据列 (modified/type/size/status) 加. */
+.details-header > .truncate,
+.details-row > .truncate {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
 }
+/* 旧全局规则已撤, 因为它会误伤 .name-wrap. 保留截断规则但限定到 .truncate class. */
 .status-badge {
   font-size: 9px;
   font-weight: 500;
@@ -413,12 +417,13 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 }
 
 /* v0.1.0-module3.0.3-hotfix7: 名字列窄窗口 + hover tooltip.
-   - .name-wrap: 相对定位父 (放 tooltip)
+   - .name-wrap: 相对定位父 (放 tooltip), 不能 overflow:hidden (否则 tooltip 被裁)
    - .name-cell: truncate 文本
    - .name-tooltip: 鼠标 hover 时显示全名 (比浏览器原生 title 更快 200ms) */
 .name-wrap {
   position: relative;
   min-width: 0;
+  overflow: visible !important;  /* hotfix12: 不被 truncate 规则误伤 */
 }
 .name-cell {
   display: block;
