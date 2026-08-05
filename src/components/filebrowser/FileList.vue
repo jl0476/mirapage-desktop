@@ -11,6 +11,7 @@
  *                  双击 = open, Enter = open, Space = select.
  */
 import { useI18n } from 'vue-i18n';
+import { ref } from 'vue';
 import { formatBytes, formatDate } from '@/locales/helpers';
 import { useSettingsStore } from '@/stores/settings';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
@@ -74,6 +75,21 @@ function onContextMenu(entry: MediaEntry, e: MouseEvent) {
   e.preventDefault();
   log('[FileList] contextmenu', entry.name, 'x=', e.clientX, 'y=', e.clientY);
   emit('contextmenu', entry, e.clientX, e.clientY);
+}
+
+// v0.1.0-module3.0.3-hotfix15: tooltip 用 Teleport 渲染, 需要 JS 算坐标
+const hoverName = ref<string | null>(null);
+const hoverPos = ref({ top: 0, left: 0 });
+function onNameHover(e: MouseEvent, name: string) {
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  hoverPos.value = {
+    top: rect.bottom + 4,  // row 下方 + 4px gap
+    left: rect.left,
+  };
+  hoverName.value = name;
+}
+function onNameLeave() {
+  hoverName.value = null;
 }
 
 /** 文件类型图标 type (FileIcon props) */
@@ -322,11 +338,22 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
         <span class="icon" :class="iconClass(entry)" aria-hidden="true">
           <FileIcon :type="iconType(entry)" />
         </span>
-        <span class="name-wrap">
+        <span
+          class="name-wrap"
+          @mouseenter="onNameHover($event, entry.name)"
+          @mouseleave="onNameLeave"
+        >
           <span class="name-cell truncate text-text-primary">{{ entry.name }}</span>
-          <!-- hover tooltip: 名字被截断时显示全名, 比浏览器 title 快 200ms.
-               name-wrap 不能 overflow:hidden (否则 tooltip 被裁), name-cell 单独 truncate. -->
-          <span class="name-tooltip" role="tooltip">{{ entry.name }}</span>
+          <!-- v0.1.0-module3.0.3-hotfix15: tooltip 用 Teleport 渲染到 body 级别, 避开
+               .details-row overflow:hidden 限制 (row 28.8px 高, tooltip 在 row 下方
+               会被吞). hover 时 JS 计算位置 fixed 坐标, 显示在 name-wrap 正下方. -->
+          <Teleport to="body" v-if="hoverName === entry.name">
+            <div
+              class="name-tooltip-portal"
+              role="tooltip"
+              :style="{ top: hoverPos.top + 'px', left: hoverPos.left + 'px' }"
+            >{{ entry.name }}</div>
+          </Teleport>
         </span>
         <span class="text-right text-text-secondary font-mono truncate">
           {{ entry.modifiedAt ? formatDate(entry.modifiedAt * 1000, settings.locale) : '—' }}
@@ -372,11 +399,12 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 .details-row {
   border-bottom: 1px solid transparent;
   transition: background 120ms var(--ease-out);
-  /* v0.1.0-module3.0.3-hotfix9: 改 overflow-x: hidden 单独约束水平, 保留 y: visible
-     让 .name-tooltip (定位在 name-wrap 下方) 能溢出显示. 原来 overflow: hidden
-     会裁掉 tooltip. */
-  overflow-x: hidden;
-  overflow-y: visible;
+  /* v0.1.0-module3.0.3-hotfix9 (已撤): 改 overflow-x: hidden + overflow-y: visible
+     单边约束, 让 .name-tooltip 溢出显示. 但实测浏览器/WebView2 下 short 规则在
+     .details-row 上被 CSS 规范化器合并时丢失 !important, overflow-y 卡回 auto.
+     重新回退到 overflow: hidden — 配合 hotfix12 的 .name-wrap overflow:visible
+     实现 tooltip 浮动 (name-wrap 内的 tooltip 不受 row overflow 限制). */
+  overflow: hidden;
 }
 .details-row:hover {
   background: var(--color-surface-light);
@@ -416,14 +444,16 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   color: var(--color-status-finished);
 }
 
-/* v0.1.0-module3.0.3-hotfix7: 名字列窄窗口 + hover tooltip.
-   - .name-wrap: 相对定位父 (放 tooltip), 不能 overflow:hidden (否则 tooltip 被裁)
+/* v0.1.0-module3.0.3-hotfix7/15: 名字列窄窗口 + hover tooltip.
+   - .name-wrap: 相对定位父, overflow visible 不被 truncate 规则误伤 (hotfix12)
    - .name-cell: truncate 文本
-   - .name-tooltip: 鼠标 hover 时显示全名 (比浏览器原生 title 更快 200ms) */
+   - 旧 .name-tooltip: 绝对定位在 row 下方, 被 .details-row overflow:hidden 吞了
+   - 新 .name-tooltip-portal (hotfix15): Teleport 到 body, JS 算 fixed 坐标,
+     不受 row overflow 限制, 真正「浮」出来. */
 .name-wrap {
   position: relative;
   min-width: 0;
-  overflow: visible !important;  /* hotfix12: 不被 truncate 规则误伤 */
+  overflow: visible !important;
 }
 .name-cell {
   display: block;
@@ -431,11 +461,8 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.name-tooltip {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  margin-top: 4px;
+.name-tooltip-portal {
+  position: fixed;
   padding: 4px 8px;
   background: var(--color-surface-3);
   color: var(--color-text-primary);
@@ -443,20 +470,14 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   line-height: 1.3;
   border-radius: 4px;
   white-space: nowrap;
-  /* 测名: 名字不超 30 字 ≈ 30ch, 但用户可能粘贴超长路径. clamp() 防溢出右侧 */
+  /* 限宽防溢出右侧 */
   max-width: min(60ch, calc(100vw - 32px));
   overflow: hidden;
   text-overflow: ellipsis;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 120ms var(--ease-out);
-  z-index: 50;
+  z-index: 100;
   box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
-  /* XP 风格边框 (与 xp-bd 一致) */
   border: 1px solid var(--color-border-default);
-}
-.name-wrap:hover .name-tooltip {
-  opacity: 1;
+  pointer-events: none;
 }
 
 /* ─── 行 (list view) ───────────────────────────────── */

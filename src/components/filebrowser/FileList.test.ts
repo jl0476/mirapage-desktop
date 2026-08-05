@@ -122,22 +122,26 @@ describe('FileList.vue — details 视图 (v0.1.0-module1.23)', () => {
     expect(w.find('[data-test="details-sort-size"]').exists()).toBe(true);
   });
 
-  // v0.1.0-module3.0.3-hotfix7: 序号列 + 名字列 hover tooltip
-  it('details 行显示 #序号 + 名字 + tooltip (hotfix7)', () => {
+  // v0.1.0-module3.0.3-hotfix15: tooltip 用 Teleport 渲染 (不在 row 内, 避免 overflow:hidden 吞).
+  // 测试 name-wrap + hover handlers 配置正确 (hover 触发后才渲染 portal).
+  it('details 行 name-wrap 有 hover 监听 + entry.name 数据 (hotfix15)', async () => {
     const entries = [entry('a.jpg'), entry('b.jpg'), entry('c.jpg')];
-    const w = mount(FileList, { props: { entries, viewMode: 'details' }, global: { plugins: [createPinia(), i18n] } });
+    const w = mount(FileList, {
+      props: { entries, viewMode: 'details' },
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,  // Teleport 需要 DOM 上下文
+    });
     // 序号列反应 entries 当前位置 (1-based)
     const idx = w.findAll('[data-test^="details-index-"]');
     expect(idx).toHaveLength(3);
     expect(idx[0].text()).toBe('1');
     expect(idx[1].text()).toBe('2');
     expect(idx[2].text()).toBe('3');
-    // hover tooltip 包含全名 (3 份, name-tooltip 元素)
-    const tips = w.findAll('.name-tooltip');
-    expect(tips).toHaveLength(3);
-    expect(tips[0].text()).toBe('a.jpg');
-    expect(tips[1].text()).toBe('b.jpg');
-    expect(tips[2].text()).toBe('c.jpg');
+    // name-wrap 元素 (每个 entry 一个)
+    const wraps = w.findAll('.name-wrap');
+    expect(wraps).toHaveLength(3);
+    // 没 hover 时无 tooltip (Teleport v-if=false)
+    expect(w.findAll('.name-tooltip-portal').length).toBe(0);
   });
 
   it('details 名字列 minmax(80px, 1fr) — 窄窗口不消失 (hotfix7)', () => {
