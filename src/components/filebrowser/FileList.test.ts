@@ -122,6 +122,33 @@ describe('FileList.vue — details 视图 (v0.1.0-module1.23)', () => {
     expect(w.find('[data-test="details-sort-size"]').exists()).toBe(true);
   });
 
+  // v0.1.0-module3.0.3-hotfix7: 序号列 + 名字列 hover tooltip
+  it('details 行显示 #序号 + 名字 + tooltip (hotfix7)', () => {
+    const entries = [entry('a.jpg'), entry('b.jpg'), entry('c.jpg')];
+    const w = mount(FileList, { props: { entries, viewMode: 'details' }, global: { plugins: [createPinia(), i18n] } });
+    // 序号列反应 entries 当前位置 (1-based)
+    const idx = w.findAll('[data-test^="details-index-"]');
+    expect(idx).toHaveLength(3);
+    expect(idx[0].text()).toBe('1');
+    expect(idx[1].text()).toBe('2');
+    expect(idx[2].text()).toBe('3');
+    // hover tooltip 包含全名 (3 份, name-tooltip 元素)
+    const tips = w.findAll('.name-tooltip');
+    expect(tips).toHaveLength(3);
+    expect(tips[0].text()).toBe('a.jpg');
+    expect(tips[1].text()).toBe('b.jpg');
+    expect(tips[2].text()).toBe('c.jpg');
+  });
+
+  it('details 名字列 minmax(80px, 1fr) — 窄窗口不消失 (hotfix7)', () => {
+    const entries = [entry('very-long-file-name-with-many-characters.jpg')];
+    const w = mount(FileList, { props: { entries, viewMode: 'details' }, global: { plugins: [createPinia(), i18n] } });
+    const row = w.find('.details-row');
+    // 必须含 minmax(80px, 1fr) — grid-template-columns 第 3 列
+    const style = row.attributes('style') ?? '';
+    expect(style).toContain('minmax(80px, 1fr)');
+  });
+
   it('details 行显示 type / size / 阅读状态 (i18n)', () => {
     const entries = [entry('photo.jpg', { size: 2048, modifiedAt: 1700000000 })];
     const w = mount(FileList, { props: { entries, viewMode: 'details' }, global: { plugins: [createPinia(), i18n] } });

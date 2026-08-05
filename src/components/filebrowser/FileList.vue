@@ -221,17 +221,25 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   <!-- v0.1.0-module1.23: Details 视图 (Windows 资源管理器多列布局) -->
   <div
     v-else-if="viewMode === 'details'"
-    class="details-view flex-1 min-h-0 flex flex-col"
+    class="details-view flex-1 min-w-0 flex flex-col"
     data-test="filelist"
     data-view="details"
     aria-label="Directory contents"
   >
     <!-- sticky 表头 (列头可点击排序) -->
+    <!-- v0.1.0-module3.0.3-hotfix7: 加序号列; name 列 minmax(80px, 1fr) 防窄窗口被挤没.
+         v0.1.0-module3.0.3-hotfix8: 右侧 4 列 (modified/type/size/status) 用 minmax(0, ...) —
+         FileList 在属性框 (EntryDetailPanel w-72) 打开时变窄, 这些列先收缩到 0 (消失),
+         名字列保留 ≥80px. header/row 同步. -->
     <div
       class="details-header sticky top-0 z-10 bg-surface/80 backdrop-blur-xl xp-bdb px-3 py-1.5 grid items-center gap-2 text-xs text-text-muted select-none"
-      style="grid-template-columns: 28px 1fr 160px 120px 100px 110px"
+      style="grid-template-columns: 40px 28px minmax(80px, 1fr) minmax(0, 160px) minmax(0, 120px) minmax(0, 100px) minmax(0, 110px)"
       role="row"
     >
+      <span
+        class="text-right text-text-tertiary font-mono"
+        data-test="details-header-index"
+      >#</span>
       <span aria-hidden="true" />
       <button
         type="button"
@@ -283,9 +291,13 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
     </div>
 
     <!-- 行 (ul 是滚动容器, sticky header 在外面) -->
-    <ul class="details-rows list-none m-0 p-0 flex-1 min-h-0 overflow-y-auto">
+    <!-- v0.1.0-module3.0.3-hotfix7: 加 #序号列 (反映当前排序位置); name 列 overflow-hidden
+         + hover 浮层 (.name-tooltip) 显示全名 — 比浏览器原生 title 更快更可控.
+         v0.1.0-module3.0.3-hotfix8: 右侧列 minmax(0, ...) + overflow:hidden — 属性框
+         打开时 FileList 变窄, 右侧列先收缩消失, 名字列保留. -->
+    <ul class="details-rows list-none m-0 p-0 flex-1 min-w-0 overflow-y-auto overflow-x-hidden">
       <li
-        v-for="entry in entries"
+        v-for="(entry, i) in entries"
         :key="entry.path"
         class="details-row grid items-center gap-2 px-3 py-1.5 text-xs cursor-pointer"
         :class="{
@@ -297,16 +309,24 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
         }"
         :data-status="markFor(entry)"
         :data-test="'row' + (markFor(entry) !== 'none' ? '-' + markFor(entry) : '')"
-        style="grid-template-columns: 28px 1fr 160px 120px 100px 110px"
+        style="grid-template-columns: 40px 28px minmax(80px, 1fr) minmax(0, 160px) minmax(0, 120px) minmax(0, 100px) minmax(0, 110px)"
         @click="onClick(entry, $event)"
         @dblclick="onDblClick(entry)"
         @keydown="onKeydown(entry, $event)"
         @contextmenu="onContextMenu(entry, $event)"
       >
+        <span
+          class="index text-right text-text-tertiary font-mono text-[10px]"
+          :data-test="`details-index-${entry.path}`"
+        >{{ i + 1 }}</span>
         <span class="icon" :class="iconClass(entry)" aria-hidden="true">
           <FileIcon :type="iconType(entry)" />
         </span>
-        <span class="name truncate text-text-primary" :title="entry.name">{{ entry.name }}</span>
+        <span class="name-wrap">
+          <span class="name-cell truncate text-text-primary">{{ entry.name }}</span>
+          <!-- hover tooltip: 名字被截断时显示全名, 比浏览器 title 快 200ms -->
+          <span class="name-tooltip" role="tooltip">{{ entry.name }}</span>
+        </span>
         <span class="text-right text-text-secondary font-mono">
           {{ entry.modifiedAt ? formatDate(entry.modifiedAt * 1000, settings.locale) : '—' }}
         </span>
@@ -351,6 +371,7 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 .details-row {
   border-bottom: 1px solid transparent;
   transition: background 120ms var(--ease-out);
+  overflow: hidden;  /* hotfix8: 防 grid 列溢出到属性框 */
 }
 .details-row:hover {
   background: var(--color-surface-light);
@@ -360,6 +381,14 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
   background: rgb(99 102 241 / 0.18);
   outline: 1px solid var(--color-accent);
   outline-offset: -1px;
+}
+/* hotfix8: 各列默认 truncate, grid 列窄时自动 ellipsis (不会撑开) */
+.details-header > *,
+.details-row > * {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .status-badge {
   font-size: 9px;
@@ -377,6 +406,48 @@ const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 .status-badge.finished {
   background: rgb(52 211 153 / 0.15);
   color: var(--color-status-finished);
+}
+
+/* v0.1.0-module3.0.3-hotfix7: 名字列窄窗口 + hover tooltip.
+   - .name-wrap: 相对定位父 (放 tooltip)
+   - .name-cell: truncate 文本
+   - .name-tooltip: 鼠标 hover 时显示全名 (比浏览器原生 title 更快 200ms) */
+.name-wrap {
+  position: relative;
+  min-width: 0;
+}
+.name-cell {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.name-tooltip {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  padding: 4px 8px;
+  background: var(--color-surface-3);
+  color: var(--color-text-primary);
+  font-size: 11px;
+  line-height: 1.3;
+  border-radius: 4px;
+  white-space: nowrap;
+  /* 测名: 名字不超 30 字 ≈ 30ch, 但用户可能粘贴超长路径. clamp() 防溢出右侧 */
+  max-width: min(60ch, calc(100vw - 32px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms var(--ease-out);
+  z-index: 50;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.35);
+  /* XP 风格边框 (与 xp-bd 一致) */
+  border: 1px solid var(--color-border-default);
+}
+.name-wrap:hover .name-tooltip {
+  opacity: 1;
 }
 
 /* ─── 行 (list view) ───────────────────────────────── */
