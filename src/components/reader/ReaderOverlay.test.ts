@@ -194,11 +194,11 @@ describe('ReaderOverlay.vue', () => {
     expect(indicator.classes()).not.toContain('mix-blend-difference');
   });
 
-  // ─── 需求2: 顶栏缩放下拉 (6 种 ScaleMode) ───
+  // ─── 需求2: 顶栏缩放下拉 (5 种 ScaleMode, stretch 已移除) ───
   // v0.1.0-reader-review (Minor #4): scale trigger 文案走 t('reader.scale.*')
   // 不再显示 raw enum "fit-screen".
 
-  it('点击缩放 trigger 展开 6 个选项 (trigger 文案 i18n: 适应屏幕)', async () => {
+  it('点击缩放 trigger 展开 5 个选项 (trigger 文案 i18n: 适应屏幕)', async () => {
     const w = makeWrapper({ hovered: true, scaleMode: 'fit-screen' });
     const trigger = w.find('[data-test="scale-trigger"]');
     expect(trigger.exists()).toBe(true);
@@ -207,7 +207,7 @@ describe('ReaderOverlay.vue', () => {
 
     await trigger.trigger('click');
     const opts = w.findAll('[data-test="scale-option"]');
-    expect(opts.length).toBe(6);
+    expect(opts.length).toBe(5);
   });
 
   it('选某项 emit scale-change', async () => {

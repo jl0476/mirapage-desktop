@@ -28,11 +28,11 @@ describe('ReaderContextMenu', () => {
     expect(items.length).toBe(6);
   });
 
-  it('点缩放子菜单展开 6 个 ScaleMode', async () => {
+  it('点缩放子菜单展开 5 个 ScaleMode', async () => {
     const wrapper = mountMenu();
     await wrapper.find('[data-test="ctx-scale"]').trigger('click');
     const opts = wrapper.findAll('[data-test="ctx-scale-option"]');
-    expect(opts.length).toBe(6);
+    expect(opts.length).toBe(5);
   });
 
   it('选缩放模式 emit scale-change', async () => {

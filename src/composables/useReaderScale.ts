@@ -1,23 +1,24 @@
 /**
- * useReaderScale.ts — Cluster C: OSD 缩放控制 (v0.1.0-module3.0.2-reader-polish)
+ * useReaderScale.ts — OSD 缩放控制
  *
- * - 接收 OSD viewer (含 bounds + viewport API) + 一个可写 ref<ScaleMode>
- * - watch ref, 变化时立即 applyScale
- * - 6 种 scale mode 映射到 OSD viewport API (zoomTo + panTo — 简单可靠)
- * - 跨 spread / mode (single ↔ double) 切换时手动重 apply (调用方负责)
+ * - 接收 OSD viewer + 可写 ref<ScaleMode> + 容器 ref
+ * - watch mode 变化 → applyScale
+ * - ResizeObserver 监听容器,尺寸变化后 debounce 重 apply (fit-screen/width/height 在窗口
+ *   极端长宽比下需重算,否则图像溢出需拖动)
  *
- * 抽象 OSDViewer 接口, 测试时直接 mock, 不依赖真实 OpenSeadragon 实例.
- *
- * v0.1.0-reader-review-fix-2:
- *  - 改用 zoomTo + panTo 替代 fitBoundsWithAlignment (alignment 格式不被 OSD 接受)
- *  - retry 延长到 5s (50 * 100ms)
- *  - 详细 log: 哪个分支执行, zoom 值, pan 目标
+ * 坐标系说明 (2026-08-05 修复):
+ *  - item.getBounds() 返回 **归一化坐标** (image width 归一到 1, height 按比例).
+ *    旧代码把它当像素除 container, 算出 zoom=1407 飞掉.
+ *  - fit-width/fit-height 改用 OSD 原生 fitHorizontally/fitVertically (内部用 _contentBounds
+ *    归一化坐标自己处理, 可靠).
+ *  - full-screen 需像素尺寸算 max(zoomX, zoomY), 从 TiledImage.source.dimensions (像素 Point) 取.
+ *  - original 的 zoom=1 在归一化系下是 home zoom 不是 1:1; 真 1:1 用 1/getHomeZoom() 缩放.
  */
-import { watch, type Ref } from 'vue';
+import { onMounted, onUnmounted, watch, type Ref } from 'vue';
 import { log } from '@/lib/logger';
 import type { ScaleMode } from '@/lib/readerSettings';
 
-/** OSD viewport 暴露的最小 API 子集 (Cluster C 需要) */
+/** OSD viewport 暴露的最小 API 子集 */
 export interface OSDBounds {
   x: number;
   y: number;
@@ -25,36 +26,59 @@ export interface OSDBounds {
   height: number;
 }
 
+export interface OSDPoint {
+  x: number;
+  y: number;
+}
+
+export interface OSDTiledImage {
+  getBounds: () => OSDBounds;
+  source?: {
+    dimensions?: OSDPoint;
+  };
+}
+
 export interface OSDViewerLike {
   viewport: {
     goHome: (immediately?: boolean) => void;
     fitBounds: (bounds: OSDBounds, immediately?: boolean) => void;
     fitBoundsWithAlignment: (bounds: OSDBounds, align: unknown, immediately?: boolean) => void;
+    fitHorizontally: (immediately?: boolean) => void;
+    fitVertically: (immediately?: boolean) => void;
     zoomTo: (zoom: number, refPoint?: { x: number; y: number } | null, immediately?: boolean) => void;
     panTo: (point: { x: number; y: number }, immediately?: boolean) => void;
-    getContainerSize: () => { x: number; y: number };
+    getContainerSize: () => OSDPoint;
+    getHomeZoom: () => number;
   };
   world: {
-    getItemAt: (idx: number) => { getBounds: () => OSDBounds } | null;
+    getItemAt: (idx: number) => OSDTiledImage | null;
   };
 }
 
 export interface UseReaderScaleOptions {
-  /** ref<OSDViewer | null>, viewer mount 后会更新 (单页) 或包含两个 (双页) */
+  /** ref<OSDViewer | null>, viewer mount 后会更新 */
   viewerRef: Ref<OSDViewerLike | null>;
   /** ref<ScaleMode>, 监听变化触发 applyScale */
   mode: Ref<ScaleMode>;
+  /** OSD 容器元素 ref, 用于 ResizeObserver 监听尺寸变化 */
+  containerRef: Ref<HTMLElement | null>;
 }
 
 const RETRY_INTERVAL_MS = 100;
-const RETRY_MAX = 50;  // 100ms * 50 = 5s — wait for OSD tile load (WebView2 + Tauri IPC 慢)
+const RETRY_MAX = 50;  // 100ms * 50 = 5s — wait for OSD tile load
+// resize 用 requestAnimationFrame 节流: 每帧最多 apply 一次 (~16ms).
+// 比 setTimeout debounce 更跟手 — 拖窗口时图像实时跟着缩放, 不需等停手.
+// 加最低间隔保护 (60ms), 防 OSD fitBounds 重算成本高掉帧.
+const RESIZE_MIN_INTERVAL_MS = 60;
 
 /**
- * useReaderScale - 把 ScaleMode 应用到 OSD viewer.
- *
- * 测试时 mock OSDViewerLike + Ref, 验证 6 种 mode 都调对应 API.
+ * useReaderScale - 把 ScaleMode 应用到 OSD viewer + 监听容器 resize 重 apply.
  */
 export function useReaderScale(opts: UseReaderScaleOptions): void {
+  let rafId: number | null = null;
+  let lastApplyAt = 0;
+  let resizeObserver: ResizeObserver | null = null;
+
   function applyScale(mode: ScaleMode, attempt: number = 0): void {
     const viewer = opts.viewerRef.value;
     if (!viewer) {
@@ -85,50 +109,41 @@ export function useReaderScale(opts: UseReaderScaleOptions): void {
 
     switch (mode) {
       case 'fit-screen': {
-        // OSD home bounds: 默认 fit image 在 viewport 内
+        // OSD home bounds: 默认 fit image 在 viewport 内 (全图可见留黑边)
         viewer.viewport.goHome(true);
         break;
       }
       case 'fit-width': {
-        // 宽度填满, 顶部对齐. zoom 后 panTo 让 viewport 中心 = imageCenter.x (水平居中)
-        // 且 viewport.top 落在 image.top — 这要求 viewport 中心 y = bounds.y + container.y/(2*zoom)
-        const zoom = container.x / bounds.width;
-        viewer.viewport.zoomTo(zoom, null, true);
-        viewer.viewport.panTo({
-          x: imageCenter.x,
-          y: bounds.y + container.y / (2 * zoom),
-        }, true);
+        // OSD 原生: 宽度填满, 高度自适应. 内部用 _contentBounds 归一化坐标处理.
+        viewer.viewport.fitHorizontally(true);
         break;
       }
       case 'fit-height': {
-        // 高度填满, 垂直居中, 左边对齐
-        const zoom = container.y / bounds.height;
-        viewer.viewport.zoomTo(zoom, null, true);
-        viewer.viewport.panTo({
-          x: bounds.x + container.x / (2 * zoom),
-          y: imageCenter.y,
-        }, true);
+        // OSD 原生: 高度填满, 宽度自适应.
+        viewer.viewport.fitVertically(true);
         break;
       }
       case 'full-screen': {
-        // 不留黑边, 可能裁剪
-        const zoomX = container.x / bounds.width;
-        const zoomY = container.y / bounds.height;
-        viewer.viewport.zoomTo(Math.max(zoomX, zoomY), null, true);
+        // 不留黑边, 可能裁剪. 归一化系下:
+        //  - zoom=1 → 图宽(bounds.width=1)填满 container 宽
+        //  - 让图高填满: zoom * bounds.height * cs.x = cs.y → zoom = cs.y / (bounds.height * cs.x)
+        //  - full-screen 取 max 让至少一边填满, 另一边溢出裁剪
+        const zoomW = 1;
+        const zoomH = container.y / (bounds.height * container.x);
+        viewer.viewport.zoomTo(Math.max(zoomW, zoomH), null, true);
         viewer.viewport.panTo(imageCenter, true);
         break;
       }
       case 'original': {
-        // 1:1 + 居中
-        viewer.viewport.zoomTo(1, null, true);
-        viewer.viewport.panTo(imageCenter, true);
-        break;
-      }
-      case 'stretch': {
-        // 双方向都填满 (uniform scale, 取 max)
-        const zoomX = container.x / bounds.width;
-        const zoomY = container.y / bounds.height;
-        viewer.viewport.zoomTo(Math.max(zoomX, zoomY), null, true);
+        // 1:1 像素. 归一化系下渲染像素宽 = zoom * container.x.
+        // 要渲染像素宽 = source 像素宽 → zoom = dims.x / container.x
+        const dims = item.source?.dimensions;
+        if (!dims) {
+          log('[useReaderScale] original: source.dimensions missing, fallback goHome');
+          viewer.viewport.goHome(true);
+          break;
+        }
+        viewer.viewport.zoomTo(dims.x / container.x, null, true);
         viewer.viewport.panTo(imageCenter, true);
         break;
       }
@@ -138,6 +153,39 @@ export function useReaderScale(opts: UseReaderScaleOptions): void {
   watch(
     () => opts.mode.value,
     (mode) => applyScale(mode),
-    { immediate: false },  // 不要 immediate, viewer mount 后由调用方触发一次
+    { immediate: false },
   );
+
+  // resize 监听: rAF 节流 + 最低间隔保护. 拖窗口时图像实时跟缩放, 不等停手.
+  function onResize(): void {
+    if (rafId !== null) return;  // 已有 pending frame, 等下一帧
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      const now = Date.now();
+      const elapsed = now - lastApplyAt;
+      if (elapsed < RESIZE_MIN_INTERVAL_MS) {
+        // 距上次太近, 延后到剩余间隔后 apply (防 OSD fitBounds 重算掉帧)
+        setTimeout(() => {
+          lastApplyAt = Date.now();
+          applyScale(opts.mode.value);
+        }, RESIZE_MIN_INTERVAL_MS - elapsed);
+      } else {
+        lastApplyAt = now;
+        applyScale(opts.mode.value);
+      }
+    });
+  }
+
+  onMounted(() => {
+    const el = opts.containerRef.value;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(el);
+  });
+
+  onUnmounted(() => {
+    if (rafId !== null) cancelAnimationFrame(rafId);
+    resizeObserver?.disconnect();
+    resizeObserver = null;
+  });
 }

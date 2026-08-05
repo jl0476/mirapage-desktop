@@ -35,7 +35,6 @@ const scaleModes: Array<{ value: ScaleMode; label: string }> = [
   { value: 'fit-height', label: t('settings.scale.fit-height') },
   { value: 'original', label: t('settings.scale.original') },
   { value: 'full-screen', label: t('settings.scale.full-screen') },
-  { value: 'stretch', label: t('settings.scale.stretch') },
 ];
 
 const directions = [

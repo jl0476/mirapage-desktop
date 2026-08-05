@@ -7,7 +7,7 @@ import { getSetting, setSetting } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import {
   TOUCH_ZONES, TOUCH_ZONE_KEY, DEFAULT_TOUCH_SCHEME,
-  DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION,
+  DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION, normalizeScaleMode,
   type ScaleMode, type ReadDirection,
   type TouchZone, type TouchAction,
 } from '@/lib/readerSettings';
@@ -56,8 +56,8 @@ export const useSettingsStore = defineStore('settings', () => {
       ['slideshow_loop', (v) => (slideshowLoop.value = v === '1')],
       ['slideshow_direction', (v) => (slideshowDirection.value = v as 'forward' | 'backward')],
       ['keep_screen_on', (v) => (keepScreenOn.value = v === '1')],
-      ['default_scale_mode', (v) => (defaultScaleMode.value = v as ScaleMode)],
-      ['scale_mode', (v) => (currentScaleMode.value = v as ScaleMode)],
+      ['default_scale_mode', (v) => (defaultScaleMode.value = normalizeScaleMode(v as ScaleMode))],
+      ['scale_mode', (v) => (currentScaleMode.value = normalizeScaleMode(v as ScaleMode))],
       ['default_read_direction', (v) => (defaultReadDirection.value = v as ReadDirection)],
       ['touch_zones_enabled', (v) => (touchZonesEnabled.value = v === '1')],
       ...TOUCH_ZONES.map((z) =>

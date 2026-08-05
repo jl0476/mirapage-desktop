@@ -243,8 +243,8 @@ describe('ReaderMainMenu.vue', () => {
     (findInBody('menu-scale') as HTMLElement).querySelector('button')!.click();
     await w.vm.$nextTick();
     const opts = findAllInBody('menu-scale-option');
-    // fit-screen / fit-width / fit-height / original / full-screen / stretch = 6
-    expect(opts.length).toBe(6);
+    // fit-screen / fit-width / fit-height / original / full-screen = 5 (stretch 已移除)
+    expect(opts.length).toBe(5);
   });
 
   it('点缩放选项 → emit scale-change(mode) + 折叠下拉', async () => {

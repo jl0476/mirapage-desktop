@@ -149,7 +149,7 @@ const scaleViewerRef = ref<OSDViewerLike | null>(null);
 const scaleModeRef = ref(settings.currentScaleMode);
 // 同步 settings.currentScaleMode → scaleModeRef, 让 useReaderScale watcher 触发
 watch(() => settings.currentScaleMode, (m) => { scaleModeRef.value = m; });
-useReaderScale({ viewerRef: scaleViewerRef, mode: scaleModeRef });
+useReaderScale({ viewerRef: scaleViewerRef, mode: scaleModeRef, containerRef });
 
 /** Cluster C: 翻页后重 apply 当前 scale (新图加载完 OSD viewport 还在旧 transform) */
 watch(

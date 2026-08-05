@@ -61,3 +61,10 @@ temp/
 # Local test sample data (PNG 样本, 本地开发 / 阅读器联调用, 不入仓)
 samples/
 test_manga/
+
+# 临时调试脚本 (CDP evaluate 客户端等)
+scripts/tmp/
+
+# 本地构建产物 / 类型检查缓存 (CLAUDE.md §5.4 不入仓)
+mirapage-desktop-local.exe
+tsconfig.tsbuildinfo

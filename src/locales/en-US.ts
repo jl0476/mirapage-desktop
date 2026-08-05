@@ -45,7 +45,6 @@ export default {
       fitHeight: 'Fit Height',
       original: 'Original',
       fullScreen: 'Full Screen',
-      stretch: 'Stretch',
     },
     continue: {
       off: 'Off',
@@ -312,7 +311,6 @@ export default {
       'fit-height': 'Fit height',
       'original': 'Original',
       'full-screen': 'Full screen',
-      'stretch': 'Stretch',
     },
     direction: {
       ltr: 'Left to right',

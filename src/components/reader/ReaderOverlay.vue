@@ -63,10 +63,10 @@ type Emits = {
 };
 const emit = defineEmits<Emits>();
 
-/** 6 种缩放模式 (对齐 PV ScaleMenuRow) */
+/** 5 种缩放模式 (对齐 PV ScaleMenuRow; stretch 因 OSD uniform scale 不支持真拉伸已移除) */
 const SCALE_MODES: ScaleMode[] = [
   'fit-screen', 'fit-width', 'fit-height',
-  'original', 'full-screen', 'stretch',
+  'original', 'full-screen',
 ];
 
 /** enum 值 → i18n key: kebab ('fit-screen') → camel ('fitScreen') */

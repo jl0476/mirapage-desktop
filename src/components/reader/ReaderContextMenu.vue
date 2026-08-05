@@ -40,7 +40,7 @@ const { t } = useI18n();
 const scaleOpen = ref(false);
 const SCALE_MODES: ScaleMode[] = [
   'fit-screen', 'fit-width', 'fit-height',
-  'original', 'full-screen', 'stretch',
+  'original', 'full-screen',
 ];
 
 /** enum 值 → i18n key: kebab ('fit-screen') → camel ('fitScreen') */

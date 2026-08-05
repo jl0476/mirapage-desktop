@@ -75,7 +75,7 @@ watch(localShow, (v) => { emit('update:show', v); });
 
 const SCALE_MODES: ScaleMode[] = [
   'fit-screen', 'fit-width', 'fit-height',
-  'original', 'full-screen', 'stretch',
+  'original', 'full-screen',
 ];
 const scaleOpen = ref(false);
 

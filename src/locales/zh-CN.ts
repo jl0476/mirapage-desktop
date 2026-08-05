@@ -46,7 +46,6 @@ export default {
       fitHeight: '适高',
       original: '原始大小',
       fullScreen: '全屏显示',
-      stretch: '拉伸',
     },
     continue: {
       off: '关闭',
@@ -313,7 +312,6 @@ export default {
       'fit-height': '适高',
       'original': '原始大小',
       'full-screen': '全屏显示',
-      'stretch': '拉伸',
     },
     direction: {
       ltr: '从左到右',
