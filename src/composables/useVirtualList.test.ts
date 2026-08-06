@@ -2,10 +2,12 @@
  * useVirtualList.test.ts — v0.1.0-module3.0.4-virtuallist
  *
  * Task 2.1: 骨架 + visibleRange/visibleEntries/totalHeight
- * scrollToIndex/scrollToPath/ResizeObserver/clamp 是 stub (后续 task 补)
+ * Task 2.2: scrollToIndex + scrollToPath
+ * Task 2.3: ResizeObserver + rAF scroll 节流
  */
-import { describe, it, expect } from 'vitest';
-import { ref, type Ref } from 'vue';
+import { describe, it, expect, vi } from 'vitest';
+import { defineComponent, h, ref, type Ref } from 'vue';
+import { mount } from '@vue/test-utils';
 import { useVirtualList } from './useVirtualList';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
@@ -130,5 +132,100 @@ describe('useVirtualList scrollToPath', () => {
     viewportHeight.value = 290;
     scrollToPath('f50', { align: 'center' });
     expect(scrollTop.value).toBe(50 * 29 - (290 - 29) / 2);
+  });
+});
+
+describe('useVirtualList ResizeObserver + rAF scroll', () => {
+  /** mount 一个 host 组件，挂在 useVirtualList，把 composable 的 containerRef 绑到 div 模板上 */
+  function mountWithVL(): {
+    wrapper: ReturnType<typeof mount>;
+    div: HTMLDivElement;
+    vl: ReturnType<typeof useVirtualList>;
+  } {
+    let vl!: ReturnType<typeof useVirtualList>;
+    const Host = defineComponent({
+      setup() {
+        const entries = ref<MediaEntry[]>([]);
+        vl = useVirtualList(entries, { rowHeight: 29 });
+        return () => h('div', { ref: vl.containerRef });
+      },
+    });
+    const wrapper = mount(Host);
+    const div = wrapper.element as HTMLDivElement;
+    Object.defineProperty(div, 'scrollTop', { value: 0, writable: true, configurable: true });
+    Object.defineProperty(div, 'clientHeight', { value: 500, writable: true, configurable: true });
+    return { wrapper, div, vl };
+  }
+
+  it('mount 后 ResizeObserver 创建并 observe(containerRef)', () => {
+    // happy-dom 不主动触发 ResizeObserver 回调, 验证 spy 即可
+    const observeSpy = vi.fn();
+    const disconnectSpy = vi.fn();
+    const MockRO = vi.fn().mockImplementation(() => ({
+      observe: observeSpy,
+      disconnect: disconnectSpy,
+      unobserve: vi.fn(),
+    }));
+    vi.stubGlobal('ResizeObserver', MockRO);
+
+    const { wrapper } = mountWithVL();
+    expect(MockRO).toHaveBeenCalled();
+    expect(observeSpy).toHaveBeenCalled();
+    wrapper.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it('scroll 事件触发 scrollTop 更新 (rAF 节流)', async () => {
+    const { div, vl } = mountWithVL();
+    expect(vl.scrollTop.value).toBe(0);
+
+    div.scrollTop = 145;
+    div.dispatchEvent(new Event('scroll'));
+
+    // rAF 是异步的，等一帧
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    expect(vl.scrollTop.value).toBe(145);
+  });
+
+  it('rAF 节流: 同一帧内多次 scroll 只更新一次 scrollTop (最后一次值)', async () => {
+    const { div, vl } = mountWithVL();
+
+    // 同一帧内 dispatch 3 次 scroll，每次设不同 scrollTop
+    div.scrollTop = 100;
+    div.dispatchEvent(new Event('scroll'));
+    div.scrollTop = 200;
+    div.dispatchEvent(new Event('scroll'));
+    div.scrollTop = 300;
+    div.dispatchEvent(new Event('scroll'));
+
+    // 等一帧 (rAF 应该已经把 scrollTop 更新到最后一次值)
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    // 节流策略: 同一帧多次 → 只更新到最新值 (300)
+    expect(vl.scrollTop.value).toBe(300);
+  });
+
+  it('onUnmounted 清理 ResizeObserver.disconnect + scroll listener', async () => {
+    const observeSpy = vi.fn();
+    const disconnectSpy = vi.fn();
+    const MockRO = vi.fn().mockImplementation(() => ({
+      observe: observeSpy,
+      disconnect: disconnectSpy,
+      unobserve: vi.fn(),
+    }));
+    vi.stubGlobal('ResizeObserver', MockRO);
+
+    const { wrapper, div } = mountWithVL();
+
+    div.scrollTop = 50;
+    div.dispatchEvent(new Event('scroll'));
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+
+    wrapper.unmount();
+
+    // unmount 后应调 disconnect
+    expect(disconnectSpy).toHaveBeenCalled();
+    vi.unstubAllGlobals();
   });
 });

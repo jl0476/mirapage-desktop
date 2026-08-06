@@ -3,17 +3,20 @@
  *
  * Task 2.1: 骨架 + visibleRange / visibleEntries / totalHeight
  * Task 2.2: scrollToIndex / scrollToPath (align: start | center | end, clamp, DOM 同步)
+ * Task 2.3: ResizeObserver + rAF scroll 节流
  *
  * 设计:
  * - 接收 entries (Ref<readonly MediaEntry[]>) + rowHeight options
  * - 返回 containerRef/contentRef + viewportHeight/scrollTop (响应式) +
  *   visibleRange/visibleEntries/totalHeight (computed) + scrollToIndex/scrollToPath
  * - bufferSize 默认 5, 上下都加 buffer 避免快速滚动空白
- * - ResizeObserver/clamp watch(entries) 是 stub (Task 2.3/2.4 补)
+ * - onMounted 装 ResizeObserver (容器尺寸 → viewportHeight) + scroll 事件 rAF 节流
+ * - onUnmounted 拆 ResizeObserver + removeEventListener + cancel pending rAF
+ * - ResizeObserver 用 feature detect, 不可用时降级为 window resize
  *
  * Phase 3 集成到 FileList 时再加绝对定位 + transform 渲染逻辑.
  */
-import { ref, computed, type Ref, type ComputedRef } from 'vue';
+import { ref, computed, onMounted, onUnmounted, type Ref, type ComputedRef } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 export interface VirtualListOptions {
@@ -108,6 +111,72 @@ export function useVirtualList(
     const idx = entries.value.findIndex((e) => e.path === path);
     if (idx >= 0) scrollToIndex(idx, opts);
   };
+
+  // Task 2.3: ResizeObserver + rAF scroll.
+  // - ResizeObserver: container 尺寸变化 → viewportHeight (驱动 visibleRange 重算)
+  // - scroll: passive listener + rAF 节流 → scrollTop (避免每像素触发 Vue computed)
+  // - 卸载: disconnect + removeEventListener + 取消未执行的 rAF
+  // - ResizeObserver 不可用时降级为 window.resize (兜底)
+  // - onUnmounted 必须在 setup 顶层调用 (Vue 警告), 不能塞在 onMounted 内
+  let ro: ResizeObserver | null = null;
+  let onScroll: (() => void) | null = null;
+  let rafId: number | null = null;
+  let resizeFallback: (() => void) | null = null;
+
+  onMounted(() => {
+    const el = containerRef.value;
+    if (!el) return;
+
+    // ResizeObserver → viewportHeight
+    const ResizeObserverCtor = typeof ResizeObserver !== 'undefined' ? ResizeObserver : null;
+    if (ResizeObserverCtor) {
+      ro = new ResizeObserverCtor(() => {
+        if (containerRef.value) {
+          viewportHeight.value = containerRef.value.clientHeight;
+        }
+      });
+      ro.observe(el);
+    } else {
+      // 兜底: window resize
+      resizeFallback = () => {
+        if (containerRef.value) {
+          viewportHeight.value = containerRef.value.clientHeight;
+        }
+      };
+      window.addEventListener('resize', resizeFallback);
+    }
+
+    // scroll → rAF 节流 → scrollTop
+    onScroll = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        if (containerRef.value) {
+          scrollTop.value = containerRef.value.scrollTop;
+        }
+        rafId = null;
+      });
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+  });
+
+  onUnmounted(() => {
+    if (ro) {
+      ro.disconnect();
+      ro = null;
+    }
+    if (resizeFallback) {
+      window.removeEventListener('resize', resizeFallback);
+      resizeFallback = null;
+    }
+    if (rafId !== null) {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+    if (onScroll) {
+      containerRef.value?.removeEventListener('scroll', onScroll);
+      onScroll = null;
+    }
+  });
 
   return {
     containerRef,
