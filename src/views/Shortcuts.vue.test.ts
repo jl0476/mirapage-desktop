@@ -96,8 +96,7 @@ describe('Shortcuts.vue', () => {
     expect(fb.rootPath).toBe('C:/a');
   });
 
-  it('点击「删除」+ confirm=true → store.remove(id) (经 IPC)', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+  it('点击「删除」+ dialog 确认 → store.remove(id) (经 IPC)', async () => {
     mockedList.mockResolvedValue([
       { id: 7, rootPath: 'C:/a', label: 'A', createdAt: 100 },
     ]);
@@ -105,14 +104,19 @@ describe('Shortcuts.vue', () => {
     const wrapper = await mountShortcuts();
     await flushPromises();
 
+    // 打开删除确认 dialog
     await wrapper.find('[data-test="row"] [data-test="btn-delete"]').trigger('click');
+    await flushPromises();
+    // 默认 dialog 不可见
+    expect(wrapper.find('[data-test="confirm-dialog"]').exists()).toBe(true);
+    // 确认按钮
+    await wrapper.find('[data-test="confirm-confirm"]').trigger('click');
     await flushPromises();
 
     expect(mockedDelete).toHaveBeenCalledWith(7);
   });
 
-  it('点击「删除」+ confirm=false → 不删除', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
+  it('点击「删除」+ dialog 取消 → 不删除', async () => {
     mockedList.mockResolvedValue([
       { id: 7, rootPath: 'C:/a', label: 'A', createdAt: 100 },
     ]);
@@ -121,8 +125,12 @@ describe('Shortcuts.vue', () => {
 
     await wrapper.find('[data-test="row"] [data-test="btn-delete"]').trigger('click');
     await flushPromises();
+    await wrapper.find('[data-test="confirm-cancel"]').trigger('click');
+    await flushPromises();
 
     expect(mockedDelete).not.toHaveBeenCalled();
+    // dialog 关闭
+    expect(wrapper.find('[data-test="confirm-dialog"]').exists()).toBe(false);
   });
 
   it('mount 时自动 refresh() 拉列表', async () => {

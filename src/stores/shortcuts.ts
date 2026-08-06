@@ -22,14 +22,19 @@ export const useShortcutsStore = defineStore('shortcuts', () => {
 
   async function add(rootPath: string, label: string | null = null): Promise<number> {
     const id = await createShortcut(rootPath, label);
-    await refresh();
+    // 后端 INSERT OR IGNORE：若 rootPath 已存在返回旧 id，本地 items 保留原条目（不重复）。
+    // 若新插入，构造新条目插入 items 头部（DB 按 created_at DESC 排序）。
+    if (!items.value.some((s) => s.id === id)) {
+      items.value.unshift({ id, rootPath, label, createdAt: Date.now() });
+    }
     return id;
   }
 
   async function remove(id: number): Promise<void> {
     await deleteShortcut(id);
+    const idx = items.value.findIndex((s) => s.id === id);
+    if (idx >= 0) items.value.splice(idx, 1);
     if (activeId.value === id) activeId.value = null;
-    await refresh();
   }
 
   function setActive(id: number | null): void {

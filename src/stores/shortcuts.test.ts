@@ -54,39 +54,69 @@ describe('shortcuts store', () => {
     expect(store.loading).toBe(false);
   });
 
-  it('add() 调 createShortcut + refresh；返回 id', async () => {
+  it('add() 调 createShortcut；新 entry 插入 items 头部；返回 id', async () => {
     mockedCreate.mockResolvedValue(42);
-    mockedList.mockResolvedValue([
-      { id: 42, rootPath: 'C:/new', label: 'New', createdAt: 999 },
-    ]);
+    mockedList.mockResolvedValue([]); // ensure no refresh fallback
     const store = useShortcutsStore();
+    const before = Date.now();
     const id = await store.add('C:/new', 'New');
+    const after = Date.now();
 
     expect(id).toBe(42);
     expect(mockedCreate).toHaveBeenCalledWith('C:/new', 'New');
+    expect(mockedCreate).toHaveBeenCalledTimes(1);
+    // 不调 refresh（性能优化）
+    expect(mockedList).not.toHaveBeenCalled();
+    // items 头部插入新条目
     expect(store.items).toHaveLength(1);
+    expect(store.items[0]).toMatchObject({
+      id: 42,
+      rootPath: 'C:/new',
+      label: 'New',
+    });
+    expect(store.items[0].createdAt).toBeGreaterThanOrEqual(before);
+    expect(store.items[0].createdAt).toBeLessThanOrEqual(after);
   });
 
   it('add() label 可选 (null)', async () => {
     mockedCreate.mockResolvedValue(1);
-    mockedList.mockResolvedValue([]);
     const store = useShortcutsStore();
     await store.add('C:/new', null);
 
     expect(mockedCreate).toHaveBeenCalledWith('C:/new', null);
+    expect(store.items[0].label).toBeNull();
   });
 
-  it('remove() 调 deleteShortcut + refresh', async () => {
+  it('add() 重复 root_path 时 INSERT OR IGNORE：items 保持首次条目（不重复）', async () => {
+    mockedCreate.mockResolvedValue(7);
+    const store = useShortcutsStore();
+    // 首次添加
+    await store.add('C:/dup', '标签 A');
+    expect(store.items).toHaveLength(1);
+    // 重复 root_path：后端返回已存在 id
+    mockedCreate.mockResolvedValueOnce(7);
+    await store.add('C:/dup', '标签 B');
+    // items 不应增加（新条目不替换 — store 不持有上次条目信息）
+    expect(store.items).toHaveLength(1);
+    expect(store.items[0].label).toBe('标签 A');
+  });
+
+  it('remove() 调 deleteShortcut；从 items 移除该 id；不调 refresh', async () => {
     mockedDelete.mockResolvedValue(undefined);
-    mockedList
-      .mockResolvedValueOnce([{ id: 1, rootPath: 'C:/a', label: null, createdAt: 100 }])
-      .mockResolvedValueOnce([]); // remove 后空列表
+    mockedList.mockResolvedValue([
+      { id: 1, rootPath: 'C:/a', label: null, createdAt: 100 },
+      { id: 2, rootPath: 'C:/b', label: null, createdAt: 200 },
+    ]);
     const store = useShortcutsStore();
     await store.refresh();
+    mockedList.mockClear();
+
     await store.remove(1);
 
     expect(mockedDelete).toHaveBeenCalledWith(1);
-    expect(store.items).toHaveLength(0);
+    expect(mockedDelete).toHaveBeenCalledTimes(1);
+    expect(mockedList).not.toHaveBeenCalled();
+    expect(store.items.map((i) => i.id)).toEqual([2]);
   });
 
   it('remove() 当前 active 时清空 activeId', async () => {
@@ -99,7 +129,6 @@ describe('shortcuts store', () => {
     store.setActive(1);
     expect(store.activeId).toBe(1);
 
-    mockedList.mockResolvedValue([]);
     await store.remove(1);
 
     expect(store.activeId).toBeNull();

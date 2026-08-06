@@ -1,9 +1,13 @@
 <script setup lang="ts">
 /**
- * Shortcuts.vue — 模块 #1
- * 列出所有快捷方式，提供打开（跳 / 并切换到该根）+ 删除
+ * Shortcuts.vue — 快捷方式管理视图
+ *
+ * v0.1.0-module3.0.X-shortcuts-polish:
+ *  - 改用 Tailwind utility class (对齐 Bookmarks.vue 风格)
+ *  - 删除确认改 in-app dialog (废弃 window.confirm)
+ *  - empty state 加 accent icon 容器 (对齐 §1.8)
  */
-import { onMounted } from 'vue';
+import { onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import { useShortcutsStore } from '@/stores/shortcuts';
@@ -29,172 +33,171 @@ function displayLabel(item: { label: string | null; rootPath: string }): string 
 async function onOpen(id: number) {
   const sc = shortcuts.items.find((s) => s.id === id);
   if (!sc) return;
-  // 先激活 shortcut, 再设文件浏览器根目录, 最后路由跳转
   shortcuts.setActive(id);
   await fb.setRoot(sc.rootPath);
   await router.push('/');
 }
 
-async function onDelete(id: number) {
-  if (window.confirm(t('shortcuts.confirmDelete'))) {
-    await shortcuts.remove(id);
-  }
+// 删除确认 dialog state
+const pendingDelete = ref<{ id: number; label: string } | null>(null);
+function onDeleteAsk(id: number) {
+  const sc = shortcuts.items.find((s) => s.id === id);
+  if (!sc) return;
+  pendingDelete.value = { id, label: displayLabel(sc) };
 }
+function onDeleteCancel() {
+  pendingDelete.value = null;
+}
+async function onDeleteConfirm() {
+  const p = pendingDelete.value;
+  pendingDelete.value = null;
+  if (!p) return;
+  await shortcuts.remove(p.id);
+}
+
+// 内嵌 SVG path (与 ShortcutDropdown / FileList 一致)
+const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z';
+const ICON_OPEN = 'M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5';
+const ICON_TRASH = 'M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14zM10 11v6M14 11v6';
+const ICON_FOLDER_OPEN_BIG = 'M6 14l1.5-7.5A2 2 0 0 1 9.45 4.8h5.1a2 2 0 0 1 1.95 1.7L18 14M6 14h12M6 14l-2 5h16l-2-5';
 </script>
 
 <template>
-  <main class="shortcuts-view">
-    <header>
-      <h2>{{ t('shortcuts.title') }}</h2>
-      <RouterLink to="/" class="back">← {{ t('common.back') }}</RouterLink>
+  <main class="p-6 h-full overflow-y-auto">
+    <header class="flex justify-between items-center mb-6">
+      <h2 class="m-0 text-xl font-semibold tracking-tight">
+        {{ t('shortcuts.title') }}
+      </h2>
+      <RouterLink
+        to="/"
+        class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
+        data-test="back-link"
+      >
+        ← {{ t('common.back') }}
+      </RouterLink>
     </header>
 
-    <p
+    <!-- 空状态 -->
+    <div
       v-if="shortcuts.items.length === 0"
-      data-test="empty-hint"
-      class="empty-hint"
+      class="flex flex-col items-center justify-center gap-4 mt-12"
+      data-test="empty-state"
     >
-      {{ t('shortcuts.empty') }}
-    </p>
+      <div
+        class="w-16 h-16 rounded-2xl bg-surface-1 xp-bd flex items-center justify-center backdrop-blur-md"
+      >
+        <svg
+          width="32" height="32" viewBox="0 0 24 24" fill="none"
+          stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true"
+        >
+          <path :d="ICON_FOLDER_OPEN_BIG" />
+        </svg>
+      </div>
+      <p class="text-text-tertiary text-sm m-0" data-test="empty-hint">
+        {{ t('shortcuts.empty') }}
+      </p>
+      <RouterLink
+        to="/"
+        class="text-accent no-underline text-sm hover:text-accent-hover hover:underline transition-colors"
+        data-test="link-to-filebrowser"
+      >
+        {{ t('fileBrowser.pickRoot') }} →
+      </RouterLink>
+    </div>
 
-    <ul v-else data-test="list" class="shortcuts-list">
+    <!-- 列表 -->
+    <ul
+      v-else
+      class="list-none p-0 m-0 flex flex-col gap-2"
+      data-test="list"
+    >
       <li
         v-for="item in shortcuts.items"
         :key="item.id"
+        class="flex items-center gap-4 p-3 px-4 bg-surface-1 xp-bd rounded-lg transition-colors duration-100 hover:border-accent hover:shadow-[0_0_10px_rgba(99,102,241,0.25)]"
         data-test="row"
       >
-        <span class="name">{{ displayLabel(item) }}</span>
-        <span class="path">{{ item.rootPath }}</span>
-        <button data-test="btn-open" @click="onOpen(item.id)">
+        <svg
+          width="18" height="18" viewBox="0 0 24 24" fill="none"
+          stroke="#6366f1" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true" class="shrink-0"
+        >
+          <path :d="ICON_FOLDER" />
+        </svg>
+        <div class="flex flex-col gap-0.5 flex-1 min-w-0">
+          <span class="font-semibold text-sm text-text-primary truncate">
+            {{ displayLabel(item) }}
+          </span>
+          <span class="font-mono text-xs text-text-tertiary truncate" :title="item.rootPath">
+            {{ item.rootPath }}
+          </span>
+        </div>
+        <button
+          data-test="btn-open"
+          class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent text-text-secondary hover:bg-surface-2 hover:text-text-primary transition-colors"
+          @click="onOpen(item.id)"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_OPEN" />
+          </svg>
           {{ t('shortcuts.open') }}
         </button>
-        <button data-test="btn-delete" @click="onDelete(item.id)">
+        <button
+          data-test="btn-delete"
+          class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent text-text-secondary hover:bg-surface-2 hover:text-error hover:border-error transition-colors"
+          @click="onDeleteAsk(item.id)"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_TRASH" />
+          </svg>
           {{ t('shortcuts.delete') }}
         </button>
       </li>
     </ul>
 
-    <RouterLink
-      v-if="shortcuts.items.length === 0"
-      to="/"
-      data-test="link-to-filebrowser"
-      class="add-link"
+    <!-- 删除确认 dialog (v0.1.0-module3.0.X: 替代 window.confirm, 适配 dark/light 主题) -->
+    <div
+      v-if="pendingDelete"
+      class="fixed inset-0 bg-black/50 backdrop-blur-md flex items-center justify-center z-[1000]"
+      data-test="confirm-dialog"
+      @click.self="onDeleteCancel"
     >
-      {{ t('fileBrowser.pickRoot') }} →
-    </RouterLink>
+      <div
+        class="bg-surface-4 xp-bd rounded-lg p-6 flex flex-col gap-4 min-w-[360px] shadow-lg"
+      >
+        <h3 class="m-0 text-base font-semibold text-text-primary flex items-center gap-2">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="#f87171" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_TRASH" />
+          </svg>
+          {{ t('shortcuts.confirmDelete') }}
+        </h3>
+        <p class="m-0 text-sm text-text-secondary">
+          {{ pendingDelete.label }}
+        </p>
+        <div class="flex justify-end gap-2 mt-2">
+          <button
+            data-test="confirm-cancel"
+            class="px-4 py-2 xp-bd bg-transparent text-text-secondary rounded transition-[background,color] duration-100 hover:bg-surface-2 hover:text-text-primary"
+            @click="onDeleteCancel"
+          >
+            {{ t('common.cancel') }}
+          </button>
+          <button
+            data-test="confirm-confirm"
+            class="flex items-center gap-1.5 px-4 py-2 border border-error text-error rounded cursor-pointer font-semibold shadow-[0_0_10px_rgba(248,113,113,0.3)] transition-[background,transform] duration-100 hover:bg-error hover:text-white active:translate-y-px"
+            @click="onDeleteConfirm"
+          >
+            {{ t('shortcuts.delete') }}
+          </button>
+        </div>
+      </div>
+    </div>
   </main>
 </template>
-
-<style scoped>
-.shortcuts-view {
-  padding: var(--space-6);
-  height: 100%;
-  overflow-y: auto;
-}
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--space-6);
-}
-h2 {
-  margin: 0;
-  font-size: var(--text-xl);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-tight);
-}
-.back {
-  color: var(--text-secondary);
-  text-decoration: none;
-  font-size: var(--text-base);
-  padding: var(--space-2) var(--space-3);
-  border-radius: var(--radius-sm);
-  transition: background var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
-}
-.back:hover { background: var(--surface-2); color: var(--text-primary); }
-
-.empty-hint {
-  color: var(--text-tertiary);
-  text-align: center;
-  margin-top: var(--space-8);
-  font-size: var(--text-md);
-}
-
-.shortcuts-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-.shortcuts-list li {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  background: var(--surface-1);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  flex-wrap: wrap;
-  transition: border-color var(--dur-fast) var(--ease-out),
-              box-shadow var(--dur-fast) var(--ease-out);
-}
-.shortcuts-list li:hover {
-  border-color: var(--accent);
-  box-shadow: var(--glow-accent);
-}
-
-.name {
-  font-weight: var(--weight-semibold);
-  min-width: 160px;
-  color: var(--text-primary);
-  font-size: var(--text-md);
-}
-.path {
-  opacity: 0.6;
-  flex: 1;
-  min-width: 200px;
-  font-size: var(--text-xs);
-  font-family: var(--font-mono);
-  color: var(--text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-button {
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  background: var(--surface-1);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: var(--text-base);
-  transition: background var(--dur-fast) var(--ease-out),
-              border-color var(--dur-fast) var(--ease-out),
-              color var(--dur-fast) var(--ease-out);
-}
-button:hover {
-  background: var(--surface-2);
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-}
-button[data-test="btn-delete"]:hover {
-  border-color: var(--error);
-  color: var(--error);
-}
-
-.add-link {
-  display: block;
-  text-align: center;
-  margin-top: var(--space-6);
-  color: var(--accent);
-  text-decoration: none;
-  font-size: var(--text-base);
-  transition: color var(--dur-fast) var(--ease-out);
-}
-.add-link:hover { color: var(--accent-hover); text-decoration: underline; }
-</style>
