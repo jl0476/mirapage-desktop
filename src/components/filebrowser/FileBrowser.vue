@@ -66,6 +66,19 @@ const showSaveDialog = ref(false);
 const saveLabel = ref('');
 // 右键菜单状态
 const ctxMenu = ref<{ entry: MediaEntry; x: number; y: number } | null>(null);
+
+/**
+ * v0.1.0-module3.0.3-hotfix (Bug: 隐藏已读完失效) — displayedEntries
+ * 之前 store.visibleEntries 是空壳 (注释说过滤, 实现没过滤), 且模板用 fb.sortedEntries.
+ * marks 在 readStatus store (不在 fileBrowser store), 所以过滤放这里组合三者.
+ * 判定与 FileList.markFor 一致: marks key 以 `|${entry.path}` 结尾且 value==='finished'.
+ */
+const displayedEntries = computed<MediaEntry[]>(() => {
+  const sorted = fb.sortedEntries;
+  if (!fb.hideFinished) return sorted;
+  return sorted.filter((e) => !readStatus.isFinished(e));
+});
+
 // 1 选中时显示详情面板
 const selectedEntry = computed<MediaEntry | null>(() => {
   if (fb.selectedPaths.size !== 1) return null;
@@ -498,7 +511,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
       <div class="flex-1 flex gap-2 min-h-0 overflow-hidden">
         <FileList
           class="flex-1 min-w-0"
-          :entries="fb.sortedEntries"
+          :entries="displayedEntries"
           :loading="fb.loading"
           :marks="readStatus.marks"
           :selected-paths="fb.selectedPaths"

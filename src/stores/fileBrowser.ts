@@ -290,8 +290,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       .reduce((s, e) => s + e.size, 0),
   );
 
-  /** hide-finished 过滤; 调用方 (FileBrowser) 传 marks map 进来 */
-  const visibleEntries = computed<MediaEntry[]>(() => sortedEntries.value);
+  // v0.1.0-module3.0.3-hotfix: 删 visibleEntries 空壳 (注释说过滤但没实现,
+  // 且 marks 在 readStatus store, 这里拿不到). 过滤改由 FileBrowser.displayedEntries 组合.
 
   return {
     // 状态
@@ -337,6 +337,5 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     selectedEntries,
     selectedCount,
     selectionSizeBytes,
-    visibleEntries,
   };
 });

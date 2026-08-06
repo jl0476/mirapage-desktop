@@ -66,5 +66,22 @@ export const useReadStatusStore = defineStore('readStatus', () => {
     marks.value = {};
   }
 
-  return { marks, refresh, clear };
+  /**
+   * v0.1.0-module3.0.3-hotfix: 判断 entry 在当前 marks 下是否为 'finished'.
+   * 判定与 FileList.markFor 一致 (key 以 `|${entry.path}` 结尾).
+   * 供 FileBrowser.displayedEntries 过滤用 — 在 store 内部访问 marks.value,
+   * 避免消费侧 ref-unwrap 行为差异 (Pinia setup store return 的 ref 在 computed
+   * 内直接读可能拿到 ref 对象而非 unwrap 值).
+   */
+  function isFinished(entry: { path: string; isDirectory: boolean; isArchive: boolean }): boolean {
+    if (!entry.isDirectory && !entry.isArchive) return false;
+    const suffix = `|${entry.path}`;
+    const m = marks.value;
+    for (const k in m) {
+      if (k.endsWith(suffix) && m[k] === 'finished') return true;
+    }
+    return false;
+  }
+
+  return { marks, refresh, clear, isFinished };
 });

@@ -557,6 +557,82 @@ describe('FileBrowser — 立即阅读入口 (Cluster A)', () => {
   });
 });
 
+// ─── v0.1.0-module3.0.3-hotfix: 隐藏已读完 (Bug — visibleEntries 空壳) ───
+// 现象: 点"隐藏已读完"按钮, fb.hideFinished 切 true, 但列表不过滤 (visibleEntries 是空壳,
+//       模板用的是 fb.sortedEntries). 修复后 hideFinished=true 时 markFor==='finished' 的行应消失.
+import { useReadStatusStore } from '@/stores/readStatus';
+
+describe('FileBrowser — 隐藏已读完', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedShortcuts.mockResolvedValue([]);
+  });
+
+  it('hideFinished=true 时, finished 目录被过滤掉 (reading/none 保留)', async () => {
+    // 3 个目录: vol1=finished, vol2=reading, vol3=none
+    mockedList.mockResolvedValueOnce([
+      { name: 'vol1', path: 'vol1', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol2', path: 'vol2', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol3', path: 'vol3', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 注入 marks: vol1=finished, vol2=reading (key 格式 `${rootPath}|${relPath}`)
+    // 注意: Pinia setup store return 的 ref 在 store 实例上被 unwrap,
+    // 必须整体赋值 rs.marks = {...} (写回 ref), 不能 rs.marks.value = {...}
+    // (后者只给 Record 加了个 value 字段, 不更新 store 内部 ref)
+    const rs = useReadStatusStore();
+    rs.marks = {
+      'C:/comics|vol1': 'finished',
+      'C:/comics|vol2': 'reading',
+    };
+    await wrapper.vm.$nextTick();
+
+    // 开启隐藏
+    fb.setHideFinished(true);
+    await wrapper.vm.$nextTick();
+
+    // 开启隐藏
+    fb.setHideFinished(true);
+    await wrapper.vm.$nextTick();
+
+    // details 视图 data-test = 'row' | 'row-reading' | 'row-finished' (按 markFor),
+    // 用前缀匹配 [data-test^="row"] 拿全部行
+    const rows = wrapper.findAll('[data-test^="row"]');
+    const names = rows.map((r) => r.text());
+    expect(names.some((t) => t.includes('vol2'))).toBe(true); // reading 保留
+    expect(names.some((t) => t.includes('vol3'))).toBe(true); // none 保留
+    expect(names.some((t) => t.includes('vol1'))).toBe(false); // finished 隐藏
+  });
+
+  it('hideFinished=false (默认) 时, finished 目录仍可见', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'vol1', path: 'vol1', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol2', path: 'vol2', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const rs = useReadStatusStore();
+    rs.marks = {
+      'C:/comics|vol1': 'finished',
+      'C:/comics|vol2': 'reading',
+    };
+    await wrapper.vm.$nextTick();
+
+    // 不开隐藏
+    expect(fb.hideFinished).toBe(false);
+    // details 视图 data-test = 'row' | 'row-reading' | 'row-finished', 用前缀匹配
+    const rows = wrapper.findAll('[data-test^="row"]');
+    expect(rows.length).toBe(2);
+  });
+});
+
 function makeEntries(...names: string[]) {
   return names.map((n) => ({
     name: n,
