@@ -161,6 +161,8 @@ export default {
   library: {
     title: '书库',
     empty: '书库为空',
+    favorite: '收藏',
+    unfavorite: '取消收藏',
     source: {
       library: '书库',
       bookmark: '书签',

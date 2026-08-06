@@ -1,7 +1,13 @@
 <script setup lang="ts">
 /**
- * HistoryView.vue — 阅览记录 (v0.1.0-module3.0, folder-level, Android BrowseHistory 对齐)
+ * History.vue — 阅览记录 (v0.1.0-module3.0, folder-level, Android BrowseHistory 对齐)
  * 列文件夹 + 时间；点击 → 跳回 FileBrowser 对应 root + path；右侧 × 删除
+ *
+ * v0.1.0-module3.0.X-polish:
+ *  - emoji 📁 → lucide folder SVG (dark/light 双主题可控)
+ *  - × 字符 → lucide X SVG
+ *  - scoped CSS hardcoded hex → Tailwind utility class (对齐 Bookmarks.vue)
+ *  - 保留 button.name / button.delete class 选择器 (History.test.ts 依赖)
  */
 import { onMounted } from 'vue';
 import { useRouter } from 'vue-router';
@@ -35,96 +41,97 @@ async function openEntry(entry: BrowseHistoryEntry) {
 async function removeEntry(entry: BrowseHistoryEntry) {
   await store.deleteEntry(entry);
 }
+
+const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z';
+const ICON_FOLDER_OPEN_BIG = 'M6 14l1.5-7.5A2 2 0 0 1 9.45 4.8h5.1a2 2 0 0 1 1.95 1.7L18 14M6 14h12M6 14l-2 5h16l-2-5';
+const ICON_X = 'M18 6 6 18M6 6l12 12';
 </script>
 
 <template>
-  <main class="history-view">
-    <header class="history-header">
-      <h2>{{ t('history.title') }}</h2>
-      <RouterLink to="/">← {{ t('common.back') }}</RouterLink>
+  <main class="p-6 h-full overflow-y-auto">
+    <header class="flex justify-between items-center mb-6">
+      <h2 class="m-0 text-xl font-semibold tracking-tight">
+        {{ t('history.title') }}
+      </h2>
+      <RouterLink
+        to="/"
+        class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
+        data-test="back-link"
+      >
+        ← {{ t('common.back') }}
+      </RouterLink>
     </header>
 
-    <p v-if="items.length === 0" class="hint">{{ t('history.empty') }}</p>
-
-    <ul v-else data-test="list" class="history-list">
+    <!-- 列表 -->
+    <ul
+      v-if="items.length > 0"
+      class="list-none p-0 m-0 flex flex-col gap-2"
+      data-test="list"
+    >
       <li
         v-for="item in items"
         :key="`${JSON.stringify(item.sourceDescriptor)}::${item.relPath}`"
+        class="flex items-center gap-4 p-3 px-4 bg-surface-1 xp-bd rounded-lg transition-colors duration-100 hover:border-accent hover:shadow-[0_0_10px_rgba(99,102,241,0.25)]"
         data-test="row"
-        class="history-row"
       >
-        <span class="icon">📁</span>
-        <button class="name" @click="openEntry(item)">{{ item.displayName }}</button>
-        <span class="time">{{ formatDate(item.lastVisitedAt, 'system') }}</span>
+        <svg
+          width="18" height="18" viewBox="0 0 24 24" fill="none"
+          stroke="#6366f1" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true" class="shrink-0"
+        >
+          <path :d="ICON_FOLDER" />
+        </svg>
         <button
-          class="delete"
+          class="name flex-1 bg-transparent border-0 text-left p-0 font-semibold text-sm text-text-primary cursor-pointer truncate hover:text-accent hover:underline transition-colors"
+          @click="openEntry(item)"
+        >
+          {{ item.displayName }}
+        </button>
+        <span class="text-xs text-text-tertiary font-mono whitespace-nowrap" data-test="time">
+          {{ formatDate(item.lastVisitedAt, 'system') }}
+        </span>
+        <button
+          data-test="btn-delete"
+          class="delete flex items-center justify-center w-7 h-7 rounded xp-bd bg-transparent text-text-tertiary hover:text-error hover:border-error transition-colors"
           :aria-label="t('common.delete')"
           @click="removeEntry(item)"
-        >×</button>
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_X" />
+          </svg>
+        </button>
       </li>
     </ul>
+
+    <!-- 空状态 -->
+    <div
+      v-else
+      class="flex flex-col items-center justify-center gap-4 mt-12"
+      data-test="empty-state"
+    >
+      <div
+        class="w-16 h-16 rounded-2xl bg-surface-1 xp-bd flex items-center justify-center backdrop-blur-md"
+      >
+        <svg
+          width="32" height="32" viewBox="0 0 24 24" fill="none"
+          stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true"
+        >
+          <path :d="ICON_FOLDER_OPEN_BIG" />
+        </svg>
+      </div>
+      <p class="text-text-tertiary text-sm m-0" data-test="empty-hint">
+        {{ t('history.empty') }}
+      </p>
+      <RouterLink
+        to="/"
+        class="text-accent no-underline text-sm hover:text-accent-hover hover:underline transition-colors"
+        data-test="link-to-filebrowser"
+      >
+        {{ t('fileBrowser.pickRoot') }} →
+      </RouterLink>
+    </div>
   </main>
 </template>
-
-<style scoped>
-.history-view { padding: 24px; height: 100%; overflow-y: auto; }
-.history-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-}
-h2 { margin: 0; }
-.history-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.history-row {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  padding: 12px;
-  border: 1px solid var(--color-border, #444);
-  border-radius: 8px;
-}
-.icon { font-size: 18px; }
-.name {
-  flex: 1;
-  background: none;
-  border: none;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  font: inherit;
-  padding: 0;
-}
-.name:hover { text-decoration: underline; }
-.time { opacity: 0.7; font-size: 12px; }
-.delete {
-  background: none;
-  border: 1px solid var(--color-border, #444);
-  color: var(--color-text-muted, #888);
-  width: 24px;
-  height: 24px;
-  border-radius: 4px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  line-height: 1;
-}
-.delete:hover {
-  color: var(--color-error, #f87171);
-  border-color: var(--color-error, #f87171);
-}
-.hint {
-  color: var(--color-text-muted, #888);
-  text-align: center;
-  margin-top: 24px;
-}
-</style>

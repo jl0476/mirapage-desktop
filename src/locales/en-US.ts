@@ -160,6 +160,8 @@ export default {
   library: {
     title: 'Library',
     empty: 'Library is empty',
+    favorite: 'Favorite',
+    unfavorite: 'Unfavorite',
     source: {
       library: 'Library',
       bookmark: 'Bookmark',
