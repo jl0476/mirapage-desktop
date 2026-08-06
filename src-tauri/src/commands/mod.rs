@@ -14,7 +14,6 @@ pub mod library;
 pub mod likes;
 pub mod log;
 pub mod progress;
-pub mod search;
 pub mod settings;
 pub mod shortcuts;
 pub mod tags;

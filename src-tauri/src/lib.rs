@@ -73,7 +73,6 @@ pub fn run() {
             commands::tags::delete_tag,
             commands::tags::add_book_tag,
             commands::tags::remove_book_tag,
-            commands::search::search,
             commands::accounts::list_accounts,
             commands::accounts::upsert_account,
             commands::accounts::delete_account,
