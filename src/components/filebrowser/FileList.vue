@@ -16,6 +16,7 @@
 import { computed, nextTick, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
+import { useReadStatusStore } from '@/stores/readStatus';
 import { useVirtualList } from '@/composables/useVirtualList';
 import VirtualRow from './VirtualRow.vue';
 import type { MediaEntry, ReadStatusMap } from '@/lib/sourceDescriptor';
@@ -46,8 +47,9 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const fb = useFileBrowserStore();
+const readStatus = useReadStatusStore();
 
-/** 三视图行高 (像素, 固定). useVirtualList 暂只支持数字 (Phase 3 后续可扩展) */
+/** 三视图行高 (像素, 固定). */
 const rowHeightByView: Record<'list' | 'grid' | 'details', number> = {
   list: 29,
   details: 29,
@@ -66,7 +68,7 @@ const {
   scrollToIndex,
   scrollToPath,
 } = useVirtualList(computed(() => props.entries), {
-  rowHeight: resolvedRowHeight.value,
+  rowHeight: resolvedRowHeight,
 });
 
 /**
@@ -83,30 +85,29 @@ onMounted(() => {
 
 /**
  * mark 预算: 父层一次性 O(n) 算 markByPath, 子 row 只接收单值 mark.
- * marks key 形如 `${descriptorId}|${entry.path}`, 用 endsWith 命中.
+ * marks key 形如 `${descriptorId}|${entry.path}` — 用 lastIndexOf('|') 取 path 段.
+ * finished 用 readStatus.finishedSet O(1) (Task 1.3); reading 仍走 marks map (readingSet 暂未实现).
  * 优先级: reading > finished > none.
  */
 const markByPath = computed<Map<string, 'reading' | 'finished' | 'none'>>(() => {
   const m = new Map<string, 'reading' | 'finished' | 'none'>();
+  const finished = readStatus.finishedSet;
+  // reading 仍走 marks map (O(n*m) 但实际 marks 量小, 暂不优化)
+  const readingPaths = new Set<string>();
+  for (const [k, v] of Object.entries(props.marks)) {
+    if (v === 'reading') {
+      const idx = k.indexOf('|');
+      readingPaths.add(idx >= 0 ? k.slice(idx + 1) : k);
+    }
+  }
   for (const e of props.entries) {
-    if (!e.isDirectory && !e.isArchive) {
+    if (e.isDirectory || e.isArchive) {
+      if (readingPaths.has(e.path)) m.set(e.path, 'reading');
+      else if (finished.has(e.path)) m.set(e.path, 'finished');
+      else m.set(e.path, 'none');
+    } else {
       m.set(e.path, 'none');
-      continue;
     }
-    let mark: 'reading' | 'finished' | 'none' = 'none';
-    for (const [k, v] of Object.entries(props.marks)) {
-      if (k.endsWith(`|${e.path}`)) {
-        if (v === 'reading') {
-          mark = 'reading';
-          break;
-        }
-        if (v === 'finished') {
-          mark = 'finished';
-          break;
-        }
-      }
-    }
-    m.set(e.path, mark);
   }
   return m;
 });
