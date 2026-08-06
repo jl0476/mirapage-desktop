@@ -28,7 +28,6 @@ export default {
     accounts: 'Accounts',
     settings: 'Settings',
     toggleSidebar: 'Toggle sidebar',
-    search: 'Search',
   },
   reader: {
     mode: {
@@ -121,6 +120,9 @@ export default {
     sortAscending: 'Ascending',
     sortDescending: 'Descending',
     search: 'Search',
+    searchPlaceholder: 'Search this folder',
+    searchResults: '{count} results',
+    searchCurrent: 'Search results',
     saveAsShortcut: 'Save as shortcut',
     shortcutLabel: 'Shortcut name (optional)',
     shortcutSaved: 'Shortcut saved',
@@ -222,13 +224,6 @@ export default {
     open: 'Open',
     delete: 'Delete',
     confirmDelete: 'Delete this shortcut?',
-  },
-  search: {
-    placeholder: 'Search filename / title / tag',
-    noResults: 'No matches',
-    modeFuzzy: 'Fuzzy',
-    modeSubstring: 'Substring',
-    resultsCount: '{count} results',
   },
   // v0.1.0-module1.22: properties panel
   properties: {

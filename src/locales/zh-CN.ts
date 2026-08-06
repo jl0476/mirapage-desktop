@@ -29,7 +29,6 @@ export default {
     accounts: '网络账户',
     settings: '设置',
     toggleSidebar: '折叠/展开 侧栏',
-    search: '搜索',
   },
   reader: {
     mode: {
@@ -122,6 +121,9 @@ export default {
     sortAscending: '升序',
     sortDescending: '降序',
     search: '搜索',
+    searchPlaceholder: '搜索当前文件夹',
+    searchResults: '找到 {count} 项',
+    searchCurrent: '搜索结果',
     saveAsShortcut: '保存为快捷方式',
     shortcutLabel: '快捷方式名称（可选）',
     shortcutSaved: '快捷方式已保存',
@@ -223,13 +225,6 @@ export default {
     open: '打开',
     delete: '删除',
     confirmDelete: '删除该快捷方式？',
-  },
-  search: {
-    placeholder: '搜索文件名 / 书名 / 标签',
-    noResults: '无匹配',
-    modeFuzzy: '模糊',
-    modeSubstring: '子串',
-    resultsCount: '共 {count} 条结果',
   },
   // v0.1.0-module1.22: 详情面板
   properties: {
