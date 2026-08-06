@@ -7,7 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import zhCN from './zh-CN';
 import enUS from './en-US';
-import { resolveSystemLocale, formatBytes, formatNumber, formatDate } from './helpers';
+import { resolveSystemLocale, formatBytes, formatNumber, formatDate, formatDateTime } from './helpers';
 
 function collectKeys(obj: unknown, prefix = ''): string[] {
   if (obj === null || obj === undefined) return [];
@@ -98,5 +98,40 @@ describe('formatDate (locale-aware)', () => {
     expect(z).toMatch(/2026/);
     expect(e).toMatch(/2026/);
     expect(z).not.toBe(e); // locale 至少不同
-  });
+  })
+})
+
+describe('formatDateTime (locale-aware, 含时分秒)', () => {
+  it('formats epoch ms 含 时:分:秒 (结构断言, 不依赖时区)', () => {
+    // 2026-01-15T14:30:45Z (UTC 时间戳, 不同环境本地化时区不同)
+    const ts = Date.UTC(2026, 0, 15, 14, 30, 45)
+    const z = formatDateTime(ts, 'zh-CN')
+    const e = formatDateTime(ts, 'en-US')
+    // 结构: 年/月/日 + 时:分:秒 (数字 + 冒号)
+    expect(z).toMatch(/\d{4}\/\d{2}\/\d{2}/)  // zh-CN: 2026/01/15
+    expect(z).toMatch(/\d{2}:\d{2}:\d{2}/)     // 时:分:秒
+    expect(e).toMatch(/\d{4}/)                 // en-US: 含 2026
+    expect(e).toMatch(/\d{2}:\d{2}:\d{2}/)
+    expect(z).not.toBe(e)  // locale 至少格式不同
+  })
+
+  it('24h 模式 (hour12: false), 深夜 / 凌晨 小时正确显示', () => {
+    // 23:59:59 UTC → 不管本地是几点都应保留 23/22/0/1 等 24h 制值
+    const ts = Date.UTC(2026, 0, 15, 23, 59, 59)
+    const z = formatDateTime(ts, 'zh-CN')
+    // 不应含 AM/PM
+    expect(z).not.toMatch(/AM|PM|上午|下午/)
+    // 小时应在 0-23 范围 (24h 制)
+    const hourMatch = z.match(/ (\d{2}):\d{2}:\d{2}$/)
+    expect(hourMatch).not.toBeNull()
+    const hour = parseInt(hourMatch![1], 10)
+    expect(hour).toBeGreaterThanOrEqual(0)
+    expect(hour).toBeLessThanOrEqual(23)
+  })
+
+  it('hour 用 2-digit (补零)', () => {
+    const ts = Date.UTC(2026, 0, 15, 1, 2, 3)
+    const z = formatDateTime(ts, 'zh-CN')
+    expect(z).toMatch(/ \d{2}:\d{2}:\d{2}$/)  // 时间部分 2 位补零
+  })
 });

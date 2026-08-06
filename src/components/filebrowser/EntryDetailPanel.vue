@@ -12,7 +12,7 @@
  */
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { formatBytes, formatDate } from '@/locales/helpers';
+import { formatBytes, formatDateTime } from '@/locales/helpers';
 import { useSettingsStore } from '@/stores/settings';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { PathUtils } from '@/lib/path';
@@ -73,7 +73,7 @@ const display = computed(() => {
     type,
     extension: ext,
     mime: mime ?? '—',
-    modified: e.modifiedAt ? formatDate(e.modifiedAt * 1000, settings.locale) : '—',
+    modified: e.modifiedAt ? formatDateTime(e.modifiedAt * 1000, settings.locale) : '—',
     created: '—',
     accessed: '—',
   };

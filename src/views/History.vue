@@ -15,7 +15,7 @@ import { storeToRefs } from 'pinia';
 import { useI18n } from 'vue-i18n';
 import { useHistoryStore } from '@/stores/history';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
-import { formatDate } from '@/locales/helpers';
+import { formatDateTime } from '@/locales/helpers';
 import type { BrowseHistoryEntry } from '@/lib/tauri';
 
 const { t } = useI18n();
@@ -88,7 +88,7 @@ const ICON_X = 'M18 6 6 18M6 6l12 12';
           {{ item.displayName }}
         </button>
         <span class="text-xs text-text-tertiary font-mono whitespace-nowrap" data-test="time">
-          {{ formatDate(item.lastVisitedAt, 'system') }}
+          {{ formatDateTime(item.lastVisitedAt, 'system') }}
         </span>
         <button
           data-test="btn-delete"

@@ -67,5 +67,29 @@ export function formatDate(
   }
 }
 
+/** locale-aware 日期+时间格式化 (年/月/日 时:分:秒). 文件浏览器列表用, 区分同一天内的修改 */
+export function formatDateTime(
+  epochMs: number,
+  locale: 'zh-CN' | 'en-US' | 'system',
+): string {
+  const resolved =
+    locale === 'system'
+      ? resolveSystemLocale(typeof navigator !== 'undefined' ? navigator.language : 'en-US')
+      : locale;
+  try {
+    return new Intl.DateTimeFormat(resolved, {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(new Date(epochMs));
+  } catch {
+    return new Date(epochMs).toISOString().slice(0, 19).replace('T', ' ');
+  }
+}
+
 // re-export SupportedLocale 给不通过 '@/locales' 而是 '@/locales/helpers' 引用的消费者
 export type { SupportedLocale };

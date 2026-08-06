@@ -18,7 +18,7 @@ import { useI18n } from 'vue-i18n'
 import type { MediaEntry } from '@/lib/sourceDescriptor'
 import FileIcon from './FileIcon.vue'
 import { useSettingsStore } from '@/stores/settings'
-import { formatBytes, formatDate } from '@/locales/helpers'
+import { formatBytes, formatDateTime } from '@/locales/helpers'
 import { mimeFromName, getMimeCategory } from '@/lib/mime'
 
 type RowMark = 'reading' | 'finished' | 'none'
@@ -165,7 +165,7 @@ function getTypeLabel(entry: MediaEntry): string {
       >
         <span class="name-cell truncate">{{ entry.name }}</span>
       </span>
-      <span class="date-cell">{{ entry.modifiedAt ? formatDate(entry.modifiedAt * 1000, settings.locale) : '—' }}</span>
+      <span class="date-cell">{{ entry.modifiedAt ? formatDateTime(entry.modifiedAt * 1000, settings.locale) : '—' }}</span>
       <span class="type-cell">{{ getTypeLabel(entry) }}</span>
       <span class="size-cell">{{ entry.isDirectory ? '—' : formatBytes(entry.size) }}</span>
       <span v-if="mark === 'reading'" class="status-badge reading">{{ statusLabel(mark) }}</span>
