@@ -50,12 +50,10 @@
 
 ```
 Phase 1 (算法层优化)           ← 独立 PR，可先发
-├─ 1.1 markFor ×6 行内调用
-├─ 1.2 iconType WeakMap 缓存
-├─ 1.3 selectRange pathIndex
-├─ 1.4 toggleSelection in-place
-├─ 1.5 readStatus finishedSet
-└─ 1.6 displayedEntries 单次循环
+├─ 1.1 fileBrowser pathIndex
+├─ 1.2 fileBrowser toggleSelection in-place
+├─ 1.3 readStatus finishedSet
+└─ 1.4 FileBrowser.displayedEntries 单次循环
 
 Phase 2 (useVirtualList composable)  ← 独立模块
 ├─ 2.1 骨架 + visibleRange
@@ -64,10 +62,10 @@ Phase 2 (useVirtualList composable)  ← 独立模块
 └─ 2.4 entries 变化 clamp scrollTop
 
 Phase 3 (FileList 集成虚拟列表)
-├─ 3.1 VirtualRow 子组件
-├─ 3.2 FileList 改虚拟容器
-├─ 3.3 store pathIndex
-└─ 3.4 FileBrowser scrollToPath 接入
+├─ 3.1 VirtualRow 子组件 (含 iconType WeakMap 缓存 + mark prop)
+├─ 3.2 FileList 改虚拟容器 (含 mark 预算)
+├─ 3.3 store pathIndex + scrollToPath callback
+└─ 3.4 FileBrowser 接入 scrollToPath
 
 Phase 4 (viewMode DOM 复用)
 ├─ 4.1 三 row 同挂
@@ -81,13 +79,15 @@ Phase 5 (键盘导航 + a11y)
 Phase 6 (搜索兼容 + 性能验证)
 ├─ 6.1 FileList 容器内 empty state
 ├─ 6.2 aria-rowcount 响应式
-└─ 6.3 E2E 性能验证（debug 实例）
+├─ 6.3 E2E 性能验证 (debug 实例) + reports commit
+└─ 6.4 reports commit
 
 Phase 7 (tag + release)
 ├─ 7.1 更新 CLAUDE.md 状态表
-├─ 7.2 跑 type-check + 测试
-├─ 7.3 本地 build（可选）
-└─ 7.4 commit + tag + push
+├─ 7.2 跑 type-check + 单测
+├─ 7.3 跑 cargo check + cargo build + npm run build
+├─ 7.4 本地 build (可选, tauri:build --no-bundle)
+└─ 7.5 commit + tag + push
 ```
 
 ---
@@ -98,186 +98,23 @@ Phase 7 (tag + release)
 
 ---
 
-### 任务 1.1：FileList 行内 `markFor` 预算化
+### 任务 1.1（已 defer 到 Phase 3）：FileList 行内 `markFor` 预算化
 
-**文件：**
-- 修改：`src/components/filebrowser/FileList.vue`
-- 测试：`src/components/filebrowser/FileList.test.ts`
-
-**问题**：模板里每个 row 调 `markFor(entry)` 4-6 次，每次 O(m) 扫 marks。
-
-**修复思路**：在 FileList 父层（script setup）预算 marks，按 path 索引为 Map；row 子组件接收 `:mark` 单值 prop；模板里 `:class="mark"`。
-
-- [ ] **步骤 1：写失败的测试**
-
-在 `FileList.test.ts` 加：
-
-```ts
-import { mount } from '@vue/test-utils'
-import FileList from './FileList.vue'
-
-describe('FileList mark 预算', () => {
-  it('rows 接收 :mark prop 而不是内联 markFor 调用', () => {
-    const marks = { 'local|Q:\\test|foo': 'finished', 'local|Q:\\test|bar': 'reading' }
-    const entries = [
-      { name: 'foo', path: 'foo', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
-      { name: 'bar', path: 'bar', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
-    ]
-    const wrapper = mount(FileList, { props: { entries, marks } })
-    const rows = wrapper.findAll('[data-test="row"]')
-    expect(rows[0].attributes('data-status')).toBe('finished')
-    expect(rows[1].attributes('data-status')).toBe('reading')
-  })
-})
-```
-
-- [ ] **步骤 2：运行测试验证 FAIL**
-
-运行：`npx vitest run src/components/filebrowser/FileList.test.ts -t "mark 预算"`
-预期：FAIL（`data-status` 属性当前不存在 / 模板依赖 `markFor(entry)`）
-
-- [ ] **步骤 3：改 FileList 父层预算 marks Map**
-
-在 `FileList.vue` 的 `<script setup>` 加：
-
-```ts
-const markByPath = computed<Map<string, 'reading' | 'finished' | 'none'>>(() => {
-  const m = new Map<string, 'reading' | 'finished' | 'none'>()
-  for (const e of props.entries) {
-    const suffix = `|${e.path}`
-    for (const [k, v] of Object.entries(props.marks)) {
-      if (k.endsWith(suffix) && (v === 'reading' || v === 'finished')) {
-        m.set(e.path, v as 'reading' | 'finished')
-        break
-      }
-    }
-    if (!m.has(e.path)) m.set(e.path, 'none')
-  }
-  return m
-})
-
-function getMark(entry: MediaEntry): 'reading' | 'finished' | 'none' {
-  return markByPath.value.get(entry.path) ?? 'none'
-}
-```
-
-- [ ] **步骤 4：改模板用 `getMark(entry)` 替换 `markFor(entry)`**
-
-全文搜索 `markFor(entry)`，全部替换为 `getMark(entry)`。模板里：
-
-```vue
-:class="{
-  'is-directory': entry.isDirectory,
-  'is-archive': entry.isArchive,
-  'is-finished': getMark(entry) === 'finished',
-  'is-reading': getMark(entry) === 'reading',
-  'is-selected': isSelected(entry),
-}"
-:data-status="getMark(entry)"
-```
-
-把 `markFor` 函数整个从 `<script setup>` 删除（不再用）。
-
-- [ ] **步骤 5：跑测试验证 PASS**
-
-运行：`npx vitest run src/components/filebrowser/FileList.test.ts -t "mark 预算"`
-预期：PASS
-
-- [ ] **步骤 6：跑全测，确认无回归**
-
-运行：`npm test -- --run`
-预期：FileList test 全 PASS（其他模块不受影响）
-
-- [ ] **步骤 7：Commit**
-
-```bash
-git add src/components/filebrowser/FileList.vue src/components/filebrowser/FileList.test.ts
-git commit -m "perf(FileList): mark 预算到父层 Map, 消除行内 markFor 重复调用"
-```
+> **deferral 原因（起飞前审查发现）**：任务 3.2 完整重写 FileList.vue，本任务会被覆盖。最终 mark 预算逻辑在 3.1 VirtualRow 接收 `:mark` prop + 3.2 FileList 父层预算 Map 一并实现。
+>
+> 详见任务 3.1 / 3.2。
 
 ---
 
-### 任务 1.2：`iconType` WeakMap 缓存
+### 任务 1.2（已 defer 到 Phase 3）：`iconType` WeakMap 缓存
 
-**文件：**
-- 修改：`src/components/filebrowser/FileList.vue`
-
-**问题**：`iconType(entry)` 行内调，每次重新 `split + toLowerCase + includes`。
-
-- [ ] **步骤 1：写失败的测试**
-
-在 `FileList.test.ts` 加：
-
-```ts
-import type { MediaEntry } from '@/lib/sourceDescriptor'
-
-describe('FileList iconType 缓存', () => {
-  it('同一 entry 第二次 iconType 调用不重算', () => {
-    const entry: MediaEntry = { name: 'foo.jpg', path: 'foo.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 }
-    const wrapper = mount(FileList, { props: { entries: [entry] } })
-    const spy = vi.spyOn(console, 'log') // 占位,实际应测内部 state
-    // 验证缓存存在: 第二次 iconType 调用应立即返回
-    // 实现后,weakmap 缓存会让计算只发生一次
-    expect(wrapper.vm).toBeDefined()
-  })
-})
-```
-
-> 注：实际更精确的做法是**暴露一个测试 hook**（`__iconTypeCache`）或在测试中观察 row 重渲染次数。
-
-- [ ] **步骤 2：运行测试验证 FAIL**
-
-运行：`npx vitest run src/components/filebrowser/FileList.test.ts -t "iconType 缓存"`
-预期：FAIL（缓存不存在）
-
-- [ ] **步骤 3：加 WeakMap 缓存**
-
-替换 FileList.vue 里的 `iconType`/`iconClass` 为：
-
-```ts
-const iconTypeCache = new WeakMap<MediaEntry, 'folder' | 'archive' | 'image' | 'file'>()
-const iconClassCache = new WeakMap<MediaEntry, string>()
-
-function iconType(entry: MediaEntry): 'folder' | 'archive' | 'image' | 'file' {
-  const cached = iconTypeCache.get(entry)
-  if (cached !== undefined) return cached
-  let kind: 'folder' | 'archive' | 'image' | 'file'
-  if (entry.isDirectory) kind = 'folder'
-  else if (entry.isArchive) kind = 'archive'
-  else {
-    const ext = entry.name.split('.').pop()?.toLowerCase() ?? ''
-    if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'].includes(ext)) kind = 'image'
-    else kind = 'file'
-  }
-  iconTypeCache.set(entry, kind)
-  return kind
-}
-
-function iconClass(entry: MediaEntry): string {
-  const cached = iconClassCache.get(entry)
-  if (cached !== undefined) return cached
-  const kind = iconType(entry)
-  const cls = `icon-${kind}`
-  iconClassCache.set(entry, cls)
-  return cls
-}
-```
-
-- [ ] **步骤 4：跑测试验证 PASS**
-
-运行：`npx vitest run src/components/filebrowser/FileList.test.ts -t "iconType 缓存"`
-预期：PASS
-
-- [ ] **步骤 5：Commit**
-
-```bash
-git add src/components/filebrowser/FileList.vue src/components/filebrowser/FileList.test.ts
-git commit -m "perf(FileList): iconType/iconClass WeakMap 缓存"
-```
+> **deferral 原因**：iconType / iconClass 在 3.1 VirtualRow.vue 内实现时一并加 WeakMap 缓存（不在 FileList 老代码上加）。
+>
+> 详见任务 3.1。
 
 ---
 
-### 任务 1.3：`fileBrowser.selectRange` 用 `pathIndex`
+### 任务 1.1（原 1.3）：`fileBrowser.selectRange` 用 `pathIndex`
 
 **文件：**
 - 修改：`src/stores/fileBrowser.ts`
@@ -356,7 +193,7 @@ git commit -m "perf(fileBrowser): pathIndex O(1) 替换 selectRange indexOf"
 
 ---
 
-### 任务 1.4：`toggleSelection` in-place + `triggerRef`
+### 任务 1.2（原 1.4）：`toggleSelection` in-place + `triggerRef`
 
 **文件：**
 - 修改：`src/stores/fileBrowser.ts`
@@ -406,7 +243,7 @@ git commit -m "perf(fileBrowser): toggleSelection in-place + triggerRef,避免 O
 
 ---
 
-### 任务 1.5：`readStatus.finishedSet` O(1) 查询
+### 任务 1.3（原 1.5）：`readStatus.finishedSet` O(1) 查询
 
 **文件：**
 - 修改：`src/stores/readStatus.ts`
@@ -500,7 +337,7 @@ git commit -m "perf(readStatus): finishedSet O(1) 查询替换 endsWith 扫表"
 
 ---
 
-### 任务 1.6：`FileBrowser.displayedEntries` 单次循环合并
+### 任务 1.4（原 1.6）：`FileBrowser.displayedEntries` 单次循环合并
 
 **文件：**
 - 修改：`src/components/filebrowser/FileBrowser.vue`
@@ -1865,7 +1702,68 @@ it('14949 → 3 (搜索后), aria-rowcount 同步', async () => {
 
 - [ ] **步骤 5：汇总 E2E 报告**
 
-记录到 `docs/superpowers/reports/2026-08-06-virtuallist-e2e.md`（如需要）。不需要 commit。
+记录到 `docs/superpowers/reports/2026-08-06-virtuallist-e2e.md`。需要 commit（违反 skill "频繁 commit" 原则 — 起飞前审查已确认加 commit）。
+
+---
+
+### 任务 6.4：E2E 报告 commit
+
+**文件：**
+- 创建：`docs/superpowers/reports/2026-08-06-virtuallist-e2e.md`
+- 修改：git index
+
+- [ ] **步骤 1：写报告文件**
+
+新建 `docs/superpowers/reports/2026-08-06-virtuallist-e2e.md`：
+
+```markdown
+# 虚拟列表 E2E 性能验证报告
+
+> 日期：2026-08-06
+> tag：v0.1.0-module3.0.4-virtuallist（实施中）
+> 验证方式：debug 实例 + `mcp__tauri-devtools__evaluate_script`
+
+## 测试场景
+
+14949 文件目录（msedgewebview2.exe PID 34544 占用 1.5 GB 修复前）。
+
+## 实测数据
+
+| 指标 | 修复前 | 修复后（目标） |
+|---|---|---|
+| DOM 节点总数 | 194,485 | < 5,000 |
+| `<li>` (role="row") 数 | 14,957 | < 100 |
+| `<ul>` scrollHeight | 427,114 px | 427,114 px（虚拟正确） |
+| `.virt-content` height | N/A | 427,114 px（虚拟） |
+| JS heap (renderer) | 167 MB | < 150 MB（下降约 10%） |
+| msedgewebview2.exe 内存 | 1,556,956 K | < 500 MB |
+| 总内存（多进程） | 2-3 GB | < 500 MB |
+| 主动触发 200 次 mousemove avg | 0.003 ms | < 1 ms |
+| 主动触发 200 次 mousemove max | 0.1 ms | < 5 ms |
+
+## 实测步骤
+
+1. 重启 dev 实例（已在 task `bylmycrfa` 后台运行）
+2. 跑 §步骤 2 评估脚本验证 DOM 节点数 / scrollHeight
+3. 跑 §步骤 3 hover 性能脚本
+4. 通过 SearchInput 输入"page001"验证搜索过滤 → scrollTop clamp
+5. 切 viewMode（list → grid → details）验证 DOM 复用
+
+## 结果
+
+✅ / ❌（实际跑后填）
+
+## 已知问题
+
+（实际跑后填）
+```
+
+- [ ] **步骤 2：Commit 报告**
+
+```bash
+git add docs/superpowers/reports/2026-08-06-virtuallist-e2e.md
+git commit -m "docs(perf): 虚拟列表 E2E 性能验证报告 (14949 entry 实测)"
+```
 
 ---
 
@@ -1923,7 +1821,48 @@ npm test -- --run
 
 ---
 
-### 任务 7.3：本地 build（可选）
+### 任务 7.3：跑 `cargo check + cargo build + npm run build`（持续规则）
+
+> **持续规则（用户 7/30 反馈）**：每个模块执行完后必须触发完整编译，前端 + 后端都得过。
+
+- [ ] **步骤 1：`cargo check`**
+
+```bash
+cd src-tauri && cargo check 2>&1 | tail -20
+```
+
+预期：0 error。
+
+- [ ] **步骤 2：`cargo build`**
+
+```bash
+cd src-tauri && cargo build 2>&1 | tail -20
+```
+
+预期：0 error，target/ 内 debug binary 生成。
+
+- [ ] **步骤 3：`npm run build`**
+
+```bash
+npm run build 2>&1 | tail -30
+```
+
+预期：vue-tsc 0 error，Vite 出 dist/。
+
+- [ ] **步骤 4（如失败，按 systematic-debugging skill 排查）**
+
+不在本计划范围内，单独 commit fix。
+
+- [ ] **步骤 5：Commit（如有 fix）**
+
+```bash
+git add <changed files>
+git commit -m "fix(perf): 修正 cargo/npm 编译错误"
+```
+
+---
+
+### 任务 7.4：本地 build（可选）
 
 - [ ] **步骤 1：跑 portable build**
 
@@ -1937,7 +1876,7 @@ cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\tauri-build-portabl
 
 ---
 
-### 任务 7.4：commit + tag + push
+### 任务 7.5：commit + tag + push
 
 - [ ] **步骤 1：确认所有 commit 已 push**
 
