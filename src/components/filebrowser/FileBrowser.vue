@@ -24,12 +24,14 @@ import { useReadStatusStore } from '@/stores/readStatus';
 import { useReaderActions } from '@/composables/useReaderActions';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
+import { filterByQuery } from '@/lib/searchFilter';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
 import RowContextMenu from './RowContextMenu.vue';
 import SortDropdown from './SortDropdown.vue';
 import ViewModeDropdown from './ViewModeDropdown.vue';
 import ShortcutDropdown from './ShortcutDropdown.vue';
+import SearchInput from './SearchInput.vue';
 import StatusBar from './StatusBar.vue';
 import EntryDetailPanel from './EntryDetailPanel.vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -75,8 +77,10 @@ const ctxMenu = ref<{ entry: MediaEntry; x: number; y: number } | null>(null);
  */
 const displayedEntries = computed<MediaEntry[]>(() => {
   const sorted = fb.sortedEntries;
-  if (!fb.hideFinished) return sorted;
-  return sorted.filter((e) => !readStatus.isFinished(e));
+  // hotfix17: hideFinished 过滤
+  const afterHide = fb.hideFinished ? sorted.filter((e) => !readStatus.isFinished(e)) : sorted;
+  // v0.1.0-module3.0.3: searchQuery 过滤 (叠加在 hideFinished 之后)
+  return filterByQuery(afterHide, fb.searchQuery);
 });
 
 // 1 选中时显示详情面板
@@ -88,6 +92,18 @@ const selectedEntry = computed<MediaEntry | null>(() => {
 
 const canSave = computed(() => fb.rootPath !== null);
 const canUp = computed(() => fb.currentPath !== '');
+
+/**
+ * v0.1.0-module3.0.3: StatusBar 左段文案.
+ * 搜索态显示 "找到 N 项" (按 displayedEntries 计数, 含 hideFinished + searchQuery 过滤后);
+ * 非搜索态显示原 "N 项" (按 sortedEntries 计数, 与 statusBar.items 行为一致).
+ */
+const statusBarItemsText = computed(() => {
+  if (fb.searchQuery) {
+    return t('fileBrowser.searchResults', { count: displayedEntries.value.length });
+  }
+  return t('fileBrowser.statusBar.items', { count: fb.sortedEntries.length });
+});
 
 /** 当前路径: rootPath + '/' + currentPath (空时仅 rootPath) */
 const displayPath = computed(() => {
@@ -465,9 +481,24 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <SortDropdown />
         <ViewModeDropdown />
+        <span class="xp-divider-v shrink-0" aria-hidden="true" />
+        <SearchInput />
       </header>
 
+      <div
+        v-if="fb.searchQuery"
+        class="bg-surface xp-bdb px-3 py-1.5 flex items-center gap-2 text-xs text-text-muted"
+        data-test="search-breadcrumb"
+      >
+        <span>{{ t('fileBrowser.searchCurrent') }}</span>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M9 18l6-6-6-6" />
+        </svg>
+        <span class="text-text-primary">{{ rootLabel }}</span>
+      </div>
       <Breadcrumb
+        v-else
         :root-label="rootLabel"
         :path="fb.currentPath"
         data-test="breadcrumb"
@@ -541,6 +572,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
         :selected-count="fb.selectedCount"
         :selection-size-bytes="fb.selectionSizeBytes"
         :current-path="displayPath"
+        :items-text="statusBarItemsText"
       />
 
       <!-- Save dialog -->

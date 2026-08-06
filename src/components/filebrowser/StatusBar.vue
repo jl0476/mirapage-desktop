@@ -16,12 +16,16 @@ interface Props {
   selectedCount: number;
   selectionSizeBytes: number;
   currentPath: string;
+  /** v0.1.0-module3.0.3: 父级可覆盖左段文案 (搜索态显示 "找到 N 项") */
+  itemsText?: string;
 }
 const props = defineProps<Props>();
 
 const { t } = useI18n();
 
-const itemsLabel = computed(() => t('fileBrowser.statusBar.items', { count: props.total }));
+const itemsLabel = computed(() =>
+  props.itemsText ?? t('fileBrowser.statusBar.items', { count: props.total }),
+);
 const selectedLabel = computed(() =>
   t('fileBrowser.statusBar.selected', { count: props.selectedCount }),
 );

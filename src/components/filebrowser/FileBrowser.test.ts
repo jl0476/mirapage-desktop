@@ -633,6 +633,97 @@ describe('FileBrowser — 隐藏已读完', () => {
   });
 });
 
+describe('FileBrowser — 内联搜索', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedShortcuts.mockResolvedValue([]);
+    mockedList.mockResolvedValue([]);
+  });
+
+  it('setSearchQuery 后列表按名过滤 (大小写不敏感)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'abc.txt', path: 'abc.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'report.pdf', path: 'report.pdf', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'XYZ', path: 'XYZ', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    fb.setSearchQuery('abc');
+    await wrapper.vm.$nextTick();
+
+    const fileList = wrapper.findComponent({ name: 'FileList' });
+    expect(fileList.props('entries').map((e: { name: string }) => e.name)).toEqual(['abc.txt']);
+  });
+
+  it('清空 query 恢复完整列表', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'abc.txt', path: 'abc.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'report.pdf', path: 'report.pdf', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    fb.setSearchQuery('abc');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findComponent({ name: 'FileList' }).props('entries').length).toBe(1);
+
+    fb.setSearchQuery('');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findComponent({ name: 'FileList' }).props('entries').length).toBe(2);
+  });
+
+  it('搜索态显示 search-breadcrumb 静态文本, 清空恢复 breadcrumb', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'abc.txt', path: 'abc.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 非搜索态: 原 breadcrumb 在
+    expect(wrapper.find('[data-test="breadcrumb"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="search-breadcrumb"]').exists()).toBe(false);
+
+    fb.setSearchQuery('abc');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-test="search-breadcrumb"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="breadcrumb"]').exists()).toBe(false);
+
+    fb.setSearchQuery('');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.find('[data-test="breadcrumb"]').exists()).toBe(true);
+  });
+
+  it('navigate 后 searchQuery 被清空 (列表恢复)', async () => {
+    mockedList
+      .mockResolvedValueOnce([
+        { name: 'sub', path: 'sub', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'abc.txt', path: 'abc.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      ] as never)
+      .mockResolvedValueOnce([
+        { name: 'page1.jpg', path: 'page1.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    fb.setSearchQuery('abc');
+    await wrapper.vm.$nextTick();
+    expect(fb.searchQuery).toBe('abc');
+
+    await fb.navigate('sub');
+    await flushPromises();
+    expect(fb.searchQuery).toBe('');
+  });
+});
+
 function makeEntries(...names: string[]) {
   return names.map((n) => ({
     name: n,
