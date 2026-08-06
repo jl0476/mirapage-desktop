@@ -1,15 +1,15 @@
 /**
  * useVirtualList.ts — v0.1.0-module3.0.4-virtuallist
  *
- * Task 2.1 骨架: 虚拟列表核心算法 (visibleRange / visibleEntries / totalHeight)
+ * Task 2.1: 骨架 + visibleRange / visibleEntries / totalHeight
+ * Task 2.2: scrollToIndex / scrollToPath (align: start | center | end, clamp, DOM 同步)
  *
  * 设计:
  * - 接收 entries (Ref<readonly MediaEntry[]>) + rowHeight options
  * - 返回 containerRef/contentRef + viewportHeight/scrollTop (响应式) +
- *   visibleRange/visibleEntries/totalHeight (computed)
+ *   visibleRange/visibleEntries/totalHeight (computed) + scrollToIndex/scrollToPath
  * - bufferSize 默认 5, 上下都加 buffer 避免快速滚动空白
- * - scrollToIndex/scrollToPath 是 stub (Task 2.2/2.3/2.4 补)
- * - ResizeObserver/clamp 也是 stub (Task 2.3/2.4 补)
+ * - ResizeObserver/clamp watch(entries) 是 stub (Task 2.3/2.4 补)
  *
  * Phase 3 集成到 FileList 时再加绝对定位 + transform 渲染逻辑.
  */
@@ -79,19 +79,34 @@ export function useVirtualList(
     entries.value.slice(visibleRange.value.start, visibleRange.value.end),
   );
 
-  // scrollToIndex / scrollToPath / ResizeObserver / clamp 在后续 task 加上.
-  // 当前阶段保留 stub 签名以满足 interface 契约, 实现空函数.
+  // Task 2.2: scrollToIndex / scrollToPath
+  // - scrollToIndex(i, opts?): 滚到 i * rowHeight, opts.align: start (默认) / center / end.
+  //   clamp [0, totalHeight - viewportHeight]; 同步设 scrollTop.value (响应式) +
+  //   containerRef.value.scrollTop (DOM 触发实际滚动).
+  // - scrollToPath(path, opts?): findIndex O(n) 找 path → 调 scrollToIndex; 找不到 no-op.
+  //   Phase 3 集成时 pathIndex 可改 Map<path, index> O(1) (复用 store.pathIndex).
   const scrollToIndex = (
-    _i: number,
-    _opts?: { align?: 'start' | 'center' | 'end' },
+    i: number,
+    opts?: { align?: 'start' | 'center' | 'end' },
   ): void => {
-    /* stub — Task 2.2 实现 */
+    const rh = resolvedRowHeight.value;
+    const vh = viewportHeight.value;
+    let target = i * rh;
+    if (opts?.align === 'center') target = i * rh - (vh - rh) / 2;
+    if (opts?.align === 'end') target = i * rh - (vh - rh);
+    target = Math.max(0, Math.min(target, totalHeight.value - vh));
+    scrollTop.value = target;
+    if (containerRef.value) {
+      containerRef.value.scrollTop = target;
+    }
   };
+
   const scrollToPath = (
-    _path: string,
-    _opts?: { align?: 'start' | 'center' | 'end' },
+    path: string,
+    opts?: { align?: 'start' | 'center' | 'end' },
   ): void => {
-    /* stub — Task 2.2 实现 */
+    const idx = entries.value.findIndex((e) => e.path === path);
+    if (idx >= 0) scrollToIndex(idx, opts);
   };
 
   return {

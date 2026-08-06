@@ -56,3 +56,79 @@ describe('useVirtualList visibleRange', () => {
     expect(visibleRange.value).toEqual({ start: 0, end: 0 });  // viewportHeight 仍 0
   });
 });
+
+describe('useVirtualList scrollToIndex', () => {
+  it('scrollToIndex(i) 滚到 i * rowHeight', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const { scrollToIndex, scrollTop } = useVirtualList(entries, { rowHeight: 29 });
+    scrollToIndex(10);
+    expect(scrollTop.value).toBe(290);  // 10 * 29
+  });
+
+  it('scrollToIndex 越界 [0, totalHeight - viewportHeight] clamp', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const { scrollToIndex, scrollTop, viewportHeight } = useVirtualList(entries, { rowHeight: 29 });
+    viewportHeight.value = 290;
+    scrollToIndex(1000);  // 超出范围
+    expect(scrollTop.value).toBeLessThanOrEqual(100 * 29 - 290);
+    expect(scrollTop.value).toBeGreaterThanOrEqual(0);
+  });
+
+  it('scrollToIndex 负数 clamp 到 0', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const { scrollToIndex, scrollTop } = useVirtualList(entries, { rowHeight: 29 });
+    scrollToIndex(-10);
+    expect(scrollTop.value).toBe(0);
+  });
+
+  it('align=center 让目标 row 在视口中央', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const { scrollToIndex, scrollTop, viewportHeight } = useVirtualList(entries, { rowHeight: 29 });
+    viewportHeight.value = 290;
+    scrollToIndex(50, { align: 'center' });
+    expect(scrollTop.value).toBe(50 * 29 - (290 - 29) / 2);
+  });
+
+  it('align=end 让目标 row 在视口底部', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const { scrollToIndex, scrollTop, viewportHeight } = useVirtualList(entries, { rowHeight: 29 });
+    viewportHeight.value = 290;
+    scrollToIndex(50, { align: 'end' });
+    expect(scrollTop.value).toBe(50 * 29 - (290 - 29));
+  });
+
+  it('scrollToIndex 同时设 containerRef.scrollTop (DOM 同步)', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const { scrollToIndex, containerRef } = useVirtualList(entries, { rowHeight: 29 });
+    const div = document.createElement('div');
+    Object.defineProperty(div, 'scrollTop', { value: 0, writable: true });
+    containerRef.value = div;
+    scrollToIndex(10);
+    expect(div.scrollTop).toBe(290);
+  });
+});
+
+describe('useVirtualList scrollToPath', () => {
+  it('scrollToPath(path) 找到 index 后调 scrollToIndex', () => {
+    const entries = ref([mockEntry('a'), mockEntry('b'), mockEntry('c')]);
+    const { scrollToPath, scrollTop } = useVirtualList(entries, { rowHeight: 29 });
+    scrollToPath('b');
+    expect(scrollTop.value).toBe(29);
+  });
+
+  it('scrollToPath 找不到 no-op (scrollTop 不变)', () => {
+    const entries = ref([mockEntry('a'), mockEntry('b')]);
+    const { scrollToPath, scrollTop } = useVirtualList(entries, { rowHeight: 29 });
+    scrollTop.value = 100;  // 预设值
+    scrollToPath('nonexistent');
+    expect(scrollTop.value).toBe(100);  // 不变
+  });
+
+  it('scrollToPath 透传 opts 到 scrollToIndex (align=center)', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const { scrollToPath, scrollTop, viewportHeight } = useVirtualList(entries, { rowHeight: 29 });
+    viewportHeight.value = 290;
+    scrollToPath('f50', { align: 'center' });
+    expect(scrollTop.value).toBe(50 * 29 - (290 - 29) / 2);
+  });
+});
