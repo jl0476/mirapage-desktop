@@ -417,7 +417,75 @@ describe('fileBrowser store — searchQuery 进目录清空', () => {
   });
 });
 
-// ─── v0.1.0-module3.0.4-virtuallist Phase 1: selectRange O(1) pathIndex ───
+// ─── v0.1.0-module3.0.4-virtuallist Phase 1: toggleSelection in-place + triggerRef ───
+// Ctrl+Click 取消大选中累积从 O(n²) → O(n). 1000 entries Ctrl+Click 取消 100 次:
+// 之前 ~250ms (累积拷贝), 之后 < 50ms (in-place + triggerRef).
+// 关键: selectedPaths 引用保持不变 (in-place), 但 triggerRef 强制响应式通知依赖者
+// (selectedCount, selectedEntries, selectionSizeBytes computed).
+describe('fileBrowser store — toggleSelection in-place', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  it('toggleSelection 不拷贝 Set, 引用不变', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => makeEntry(`f${i}.txt`)),
+    )
+    const fb = useFileBrowserStore()
+    await fb.setRoot('C:/x')
+    fb.replaceSelection('f0.txt')
+    const refBefore = fb.selectedPaths
+    fb.toggleSelection('f0.txt')
+    // in-place 模式下 selectedPaths 引用保持不变 (新实现);
+    // 旧实现 `selectedPaths.value = new Set(...)` 会换引用, 这里会 FAIL.
+    expect(fb.selectedPaths).toBe(refBefore)
+    expect(fb.selectedPaths.has('f0.txt')).toBe(false)
+  })
+
+  it('toggleSelection 响应式通知: triggerRef 强制 watcher 重算', async () => {
+    const { watch } = await import('vue')
+    mockedList.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => makeEntry(`f${i}.txt`)),
+    )
+    const fb = useFileBrowserStore()
+    await fb.setRoot('C:/x')
+    let computeCount = 0
+    // 订阅 selectedCount (computed → ref selectedPaths): toggle 后必须重算.
+    // flush: 'sync' 让 watcher 回调在 trigger 后立即执行, 避免 post-flush 时序导致断言在 flush 之前跑完.
+    const stop = watch(
+      () => fb.selectedCount,
+      () => { computeCount++ },
+      { flush: 'sync' },
+    )
+    fb.replaceSelection('f0.txt')
+    computeCount = 0  // 重置 baseline (初始化选中也触发 watcher)
+    fb.toggleSelection('f0.txt')
+    expect(computeCount).toBeGreaterThan(0)
+    stop()
+  })
+
+  it('Ctrl+Click 连续取消大集合: O(n) per call, 总 O(n) 不是 O(n²)', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 1000 }, (_, i) => makeEntry(`f${i}.txt`)),
+    )
+    const fb = useFileBrowserStore()
+    await fb.setRoot('C:/x')
+    // 选前 1000 个: replaceSelection(1) + 999 个 toggle add (累积增长 1→2→...→1000)
+    const allPaths = Array.from({ length: 1000 }, (_, i) => `f${i}.txt`)
+    fb.replaceSelection(allPaths[0])
+    for (let i = 1; i < 1000; i++) fb.toggleSelection(allPaths[i])
+    expect(fb.selectedPaths.size).toBe(1000)
+    // 连续 Ctrl+Click 取消 100 个 (旧实现每次 new Set 拷贝 ~10μs, 累积 O(n²); 新实现 in-place + triggerRef)
+    const t0 = performance.now()
+    for (let i = 0; i < 100; i++) fb.toggleSelection(allPaths[i])
+    const t1 = performance.now()
+    expect(t1 - t0).toBeLessThan(50)  // 100 次 in-place 操作应 < 50ms
+    expect(fb.selectedPaths.size).toBe(900)
+  })
+});
+
+// ─── v0.1.0-module3.0.4-virtuallist Phase 1: selectRange pathIndex O(1) ───
 // 14949 entries 目录的 Shift+Click 范围选择从 O(n) indexOf × 2 → O(1) Map 查找.
 describe('fileBrowser store — selectRange pathIndex O(1)', () => {
   beforeEach(() => {

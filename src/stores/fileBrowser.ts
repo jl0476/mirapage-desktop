@@ -13,7 +13,7 @@
  *   hideFinished 从 FileBrowser.vue 搬入 store, 跟 sortField 一组持久化.
  */
 import { defineStore } from 'pinia';
-import { computed, ref } from 'vue';
+import { computed, ref, triggerRef } from 'vue';
 import { listDirectory } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import { sortEntries, type SortField } from '@/lib/fileSort';
@@ -240,10 +240,17 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   function toggleSelection(path: string): void {
-    const next = new Set(selectedPaths.value);
-    if (next.has(path)) next.delete(path);
-    else next.add(path);
-    selectedPaths.value = next;
+    // v0.1.0-module3.0.4-virtuallist Phase 1: in-place + triggerRef.
+    // 旧实现 `selectedPaths.value = new Set(...)` 每次 O(n) 拷贝, Ctrl+Click
+    // 连续 add/remove 大选中累积 O(n²). 改 in-place delete/add + triggerRef:
+    // - 引用保持不变 (依赖者用 refBefore === fb.selectedPaths 仍 true)
+    // - Vue 响应式: triggerRef 强制通知依赖的 computed (selectedCount,
+    //   selectedEntries, selectionSizeBytes), 因为 Set 是 raw (非 reactive())
+    //   的, mutator 不会自动触发 ref-level deps.
+    const set = selectedPaths.value;
+    if (set.has(path)) set.delete(path);
+    else set.add(path);
+    triggerRef(selectedPaths);
   }
 
   function replaceSelection(path: string): void {
