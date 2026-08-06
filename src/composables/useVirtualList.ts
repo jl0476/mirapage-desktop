@@ -16,7 +16,7 @@
  *
  * Phase 3 集成到 FileList 时再加绝对定位 + transform 渲染逻辑.
  */
-import { ref, computed, onMounted, onUnmounted, type Ref, type ComputedRef } from 'vue';
+import { ref, computed, onMounted, onUnmounted, nextTick, watch, type Ref, type ComputedRef } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 export interface VirtualListOptions {
@@ -158,6 +158,25 @@ export function useVirtualList(
     };
     el.addEventListener('scroll', onScroll, { passive: true });
   });
+
+  // Task 2.4: entries 引用变化 → scrollTop clamp 到合法范围.
+  // - 场景: 搜索过滤 / 新目录加载 / 排序变化后 totalHeight 变小,
+  //   旧 scrollTop 超出 max → 看到空白. 自动 clamp 避免.
+  // - flush: 'post' 让 watcher 在 DOM 更新后跑 (确保 viewportHeight 已更新).
+  // - nextTick 双重保险 (happy-dom flush 时序不稳).
+  // - max 先 Math.max(0, ...) 兜底 (entries 空时 totalHeight=0, vh 可能 > 0).
+  // - 同步 ref + DOM (避免 ref 与 containerRef.value.scrollTop 不一致).
+  // - watcher 顶层调用 (Vue 警告: onWatcher 必须在 setup 顶层, 不能塞 onMounted).
+  watch(entries, () => {
+    nextTick(() => {
+      const max = Math.max(0, totalHeight.value - viewportHeight.value);
+      const target = Math.min(scrollTop.value, max);
+      if (containerRef.value && containerRef.value.scrollTop !== target) {
+        containerRef.value.scrollTop = target;
+      }
+      scrollTop.value = target;
+    });
+  }, { flush: 'post' });
 
   onUnmounted(() => {
     if (ro) {

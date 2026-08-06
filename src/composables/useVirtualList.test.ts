@@ -6,7 +6,7 @@
  * Task 2.3: ResizeObserver + rAF scroll 节流
  */
 import { describe, it, expect, vi } from 'vitest';
-import { defineComponent, h, ref, type Ref } from 'vue';
+import { defineComponent, h, nextTick, ref, type Ref } from 'vue';
 import { mount } from '@vue/test-utils';
 import { useVirtualList } from './useVirtualList';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -227,5 +227,94 @@ describe('useVirtualList ResizeObserver + rAF scroll', () => {
     // unmount 后应调 disconnect
     expect(disconnectSpy).toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+});
+
+describe('useVirtualList watch(entries) clamp', () => {
+  it('entries 14949 → 10: scrollTop 超 max → 自动 clamp 到 0', async () => {
+    const big = Array.from({ length: 14949 }, (_, i) => mockEntry(`f${i}`));
+    const small = Array.from({ length: 10 }, (_, i) => mockEntry(`s${i}`));
+    const entries = ref<MediaEntry[]>(big);
+    const { scrollTop, containerRef, scrollToIndex, viewportHeight } = useVirtualList(entries, { rowHeight: 29 });
+    const div = document.createElement('div');
+    Object.defineProperty(div, 'scrollTop', { value: 0, writable: true });
+    Object.defineProperty(div, 'clientHeight', { value: 290 });
+    document.body.appendChild(div);
+    containerRef.value = div;
+    viewportHeight.value = 290;  // happy-dom 不主动触发 ResizeObserver, 手动同步 clientHeight → viewportHeight
+    scrollToIndex(10000);  // scrollTop = 290000
+    expect(scrollTop.value).toBe(290000);
+
+    entries.value = small;
+    await nextTick();
+    await new Promise((r) => requestAnimationFrame(r));
+
+    // 10 entries * 29 = 290, totalHeight - vh = 290 - 290 = 0 → clamp 到 0
+    expect(scrollTop.value).toBe(0);
+    expect(div.scrollTop).toBe(0);
+    document.body.removeChild(div);
+  });
+
+  it('entries 14949 → 1000: scrollTop 部分 clamp', async () => {
+    const big = Array.from({ length: 14949 }, (_, i) => mockEntry(`f${i}`));
+    const medium = Array.from({ length: 1000 }, (_, i) => mockEntry(`m${i}`));
+    const entries = ref<MediaEntry[]>(big);
+    const { scrollTop, containerRef, scrollToIndex, viewportHeight } = useVirtualList(entries, { rowHeight: 29 });
+    const div = document.createElement('div');
+    Object.defineProperty(div, 'scrollTop', { value: 0, writable: true });
+    Object.defineProperty(div, 'clientHeight', { value: 290 });
+    document.body.appendChild(div);
+    containerRef.value = div;
+    viewportHeight.value = 290;
+    scrollToIndex(14000);  // scrollTop = 406000
+    expect(scrollTop.value).toBe(406000);
+
+    entries.value = medium;
+    await nextTick();
+    await new Promise((r) => requestAnimationFrame(r));
+
+    // 1000 * 29 = 29000, totalHeight - vh = 29000 - 290 = 28710
+    expect(scrollTop.value).toBe(28710);
+    document.body.removeChild(div);
+  });
+
+  it('entries 100 → 1000 (扩容): scrollTop 不变 (不需要 clamp)', async () => {
+    const small = Array.from({ length: 100 }, (_, i) => mockEntry(`s${i}`));
+    const big = Array.from({ length: 1000 }, (_, i) => mockEntry(`b${i}`));
+    const entries = ref<MediaEntry[]>(small);
+    const { scrollTop, containerRef } = useVirtualList(entries, { rowHeight: 29 });
+    const div = document.createElement('div');
+    Object.defineProperty(div, 'scrollTop', { value: 0, writable: true });
+    Object.defineProperty(div, 'clientHeight', { value: 290 });
+    document.body.appendChild(div);
+    containerRef.value = div;
+    scrollTop.value = 1000;
+
+    entries.value = big;
+    await nextTick();
+    await new Promise((r) => requestAnimationFrame(r));
+
+    // 扩容后 max = 29000 - 290 = 28710 > 1000, 不需要
+    expect(scrollTop.value).toBe(1000);
+    document.body.removeChild(div);
+  });
+
+  it('entries → 空数组: scrollTop clamp 到 0', async () => {
+    const some = Array.from({ length: 10 }, (_, i) => mockEntry(`s${i}`));
+    const entries = ref<MediaEntry[]>(some);
+    const { scrollTop, containerRef } = useVirtualList(entries, { rowHeight: 29 });
+    const div = document.createElement('div');
+    Object.defineProperty(div, 'scrollTop', { value: 0, writable: true });
+    Object.defineProperty(div, 'clientHeight', { value: 290 });
+    document.body.appendChild(div);
+    containerRef.value = div;
+    scrollTop.value = 100;
+
+    entries.value = [];
+    await nextTick();
+    await new Promise((r) => requestAnimationFrame(r));
+
+    expect(scrollTop.value).toBe(0);
+    document.body.removeChild(div);
   });
 });
