@@ -11,6 +11,7 @@ import FileBrowser from './FileBrowser.vue';
 import { listDirectory, listShortcuts, createShortcut } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
+import type { MediaEntry } from '@/lib/sourceDescriptor';
 import zhCN from '@/locales/zh-CN';
 
 vi.mock('@/lib/tauri', () => ({
@@ -721,6 +722,135 @@ describe('FileBrowser — 内联搜索', () => {
     await fb.navigate('sub');
     await flushPromises();
     expect(fb.searchQuery).toBe('');
+  });
+});
+
+// ─── v0.1.0-module3.0.4-virtuallist Task 1.4: displayedEntries 单次循环合并 ───
+//
+// 优化前: sort → filter(hideFinished) → filter(searchQuery) 三次 O(n) 遍历 + 三次数组分配
+// 优化后: sort → single loop (hideFinished + searchQuery 在一次 for-of 里同时判断)
+//         fast path 两个 filter 都没启用时直接返回 sortedEntries 引用
+//
+// 重点: 行为兼容是核心 — 测试靠 FiLE 列表 prop 与 sortedEntries 比对结果, 不靠 spy count
+//       (单次循环是性能优化, 不能让功能行为变化 — 验证"做什么"而非"怎么实现")
+
+describe('FileBrowser — displayedEntries 单次循环 (Task 1.4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedShortcuts.mockResolvedValue([]);
+  });
+
+  /**
+   * 工具: 用 FileList 组件拿到当前 displayedEntries 数组引用.
+   * 比 wrapper.vm.displayedEntries 更稳定 — 不依赖 defineExpose.
+   */
+  function getDisplayed(wrapper: ReturnType<typeof mount>): MediaEntry[] {
+    return wrapper.findComponent({ name: 'FileList' }).props('entries') as MediaEntry[];
+  }
+
+  it('hideFinished + searchQuery 同时启用: 排除 finished, 保留 query 匹配, 顺序按 sorted', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'foo-vol1', path: 'foo-vol1', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'foo-vol2', path: 'foo-vol2', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'bar-vol3', path: 'bar-vol3', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'foo-vol4', path: 'foo-vol4', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const rs = useReadStatusStore();
+    rs.marks = {
+      'C:/comics|foo-vol1': 'finished',
+      'C:/comics|foo-vol2': 'reading',
+      'C:/comics|bar-vol3': 'finished',
+      'C:/comics|foo-vol4': 'finished',
+    };
+    await wrapper.vm.$nextTick();
+
+    fb.setHideFinished(true);
+    fb.setSearchQuery('foo');
+    await wrapper.vm.$nextTick();
+
+    const displayed = getDisplayed(wrapper);
+    // 应剩: foo-vol2 (reading, name 包含 'foo')
+    expect(displayed.map((e) => e.name)).toEqual(['foo-vol2']);
+    // 全部 finished 已过滤
+    expect(displayed.every((e) => !rs.isFinished(e))).toBe(true);
+    // 全部含 'foo' (大小写不敏感)
+    expect(displayed.every((e) => e.name.toLowerCase().includes('foo'))).toBe(true);
+  });
+
+  it('fast path: !q && !hide → displayedEntries === fb.sortedEntries (引用相等)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'vol1', path: 'vol1', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol2', path: 'vol2', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 默认 hideFinished=false, searchQuery=''
+    expect(fb.hideFinished).toBe(false);
+    expect(fb.searchQuery).toBe('');
+
+    // fast path: 直接返回 sortedEntries 引用 — 避免下游误重算
+    expect(getDisplayed(wrapper)).toBe(fb.sortedEntries);
+  });
+
+  it('只有 searchQuery: 单次循环过滤, 顺序与 sortedEntries 一致', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'page1.jpg', path: 'page1.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'cover.png', path: 'cover.png', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'page2.jpg', path: 'page2.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'index.html', path: 'index.html', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'page3.jpg', path: 'page3.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    fb.setSearchQuery('page');
+    await wrapper.vm.$nextTick();
+
+    const displayed = getDisplayed(wrapper);
+    const expected = fb.sortedEntries.filter((e) => e.name.toLowerCase().includes('page'));
+    // 顺序与 sortedEntries 中匹配项的顺序一致
+    expect(displayed.map((e) => e.name)).toEqual(expected.map((e) => e.name));
+    expect(displayed.length).toBe(3);
+  });
+
+  it('只有 hideFinished: 单次循环过滤 finished, 顺序与 sortedEntries 一致', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'vol1', path: 'vol1', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol2', path: 'vol2', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol3', path: 'vol3', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol4', path: 'vol4', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const rs = useReadStatusStore();
+    rs.marks = {
+      'C:/comics|vol1': 'finished',
+      'C:/comics|vol3': 'finished',
+      'C:/comics|vol2': 'reading',
+      'C:/comics|vol4': 'finished',
+    };
+    await wrapper.vm.$nextTick();
+
+    fb.setHideFinished(true);
+    await wrapper.vm.$nextTick();
+
+    const displayed = getDisplayed(wrapper);
+    // 顺序保留: vol2 (唯一非 finished)
+    expect(displayed.map((e) => e.name)).toEqual(['vol2']);
+    expect(displayed.every((e) => !rs.isFinished(e))).toBe(true);
   });
 });
 

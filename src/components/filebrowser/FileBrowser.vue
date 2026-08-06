@@ -24,7 +24,6 @@ import { useReadStatusStore } from '@/stores/readStatus';
 import { useReaderActions } from '@/composables/useReaderActions';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
-import { filterByQuery } from '@/lib/searchFilter';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
 import RowContextMenu from './RowContextMenu.vue';
@@ -74,13 +73,27 @@ const ctxMenu = ref<{ entry: MediaEntry; x: number; y: number } | null>(null);
  * 之前 store.visibleEntries 是空壳 (注释说过滤, 实现没过滤), 且模板用 fb.sortedEntries.
  * marks 在 readStatus store (不在 fileBrowser store), 所以过滤放这里组合三者.
  * 判定与 FileList.markFor 一致: marks key 以 `|${entry.path}` 结尾且 value==='finished'.
+ *
+ * v0.1.0-module3.0.4-virtuallist Task 1.4: 合并 hideFinished + searchQuery 为单次循环.
+ * 之前: sort → filter(hideFinished) → filter(searchQuery) 三次 O(n) 遍历 + 三次数组分配.
+ * 之后: sort → single loop (一次遍历 + 一次分配, 仅当 filter 启用).
+ * fast path (!q && !hide) 直接返回 sortedEntries 引用, 避免 Vue computed 重算触发下游.
+ * isFinished 走 Task 1.3 的 finishedSet O(1).
  */
 const displayedEntries = computed<MediaEntry[]>(() => {
   const sorted = fb.sortedEntries;
-  // hotfix17: hideFinished 过滤
-  const afterHide = fb.hideFinished ? sorted.filter((e) => !readStatus.isFinished(e)) : sorted;
-  // v0.1.0-module3.0.3: searchQuery 过滤 (叠加在 hideFinished 之后)
-  return filterByQuery(afterHide, fb.searchQuery);
+  const q = fb.searchQuery.trim().toLowerCase();
+  const hide = fb.hideFinished;
+  // fast path: 两个 filter 都没启用 → 保持 sortedEntries 引用
+  if (!q && !hide) return sorted;
+  // single loop: 同时判断 hideFinished + searchQuery
+  const result: MediaEntry[] = [];
+  for (const e of sorted) {
+    if (hide && readStatus.isFinished(e)) continue;
+    if (q && !e.name.toLowerCase().includes(q)) continue;
+    result.push(e);
+  }
+  return result;
 });
 
 // 1 选中时显示详情面板
