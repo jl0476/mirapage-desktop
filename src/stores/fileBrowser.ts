@@ -28,6 +28,21 @@ export type FileBrowserError =
 
 export type ViewMode = 'list' | 'grid' | 'details';
 
+// ─── v0.1.0-module3.0.4-virtuallist Phase 3 ───
+// FileList 组件实例方法 scrollToPath 通过模块级 callback 注册机制反向传给 store.
+// FileBrowser 在 onMounted 调 setScrollToIndexCallback(fileListRef.scrollToPath).
+// 模块级 (非 store 字段): 因为 callback 是 Vue 组件实例方法, store 不能持有 ref;
+// 跨 store 实例共享, 单实例 (实际不会多 FileList 同时挂载 — YAGNI).
+let scrollToIndexCallback:
+  | ((i: number, opts?: { align?: 'start' | 'center' | 'end' }) => void)
+  | null = null;
+
+export function setScrollToIndexCallback(
+  cb: typeof scrollToIndexCallback,
+): void {
+  scrollToIndexCallback = cb;
+}
+
 export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
   const currentPath = ref<string>('');
@@ -280,6 +295,19 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     searchQuery.value = q;
   }
 
+  // ─── v0.1.0-module3.0.4-virtuallist Phase 3: scrollToPath action ───
+  // 用 pathIndex O(1) 找 index, 再调 scrollToIndexCallback(index, opts).
+  // 没注册 callback / 路径不在 entries → no-op (FileList 未挂 / 已删条目场景安全).
+  function scrollToPath(
+    path: string,
+    opts?: { align?: 'start' | 'center' | 'end' },
+  ): void {
+    if (!scrollToIndexCallback) return;
+    const i = pathIndex.value.get(path);
+    if (i === undefined) return;
+    scrollToIndexCallback(i, opts);
+  }
+
   // ─── v0.1.0-module1.22: computed ──
 
   const sortedEntries = computed<MediaEntry[]>(() =>
@@ -350,8 +378,11 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     clearSelection,
     selectAll,
     setSearchQuery,
+    // v0.1.0-module3.0.4-virtuallist Phase 3: scrollToPath action (回调到 FileList 实例)
+    scrollToPath,
     // computed
     sortedEntries,
+    pathIndex,
     selectedEntries,
     selectedCount,
     selectionSizeBytes,

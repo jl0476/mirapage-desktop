@@ -2,9 +2,9 @@
  * fileBrowser store 单测 — 模块 #1
  * v0.1.0-module1.22: 升维度 — sortField / viewMode / selectedPaths / hideFinished
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { useFileBrowserStore } from './fileBrowser';
+import { useFileBrowserStore, setScrollToIndexCallback } from './fileBrowser';
 import { listDirectory, getSetting, setSetting } from '@/lib/tauri';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
@@ -541,5 +541,76 @@ describe('fileBrowser store — selectRange pathIndex O(1)', () => {
     expect(fb.selectedPaths.has('a.txt')).toBe(true);
     expect(fb.selectedPaths.has('b.txt')).toBe(true);
     expect(fb.selectedPaths.has('c.txt')).toBe(true);
+  });
+});
+
+// ─── v0.1.0-module3.0.4-virtuallist Phase 3: store pathIndex 暴露 + scrollToPath action + setScrollToIndexCallback ───
+// FileList 组件实例方法 scrollToPath 通过模块级 callback 注册机制反向传给 store.
+// FileBrowser 在 onMounted 调 setScrollToIndexCallback(fileListRef.scrollToPath).
+describe('fileBrowser store — pathIndex 暴露 + scrollToPath action + setScrollToIndexCallback', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    // callback 是模块级 state, 测试间必须手动清零避免污染
+    setScrollToIndexCallback(null);
+  });
+
+  it('pathIndex 已 export, 可通过 fb.pathIndex 访问', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => makeEntry(`f${i}`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    expect(fb.pathIndex).toBeInstanceOf(Map);
+    expect(fb.pathIndex.get('f5')).toBe(5);
+  });
+
+  it('scrollToPath 没注册 callback → no-op', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => makeEntry(`f${i}`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    // 没注册 callback, 不应抛错
+    expect(() => fb.scrollToPath('f5')).not.toThrow();
+  });
+
+  it('setScrollToIndexCallback + scrollToPath 联动: callback 被调用', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => makeEntry(`f${i}`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    const cb = vi.fn();
+    setScrollToIndexCallback(cb);
+    fb.scrollToPath('f50');
+    expect(cb).toHaveBeenCalledWith(50, undefined);
+  });
+
+  it('scrollToPath 透传 opts (align=center)', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => makeEntry(`f${i}`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    const cb = vi.fn();
+    setScrollToIndexCallback(cb);
+    fb.scrollToPath('f5', { align: 'center' });
+    expect(cb).toHaveBeenCalledWith(5, { align: 'center' });
+  });
+
+  it('scrollToPath 路径不存在 callback 不调', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => makeEntry(`f${i}`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    const cb = vi.fn();
+    setScrollToIndexCallback(cb);
+    fb.scrollToPath('nonexistent');
+    expect(cb).not.toHaveBeenCalled();
   });
 });
