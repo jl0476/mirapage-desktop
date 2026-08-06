@@ -364,3 +364,133 @@ describe('FileList.vue — details 视图', () => {
     w.unmount();
   });
 });
+
+describe('FileList.vue — 键盘导航 (Task 5.1)', () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it('ArrowDown 无 focused row → 聚焦第一个 entry (f0)', async () => {
+    const entries = Array.from({ length: 50 }, (_, i) => entry(`f${i}`));
+    const w = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    await w.find('.virt-container').trigger('keydown', { key: 'ArrowDown' });
+    await settle();
+    const focused = w.find('[data-focused="true"]');
+    expect(focused.exists()).toBe(true);
+    expect(focused.attributes('data-path')).toBe('f0');
+    w.unmount();
+  });
+
+  it('ArrowDown 连续触发: 焦点从 f0 移到 f1', async () => {
+    const entries = Array.from({ length: 50 }, (_, i) => entry(`f${i}`));
+    const w = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    await w.find('.virt-container').trigger('keydown', { key: 'ArrowDown' });
+    await settle();
+    await w.find('.virt-container').trigger('keydown', { key: 'ArrowDown' });
+    await settle();
+    const focused = w.find('[data-focused="true"]');
+    expect(focused.exists()).toBe(true);
+    expect(focused.attributes('data-path')).toBe('f1');
+    w.unmount();
+  });
+
+  it('Home 键 → 跳到第一个 entry', async () => {
+    const entries = Array.from({ length: 100 }, (_, i) => entry(`f${i}`));
+    const w = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    // 先 End 跳到最后, 再 Home 跳回第一个
+    await w.find('.virt-container').trigger('keydown', { key: 'End' });
+    await settle();
+    await w.find('.virt-container').trigger('keydown', { key: 'Home' });
+    await settle();
+    const focused = w.find('[data-focused="true"]');
+    expect(focused.exists()).toBe(true);
+    expect(focused.attributes('data-path')).toBe('f0');
+    w.unmount();
+  });
+
+  it('End 键 → 跳到最后一个 entry', async () => {
+    const entries = Array.from({ length: 100 }, (_, i) => entry(`f${i}`));
+    const w = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    await w.find('.virt-container').trigger('keydown', { key: 'End' });
+    await settle();
+    const focused = w.find('[data-focused="true"]');
+    expect(focused.exists()).toBe(true);
+    expect(focused.attributes('data-path')).toBe('f99');
+    w.unmount();
+  });
+});
+
+describe('FileList.vue — focused row tabindex (Task 5.2)', () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it('ArrowDown 后 focused row tabindex=0, 唯一聚焦', async () => {
+    const entries = Array.from({ length: 50 }, (_, i) => entry(`f${i}`));
+    const w = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    await w.find('.virt-container').trigger('keydown', { key: 'ArrowDown' });
+    await settle();
+    const rows = w.findAll('[role="row"]');
+    expect(rows.length).toBeGreaterThan(0);
+    // 验证: 有且只有一行 data-focused="true" 且 tabindex="0"
+    const focusedRows = rows.filter((r) => r.attributes('data-focused') === 'true');
+    expect(focusedRows.length).toBe(1);
+    expect(focusedRows[0].attributes('tabindex')).toBe('0');
+    // 验证: 其余可见行都不是 focused (data-focused != "true")
+    const nonFocusedCount = rows.length - focusedRows.length;
+    expect(nonFocusedCount).toBeGreaterThan(0);
+    w.unmount();
+  });
+});
+
+describe('FileList.vue — aria 属性 (Task 5.3)', () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it('aria-rowcount 同步 entries.length', async () => {
+    const entries = Array.from({ length: 14949 }, (_, i) => entry(`f${i}`));
+    const w = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    expect(w.find('.virt-container').attributes('aria-rowcount')).toBe('14949');
+    w.unmount();
+  });
+
+  it('aria-rowindex 从 1 开始递增', async () => {
+    const entries = Array.from({ length: 50 }, (_, i) => entry(`f${i}`));
+    const w = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    const rows = w.findAll('[role="row"]');
+    expect(rows.length).toBeGreaterThan(0);
+    rows.forEach((row, i) => {
+      expect(row.attributes('aria-rowindex')).toBe(String(i + 1));
+    });
+    w.unmount();
+  });
+
+  it('aria-selected 跟随 props.selectedPaths', async () => {
+    const entries = Array.from({ length: 5 }, (_, i) => entry(`f${i}`));
+    const selectedPaths = new Set(['f2']);
+    const w = mountList(
+      { entries, selectedPaths, viewMode: 'list' },
+      { attachTo: document.body },
+    );
+    await settle();
+    const rows = w.findAll('[role="row"]');
+    expect(rows.length).toBe(5);
+    rows.forEach((row) => {
+      const path = row.attributes('data-path');
+      expect(row.attributes('aria-selected')).toBe(String(path === 'f2'));
+    });
+    w.unmount();
+  });
+
+  it('容器 role="grid" + aria-label="文件列表" + tabindex="0"', () => {
+    const entries = [entry('a.jpg')];
+    const w = mountList({ entries });
+    const container = w.find('.virt-container');
+    expect(container.attributes('role')).toBe('grid');
+    expect(container.attributes('aria-label')).toBe('文件列表');
+    expect(container.attributes('tabindex')).toBe('0');
+    w.unmount();
+  });
+});
