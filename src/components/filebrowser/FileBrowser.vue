@@ -15,10 +15,10 @@
  *  - EntryDetailPanel 显示 3 个 CTA: 立即阅读 / 加入书库 / 下载全部 (stub)
  *  - 右键菜单 (RowContextMenu) 加 立即阅读 / 加入书库 项
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getSetting, setSetting } from '@/lib/tauri';
-import { useFileBrowserStore } from '@/stores/fileBrowser';
+import { useFileBrowserStore, setScrollToIndexCallback } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
 import { useReaderActions } from '@/composables/useReaderActions';
@@ -67,6 +67,10 @@ const showSaveDialog = ref(false);
 const saveLabel = ref('');
 // 右键菜单状态
 const ctxMenu = ref<{ entry: MediaEntry; x: number; y: number } | null>(null);
+
+// v0.1.0-module3.0.4-virtuallist Task 3.4: FileList ref 绑定, 拿 scrollToPath expose.
+// onMounted 注册 setScrollToIndexCallback, 让 fb.scrollToPath(path) 能滚到 FileList 对应行.
+const fileListRef = ref<InstanceType<typeof FileList> | null>(null);
 
 /**
  * v0.1.0-module3.0.3-hotfix (Bug: 隐藏已读完失效) — displayedEntries
@@ -128,6 +132,15 @@ const displayPath = computed(() => {
 const LAST_ROOT_KEY = 'file_browser_last_root';
 
 onMounted(async () => {
+  // v0.1.0-module3.0.4-virtuallist Task 3.4: 注册 scrollToPath callback.
+  // store.scrollToPath(path) 会调 scrollToIndexCallback(i, opts),
+  // 这里把 i 转回 sortedEntries[i].path 再交给 FileList 滚到行.
+  setScrollToIndexCallback((i, opts) => {
+    const target = fb.sortedEntries[i]?.path;
+    if (target && fileListRef.value) {
+      fileListRef.value.scrollToPath(target, opts);
+    }
+  });
   await shortcuts.refresh();
   await readStatus.refresh();
   // v0.1.0-module1.22: 加载 sortField/sortAscending/viewMode/hideFinished 持久化
@@ -153,6 +166,12 @@ onMounted(async () => {
       // 静默回退: 显示 empty state
     }
   }
+});
+
+// v0.1.0-module3.0.4-virtuallist Task 3.4: 卸载清空 callback,
+// 防止 stale ref (下次 mount 前若再 scrollToPath 会调到已死的 vm).
+onUnmounted(() => {
+  setScrollToIndexCallback(null);
 });
 
 // #1 rootPath 变化时持久化
@@ -555,6 +574,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
       <!-- Main: 左侧 FileList + 右侧 DetailPanel (1 选中时) -->
       <div class="flex-1 flex gap-2 min-h-0 overflow-hidden">
         <FileList
+          ref="fileListRef"
           class="flex-1 min-w-0"
           :entries="displayedEntries"
           :loading="fb.loading"

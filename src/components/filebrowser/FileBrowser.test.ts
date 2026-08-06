@@ -863,3 +863,119 @@ function makeEntries(...names: string[]) {
     size: 100,
   }));
 }
+
+// ─── v0.1.0-module3.0.4-virtuallist Task 3.4: FileBrowser 接入 scrollToPath ───
+//
+// FileBrowser 在 onMounted 调 setScrollToIndexCallback 注册 (i, opts) →
+//   fileListRef.value.scrollToPath(sortedEntries[i].path, opts)
+// 让 store.scrollToPath(path) 能间接滚到 FileList 对应行.
+// onUnmounted 清空 callback (避免下次 mount 时旧实例引用).
+//
+// 测试策略: 替换 FileList 子组件为 stub (vi.fn 暴露 scrollToPath),
+// 绕过 Vue publicProxy 的 read-only defineProperty 限制. 这样 spy 直接生效.
+
+describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
+  let scrollToPathStub: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    scrollToPathStub = vi.fn();
+  });
+
+  function mountWithFileListStub() {
+    // 局部 stub: 不污染其它 describe 块
+    const FileListStub = {
+      name: 'FileList',
+      setup(_: unknown, { expose }: { expose: (e: Record<string, unknown>) => void }) {
+        expose({ scrollToPath: scrollToPathStub });
+        return () => null;
+      },
+    };
+    return mount(FileBrowser, {
+      global: {
+        plugins: [i18n],
+        stubs: { FileList: FileListStub },
+      },
+      attachTo: document.body,
+    });
+  }
+
+  it('onMounted 后 fb.scrollToPath(path) 触发 FileList.scrollToPath (callback 已注册)', async () => {
+    mockedList.mockResolvedValueOnce(
+      Array.from({ length: 100 }, (_, i) => ({
+        name: `f${i}`,
+        path: `f${i}`,
+        isDirectory: i % 2 === 0,
+        isArchive: false,
+        size: 0,
+        modifiedAt: 0,
+      })) as never,
+    );
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    fb.scrollToPath('f50');
+    expect(scrollToPathStub).toHaveBeenCalledTimes(1);
+    expect(scrollToPathStub).toHaveBeenCalledWith('f50', undefined);
+
+    wrapper.unmount();
+  });
+
+  it('fb.scrollToPath 透传 opts (align=center)', async () => {
+    mockedList.mockResolvedValueOnce(
+      Array.from({ length: 100 }, (_, i) => ({
+        name: `f${i}`,
+        path: `f${i}`,
+        isDirectory: i % 2 === 0,
+        isArchive: false,
+        size: 0,
+        modifiedAt: 0,
+      })) as never,
+    );
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    fb.scrollToPath('f5', { align: 'center' });
+    expect(scrollToPathStub).toHaveBeenCalledWith('f5', { align: 'center' });
+
+    wrapper.unmount();
+  });
+
+  it('onUnmounted 清空 callback (避免 stale ref 风险)', async () => {
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    // 此时 callback 已注册, stub 收到一次调用 — 验证注册
+    // (上面两个 it 用同一 stub, 这里清空调用记录独立验证)
+    scrollToPathStub.mockClear();
+    wrapper.unmount();
+    await flushPromises();
+
+    // 卸载后再 fetch 一组 entries (active pinia 仍在, 同一 store 实例)
+    mockedList.mockResolvedValueOnce(
+      Array.from({ length: 10 }, (_, i) => ({
+        name: `f${i}`,
+        path: `f${i}`,
+        isDirectory: i % 2 === 0,
+        isArchive: false,
+        size: 0,
+        modifiedAt: 0,
+      })) as never,
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // callback 应已被清空 → scrollToPath no-op, stub 不会被调到, 不抛错
+    expect(() => fb.scrollToPath('f5')).not.toThrow();
+    expect(scrollToPathStub).not.toHaveBeenCalled();
+  });
+});
