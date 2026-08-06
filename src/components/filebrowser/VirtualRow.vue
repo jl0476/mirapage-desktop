@@ -184,7 +184,7 @@ function getTypeLabel(entry: MediaEntry): string {
 .row-host:not(.row-host-grid) .row-view-grid { display: none; }
 .row-host:not(.row-host-details) .row-view-details { display: none; }
 
-/* list view block 样式 */
+/* list view block 样式 — height 100% 撑满 29px row host (row host 是 absolute 定位 29px 高度的虚拟槽位) */
 .row-view-list {
   display: flex;
   align-items: center;
@@ -192,6 +192,8 @@ function getTypeLabel(entry: MediaEntry): string {
   padding: 6px 12px;  /* py-1.5 px-3 per CLAUDE.md §1.4 */
   font-size: 12px;
   color: var(--color-text-secondary);
+  height: 100%;
+  box-sizing: border-box;
 }
 .row-view-list .name { flex: 1; min-width: 0; }
 
@@ -203,6 +205,8 @@ function getTypeLabel(entry: MediaEntry): string {
   padding: 12px 8px;
   font-size: 12px;
   color: var(--color-text-secondary);
+  height: 100%;
+  box-sizing: border-box;
 }
 .row-view-grid .grid-icon {
   font-size: 32px;
@@ -225,6 +229,8 @@ function getTypeLabel(entry: MediaEntry): string {
   padding: 0 12px;
   font-size: 12px;
   color: var(--color-text-secondary);
+  height: 100%;
+  box-sizing: border-box;
 }
 .row-view-details .name-wrap { position: relative; overflow: visible !important; min-width: 0; }
 .row-view-details .index { text-align: right; color: var(--color-text-tertiary); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; }
