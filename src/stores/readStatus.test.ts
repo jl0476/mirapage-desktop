@@ -85,7 +85,8 @@ describe('readStatus', () => {
       expect(rs.finishedSet.has('bar')).toBe(true);
     });
 
-    it('marks 替换后 finishedSet 能重建', async () => {
+    it('marks 替换后显式 rebuildFinishedSet 重建 finishedSet', async () => {
+      // 注: watch(marks) 默认 flush: 'pre' 异步, 测试场景需显式 rebuild 同步触发
       const rs = useReadStatusStore();
       rs.marks = { 'local|Q:\\test|foo': 'finished' };
       rs.rebuildFinishedSet();
