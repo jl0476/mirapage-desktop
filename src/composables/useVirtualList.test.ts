@@ -133,6 +133,27 @@ describe('useVirtualList scrollToPath', () => {
     scrollToPath('f50', { align: 'center' });
     expect(scrollTop.value).toBe(50 * 29 - (290 - 29) / 2);
   });
+
+  it('scrollToPath 用 pathIndex O(1): 10000 entries < 1ms', () => {
+    const entries = ref(Array.from({ length: 10000 }, (_, i) => mockEntry(`f${i}`)));
+    const pathIndex = ref(new Map(entries.value.map((e, i) => [e.path, i])));
+    const { scrollToPath, scrollTop } = useVirtualList(entries, { rowHeight: 29, pathIndex });
+    const t0 = performance.now();
+    scrollToPath('f5000');
+    const t1 = performance.now();
+    expect(scrollTop.value).toBe(5000 * 29);
+    // O(1) Map.get 应远小于 1ms; 留 5ms 阈值防 happy-dom 噪声
+    expect(t1 - t0).toBeLessThan(5);
+  });
+
+  it('scrollToPath 用 pathIndex 时 fallback findIndex 不被调用', () => {
+    const entries = ref([mockEntry('a'), mockEntry('b')]);
+    const pathIndex = ref(new Map([['a', 0], ['b', 1]]));
+    const { scrollToPath, scrollTop } = useVirtualList(entries, { rowHeight: 29, pathIndex });
+    pathIndex.value.delete('a');  // Map 里删 'a', 但 entries 仍有 'a'
+    scrollToPath('a');  // findIndex 会找到 0, 但 pathIndex.get 返回 undefined → no-op
+    expect(scrollTop.value).toBe(0);  // 没动
+  });
 });
 
 describe('useVirtualList ResizeObserver + rAF scroll', () => {

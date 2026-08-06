@@ -876,6 +876,10 @@ function makeEntries(...names: string[]) {
 
 describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
   let scrollToPathStub: ReturnType<typeof vi.fn>;
+  // v0.1.0-module3.0.4-hotfix: callback 改调 FileList.scrollToIndex (O(1) fast path,
+  // 跳过 i→path→findIndex 双重反查). scrollToPath 仍暴露 (FileList 内部 viewMode
+  // 切换 retention 仍用, 但全局 callback 走 scrollToIndex).
+  let scrollToIndexStub: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -883,6 +887,7 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
     mockedList.mockResolvedValue([]);
     mockedShortcuts.mockResolvedValue([]);
     scrollToPathStub = vi.fn();
+    scrollToIndexStub = vi.fn();
   });
 
   function mountWithFileListStub() {
@@ -890,7 +895,7 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
     const FileListStub = {
       name: 'FileList',
       setup(_: unknown, { expose }: { expose: (e: Record<string, unknown>) => void }) {
-        expose({ scrollToPath: scrollToPathStub });
+        expose({ scrollToPath: scrollToPathStub, scrollToIndex: scrollToIndexStub });
         return () => null;
       },
     };
@@ -903,16 +908,24 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
     });
   }
 
-  it('onMounted 后 fb.scrollToPath(path) 触发 FileList.scrollToPath (callback 已注册)', async () => {
+  it('onMounted 后 fb.scrollToPath(path) 触发 FileList.scrollToIndex (callback 已注册, 透传 index)', async () => {
+    // v0.1.0-module3.0.4-hotfix: callback 现在直接传 index (跳过 i→path→findIndex).
+    // 数据用混入 file/dir 的 10 个名字, sortedEntries 走 dir-first sort:
+    //   dirs (a, b, c — 3 个) → positions 0-2; files (a.txt, b.txt, ..., g.txt — 7 个) → positions 3-9.
+    // 'c.txt' 是 file, 自然排在 dir c 之后, 仍按文件 sub-sort 排第 0 (lex: a.txt, b.txt, c.txt, d.txt, e.txt, f.txt, g.txt).
     mockedList.mockResolvedValueOnce(
-      Array.from({ length: 100 }, (_, i) => ({
-        name: `f${i}`,
-        path: `f${i}`,
-        isDirectory: i % 2 === 0,
-        isArchive: false,
-        size: 0,
-        modifiedAt: 0,
-      })) as never,
+      [
+        { name: 'a.txt', path: 'a.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'b', path: 'b', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'c.txt', path: 'c.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'a', path: 'a', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'b.txt', path: 'b.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'c', path: 'c', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'd.txt', path: 'd.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'e.txt', path: 'e.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'f.txt', path: 'f.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'g.txt', path: 'g.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      ] as never,
     );
     const wrapper = mountWithFileListStub();
     await flushPromises();
@@ -920,23 +933,32 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
     await fb.setRoot('C:/comics');
     await flushPromises();
 
-    fb.scrollToPath('f50');
-    expect(scrollToPathStub).toHaveBeenCalledTimes(1);
-    expect(scrollToPathStub).toHaveBeenCalledWith('f50', undefined);
+    fb.scrollToPath('e.txt');
+    // sortedEntries = [a, b, c, a.txt, b.txt, c.txt, d.txt, e.txt, f.txt, g.txt]
+    //                 pos:  0  1  2    3      4      5      6      7      8      9
+    // 'e.txt' (sorted at 7) → callback(7) → scrollToIndex(7)
+    expect(scrollToIndexStub).toHaveBeenCalledTimes(1);
+    expect(scrollToIndexStub).toHaveBeenCalledWith(7, undefined);
+    // scrollToPath 不再被 callback 走 (FileList 自身 viewMode retention 才会用)
+    expect(scrollToPathStub).not.toHaveBeenCalled();
 
     wrapper.unmount();
   });
 
-  it('fb.scrollToPath 透传 opts (align=center)', async () => {
+  it('fb.scrollToPath 透传 opts 到 scrollToIndex (align=center)', async () => {
     mockedList.mockResolvedValueOnce(
-      Array.from({ length: 100 }, (_, i) => ({
-        name: `f${i}`,
-        path: `f${i}`,
-        isDirectory: i % 2 === 0,
-        isArchive: false,
-        size: 0,
-        modifiedAt: 0,
-      })) as never,
+      [
+        { name: 'a.txt', path: 'a.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'b', path: 'b', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'c.txt', path: 'c.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'a', path: 'a', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'b.txt', path: 'b.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'c', path: 'c', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'd.txt', path: 'd.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'e.txt', path: 'e.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'f.txt', path: 'f.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'g.txt', path: 'g.txt', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      ] as never,
     );
     const wrapper = mountWithFileListStub();
     await flushPromises();
@@ -944,8 +966,9 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
     await fb.setRoot('C:/comics');
     await flushPromises();
 
-    fb.scrollToPath('f5', { align: 'center' });
-    expect(scrollToPathStub).toHaveBeenCalledWith('f5', { align: 'center' });
+    fb.scrollToPath('b', { align: 'center' });
+    // 'b' (dir, sorted at 1) → callback(1, { align: 'center' })
+    expect(scrollToIndexStub).toHaveBeenCalledWith(1, { align: 'center' });
 
     wrapper.unmount();
   });
@@ -955,7 +978,7 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
     await flushPromises();
     // 此时 callback 已注册, stub 收到一次调用 — 验证注册
     // (上面两个 it 用同一 stub, 这里清空调用记录独立验证)
-    scrollToPathStub.mockClear();
+    scrollToIndexStub.mockClear();
     wrapper.unmount();
     await flushPromises();
 
@@ -976,6 +999,6 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
 
     // callback 应已被清空 → scrollToPath no-op, stub 不会被调到, 不抛错
     expect(() => fb.scrollToPath('f5')).not.toThrow();
-    expect(scrollToPathStub).not.toHaveBeenCalled();
+    expect(scrollToIndexStub).not.toHaveBeenCalled();
   });
 });

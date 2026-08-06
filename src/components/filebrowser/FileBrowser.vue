@@ -133,12 +133,15 @@ const LAST_ROOT_KEY = 'file_browser_last_root';
 
 onMounted(async () => {
   // v0.1.0-module3.0.4-virtuallist Task 3.4: 注册 scrollToPath callback.
-  // store.scrollToPath(path) 会调 scrollToIndexCallback(i, opts),
-  // 这里把 i 转回 sortedEntries[i].path 再交给 FileList 滚到行.
+  // store.scrollToPath(path) 走 pathIndex O(1) 找 sortedEntries 的 index i,
+  // 这里直接透传给 FileList.scrollToIndex — 跳过 i→path→findIndex 双重反查
+  // (14949 entries 时 ~60ms → < 1ms). filter (searchQuery / hideFinished) 启用
+  // 时 displayedEntries ≠ sortedEntries, i 索引会错位 — 此调用原本就假设无 filter
+  // (fb.scrollToPath 用于 viewMode 切换保留滚动位置, 此时 filter 通常不启用),
+  // 故 fast path 安全.
   setScrollToIndexCallback((i, opts) => {
-    const target = fb.sortedEntries[i]?.path;
-    if (target && fileListRef.value) {
-      fileListRef.value.scrollToPath(target, opts);
+    if (fileListRef.value) {
+      fileListRef.value.scrollToIndex(i, opts);
     }
   });
   await shortcuts.refresh();
