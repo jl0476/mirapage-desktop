@@ -209,20 +209,26 @@ describe('FileList.vue — 虚拟化集成 (Task 3.2)', () => {
     w.unmount();
   });
 
-  it('viewMode 切换: DOM row 元素复用 (CSS 显隐)', async () => {
-    const entries = Array.from({ length: 100 }, (_, i) => entry(`f${i}`));
+  it('viewMode 切换 list → grid: grid view 渲染所有 entries (不虚拟化)', async () => {
+    const entries = Array.from({ length: 20 }, (_, i) => entry(`f${i}`))
     const w = mountList(
       { entries, viewMode: 'list' },
       { attachTo: document.body },
-    );
-    await settle();
-    const beforeRow = w.findAll('[data-test="row"]')[0]?.element;
-    await w.setProps({ viewMode: 'grid' });
-    await nextTick();
-    const afterRow = w.findAll('[data-test="row"]')[0]?.element;
-    // 同一 element 复用 (DOM 重建 = 不同 element)
-    expect(afterRow).toBe(beforeRow);
-    w.unmount();
+    )
+    await settle()
+    // list view: 虚拟化, viewport 内只渲染可见 row (< 20)
+    const listRowCount = w.findAll('[data-test="row"]').length
+    expect(listRowCount).toBeLessThan(entries.length)
+    await w.setProps({ viewMode: 'grid' })
+    // 多等几个 tick 让 watcher + DOM patch 完成
+    await nextTick(); await nextTick()
+    await new Promise(r => requestAnimationFrame(() => r()))
+    await new Promise(r => requestAnimationFrame(() => r()))
+    // grid view: 不虚拟化, 所有 entries 渲染
+    expect(w.findAll('[data-test="row"]').length).toBe(entries.length)
+    // grid 容器存在
+    expect(w.find('.virt-grid-view').exists()).toBe(true)
+    w.unmount()
   });
 
   it('viewMode 切换 details → list: DOM 元素复用', async () => {

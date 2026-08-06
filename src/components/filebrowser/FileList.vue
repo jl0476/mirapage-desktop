@@ -312,7 +312,32 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
       <span>{{ t('fileBrowser.empty') }}</span>
     </div>
 
-    <!-- 虚拟滚动内容 -->
+    <!-- grid 视图: 不虚拟化, CSS grid auto-fill wrap 多列 (每 entry 占一格) -->
+    <div
+      v-else-if="viewMode === 'grid'"
+      class="virt-grid-view"
+      role="presentation"
+    >
+      <VirtualRow
+        v-for="(entry, i) in entries"
+        :key="entry.path"
+        :entry="entry"
+        :row-index="i"
+        :absolute-top="0"
+        :mark="getMark(entry)"
+        :selected="isSelected(entry)"
+        :view-mode="viewMode"
+        :row-height="resolvedRowHeight"
+        @row-click="onRowClick"
+        @row-dblclick="onRowDblclick"
+        @row-keydown="onRowKeydown"
+        @row-contextmenu="onRowContextmenu"
+        @name-hover="onNameHover"
+        @name-leave="onNameLeave"
+      />
+    </div>
+
+    <!-- list/details 视图: 虚拟滚动 -->
     <div
       v-else
       ref="contentRef"
@@ -351,6 +376,13 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
 }
 .virt-content {
   position: relative;
+}
+.virt-grid-view {
+  display: grid;
+  /* 每 entry 至少 120px, auto-fill 自动算列数 (容器宽度 / 120) */
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  padding: 8px;
 }
 .virt-empty {
   display: flex;

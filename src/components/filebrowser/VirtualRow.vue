@@ -63,15 +63,20 @@ const rowClasses = computed(() => ({
   'is-selected': props.selected,
 }))
 
-const rowStyle = computed(() => ({
-  position: 'absolute' as const,
-  top: '0',
-  left: '0',
-  right: '0',
-  height: props.rowHeight + 'px',
-  transform: `translateY(${props.absoluteTop}px)`,
-  contain: 'layout style',
-}))
+const rowStyle = computed(() => {
+  // grid 视图: 不 absolute, 让 CSS grid auto-fill 自动 wrap 多列
+  if (props.viewMode === 'grid') return {}
+  // list / details 视图: absolute + translateY 虚拟滚动定位
+  return {
+    position: 'absolute' as const,
+    top: '0',
+    left: '0',
+    right: '0',
+    height: props.rowHeight + 'px',
+    transform: `translateY(${props.absoluteTop}px)`,
+    contain: 'layout style',
+  }
+})
 
 // iconType / iconClass WeakMap 缓存 (按 entry 引用缓存, 列表复用时命中)
 const iconTypeCache = new WeakMap<MediaEntry, FileIconType>()
