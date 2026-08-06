@@ -19,6 +19,7 @@ import type { MediaEntry } from '@/lib/sourceDescriptor'
 import FileIcon from './FileIcon.vue'
 import { useSettingsStore } from '@/stores/settings'
 import { formatBytes, formatDate } from '@/locales/helpers'
+import { mimeFromName, getMimeCategory } from '@/lib/mime'
 
 type RowMark = 'reading' | 'finished' | 'none'
 type ViewMode = 'list' | 'grid' | 'details'
@@ -107,6 +108,12 @@ function statusLabel(m: RowMark): string {
 function getTypeLabel(entry: MediaEntry): string {
   if (entry.isDirectory) return t('properties.typeDirectory')
   if (entry.isArchive) return t('properties.typeArchive')
+  const mime = mimeFromName(entry.name)
+  const category = mime ? getMimeCategory(mime) : null
+  if (category === 'image') return t('properties.typeImage')
+  if (category === 'video') return t('properties.typeVideo')
+  if (category === 'audio') return t('properties.typeAudio')
+  if (category === 'text') return t('properties.typeText')
   return t('properties.typeFile')
 }
 </script>
@@ -160,7 +167,7 @@ function getTypeLabel(entry: MediaEntry): string {
       </span>
       <span class="date-cell">{{ entry.modifiedAt ? formatDate(entry.modifiedAt * 1000, settings.locale) : '—' }}</span>
       <span class="type-cell">{{ getTypeLabel(entry) }}</span>
-      <span class="size-cell">{{ formatBytes(entry.size) }}</span>
+      <span class="size-cell">{{ entry.isDirectory ? '—' : formatBytes(entry.size) }}</span>
       <span v-if="mark === 'reading'" class="status-badge reading">{{ statusLabel(mark) }}</span>
       <span v-else-if="mark === 'finished'" class="status-badge finished">{{ statusLabel(mark) }}</span>
     </div>
