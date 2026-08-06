@@ -416,3 +416,62 @@ describe('fileBrowser store — searchQuery 进目录清空', () => {
     expect(store.searchQuery).toBe('');
   });
 });
+
+// ─── v0.1.0-module3.0.4-virtuallist Phase 1: selectRange O(1) pathIndex ───
+// 14949 entries 目录的 Shift+Click 范围选择从 O(n) indexOf × 2 → O(1) Map 查找.
+describe('fileBrowser store — selectRange pathIndex O(1)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('shift+click 大范围选择用 pathIndex 选中正确子集', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 1000 }, (_, i) => makeEntry(`f${i}.txt`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    fb.selectRange('f10.txt', 'f20.txt');
+    expect(fb.selectedPaths.size).toBe(11);
+    expect(fb.selectedPaths.has('f15.txt')).toBe(true);
+  });
+
+  it('selectRange 反向范围 (to < from) 也正确', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 100 }, (_, i) => makeEntry(`f${i}.txt`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    fb.selectRange('f80.txt', 'f20.txt');
+    expect(fb.selectedPaths.size).toBe(61);
+    expect(fb.selectedPaths.has('f50.txt')).toBe(true);
+  });
+
+  it('selectRange 路径不存在 → no-op (保留先前 selection)', async () => {
+    mockedList.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => makeEntry(`f${i}.txt`)),
+    );
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    fb.replaceSelection('f0.txt');
+    expect(fb.selectedPaths.size).toBe(1);
+    fb.selectRange('f0.txt', 'nonexistent.txt');
+    expect(fb.selectedPaths.size).toBe(1);
+  });
+
+  it('pathIndex 与 sortedEntries 同步 (entries 无序 → sort 后按 sorted 顺序)', async () => {
+    mockedList.mockResolvedValue([
+      makeEntry('c.txt'),
+      makeEntry('a.txt'),
+      makeEntry('b.txt'),
+    ]);
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/x');
+    // entries 顺序 [c, a, b], sortedEntries 顺序 [a, b, c]
+    fb.selectRange('a.txt', 'c.txt');
+    expect(fb.selectedPaths.size).toBe(3);
+    expect(fb.selectedPaths.has('a.txt')).toBe(true);
+    expect(fb.selectedPaths.has('b.txt')).toBe(true);
+    expect(fb.selectedPaths.has('c.txt')).toBe(true);
+  });
+});
