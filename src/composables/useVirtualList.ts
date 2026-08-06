@@ -16,12 +16,12 @@
  *
  * Phase 3 集成到 FileList 时再加绝对定位 + transform 渲染逻辑.
  */
-import { ref, computed, onMounted, onUnmounted, nextTick, watch, type Ref, type ComputedRef } from 'vue';
+import { ref, computed, isRef, onMounted, onUnmounted, nextTick, watch, type Ref, type ComputedRef } from 'vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 export interface VirtualListOptions {
-  /** 固定行高 (像素). 动态行高留给 grid 后续任务 */
-  rowHeight: number | ((entry: MediaEntry) => number);
+  /** 固定行高 (像素). 支持 number / Ref<number> / (entry) => number */
+  rowHeight: number | Ref<number> | ((entry: MediaEntry) => number);
   /** visibleRange 上下额外渲染的行数, 默认 5 */
   bufferSize?: number;
 }
@@ -53,11 +53,23 @@ export function useVirtualList(
   const scrollTop = ref(0);
   const bufferSize = options.bufferSize ?? 5;
 
-  // Task 2.1: 只支持固定 rowHeight (动态 rowHeight 函数留待 grid 任务处理,
-  // 因为 visibleRange 算法依赖固定 rowHeight 才能用除法定位 start index).
+  // Task 2.1: 支持 number / Ref<number> / (entry) => number 三种 rowHeight 形式.
+  // Ref<number> 形式让 viewMode 变化能响应式驱动 totalHeight / visibleRange 重算.
   const resolvedRowHeight = computed<number>(() => {
     const rh = options.rowHeight;
-    return typeof rh === 'number' ? rh : 0;
+    if (typeof rh === 'number') return rh > 0 ? rh : 0;
+    if (typeof rh === 'function') {
+      return Math.max(0, rh({
+        name: '_default',
+        path: '_default',
+        isDirectory: false,
+        isArchive: false,
+        size: 0,
+        modifiedAt: 0,
+      }));
+    }
+    if (isRef(rh)) return rh.value > 0 ? rh.value : 0;
+    return 0;
   });
 
   const totalHeight = computed<number>(
