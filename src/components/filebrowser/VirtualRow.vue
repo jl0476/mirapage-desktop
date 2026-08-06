@@ -191,7 +191,7 @@ function getTypeLabel(entry: MediaEntry): string {
   gap: 8px;
   padding: 6px 12px;  /* py-1.5 px-3 per CLAUDE.md §1.4 */
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);  /* 文件名/属性默认主色, 比 secondary 深 */
   height: 100%;
   box-sizing: border-box;
 }
@@ -204,7 +204,7 @@ function getTypeLabel(entry: MediaEntry): string {
   align-items: center;
   padding: 12px 8px;
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);
   height: 100%;
   box-sizing: border-box;
 }
@@ -228,7 +228,7 @@ function getTypeLabel(entry: MediaEntry): string {
   gap: 8px;
   padding: 0 12px;
   font-size: 12px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-primary);  /* 详情列文字默认主色, 比 secondary 深 */
   height: 100%;
   box-sizing: border-box;
 }
