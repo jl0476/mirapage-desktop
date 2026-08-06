@@ -123,10 +123,12 @@ const statusBarItemsText = computed(() => {
   return t('fileBrowser.statusBar.items', { count });
 });
 
-/** 当前路径: rootPath + '/' + currentPath (空时仅 rootPath) */
+/** 当前路径: rootPath + '/' + currentPath (空时仅 rootPath). 统一 '/' 分隔符 (Windows rootPath 用 \, 项目 path.ts 用 /, 显示统一) */
 const displayPath = computed(() => {
   if (!fb.rootPath) return '';
-  return fb.currentPath ? `${fb.rootPath}/${fb.currentPath}` : fb.rootPath;
+  // 统一用 '/' 显示 — Windows / Unix 都接受, 对齐 path.ts crumbs() 实现
+  const root = fb.rootPath.replace(/\\/g, '/');
+  return fb.currentPath ? `${root}/${fb.currentPath}` : root;
 });
 
 const LAST_ROOT_KEY = 'file_browser_last_root';

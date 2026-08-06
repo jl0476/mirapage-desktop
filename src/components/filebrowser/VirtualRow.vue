@@ -232,14 +232,15 @@ function getTypeLabel(entry: MediaEntry): string {
 .row-view-details .type-cell { text-align: center; }
 .row-view-details .size-cell { text-align: right; font-family: ui-monospace, SFMono-Regular, monospace; }
 
-/* 通用行状态 — 三视图都生效 */
-.row-host:hover { background: var(--color-surface-light); color: var(--color-text-primary); }
-.row-host.is-selected {
+/* 通用行状态 — 三视图都生效. 选择器限定 [role="row"] 避免内层 block (row-view-list/grid/details)
+   也带 row-host+is-selected class 时 outline/background 三个 block 重叠 (三视图同挂 DOM 复用). */
+.row-host[role="row"]:hover { background: var(--color-surface-light); color: var(--color-text-primary); }
+.row-host[role="row"].is-selected {
   background: rgb(99 102 241 / 0.18);
   outline: 1px solid var(--color-accent);
   outline-offset: -1px;
 }
-.row-host:hover .icon :deep(.file-icon) { filter: drop-shadow(0 0 4px currentColor); }
+.row-host[role="row"]:hover .icon :deep(.file-icon) { filter: drop-shadow(0 0 4px currentColor); }
 
 /* 文件类型彩色图标 */
 .icon {
