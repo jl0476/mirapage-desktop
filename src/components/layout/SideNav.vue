@@ -21,7 +21,7 @@ const collapsed = ref(false);
 
 const items: NavItem[] = [
   { to: '/',          icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z', labelKey: 'nav.fileBrowser' },
-  { to: '/shortcuts', icon: 'M12 2l2.39 7.36H22l-6.18 4.49L18.21 22 12 17.27 5.79 4.73 2.39-8.15L4 9.36h7.61Z', labelKey: 'nav.shortcuts' },
+  { to: '/shortcuts', icon: 'M9 17H7A5 5 0 0 1 7 7h2M15 7h2a5 5 0 1 1 0 10h-2M8 12h8', labelKey: 'nav.shortcuts' },
   { to: '/library',   icon: 'M3 19V5a2 2 0 0 1 2-2h5v16H5a2 2 0 0 1-2-2Zm8-16h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8V3Z', labelKey: 'nav.library' },
   { to: '/bookmarks', icon: 'M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16Z', labelKey: 'nav.bookmarks' },
   { to: '/likes',     icon: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z', labelKey: 'nav.likes' },
