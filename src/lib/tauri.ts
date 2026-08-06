@@ -264,17 +264,6 @@ export async function removeBookTag(bookId: number, tagId: number): Promise<void
   await invoke<void>('remove_book_tag', { bookId, tagId });
 }
 
-// ─── Search (Phase 4) ───────────────────────────────────────────────────
-export interface SearchHit {
-  source: 'library' | 'bookmark' | 'history' | 'tag';
-  bookId: number;
-  title: string;
-  snippet?: string;
-}
-export async function search(query: string): Promise<SearchHit[]> {
-  return invoke<SearchHit[]>('search', { query });
-}
-
 // ─── Accounts (Phase 7-8) ──────────────────────────────────────────────
 export interface AccountItem {
   id: number;

@@ -39,7 +39,6 @@ function makeRouter(): Router {
     history: createMemoryHistory(),
     routes: [
       { path: '/',          name: 'home',       component: { template: '<div />' } },
-      { path: '/search',    name: 'search',     component: { template: '<div />' } },
       { path: '/shortcuts', name: 'shortcuts',  component: { template: '<div />' } },
       { path: '/library',   name: 'library',    component: { template: '<div />' } },
       { path: '/bookmarks', name: 'bookmarks',  component: { template: '<div />' } },
@@ -62,15 +61,14 @@ async function mountSideNav(initialRoute = '/'): Promise<{ wrapper: ReturnType<t
 }
 
 describe('SideNav — 8 项导航', () => {
-  it('mount 渲染 9 个 RouterLink 指向 9 条路由', async () => {
+  it('mount 渲染 8 个 RouterLink 指向 8 条路由', async () => {
     const { wrapper } = await mountSideNav();
     const links = wrapper.findAllComponents(RouterLink);
-    expect(links.length).toBe(9);
+    expect(links.length).toBe(8);
 
     const hrefs = links.map((l) => l.props('to'));
     expect(hrefs).toEqual([
       '/',
-      '/search',
       '/shortcuts',
       '/library',
       '/bookmarks',
@@ -81,11 +79,10 @@ describe('SideNav — 8 项导航', () => {
     ]);
   });
 
-  it('9 个项目的 label 通过 i18n key 渲染', async () => {
+  it('8 个项目的 label 通过 i18n key 渲染', async () => {
     const { wrapper } = await mountSideNav();
     const html = wrapper.html();
     expect(html).toContain('文件浏览');
-    expect(html).toContain('搜索');
     expect(html).toContain('快捷方式');
     expect(html).toContain('书库');
     expect(html).toContain('书签');
@@ -206,8 +203,8 @@ describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
       .toContain('is-active');
   });
 
-  it('9 个 RouterLink 逐个点击 → router.push 按顺序被调 9 次', async () => {
-    const targets = ['/', '/search', '/shortcuts', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
+  it('8 个 RouterLink 逐个点击 → router.push 按顺序被调 8 次', async () => {
+    const targets = ['/', '/shortcuts', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
     const { wrapper, router } = await mountSideNav('/');
     await new Promise((r) => setTimeout(r, 0));
 

@@ -47,11 +47,6 @@ const router = createRouter({
       component: () => import('@/views/Settings.vue'),
     },
     {
-      path: '/search',
-      name: 'search',
-      component: () => import('@/views/Search.vue'),
-    },
-    {
       path: '/reader/:bookId',
       name: 'reader',
       component: () => import('@/views/ReaderView.vue'),

@@ -5,19 +5,14 @@
  * - 全部按 lastReadAt DESC 排
  * - 双击 ★ 切换 favorite 状态
  */
-import { onMounted, ref } from 'vue';
+import { onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useI18n } from 'vue-i18n';
 import { useLibraryStore } from '@/stores/library';
-import { useSearchStore } from '@/stores/search';
 
 const { t } = useI18n();
 const library = useLibraryStore();
 const { items } = storeToRefs(library);
-const search = useSearchStore();
-const { hits, query } = storeToRefs(search);
-
-const showSearch = ref(false);
 
 onMounted(() => {
   library.refresh();
@@ -33,23 +28,11 @@ async function toggleFav(id: number) {
     <header>
       <h2>{{ t('library.title') }}</h2>
       <div class="actions">
-        <button data-test="search-toggle" @click="showSearch = !showSearch">
-          {{ showSearch ? '×' : t('fileBrowser.search') }}
-        </button>
         <RouterLink to="/">← {{ t('common.back') }}</RouterLink>
       </div>
     </header>
 
-    <input
-      v-if="showSearch"
-      v-model="query"
-      data-test="search-input"
-      type="search"
-      :placeholder="t('fileBrowser.search')"
-      @keyup.enter="search.run()"
-    />
-
-    <ul v-if="!query || hits.length === 0" data-test="list" class="library-list">
+    <ul data-test="list" class="library-list">
       <li v-for="book in items" :key="book.id" data-test="row">
         <span class="title">{{ book.title }}</span>
         <span class="fav" :class="{ on: book.isFavorite }" @click="toggleFav(book.id)">
@@ -57,16 +40,6 @@ async function toggleFav(id: number) {
         </span>
         <!-- v0.1.0-module3.0.1: 用 name+params 触发 /reader/:bookId path-param 路由 -->
         <RouterLink :to="{ name: 'reader', params: { bookId: book.id } }">
-          {{ t('common.open') }}
-        </RouterLink>
-      </li>
-    </ul>
-
-    <ul v-else data-test="search-results" class="library-list">
-      <li v-for="hit in hits" :key="`${hit.source}-${hit.bookId}`">
-        <span class="title">{{ hit.title }}</span>
-        <span class="source">{{ t('library.source.' + hit.source) }}</span>
-        <RouterLink :to="{ name: 'reader', params: { bookId: hit.bookId } }">
           {{ t('common.open') }}
         </RouterLink>
       </li>
