@@ -385,3 +385,34 @@ describe('fileBrowser store — v0.1.0-module3.0 集成', () => {
     expect(setDirectorySort).toHaveBeenCalled();
   });
 });
+
+describe('fileBrowser store — searchQuery 进目录清空', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue([]);
+  });
+
+  it('setSearchQuery 写入 searchQuery', () => {
+    const store = useFileBrowserStore();
+    store.setSearchQuery('abc');
+    expect(store.searchQuery).toBe('abc');
+  });
+
+  it('navigate 清空 searchQuery', async () => {
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.setSearchQuery('abc');
+    expect(store.searchQuery).toBe('abc');
+    await store.navigate('sub');
+    expect(store.searchQuery).toBe('');
+  });
+
+  it('setRoot 清空 searchQuery', async () => {
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/x');
+    store.setSearchQuery('abc');
+    await store.setRoot('C:/y');
+    expect(store.searchQuery).toBe('');
+  });
+});

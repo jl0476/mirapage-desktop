@@ -93,6 +93,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     entries.value = [];
     error.value = null;
     clearSelection();
+    searchQuery.value = ''; // v0.1.0-module3.0.3: 换目录清空搜索 (对齐 PV)
     if (root !== null) {
       await fetch('');
     }
@@ -100,6 +101,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
 
   async function navigate(path: string): Promise<void> {
     currentPath.value = path;
+    searchQuery.value = ''; // v0.1.0-module3.0.3: 换目录清空搜索 (对齐 PV)
     await fetch(path);
   }
 
