@@ -119,7 +119,6 @@ export default {
     },
     sortAscending: 'Ascending',
     sortDescending: 'Descending',
-    search: 'Search',
     searchPlaceholder: 'Search this folder',
     searchResults: '{count} results',
     searchCurrent: 'Search results',

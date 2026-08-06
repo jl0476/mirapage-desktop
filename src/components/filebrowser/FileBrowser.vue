@@ -95,14 +95,15 @@ const canUp = computed(() => fb.currentPath !== '');
 
 /**
  * v0.1.0-module3.0.3: StatusBar 左段文案.
- * 搜索态显示 "找到 N 项" (按 displayedEntries 计数, 含 hideFinished + searchQuery 过滤后);
- * 非搜索态显示原 "N 项" (按 sortedEntries 计数, 与 statusBar.items 行为一致).
+ * 始终按 displayedEntries 计数 (含 hideFinished + searchQuery 过滤后), 保证与列表行数一致.
+ * 搜索态显示 "找到 N 项", 非搜索态显示 "N 项".
  */
 const statusBarItemsText = computed(() => {
+  const count = displayedEntries.value.length;
   if (fb.searchQuery) {
-    return t('fileBrowser.searchResults', { count: displayedEntries.value.length });
+    return t('fileBrowser.searchResults', { count });
   }
-  return t('fileBrowser.statusBar.items', { count: fb.sortedEntries.length });
+  return t('fileBrowser.statusBar.items', { count });
 });
 
 /** 当前路径: rootPath + '/' + currentPath (空时仅 rootPath) */

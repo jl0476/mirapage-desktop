@@ -120,7 +120,6 @@ export default {
     },
     sortAscending: '升序',
     sortDescending: '降序',
-    search: '搜索',
     searchPlaceholder: '搜索当前文件夹',
     searchResults: '找到 {count} 项',
     searchCurrent: '搜索结果',

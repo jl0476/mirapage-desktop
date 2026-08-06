@@ -17,7 +17,6 @@ export type ColorTheme = 'blue' | 'purple' | 'amber' | 'neutral';
 export type Locale = 'system' | 'zh-CN' | 'en-US';
 export type ContinueMode = 'off' | 'auto' | 'manual';
 export type ReaderMode = 'single' | 'double';
-export type SearchMode = 'fuzzy' | 'substring';
 
 export const useSettingsStore = defineStore('settings', () => {
   const themeMode = ref<ThemeMode>('system');
@@ -25,7 +24,6 @@ export const useSettingsStore = defineStore('settings', () => {
   const locale = ref<Locale>('system');
   const readerDefaultMode = ref<ReaderMode>('single');
   const continueToNextVolume = ref<ContinueMode>('manual');
-  const searchMode = ref<SearchMode>('fuzzy');
   const slideshowIntervalMs = ref(3000);
   const slideshowLoop = ref(true);
   const slideshowDirection = ref<'forward' | 'backward'>('forward');
@@ -51,7 +49,6 @@ export const useSettingsStore = defineStore('settings', () => {
       ['locale', (v) => (locale.value = v as Locale)],
       ['reader_default_mode', (v) => (readerDefaultMode.value = v as ReaderMode)],
       ['continue_to_next_volume', (v) => (continueToNextVolume.value = v as ContinueMode)],
-      ['search_mode', (v) => (searchMode.value = v as SearchMode)],
       ['slideshow_interval_ms', (v) => (slideshowIntervalMs.value = Number(v))],
       ['slideshow_loop', (v) => (slideshowLoop.value = v === '1')],
       ['slideshow_direction', (v) => (slideshowDirection.value = v as 'forward' | 'backward')],
@@ -141,7 +138,6 @@ export const useSettingsStore = defineStore('settings', () => {
     locale,
     readerDefaultMode,
     continueToNextVolume,
-    searchMode,
     slideshowIntervalMs,
     slideshowLoop,
     slideshowDirection,
