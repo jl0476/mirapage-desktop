@@ -318,3 +318,33 @@ describe('useVirtualList watch(entries) clamp', () => {
     document.body.removeChild(div);
   });
 });
+
+describe('useVirtualList rowHeight: Ref<number>', () => {
+  it('rowHeight ref 变化 → totalHeight 响应式重算', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    const rowHeightRef = ref(29);
+    const { totalHeight } = useVirtualList(entries, { rowHeight: rowHeightRef });
+    expect(totalHeight.value).toBe(100 * 29);  // 2900
+
+    rowHeightRef.value = 132;
+    expect(totalHeight.value).toBe(100 * 132);  // 13200 (grid view)
+  });
+
+  it('rowHeight ref 变化 → visibleRange 重算 (依赖 rh 除法)', () => {
+    const entries = ref(Array.from({ length: 1000 }, (_, i) => mockEntry(`f${i}`)));
+    const rowHeightRef = ref(29);
+    const { visibleRange, viewportHeight, scrollTop } = useVirtualList(entries, { rowHeight: rowHeightRef });
+    viewportHeight.value = 290;
+    scrollTop.value = 290;  // 列表视图: scrollTop/rh = 10
+
+    // list (rh=29): rawStart = 10 - 5 = 5, rawEnd = ceil(580/29) + 5 = 20+5 = 25
+    expect(visibleRange.value.start).toBe(5);
+    expect(visibleRange.value.end).toBe(25);
+
+    // 切到 grid (rh=132): rawStart = floor(290/132) - 5 = 2-5 = -3 → clamp 0
+    //                     rawEnd = ceil(580/132) + 5 = 5+5 = 10
+    rowHeightRef.value = 132;
+    expect(visibleRange.value.start).toBe(0);
+    expect(visibleRange.value.end).toBe(10);
+  });
+});

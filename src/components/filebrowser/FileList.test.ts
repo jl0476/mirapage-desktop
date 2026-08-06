@@ -129,6 +129,15 @@ describe('FileList.vue', () => {
     w.unmount();
   });
 
+  it('Space 键 → emit select (单击等价)', async () => {
+    const entries = Array.from({ length: 5 }, (_, i) => entry(`f${i}`));
+    const wrapper = mountList({ entries, viewMode: 'list' }, { attachTo: document.body });
+    await settle();
+    await wrapper.find('[data-test="row"]').trigger('keydown', { key: ' ' });
+    expect(wrapper.emitted('select')).toBeTruthy();
+    wrapper.unmount();
+  });
+
   it('applies is-selected class when path in selectedPaths', async () => {
     const entries = [entry('a.jpg'), entry('b.jpg')];
     const w = mountList(
@@ -214,6 +223,21 @@ describe('FileList.vue — 虚拟化集成 (Task 3.2)', () => {
     // 同一 element 复用 (DOM 重建 = 不同 element)
     expect(afterRow).toBe(beforeRow);
     w.unmount();
+  });
+
+  it('viewMode 切换 details → list: DOM 元素复用', async () => {
+    const entries = Array.from({ length: 100 }, (_, i) => entry(`f${i}`));
+    const wrapper = mountList(
+      { entries, viewMode: 'details' },
+      { attachTo: document.body },
+    );
+    await settle();
+    const beforeRow = wrapper.findAll('[data-test="row"]')[0]?.element;
+    await wrapper.setProps({ viewMode: 'list' });
+    await nextTick();
+    const afterRow = wrapper.findAll('[data-test="row"]')[0]?.element;
+    expect(afterRow).toBe(beforeRow);
+    wrapper.unmount();
   });
 });
 
