@@ -241,6 +241,72 @@ describe('FileList.vue — 虚拟化集成 (Task 3.2)', () => {
   });
 });
 
+describe('FileList.vue — viewMode 切换保留滚动位置 (Task 4.1)', () => {
+  it('list → details: focused row 位置保留 (scrollTop 跟 focused row 走)', async () => {
+    const entries = Array.from({ length: 1000 }, (_, i) => entry(`f${i}`));
+    const wrapper = mountList(
+      { entries, viewMode: 'list' },
+      { attachTo: document.body },
+    );
+    await settle();
+
+    const ref = wrapper.vm as unknown as { scrollToIndex: (i: number) => void; scrollTop: number };
+    // 滚到 index=500 附近 (visibleRange=495-510, 500 与 510 都在 viewport 内)
+    ref.scrollToIndex(500);
+    await settle();
+
+    // 手动标记 entries[510] 为 focused row (相对于 scrollTop 锚定的 500 偏移 10)
+    // 模拟 keyboard 导航把 focus 移到了 510, 但 scrollTop 仍停在 500 的位置
+    const targetPath = entries[510].path; // 'f510'
+    const container = wrapper.find('.virt-container').element;
+    const visibleRows = container.querySelectorAll('[role="row"][data-path]');
+    visibleRows.forEach((el) => {
+      const htmlEl = el as HTMLElement;
+      htmlEl.dataset.focused = htmlEl.dataset.path === targetPath ? 'true' : 'false';
+    });
+
+    // 切到 details — watcher 应把 scrollTop 恢复到 f510 (index=510, rowHeight=29=14510)
+    await wrapper.setProps({ viewMode: 'details' });
+    await nextTick();
+    await nextTick();
+    await new Promise(r => requestAnimationFrame(r));
+
+    // 若 watcher 生效: scrollTop = 510 * 29 = 14790
+    // 若 watcher 没生效: scrollTop 仍是 500 * 29 = 14500, 此处断言失败
+    expect(ref.scrollTop).toBe(510 * 29);
+    wrapper.unmount();
+  });
+
+  it('details → grid: 无 focused row → fallback 到第一个可见 row', async () => {
+    const entries = Array.from({ length: 1000 }, (_, i) => entry(`f${i}`));
+    const wrapper = mountList(
+      { entries, viewMode: 'details' },
+      { attachTo: document.body },
+    );
+    await settle();
+
+    const ref = wrapper.vm as unknown as { scrollToIndex: (i: number) => void; scrollTop: number };
+    // 在 details view 滚到 index 300
+    ref.scrollToIndex(300);
+    await settle();
+    expect(ref.scrollTop).toBe(300 * 29);
+
+    // 不设 focused row — 模拟用户只用鼠标滚轮
+    // 切到 grid (rowHeight 29 → 132), viewport 内 visibleRange 是 295-310,
+    // DOM 第一个 row path = 'f295' → fallback 取此 path → scrollToPath('f295')
+    // 在 grid 中: scrollTop = 295 * 132 = 38940
+    await wrapper.setProps({ viewMode: 'grid' });
+    await nextTick();
+    await nextTick();
+    await new Promise(r => requestAnimationFrame(r));
+
+    // 若 watcher 生效: scrollTop = 295 * 132 = 38940
+    // 若 watcher 没生效: scrollTop 仍是 details view 的 300 * 29 = 8700
+    expect(ref.scrollTop).toBe(295 * 132);
+    wrapper.unmount();
+  });
+});
+
 describe('FileList.vue — details 视图', () => {
   beforeEach(() => setActivePinia(createPinia()));
 

@@ -13,7 +13,7 @@
  * 三视图 (list / grid / details) 由 viewMode prop 切换, VirtualRow 内部用
  * CSS :not() 显隐, viewMode 切换不重建 DOM (复用 + 保留 Vue 渲染缓存).
  */
-import { computed, nextTick, onMounted } from 'vue';
+import { ref, computed, nextTick, onMounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReadStatusStore } from '@/stores/readStatus';
@@ -69,6 +69,32 @@ const {
   scrollToPath,
 } = useVirtualList(computed(() => props.entries), {
   rowHeight: resolvedRowHeight,
+});
+
+/* ─── viewMode 切换保留滚动位置 (Task 4.1) ─────────────
+ * 切 viewMode 时 useVirtualList 会响应 rowHeight 变化重算 totalHeight, 但 scrollTop
+ * 数值保留不变 — 若用户在 grid 大行高滚到 50%, 切回 list 小行高后同样的 scrollTop 数值
+ * 指向的 row index 已经偏到别的位置. 这里在切换前记下 focused row path, 切换后用
+ * scrollToPath 把它滚到新行高的正确位置.
+ *
+ * watch props.viewMode 而非 props.entries — entries 变化已由 useVirtualList 内部
+ * watcher 处理 (Task 2.4 clamp), 两者职责不重叠.
+ */
+const selectedPathBeforeSwitch = ref<string | null>(null);
+watch(() => props.viewMode, async () => {
+  const focusedEl = containerRef.value?.querySelector('[data-focused="true"]') as HTMLElement | null;
+  const focusedPath = focusedEl?.dataset.path ?? null;
+  const firstVisibleEl = containerRef.value?.querySelector('[role="row"][data-path]') as HTMLElement | null;
+  const firstVisiblePath = firstVisibleEl?.dataset.path ?? null;
+  selectedPathBeforeSwitch.value = focusedPath ?? firstVisiblePath;
+
+  // 等 useVirtualList 响应 rowHeight 变化重算 totalHeight / visibleRange
+  await nextTick();
+  await nextTick();
+
+  if (selectedPathBeforeSwitch.value) {
+    scrollToPath(selectedPathBeforeSwitch.value);
+  }
 });
 
 /**
