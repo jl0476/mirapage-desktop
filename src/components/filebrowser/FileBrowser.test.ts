@@ -265,6 +265,72 @@ describe('FileBrowser — dropdown 切换', () => {
     expect(mockedList).not.toHaveBeenCalled();
     expect(shortcuts.activeId).toBe(1);
   });
+
+  it('同根不同 relPath shortcut 切换: setRoot 无条件执行, currentPath 切到 relPath (code-review #1)', async () => {
+    // v0.1.0-module3.0.5 code-review: rootPath 相同时不做 setRoot 守卫会漏切子目录.
+    // 两个 shortcut 同 descriptor (D:/manga) 但 relPath 不同 ('vol05' vs 'vol06'):
+    //   激活 vol05 → 激活 vol06, rootPath 相同但必须切 currentPath.
+    mockedShortcuts.mockResolvedValue([
+      mkShortcut(1, 'D:/manga', 'Vol.05', 'vol05'),
+      mkShortcut(2, 'D:/manga', 'Vol.06', 'vol06'),
+    ]);
+    mockedList.mockResolvedValue([]);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 激活 Vol.05 (relPath='vol05')
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-1"]').trigger('click');
+    await flushPromises();
+    expect(fb.rootPath).toBe('D:/manga');
+    expect(fb.currentPath).toBe('vol05');
+
+    // 切 Vol.06 (同根 D:/manga, relPath='vol06') — 必须切 currentPath
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-2"]').trigger('click');
+    await flushPromises();
+    expect(fb.rootPath).toBe('D:/manga');
+    expect(fb.currentPath).toBe('vol06');
+
+    // 切回 Vol.05 — currentPath 切回 vol05
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-1"]').trigger('click');
+    await flushPromises();
+    expect(fb.currentPath).toBe('vol05');
+  });
+
+  it('同根 shortcut 从子目录切回根 (relPath=""): currentPath 清空 (code-review #1)', async () => {
+    // 根 shortcut (relPath='') 和子目录 shortcut (relPath='sub') 同根:
+    //   激活 sub → 激活根, currentPath 必须清空回 ''.
+    mockedShortcuts.mockResolvedValue([
+      mkShortcut(1, 'D:/manga', '根', ''),
+      mkShortcut(2, 'D:/manga', '子目录', 'sub'),
+    ]);
+    mockedList.mockResolvedValue([]);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 激活子目录
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-2"]').trigger('click');
+    await flushPromises();
+    expect(fb.currentPath).toBe('sub');
+
+    // 切回根 shortcut — currentPath 必须清空
+    await wrapper.find('[data-test="shortcut-dropdown"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="shortcut-opt-1"]').trigger('click');
+    await flushPromises();
+    expect(fb.currentPath).toBe('');
+  });
 });
 
 describe('FileBrowser — 错误状态', () => {

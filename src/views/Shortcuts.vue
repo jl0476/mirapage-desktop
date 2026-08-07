@@ -24,7 +24,7 @@ onMounted(async () => {
   await shortcuts.refresh();
 });
 
-/** 解码 shortcut 的 sourceDescriptorJson (失败 fallback 一个空 Local) */
+/** 解码 shortcut 的 sourceDescriptorJson (失败或非 Local 返回 null) */
 function decodeDescriptor(sc: ShortcutItem): SourceDescriptorLocal | null {
   try {
     const d = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;

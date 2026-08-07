@@ -195,6 +195,8 @@ watch(
 
 // v0.1.0-module3.0.5: shortcut 切换 → 解码 descriptor + 两步打开 (setRoot + navigate relPath)
 // 复用 History.vue openEntry 模式. Phase 1 只 Local; SMB/WebDAV 实装后扩展 TODO.
+// 注意: setRoot 无条件调 (不做 rootPath 相等守卫) — 否则同根不同 relPath 的 shortcut
+// 切换时 setRoot 被跳过, currentPath 残留旧路径, 列表不切到正确目录.
 watch(
   () => shortcuts.activeId,
   async (id) => {
@@ -208,9 +210,7 @@ watch(
       return;
     }
     if (desc.type === 'local') {
-      if (desc.rootPath !== fb.rootPath) {
-        await fb.setRoot(desc.rootPath);
-      }
+      await fb.setRoot(desc.rootPath);
       if (sc.relPath) {
         await fb.navigate(sc.relPath);
       }
