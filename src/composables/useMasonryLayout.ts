@@ -62,3 +62,40 @@ export function layoutMasonry(
   const totalHeight = Math.max(...colTops);
   return { map, totalHeight };
 }
+
+/** 默认宽高比（宽/高），漫画常见竖长 3:4 */
+export const DEFAULT_ASPECT_RATIO = 3 / 4;
+
+/** 未测量 item 的估算高度 = colWidth / aspectRatio（aspectRatio 是 w/h） */
+export function estimateHeight(colWidth: number, aspectRatio: number): number {
+  if (aspectRatio <= 0) return colWidth; // 防御
+  return colWidth / aspectRatio;
+}
+
+export interface AnchorParams {
+  oldLayout: Map<string, MasonryItem>;
+  scrollTop: number;
+  changedPaths: string[];
+  oldHeights: Record<string, number>;
+  newHeights: Record<string, number>;
+}
+
+/**
+ * 尺寸到达后，对 changedPaths 的 item 计算 scrollTop 补偿量。
+ * 仅累加"在当前 scrollTop 上方"（item.top < scrollTop）的 item 高度差（newH - oldH）。
+ * 返回值 > 0 表示内容下移了，应把 scrollTop 往下加；< 0 表示往上减；0 表示无影响。
+ * 下方 item（top >= scrollTop）不补偿（不影响视口）。
+ */
+export function applyMeasuredBatch(params: AnchorParams): number {
+  let compensation = 0;
+  for (const path of params.changedPaths) {
+    const item = params.oldLayout.get(path);
+    if (!item) continue;
+    if (item.top < params.scrollTop) {
+      const oldH = params.oldHeights[path] ?? item.height;
+      const newH = params.newHeights[path] ?? item.height;
+      compensation += newH - oldH;
+    }
+  }
+  return compensation;
+}

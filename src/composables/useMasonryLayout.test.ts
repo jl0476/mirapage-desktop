@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { computeColWidth, layoutMasonry, type MasonryInput } from './useMasonryLayout';
+import {
+  applyMeasuredBatch,
+  computeColWidth,
+  DEFAULT_ASPECT_RATIO,
+  estimateHeight,
+  layoutMasonry,
+  type MasonryInput,
+  type MasonryItem,
+} from './useMasonryLayout';
 
 describe('computeColWidth', () => {
   it('容器宽度按列数均分减去 gap', () => {
@@ -77,5 +85,72 @@ describe('layoutMasonry (贪心放最短列)', () => {
     expect(map.get('a')!.left).toBe(0);       // col0
     expect(map.get('b')!.left).toBe(120);     // col1: 1*(100+20)
     expect(map.get('c')!.left).toBe(240);     // col2: 2*(100+20)
+  });
+});
+
+describe('estimateHeight (未测量占位)', () => {
+  it('按估算宽高比 + colWidth 算高度 (aspectRatio=w/h)', () => {
+    // 3:4 即 w/h=0.75, colWidth=100 → height = 100/0.75 = 133.33
+    expect(estimateHeight(100, 3 / 4)).toBeCloseTo(133.33, 1);
+  });
+  it('aspectRatio<=0 时 fallback 到 colWidth (防御)', () => {
+    expect(estimateHeight(100, 0)).toBe(100);
+  });
+  it('DEFAULT_ASPECT_RATIO = 3/4', () => {
+    expect(DEFAULT_ASPECT_RATIO).toBe(3 / 4);
+  });
+});
+
+describe('applyMeasuredBatch (滚动锚定补偿)', () => {
+  function mkItem(path: string, top: number, height: number): MasonryItem {
+    return { path, width: 100, height, top, left: 0, col: 0 };
+  }
+
+  it('上方 item 高度变化 → 补偿正量', () => {
+    // item.top=20 < scrollTop=50, oldH=100 newH=150 → delta=+50
+    const compensation = applyMeasuredBatch({
+      oldLayout: new Map([['a', mkItem('a', 20, 100)]]),
+      scrollTop: 50,
+      changedPaths: ['a'],
+      oldHeights: { a: 100 },
+      newHeights: { a: 150 },
+    });
+    expect(compensation).toBe(50);
+  });
+
+  it('item 在视口下方 (top > scrollTop) → 不补偿', () => {
+    const compensation = applyMeasuredBatch({
+      oldLayout: new Map([['a', mkItem('a', 500, 100)]]),
+      scrollTop: 50,
+      changedPaths: ['a'],
+      oldHeights: { a: 100 },
+      newHeights: { a: 150 },
+    });
+    expect(compensation).toBe(0);
+  });
+
+  it('多个上方 item → delta 累加', () => {
+    const compensation = applyMeasuredBatch({
+      oldLayout: new Map([
+        ['a', mkItem('a', 10, 100)],
+        ['b', mkItem('b', 30, 200)],
+      ]),
+      scrollTop: 500,
+      changedPaths: ['a', 'b'],
+      oldHeights: { a: 100, b: 200 },
+      newHeights: { a: 120, b: 180 }, // a +20, b -20 → 净 0
+    });
+    expect(compensation).toBe(0);
+  });
+
+  it('changedPath 不在 layout → 跳过', () => {
+    const compensation = applyMeasuredBatch({
+      oldLayout: new Map(),
+      scrollTop: 50,
+      changedPaths: ['missing'],
+      oldHeights: {},
+      newHeights: {},
+    });
+    expect(compensation).toBe(0);
   });
 });
