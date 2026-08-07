@@ -188,6 +188,47 @@ export async function setDirectorySort(
   });
 }
 
+// ─── Image Dimensions (v0.1.0-module3.0.6 masonry) ─────────────────────
+export interface ImageDim {
+  path: string;
+  width: number;
+  height: number;
+}
+
+/** 批量读图片尺寸（仅 masonry viewMode 触发）。paths 是预读窗口子集。 */
+export async function listImageDimensions(
+  descriptor: SourceDescriptor,
+  paths: string[],
+): Promise<ImageDim[]> {
+  return invoke<ImageDim[]>('list_image_dimensions', { descriptor, paths });
+}
+
+// ─── Directory Masonry (v0.1.0-module3.0.6 per-folder 布局参数) ──────────
+export interface DirectoryMasonry {
+  colCount: number | null;
+  hGap: number | null;
+  vGap: number | null;
+}
+
+export async function getDirectoryMasonry(
+  sourceDescriptor: SourceDescriptor,
+  relPath: string,
+): Promise<DirectoryMasonry | null> {
+  return invoke<DirectoryMasonry | null>('get_directory_masonry', { sourceDescriptor, relPath });
+}
+
+export async function setDirectoryMasonry(
+  sourceDescriptor: SourceDescriptor,
+  relPath: string,
+  colCount: number | null,
+  hGap: number | null,
+  vGap: number | null,
+): Promise<void> {
+  await invoke<void>('set_directory_masonry', {
+    args: { sourceDescriptor, relPath, colCount, hGap, vGap },
+  });
+}
+
 // ─── Progress (Phase 4) ─────────────────────────────────────────────────
 export interface ProgressItem {
   bookId: number;
