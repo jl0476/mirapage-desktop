@@ -9,8 +9,7 @@
 import { onMounted, onUnmounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useShortcutsStore } from '@/stores/shortcuts';
-import type { ShortcutItem } from '@/lib/tauri';
-import type { SourceDescriptor } from '@/lib/sourceDescriptor';
+import { shortcutDisplayLabel } from '@/lib/shortcutHelpers';
 
 const { t } = useI18n();
 const shortcuts = useShortcutsStore();
@@ -18,32 +17,6 @@ const open = ref(false);
 const dropdownRef = ref<HTMLDivElement | null>(null);
 
 const ICON_CHEVRON_DOWN = 'M6 9l6 6 6-6';
-
-/** 解码 shortcut descriptor (失败 fallback null) — Phase 1 只 Local */
-function localRootPath(sc: ShortcutItem): string | null {
-  try {
-    const d = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;
-    if (d.type === 'local') return d.rootPath;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/** shortcut 完整路径 */
-function fullPath(sc: ShortcutItem): string {
-  const root = localRootPath(sc);
-  if (root === null) return sc.sourceDescriptorJson;
-  return root + (sc.relPath ? '/' + sc.relPath : '');
-}
-
-function basename(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
-}
-
-function displayLabel(sc: ShortcutItem): string {
-  return sc.alias || basename(fullPath(sc));
-}
 
 function onSelect(id: number | null) {
   if (id === null) {
@@ -70,7 +43,7 @@ const currentLabel = () => {
   if (shortcuts.activeId === null) return t('fileBrowser.noShortcut');
   const sc = shortcuts.items.find((s) => s.id === shortcuts.activeId);
   if (!sc) return t('fileBrowser.noShortcut');
-  return displayLabel(sc);
+  return shortcutDisplayLabel(sc);
 };
 </script>
 
@@ -121,7 +94,7 @@ const currentLabel = () => {
              stroke-linejoin="round" class="shrink-0" aria-hidden="true">
           <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
         </svg>
-        <span class="truncate">{{ displayLabel(s) }}</span>
+        <span class="truncate">{{ shortcutDisplayLabel(s) }}</span>
       </button>
     </div>
   </div>
