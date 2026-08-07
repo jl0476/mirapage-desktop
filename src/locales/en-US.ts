@@ -148,9 +148,10 @@ export default {
     showFinished: 'Show finished',
     // v0.1.0-module1.22: viewMode + statusBar
     viewMode: 'View',
-    viewList: 'List',
-    viewGrid: 'Grid',
+    viewMasonry: 'Masonry',
     viewDetails: 'Details',
+    masonrySettings: 'Masonry settings',
+    noImagesForMasonry: 'No images in this folder; masonry view unavailable',
     statusBar: {
       items: '{count} items',
       selected: '{count} selected',
@@ -271,6 +272,7 @@ export default {
       behavior: 'Behavior',
       slideshow: 'Slideshow',
       touch: 'Touch zones',
+      masonry: 'Masonry',
     },
     reader: {
       mode: 'Default reading mode',
@@ -302,6 +304,15 @@ export default {
       enabled: 'Enable 9-zone tapping',
       reset: 'Reset to classic layout',
       resetConfirm: 'Reset all 9 zones to defaults?',
+    },
+    masonry: {
+      defaultCols: 'Default columns',
+      defaultHGap: 'Default horizontal gap',
+      defaultVGap: 'Default vertical gap',
+      colCount: 'Columns',
+      hGap: 'Horizontal gap',
+      vGap: 'Vertical gap',
+      perFolderHint: 'Independent setting for this folder; unmodified folders use global default',
     },
     scale: {
       'fit-screen': 'Fit screen',

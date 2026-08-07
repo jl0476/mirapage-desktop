@@ -149,9 +149,10 @@ export default {
     showFinished: '显示已读完',
     // v0.1.0-module1.22: 视图模式 + 状态栏
     viewMode: '视图',
-    viewList: '列表',
-    viewGrid: '网格',
+    viewMasonry: '瀑布流',
     viewDetails: '详情',
+    masonrySettings: '瀑布流设置',
+    noImagesForMasonry: '该目录无图片，无法使用瀑布流视图',
     statusBar: {
       items: '共 {count} 项',
       selected: '已选 {count} 项',
@@ -272,6 +273,7 @@ export default {
       behavior: '行为',
       slideshow: '幻灯片',
       touch: '触控分区',
+      masonry: '瀑布流',
     },
     reader: {
       mode: '默认阅读模式',
@@ -303,6 +305,15 @@ export default {
       enabled: '启用 9 宫格点击',
       reset: '恢复经典布局',
       resetConfirm: '将 9 区动作恢复为默认？',
+    },
+    masonry: {
+      defaultCols: '默认列数',
+      defaultHGap: '默认列间距',
+      defaultVGap: '默认行间距',
+      colCount: '列数',
+      hGap: '列间距',
+      vGap: '行间距',
+      perFolderHint: '当前目录独立设置；未修改的目录用全局默认值',
     },
     scale: {
       'fit-screen': '适应屏幕',
