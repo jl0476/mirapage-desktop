@@ -49,6 +49,10 @@ const { t } = useI18n();
 const fb = useFileBrowserStore();
 const readStatus = useReadStatusStore();
 
+/* ─── name-wrap tooltip 状态 ─── */
+const hoveredName = ref<string | null>(null);
+const hoverPos = ref<{ top: number; left: number } | null>(null);
+
 /** 三视图行高 (像素, 固定). */
 const rowHeightByView: Record<'list' | 'grid' | 'details', number> = {
   list: 29,
@@ -168,9 +172,19 @@ function onRowContextmenu(entry: MediaEntry, event: MouseEvent): void {
   emit('contextmenu', entry, event.clientX, event.clientY);
 }
 function onNameHover(entry: MediaEntry, event: MouseEvent): void {
+  // 记录 hovered entry + 鼠标位置, 渲染 Teleport tooltip 显示全名 (truncate 时看不全)
+  hoveredName.value = entry.name
+  const target = event.currentTarget as HTMLElement
+  const rect = target.getBoundingClientRect()
+  hoverPos.value = {
+    top: rect.top - 6,  // name 上方 6px
+    left: rect.left + rect.width / 2,  // 水平居中
+  }
   emit('name-hover', entry, event);
 }
 function onNameLeave(): void {
+  hoveredName.value = null
+  hoverPos.value = null
   emit('name-leave');
 }
 
@@ -363,6 +377,24 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
         @name-leave="onNameLeave"
       />
     </div>
+
+    <!-- name-wrap 全名 tooltip (Teleport to body 跳出容器 overflow) -->
+    <Teleport to="body">
+      <div
+        v-if="hoveredName && hoverPos"
+        class="name-tooltip-portal"
+        :style="{
+          position: 'fixed',
+          top: hoverPos.top + 'px',
+          left: hoverPos.left + 'px',
+          transform: 'translate(-50%, -100%)',
+        }"
+        role="tooltip"
+        data-test="name-tooltip"
+      >
+        {{ hoveredName }}
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -397,6 +429,21 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
 .virt-container.loading {
   pointer-events: none;
   opacity: 0.55;
+}
+
+/* ─── name 全名 tooltip (Teleport to body) ─── */
+.name-tooltip-portal {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-default);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  z-index: 1100;
+  white-space: nowrap;
+  max-width: 80vw;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
 }
 
 /* details 列头 — 沿用 v0.1.0-module1.23 样式 (Xplorer 风格) */

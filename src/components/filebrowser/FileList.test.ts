@@ -222,8 +222,8 @@ describe('FileList.vue — 虚拟化集成 (Task 3.2)', () => {
     await w.setProps({ viewMode: 'grid' })
     // 多等几个 tick 让 watcher + DOM patch 完成
     await nextTick(); await nextTick()
-    await new Promise(r => requestAnimationFrame(() => r()))
-    await new Promise(r => requestAnimationFrame(() => r()))
+    await new Promise<void>(r => requestAnimationFrame(() => r()))
+    await new Promise<void>(r => requestAnimationFrame(() => r()))
     // grid view: 不虚拟化, 所有 entries 渲染
     expect(w.findAll('[data-test="row"]').length).toBe(entries.length)
     // grid 容器存在
