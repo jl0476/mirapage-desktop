@@ -177,7 +177,7 @@ function onNameHover(entry: MediaEntry, event: MouseEvent): void {
   const target = event.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
   hoverPos.value = {
-    top: rect.top - 6,  // name 上方 6px
+    top: rect.top - 2,  // name 上方 2px (紧贴, 之前 6px 显得太远)
     left: rect.left + rect.width / 2,  // 水平居中
   }
   emit('name-hover', entry, event);
