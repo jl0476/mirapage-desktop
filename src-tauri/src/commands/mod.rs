@@ -5,6 +5,7 @@
 
 pub mod accounts;
 pub mod bookmarks;
+pub mod directory_masonry;
 pub mod directory_sort;
 pub mod file_browser;
 pub mod find_next_volume;

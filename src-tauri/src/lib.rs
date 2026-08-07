@@ -89,6 +89,9 @@ pub fn run() {
             commands::find_next_volume::find_next_volume,
             // 瀑布流布局骨架数据（masonry viewMode 预读 header）
             commands::image_dimensions::list_image_dimensions,
+            // 瀑布流布局参数覆盖 (v0.1.0-module3.0.6)
+            commands::directory_masonry::get_directory_masonry,
+            commands::directory_masonry::set_directory_masonry,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

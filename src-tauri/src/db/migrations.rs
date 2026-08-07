@@ -78,6 +78,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 8 {
+        apply_008_directory_masonry(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (8, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -376,6 +384,19 @@ fn apply_007_shortcuts_cross_source(conn: &Connection) -> anyhow::Result<()> {
         DROP TABLE shortcut;
         ALTER TABLE shortcut_new RENAME TO shortcut;
         "#,
+    )?;
+    Ok(())
+}
+
+fn apply_008_directory_masonry(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "-- directory_masonry: per-folder 瀑布流布局参数覆盖 (v0.1.0-module3.0.6)
+         CREATE TABLE directory_masonry (
+           location_key TEXT PRIMARY KEY,
+           col_count   INTEGER,
+           h_gap       INTEGER,
+           v_gap       INTEGER
+         );",
     )?;
     Ok(())
 }
