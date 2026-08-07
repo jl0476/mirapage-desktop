@@ -177,8 +177,8 @@ function onNameHover(entry: MediaEntry, event: MouseEvent): void {
   const target = event.currentTarget as HTMLElement
   const rect = target.getBoundingClientRect()
   hoverPos.value = {
-    top: rect.top - 2,  // name 上方 2px (紧贴, 之前 6px 显得太远)
-    left: rect.left + rect.width / 2,  // 水平居中
+    top: rect.bottom + 4,  // name 下方 4px (对齐 hotfix15 原版, 不是上方)
+    left: rect.left,  // 左对齐 name 左边缘 (不是水平居中)
   }
   emit('name-hover', entry, event);
 }
@@ -387,7 +387,6 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
           position: 'fixed',
           top: hoverPos.top + 'px',
           left: hoverPos.left + 'px',
-          transform: 'translate(-50%, -100%)',
         }"
         role="tooltip"
         data-test="name-tooltip"
