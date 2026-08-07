@@ -238,7 +238,10 @@ function getTypeLabel(entry: MediaEntry): string {
   box-sizing: border-box;
 }
 .row-view-details .name-wrap { position: relative; overflow: visible !important; min-width: 0; }
-.row-view-details .name-wrap > .name-cell { min-width: 0; }
+.row-view-details .name-wrap > .name-cell {
+  display: block;  /* hotfix15 风格: span 默认 inline, 不支持 text-overflow:ellipsis, 需 block */
+  min-width: 0;
+}
 /* hotfix15 风格: 数据列 truncate ellipsis (窄面板时列收缩不重叠, 列按 minmax(0, ...) 收缩).
    scoped CSS 兜底 (Tailwind utility .truncate 在 scoped 环境下需 data-v-XXX 选择器) */
 .row-view-details > .truncate,
@@ -246,7 +249,6 @@ function getTypeLabel(entry: MediaEntry): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
 }
 .row-view-details .index { text-align: right; color: var(--color-text-tertiary); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; }
 .row-view-details .date-cell { text-align: right; font-family: ui-monospace, SFMono-Regular, monospace; }
