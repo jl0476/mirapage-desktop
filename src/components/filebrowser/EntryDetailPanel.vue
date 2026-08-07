@@ -27,6 +27,7 @@ const props = defineProps<Props>();
 const emit = defineEmits<{
   (e: 'read-now'): void;
   (e: 'add-to-library'): void;
+  (e: 'close'): void;
 }>();
 
 const { t } = useI18n();
@@ -91,9 +92,24 @@ const isDirectory = computed(() => props.entry?.isDirectory === true);
     :aria-label="t('properties.title')"
   >
     <header class="flex items-center gap-2 pb-2 xp-bdb-subtle">
-      <h3 class="m-0 text-sm font-semibold text-text-primary">
+      <h3 class="m-0 text-sm font-semibold text-text-primary flex-1">
         {{ t('properties.title') }}
       </h3>
+      <button
+        type="button"
+        class="flex items-center justify-center w-5 h-5 rounded text-text-muted
+               hover:text-text-primary hover:bg-surface-light transition-colors"
+        data-test="entry-detail-close"
+        :title="t('common.cancel')"
+        :aria-label="t('common.cancel')"
+        @click="emit('close')"
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" aria-hidden="true">
+          <path d="M18 6L6 18M6 6l12 12" />
+        </svg>
+      </button>
     </header>
     <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-baseline">
       <dt class="text-text-muted">{{ t('properties.labelName') }}</dt>
