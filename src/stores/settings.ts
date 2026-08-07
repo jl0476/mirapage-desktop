@@ -39,6 +39,11 @@ export const useSettingsStore = defineStore('settings', () => {
   const touchZonesEnabled = ref<boolean>(true);  // master toggle for 9-zone
   const touchScheme = reactive<Record<TouchZone, TouchAction>>({ ...DEFAULT_TOUCH_SCHEME });
 
+  // v0.1.0-module3.0.6: masonry 瀑布流全局默认（per-folder override 在 useMasonrySettings）
+  const masonryDefaultCols = ref(4);
+  const masonryDefaultHGap = ref(8);
+  const masonryDefaultVGap = ref(8);
+
   const initialized = ref(false);
 
   /** 加载所有 settings（启动时调用） */
@@ -57,6 +62,9 @@ export const useSettingsStore = defineStore('settings', () => {
       ['scale_mode', (v) => (currentScaleMode.value = normalizeScaleMode(v as ScaleMode))],
       ['default_read_direction', (v) => (defaultReadDirection.value = v as ReadDirection)],
       ['touch_zones_enabled', (v) => (touchZonesEnabled.value = v === '1')],
+      ['fb_masonry_default_cols', (v) => (masonryDefaultCols.value = Number(v))],
+      ['fb_masonry_default_h_gap', (v) => (masonryDefaultHGap.value = Number(v))],
+      ['fb_masonry_default_v_gap', (v) => (masonryDefaultVGap.value = Number(v))],
       ...TOUCH_ZONES.map((z) =>
         [`touch_${TOUCH_ZONE_KEY[z]}`, (v) => (touchScheme[z] = v as TouchAction)] as [string, (v: string) => void],
       ),
@@ -84,6 +92,26 @@ export const useSettingsStore = defineStore('settings', () => {
   async function setScaleMode(mode: ScaleMode): Promise<void> {
     currentScaleMode.value = mode;
     await update('scale_mode', mode);
+  }
+
+  /**
+   * v0.1.0-module3.0.6: 设置 masonry 全局默认列数（先设 ref 再 update，update 只写 DB）。
+   */
+  async function setMasonryDefaultCols(v: number): Promise<void> {
+    masonryDefaultCols.value = v;
+    await update('fb_masonry_default_cols', v);
+  }
+
+  /** v0.1.0-module3.0.6: 设置 masonry 全局默认列间距 */
+  async function setMasonryDefaultHGap(v: number): Promise<void> {
+    masonryDefaultHGap.value = v;
+    await update('fb_masonry_default_h_gap', v);
+  }
+
+  /** v0.1.0-module3.0.6: 设置 masonry 全局默认行间距 */
+  async function setMasonryDefaultVGap(v: number): Promise<void> {
+    masonryDefaultVGap.value = v;
+    await update('fb_masonry_default_v_gap', v);
   }
 
   /**
@@ -147,11 +175,17 @@ export const useSettingsStore = defineStore('settings', () => {
     currentScaleMode,
     touchZonesEnabled,
     touchScheme,
+    masonryDefaultCols,
+    masonryDefaultHGap,
+    masonryDefaultVGap,
     initialized,
     // 方法
     load,
     update,
     setScaleMode,
+    setMasonryDefaultCols,
+    setMasonryDefaultHGap,
+    setMasonryDefaultVGap,
     cycleReaderMode,
     cycleReadDirection,
     setTouchAction,
