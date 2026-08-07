@@ -23,6 +23,7 @@ import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
 import { useSettingsStore } from '@/stores/settings';
 import { useReaderActions } from '@/composables/useReaderActions';
+import { useMasonrySettings } from '@/composables/useMasonrySettings';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import FileList from './FileList.vue';
@@ -33,6 +34,7 @@ import ShortcutDropdown from './ShortcutDropdown.vue';
 import SearchInput from './SearchInput.vue';
 import StatusBar from './StatusBar.vue';
 import EntryDetailPanel from './EntryDetailPanel.vue';
+import MasonrySettingsPopup from './MasonrySettingsPopup.vue';
 import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
@@ -118,6 +120,44 @@ const masonryDescriptor = computed<SourceDescriptorLocal>(() => ({
   type: 'local',
   rootPath: fb.rootPath || '',
 }));
+
+// v0.1.0-module3.0.5-masonry (阶段 E3): 工具栏图标按钮 + ⚙ popup 状态 +
+// per-folder masonryParams resolve. 首次切到 masonry 用全局默认值, resolve 完成后更新.
+const masonrySettings = useMasonrySettings(settings);
+const masonryPopupOpen = ref(false);
+const masonryParams = ref({
+  colCount: settings.masonryDefaultCols,
+  hGap: settings.masonryDefaultHGap,
+  vGap: settings.masonryDefaultVGap,
+});
+
+// 当前目录是否有图片（masonry 守卫）
+const hasImages = computed(() => fb.sortedEntries.some((e) => isImage(e.name)));
+
+// 进无图目录且当前是 masonry → 回落 details
+watch([() => fb.viewMode, hasImages], ([mode, has]) => {
+  if (mode === 'masonry' && !has) {
+    fb.setViewMode('details');
+  }
+});
+
+// 切到 masonry 或进新目录时 resolve per-folder 参数
+watch([() => fb.viewMode, () => fb.currentPath], async ([mode]) => {
+  if (mode === 'masonry' && fb.rootPath) {
+    const desc = { type: 'local' as const, rootPath: fb.rootPath };
+    masonryParams.value = await masonrySettings.resolve(desc, fb.currentPath);
+  }
+});
+
+function onMasonryChange(partial: { colCount?: number; hGap?: number; vGap?: number }) {
+  masonryParams.value = { ...masonryParams.value, ...partial };
+  if (!fb.rootPath) return;
+  const desc = { type: 'local' as const, rootPath: fb.rootPath };
+  masonrySettings.set(desc, fb.currentPath, partial);
+}
+function onMasonryPopupClose() {
+  masonryPopupOpen.value = false;
+}
 
 /**
  * v0.1.0-module3.0.3: StatusBar 左段文案.
@@ -353,6 +393,11 @@ const ICON_DOWNLOAD = 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12
 // v0.1.0-module2.0: emit 'open' 已废弃 (双击只进目录, 触发阅读走 useReaderActions)
 //  保留 emit 类型仅出于向后兼容 — 不再 emit
 
+// v0.1.0-module3.0.5-masonry (阶段 E3): 视图切换图标按钮 (替代已删 ViewModeDropdown).
+// ICON_DETAILS 从已删 ViewModeDropdown 搬. ICON_MASONRY 新增.
+const ICON_DETAILS = 'M3 4h18M3 9h18M3 14h18M3 19h18';
+const ICON_MASONRY = 'M3 21V10h5v11M10 21V4h5v17M17 21v-7h4v7';
+
 // selectedEntry 已在前面声明 (line 46, 复用 store.selectedPaths + sortedEntries)
 // Cluster A: 选中图片时立即阅读按钮也可点 (issue #3)
 const canReadNow = computed(() => {
@@ -544,9 +589,49 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
         </button>
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <SortDropdown />
-        <!-- v0.1.0-module3.0.5-masonry (阶段 E2): 临时删除 ViewModeDropdown.
-             E3 会换为图标按钮 (toolbar 直接嵌 list/grid/details/masonry toggle).
-             当前 viewMode 切换仅依赖 settings store (持久化) + FileList 内部 viewMode 切换保留滚动位置. -->
+        <!-- v0.1.0-module3.0.5-masonry (阶段 E3): 视图切换图标按钮
+             (详情在前 + 瀑布流). ⚙ 仅 masonry 出现, 接 MasonrySettingsPopup. -->
+        <div class="relative flex items-center gap-0.5">
+          <button data-test="view-details" class="tb-btn"
+                  :class="fb.viewMode === 'details' ? 'text-accent' : ''"
+                  :title="t('fileBrowser.viewDetails')"
+                  @click="fb.setViewMode('details')">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+              <path :d="ICON_DETAILS" />
+            </svg>
+          </button>
+          <button data-test="view-masonry" class="tb-btn"
+                  :class="fb.viewMode === 'masonry' ? 'text-accent' : ''"
+                  :disabled="!hasImages"
+                  :title="hasImages ? t('fileBrowser.viewMasonry') : t('fileBrowser.noImagesForMasonry')"
+                  @click="fb.setViewMode('masonry')">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+              <path :d="ICON_MASONRY" />
+            </svg>
+          </button>
+          <button v-if="fb.viewMode === 'masonry'" data-test="btn-masonry-settings"
+                  class="tb-btn" :title="t('fileBrowser.masonrySettings')"
+                  @click="masonryPopupOpen = !masonryPopupOpen">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                 stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+          <MasonrySettingsPopup
+            v-if="masonryPopupOpen && fb.viewMode === 'masonry'"
+            :col-count="masonryParams.colCount"
+            :h-gap="masonryParams.hGap"
+            :v-gap="masonryParams.vGap"
+            @change="onMasonryChange"
+            @close="onMasonryPopupClose"
+          />
+        </div>
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <SearchInput />
       </header>
@@ -617,9 +702,9 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           :descriptor="masonryDescriptor"
           :root-path="fb.rootPath"
           :current-path="fb.lastFetchedPath || fb.rootPath || ''"
-          :col-count="settings.masonryDefaultCols"
-          :h-gap="settings.masonryDefaultHGap"
-          :v-gap="settings.masonryDefaultVGap"
+          :col-count="masonryParams.colCount"
+          :h-gap="masonryParams.hGap"
+          :v-gap="masonryParams.vGap"
           data-test="filelist"
           @open="onEntryOpen"
           @select="onEntrySelect"
