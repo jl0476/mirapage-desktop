@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationDir": "../dist/typings"
+  },
+  "include": [".", "./global.d.ts", "./**/*.ts", "./**/*.vue"]
+}
