@@ -21,11 +21,11 @@ beforeEach(() => {
 });
 
 describe('Settings.vue', () => {
-  it('renders all 5 sections with anchors', () => {
+  it('renders all 6 sections with anchors', () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n] } });
     const anchors = wrapper.findAll('[data-test^="anchor-"]');
-    expect(anchors.length).toBe(5);
-    for (const id of ['reader', 'appearance', 'behavior', 'slideshow', 'touch']) {
+    expect(anchors.length).toBe(6);
+    for (const id of ['reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry']) {
       expect(wrapper.find(`#${id}`).exists()).toBe(true);
     }
   });

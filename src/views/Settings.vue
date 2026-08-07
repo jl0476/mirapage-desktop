@@ -20,7 +20,7 @@ import NumberRow from '@/components/settings/NumberRow.vue';
 const { t } = useI18n();
 const settings = useSettingsStore();
 
-const sections = ['reader', 'appearance', 'behavior', 'slideshow', 'touch'] as const;
+const sections = ['reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry'] as const;
 const { activeId, scrollTo } = useSectionAnchors([...sections]);
 
 // ─── 枚举选项源 ───────────────────────────────────────────────────────
@@ -357,6 +357,42 @@ function closeOpenCell(e: MouseEvent) {
             >
               {{ t('settings.touch.resetConfirm') }}
             </button>
+          </div>
+        </section>
+
+        <!-- Masonry -->
+        <section id="masonry" data-test="section-masonry" class="scroll-mt-4 bg-surface-1 border border-[color:var(--color-border-default)] rounded-lg p-6">
+          <h3 class="text-sm font-semibold text-accent uppercase tracking-wider mb-4">
+            {{ t('settings.section.masonry') }}
+          </h3>
+          <div class="flex flex-col gap-3">
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs text-text-muted">{{ t('settings.masonry.defaultCols') }}</span>
+                <span class="text-xs text-accent font-mono">{{ settings.masonryDefaultCols }}</span>
+              </div>
+              <input type="range" min="2" max="8" step="1" :value="settings.masonryDefaultCols"
+                     class="w-full accent-accent cursor-pointer" data-test="masonry-default-cols"
+                     @input="(e) => settings.setMasonryDefaultCols(Number((e.target as HTMLInputElement).value))" />
+            </div>
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs text-text-muted">{{ t('settings.masonry.defaultHGap') }}</span>
+                <span class="text-xs text-accent font-mono">{{ settings.masonryDefaultHGap }}px</span>
+              </div>
+              <input type="range" min="0" max="24" step="1" :value="settings.masonryDefaultHGap"
+                     class="w-full accent-accent cursor-pointer" data-test="masonry-default-hgap"
+                     @input="(e) => settings.setMasonryDefaultHGap(Number((e.target as HTMLInputElement).value))" />
+            </div>
+            <div>
+              <div class="flex items-center justify-between mb-1">
+                <span class="text-xs text-text-muted">{{ t('settings.masonry.defaultVGap') }}</span>
+                <span class="text-xs text-accent font-mono">{{ settings.masonryDefaultVGap }}px</span>
+              </div>
+              <input type="range" min="0" max="24" step="1" :value="settings.masonryDefaultVGap"
+                     class="w-full accent-accent cursor-pointer" data-test="masonry-default-vgap"
+                     @input="(e) => settings.setMasonryDefaultVGap(Number((e.target as HTMLInputElement).value))" />
+            </div>
           </div>
         </section>
       </div>
