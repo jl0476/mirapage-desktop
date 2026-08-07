@@ -5,11 +5,11 @@
  * v0.1.0-module3.0.4-virtuallist: 父级 useVirtualList 给 absoluteTop,
  * 单 row 渲染由绝对定位 + transform 摆位, 只触发 composite (不触发 layout).
  *
- * 设计要点:
- * - 三视图 (list/grid/details) block 同挂, **无 v-if** 包装, viewMode 切换不重建 DOM
- *   (CSS `:not()` 选择器显隐, 保留组件复用 + Vue 渲染缓存)
- * - iconType / iconClass 用 WeakMap 缓存 (defer 自 Task 1.2)
- * - padding 6px 12px 对齐 CLAUDE.md §1.4 (py-1.5 px-3)
+ * v0.1.0-module3.0.5-masonry (阶段 E2): 模板仅剩 details view block.
+ *  list/grid 已从 ViewMode union 收窄出, 此组件不再支持其他视图.
+ *  - absoluteTop → transform: translateY (只触发 composite)
+ *  - iconType / iconClass 用 WeakMap 缓存 (defer 自 Task 1.2)
+ *  - padding 6px 12px 对齐 CLAUDE.md §1.4 (py-1.5 px-3)
  *
  * 依赖: FileIcon 子组件, settings store (locale), vue-i18n (t), format helpers.
  */
@@ -66,11 +66,8 @@ const rowClasses = computed(() => ({
 }))
 
 const rowStyle = computed(() => {
-  // v0.1.0-module3.0.5-masonry (阶段 B / B4): grid 已收窄出 ViewMode union,
-  // 但 template 分支保留到 E2 删 — as string 绕过类型窄化检查.
-  // grid 视图: 不 absolute, 让 CSS grid auto-fill 自动 wrap 多列
-  if ((props.viewMode as string) === 'grid') return {}
-  // list / details 视图: absolute + translateY 虚拟滚动定位
+  // v0.1.0-module3.0.5-masonry (阶段 E2): grid 已收窄出 ViewMode union 并删 template 分支,
+  // 此处 rowStyle 只走 details (absolute + translateY 虚拟滚动定位), 不再需要 grid/list 分支.
   return {
     position: 'absolute' as const,
     top: '0',
@@ -143,25 +140,7 @@ function getTypeLabel(entry: MediaEntry): string {
     @contextmenu="$emit('row-contextmenu', entry, $event)"
     tabindex="-1"
   >
-    <!-- list view block -->
-    <div class="row-view-list" :class="rowClasses">
-      <span class="icon" :class="iconClass(entry)">
-        <FileIcon :type="iconType(entry)" />
-      </span>
-      <span class="name truncate">{{ entry.name }}</span>
-      <span v-if="mark !== 'none'" class="status" :class="mark">{{ statusLabel(mark) }}</span>
-    </div>
-
-    <!-- grid view block -->
-    <div class="row-view-grid" :class="rowClasses">
-      <div class="grid-icon" :class="iconClass(entry)">
-        <FileIcon :type="iconType(entry)" />
-      </div>
-      <div class="grid-name truncate">{{ entry.name }}</div>
-      <span v-if="mark !== 'none'" class="status-badge" :class="mark">{{ statusLabel(mark) }}</span>
-    </div>
-
-    <!-- details view block -->
+    <!-- details view block (唯一保留: 阶段 E2 删 list/grid) -->
     <div class="row-view-details" :class="rowClasses">
       <span class="index">{{ rowIndex + 1 }}</span>
       <span class="icon" :class="iconClass(entry)">
@@ -187,46 +166,7 @@ function getTypeLabel(entry: MediaEntry): string {
 .row-host {
   cursor: pointer;
 }
-/* viewMode 切换: CSS 显隐 (无 v-if, viewMode 切换不重建 DOM)
-   .row-host:not(.row-host-list) 选中 host 但不在 list 模式 → 隐藏 list block */
-.row-host:not(.row-host-list) .row-view-list { display: none; }
-.row-host:not(.row-host-grid) .row-view-grid { display: none; }
-.row-host:not(.row-host-details) .row-view-details { display: none; }
-
-/* list view block 样式 — height 100% 撑满 29px row host (row host 是 absolute 定位 29px 高度的虚拟槽位) */
-.row-view-list {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;  /* py-1.5 px-3 per CLAUDE.md §1.4 */
-  font-size: 12px;
-  color: var(--color-text-primary);  /* 文件名/属性默认主色, 比 secondary 深 */
-  height: 100%;
-  box-sizing: border-box;
-}
-.row-view-list .name { flex: 1; min-width: 0; }
-
-/* grid view block 样式 */
-.row-view-grid {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 12px 8px;
-  font-size: 12px;
-  color: var(--color-text-primary);
-  height: 100%;
-  box-sizing: border-box;
-}
-.row-view-grid .grid-icon {
-  font-size: 32px;
-  margin-bottom: 6px;
-  width: 32px;
-  height: 32px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-.row-view-grid .grid-name { max-width: 100%; }
+/* viewMode 切换: 阶段 E2 只剩 details, 不再需要 :not() 显隐 (template 已无其他 view block) */
 
 /* details view block 样式 */
 .row-view-details {
@@ -259,8 +199,7 @@ function getTypeLabel(entry: MediaEntry): string {
 .row-view-details .type-cell { text-align: center; }
 .row-view-details .size-cell { text-align: right; font-family: ui-monospace, SFMono-Regular, monospace; }
 
-/* 通用行状态 — 三视图都生效. 选择器限定 [role="row"] 避免内层 block (row-view-list/grid/details)
-   也带 row-host+is-selected class 时 outline/background 三个 block 重叠 (三视图同挂 DOM 复用). */
+/* 行状态 — 选择器限定 [role="row"] 避免内层 block 也带 row-host class 时 outline/background 重叠. */
 .row-host[role="row"]:hover { background: var(--color-surface-light); color: var(--color-text-primary); }
 .row-host[role="row"].is-selected {
   background: rgb(99 102 241 / 0.18);
@@ -282,9 +221,7 @@ function getTypeLabel(entry: MediaEntry): string {
 .icon-archive { color: var(--color-file-archive); }
 .icon-file { color: var(--color-file-default); }
 
-/* 列表/详情 name cell — truncate */
-.name,
-.grid-name,
+/* details name cell — truncate */
 .name-cell {
   flex: 1;
   font-size: 12px;
@@ -293,38 +230,14 @@ function getTypeLabel(entry: MediaEntry): string {
   text-overflow: ellipsis;
   min-width: 0;
 }
-.grid-name {
-  flex: 0 1 auto;
-  text-align: center;
-  width: 100%;
-}
 
 /* 阅读状态双染色 (icon tint + name 颜色) */
 .row-host.is-finished .icon { color: var(--color-status-finished); }
 .row-host.is-reading .icon { color: var(--color-status-reading); }
-.row-host.is-directory .name,
 .row-host.is-directory .name-cell { font-weight: 500; color: var(--color-text-primary); }
-.row-host.is-archive .name,
 .row-host.is-archive .name-cell { color: var(--color-file-archive); }
 
-/* status badge (list/grid/details 共用) */
-.status {
-  font-size: 10px;
-  font-weight: 500;
-  padding: 1px 6px;
-  border-radius: 3px;
-  flex-shrink: 0;
-  margin-left: auto;
-  line-height: 1.4;
-}
-.status.finished {
-  background: rgb(52 211 153 / 0.15);
-  color: var(--color-status-finished);
-}
-.status.reading {
-  background: rgb(99 102 241 / 0.18);
-  color: var(--color-status-reading);
-}
+/* status badge (details 视图) */
 .status-badge {
   font-size: 9px;
   font-weight: 500;

@@ -21,6 +21,7 @@ import { getSetting, setSetting } from '@/lib/tauri';
 import { useFileBrowserStore, setScrollToIndexCallback } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
+import { useSettingsStore } from '@/stores/settings';
 import { useReaderActions } from '@/composables/useReaderActions';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
@@ -28,7 +29,6 @@ import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
 import RowContextMenu from './RowContextMenu.vue';
 import SortDropdown from './SortDropdown.vue';
-import ViewModeDropdown from './ViewModeDropdown.vue';
 import ShortcutDropdown from './ShortcutDropdown.vue';
 import SearchInput from './SearchInput.vue';
 import StatusBar from './StatusBar.vue';
@@ -39,6 +39,7 @@ const { t } = useI18n();
 const fb = useFileBrowserStore();
 const shortcuts = useShortcutsStore();
 const readStatus = useReadStatusStore();
+const settings = useSettingsStore();
 const readerActions = useReaderActions({
   resolveRootPath: () => fb.rootPath ?? '',
   buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
@@ -109,6 +110,14 @@ const selectedEntry = computed<MediaEntry | null>(() => {
 
 const canSave = computed(() => fb.rootPath !== null);
 const canUp = computed(() => fb.currentPath !== '');
+
+// v0.1.0-module3.0.5-masonry (阶段 E2): 瀑布流视图的 source descriptor
+// (MasonryView 需要 descriptor 才能 prefetch image dimensions via Rust IPC)
+// Phase 1 只 Local; SMB/WebDAV descriptor 留 Phase 7-8 扩展.
+const masonryDescriptor = computed<SourceDescriptorLocal>(() => ({
+  type: 'local',
+  rootPath: fb.rootPath || '',
+}));
 
 /**
  * v0.1.0-module3.0.3: StatusBar 左段文案.
@@ -535,7 +544,9 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
         </button>
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <SortDropdown />
-        <ViewModeDropdown />
+        <!-- v0.1.0-module3.0.5-masonry (阶段 E2): 临时删除 ViewModeDropdown.
+             E3 会换为图标按钮 (toolbar 直接嵌 list/grid/details/masonry toggle).
+             当前 viewMode 切换仅依赖 settings store (持久化) + FileList 内部 viewMode 切换保留滚动位置. -->
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <SearchInput />
       </header>
@@ -603,6 +614,12 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           :marks="readStatus.marks"
           :selected-paths="fb.selectedPaths"
           :view-mode="fb.viewMode"
+          :descriptor="masonryDescriptor"
+          :root-path="fb.rootPath"
+          :current-path="fb.lastFetchedPath || fb.rootPath || ''"
+          :col-count="settings.masonryDefaultCols"
+          :h-gap="settings.masonryDefaultHGap"
+          :v-gap="settings.masonryDefaultVGap"
           data-test="filelist"
           @open="onEntryOpen"
           @select="onEntrySelect"

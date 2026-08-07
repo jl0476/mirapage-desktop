@@ -79,7 +79,7 @@ function statusLabel(m: RowMark): string {
   overflow: hidden;
   background: var(--color-surface-1);
   border: 1px solid var(--color-border-default);
-  transition: outline 80ms var(--ease-out);
+  transition: outline 80ms ease-out; /* v0.1.0-module3.0.5-masonry (阶段 E2) 修 D1: 替换未定义 var(--ease-out) */
   contain: layout style;
 }
 .masonry-img {

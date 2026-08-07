@@ -19,22 +19,35 @@ import { useFileBrowserStore, type ViewMode } from '@/stores/fileBrowser';
 import { useReadStatusStore } from '@/stores/readStatus';
 import { useVirtualList } from '@/composables/useVirtualList';
 import VirtualRow from './VirtualRow.vue';
-import type { MediaEntry, ReadStatusMap } from '@/lib/sourceDescriptor';
+import MasonryView from './MasonryView.vue';
+import type { MediaEntry, ReadStatusMap, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 interface Props {
   entries: MediaEntry[];
   loading?: boolean;
   marks?: ReadStatusMap;
   selectedPaths?: Set<string>;
-  // v0.1.0-module3.0.5-masonry (阶段 B / B4): 收窄为 details | masonry.
+  // v0.1.0-module3.0.5-masonry (阶段 E2): 收窄为 details | masonry,
   // 老 list/grid 仅用于持久化兼容 (fileBrowser.loadLayout fallback → details).
   viewMode?: ViewMode;
+  // MasonryView 所需参数 (阶段 E2 接入瀑布流视图)
+  descriptor?: SourceDescriptor;
+  rootPath?: string | null;
+  currentPath?: string;
+  colCount?: number;
+  hGap?: number;
+  vGap?: number;
 }
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
   marks: () => ({}),
   selectedPaths: () => new Set<string>(),
   viewMode: 'details',
+  rootPath: null,
+  currentPath: '',
+  colCount: 4,
+  hGap: 8,
+  vGap: 8,
 });
 
 const emit = defineEmits<{
@@ -55,13 +68,11 @@ const readStatus = useReadStatusStore();
 const hoveredName = ref<string | null>(null);
 const hoverPos = ref<{ top: number; left: number } | null>(null);
 
-/** 行高映射 (像素, 固定). v0.1.0-module3.0.5-masonry 收窄后 list/grid 已不可达,
- *  保留旧 key 仅作 dead-code 文档 (template `v-else-if="viewMode === 'grid'"` 分支仍存在). */
-const rowHeightByView: Record<string, number> = {
-  list: 29,
+/** 行高映射 (像素, 固定). v0.1.0-module3.0.5-masonry (阶段 E2) 收窄为 details,
+ *  masonry 由 MasonryView 自己管理布局 (变高卡片, 无固定 rowHeight),
+ *  使用 Partial 避免强制列出 union 全部 key. */
+const rowHeightByView: Partial<Record<ViewMode, number>> = {
   details: 29,
-  masonry: 29,
-  grid: 132,
 };
 const resolvedRowHeight = computed(() => rowHeightByView[props.viewMode] ?? 29);
 
@@ -330,34 +341,24 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
       <span>{{ t('fileBrowser.empty') }}</span>
     </div>
 
-    <!-- grid 视图: 不虚拟化, CSS grid auto-fill wrap 多列 (每 entry 占一格)
-     v0.1.0-module3.0.5-masonry (阶段 B / B4): grid 已收窄出 ViewMode union,
-     但 template 分支保留到 E2 删 — 用 as string 绕过 vue-tsc 类型窄化检查 -->
-    <div
-      v-else-if="(viewMode as string) === 'grid'"
-      class="virt-grid-view"
-      role="presentation"
-    >
-      <VirtualRow
-        v-for="(entry, i) in entries"
-        :key="entry.path"
-        :entry="entry"
-        :row-index="i"
-        :absolute-top="0"
-        :mark="getMark(entry)"
-        :selected="isSelected(entry)"
-        :view-mode="viewMode"
-        :row-height="resolvedRowHeight"
-        @row-click="onRowClick"
-        @row-dblclick="onRowDblclick"
-        @row-keydown="onRowKeydown"
-        @row-contextmenu="onRowContextmenu"
-        @name-hover="onNameHover"
-        @name-leave="onNameLeave"
-      />
-    </div>
+    <!-- masonry 视图: 变高瀑布流, 由 MasonryView 自己管布局 -->
+    <MasonryView
+      v-else-if="viewMode === 'masonry'"
+      :entries="entries"
+      :marks="marks || {}"
+      :selected-paths="selectedPaths || new Set()"
+      :descriptor="descriptor || { type: 'local', rootPath: rootPath || '' }"
+      :root-path="rootPath || ''"
+      :current-path="currentPath || ''"
+      :col-count="colCount || 4"
+      :h-gap="hGap || 8"
+      :v-gap="vGap || 8"
+      @row-click="onRowClick"
+      @row-dblclick="onRowDblclick"
+      @row-contextmenu="onRowContextmenu"
+    />
 
-    <!-- list/details 视图: 虚拟滚动 -->
+    <!-- details 视图: 虚拟滚动 -->
     <div
       v-else
       ref="contentRef"
@@ -413,13 +414,6 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
 }
 .virt-content {
   position: relative;
-}
-.virt-grid-view {
-  display: grid;
-  /* 每 entry 至少 120px, auto-fill 自动算列数 (容器宽度 / 120) */
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 8px;
-  padding: 8px;
 }
 .virt-empty {
   display: flex;

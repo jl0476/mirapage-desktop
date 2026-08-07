@@ -2,8 +2,11 @@
  * VirtualRow.vue 测试
  * v0.1.0-module3.0.4-virtuallist: Phase 3 FileList 集成 - 虚拟列表 row 子组件
  *
+ * v0.1.0-module3.0.5-masonry (阶段 E2): 仅剩 details view block;
+ *  list/grid 已删除. 测试聚焦 details + 基础 row 渲染.
+ *
  * 验证:
- * - 三视图 (list/grid/details) block DOM 同挂 (无 v-if), CSS 显隐 (viewMode 切换不重建)
+ * - template 仅渲染 row-view-details block
  * - absoluteTop → transform: translateY (只触发 composite)
  * - aria-rowindex 从 1 开始
  * - iconType WeakMap 缓存 (重复调用命中缓存)
@@ -40,54 +43,38 @@ describe('VirtualRow.vue', () => {
     setActivePinia(createPinia())
   })
 
-  // v0.1.0-module3.0.5-masonry (阶段 B / B4): VirtualRow.viewMode 已收窄为 details | masonry,
-  // 但 CSS .row-host-list / .row-host-grid class 保留到 E2 删. 测试 props 临时放宽 — cast 'as any'
-  // 绕过 vue-test-utils props 类型检查 (只用于测试 dead-code CSS, 不影响 production 类型).
-  const mkProps = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  const mkProps = (overrides: Record<string, unknown> = {}): any => ({
     entry: entry('foo.txt'),
     rowIndex: 0,
     absoluteTop: 0,
     mark: 'none',
     selected: false,
-    viewMode: 'list',
+    viewMode: 'details',
     rowHeight: 29,
     ...overrides,
   })
 
-  it('三视图 DOM 同时存在 (CSS 显隐控制)', () => {
+  it('只渲染 details view block (list/grid block 已删)', () => {
     const w = mount(VirtualRow, {
-      props: mkProps({ viewMode: 'list' }) as any,
+      props: mkProps(),
       global: { plugins: [createPinia(), i18n] },
     })
-    expect(w.find('.row-view-list').exists()).toBe(true)
-    expect(w.find('.row-view-grid').exists()).toBe(true)
     expect(w.find('.row-view-details').exists()).toBe(true)
+    expect(w.find('.row-view-list').exists()).toBe(false)
+    expect(w.find('.row-view-grid').exists()).toBe(false)
   })
 
-  it('viewMode=list 时只有 list block 可见 class (CSS 显隐)', () => {
+  it('details view host class 存在 (row-host-details)', () => {
     const w = mount(VirtualRow, {
-      props: mkProps({ viewMode: 'list' }) as any,
+      props: mkProps({ viewMode: 'details' }),
       global: { plugins: [createPinia(), i18n] },
     })
-    // computed style 在 happy-dom 下可能不准, 用 class 验证
-    expect(w.find('.row-host-list').exists()).toBe(true)
-    expect(w.find('.row-host-grid').exists()).toBe(false)
-    expect(w.find('.row-host-details').exists()).toBe(false)
-  })
-
-  it('viewMode=details 时 details block 可见 class', () => {
-    const w = mount(VirtualRow, {
-      props: mkProps({ viewMode: 'details' }) as any,
-      global: { plugins: [createPinia(), i18n] },
-    })
-    expect(w.find('.row-host-list').exists()).toBe(false)
-    expect(w.find('.row-host-grid').exists()).toBe(false)
     expect(w.find('.row-host-details').exists()).toBe(true)
   })
 
   it('absoluteTop → transform: translateY', () => {
     const w = mount(VirtualRow, {
-      props: mkProps({ rowIndex: 100, absoluteTop: 2900, viewMode: 'list' }) as any,
+      props: mkProps({ rowIndex: 100, absoluteTop: 2900 }),
       global: { plugins: [createPinia(), i18n] },
     })
     const style = w.find('.row-host').attributes('style') || ''
@@ -96,7 +83,7 @@ describe('VirtualRow.vue', () => {
 
   it('aria-rowindex 从 1 开始', () => {
     const w = mount(VirtualRow, {
-      props: mkProps({ rowIndex: 4, viewMode: 'list' }) as any,
+      props: mkProps({ rowIndex: 4 }),
       global: { plugins: [createPinia(), i18n] },
     })
     expect(w.find('[role="row"]').attributes('aria-rowindex')).toBe('5')
@@ -105,7 +92,7 @@ describe('VirtualRow.vue', () => {
   it('iconType WeakMap 缓存: 重复调用稳定返回 image', () => {
     const e = entry('foo.jpg')
     const w = mount(VirtualRow, {
-      props: mkProps({ entry: e, viewMode: 'list' }) as any,
+      props: mkProps({ entry: e }),
       global: { plugins: [createPinia(), i18n] },
     })
     // vm 上能拿到 script setup 暴露的 iconType 函数
