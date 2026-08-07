@@ -76,6 +76,28 @@
 > - **6 种缩放**（`fit-screen / fit-width / fit-height / original / full-screen / stretch`）— `useReaderScale` composable 监听 `settings.currentScaleMode` 变化 → `applyScale`（fit-* 用 OSD `fitBoundsWithAlignment`，`original` 1:1 + 居中，`stretch` 取 `max(widthRatio, heightRatio)`）。SinglePageViewer / DoublePageViewer `defineExpose({ getViewer/getBounds })` 暴露给父级。9 宫格 `fitWidth` 改调 `setScaleMode`（立即 apply + 持久化）。
 > - **reader 排序与 file browser 一致** — `ReaderView.loadBook` 用 `useFileBrowserStore().effectiveSortField / .effectiveSortAscending`（含 per-folder override via `directorySort`）替代硬编码 `naturalSort(name)`，复用 `lib/fileSort.sortEntries`。`?at=` 仍按 name 找 spread index 不受排序影响。
 
+> ✅ **已落地**（v0.1.0-module3.0.4-virtuallist，spec：`docs/superpowers/specs/2026-08-06-large-folder-perf-design.md`，plan：`docs/superpowers/plans/2026-08-06-virtuallist.md`，E2E：`docs/superpowers/reports/2026-08-06-virtuallist-e2e.md`）：
+> - **手写 `useVirtualList` composable**（`src/composables/useVirtualList.ts`，~80 行无新依赖）：`visibleRange / visibleEntries / totalHeight` computed + `scrollToIndex(i, opts?)` (align: start/center/end) + `scrollToPath(path)` + `ResizeObserver + rAF` 节流 scroll + `watch(entries, { flush: 'post' })` clamp scrollTop 到 `[0, totalHeight - viewportHeight]`
+> - **FileList 三视图统一虚拟化**（list/details 按 row 虚拟化；grid 不虚拟化，CSS grid auto-fill wrap 多列）
+> - **viewMode 切换 DOM 复用**：三个 view block（list/grid/details）同时挂载，CSS `:not()` 显隐；切换不重建 DOM、不丢状态
+> - **VirtualRow 子组件**（`src/components/filebrowser/VirtualRow.vue`）：`position: absolute; transform: translateY(N * rowHeight)` + `contain: layout style`（虚拟化定位 + GPU 合成层隔离）；行内 `iconType/iconClass` WeakMap 缓存
+> - **算法层顺手修 4 个 O(n²) hot path**：
+>   - `pathIndex: Ref<Map<path, index>>`（fileBrowser.ts）—— Shift+Click range select O(1) lookup
+>   - `toggleSelection` in-place `Set.delete/add + triggerRef` —— Ctrl+Click 取消大选中 O(n²) → O(1)
+>   - `readStatus.finishedSet: Set<string>` —— hideFinished=true 时 displayedEntries O(n×m) → O(n)
+>   - `displayedEntries` 单次循环合并 hideFinished + searchQuery（fast path 两个 filter 都未启用时直接返回 sortedEntries 引用）
+> - **a11y**：role="grid" + aria-rowcount + aria-rowindex + aria-selected + 6 键键盘导航（Arrow/PageUp/Down/Home/End）+ roving tabindex 焦点管理
+> - **搜索兼容**：useVirtualList 对 entries 输入域透明（仅 slice 不影响 filter）；watch(entries) clamp 避免"滚到底后搜索 → 空白"
+> - **11 hotfix（同 tag merge）**：删 searchFilter 孤儿 + 路径分隔符统一 `/` + row view block height:100% 撑满 + grid 视图多列 wrap + tooltip Teleport + tooltip 位置对齐 hotfix15 原版 + details 各列 truncate + name-cell display:block（span inline 不支持 ellipsis）等
+> - **E2E 实测**（14949 entry "AI" 目录）：
+>   - DOM 节点 194,485 → 1,284（**151×**）
+>   - role="row" 14,957 → 43（**348×**）
+>   - JS heap 167 MB → 32 MB（**5.3×**）
+>   - 搜索 "page" 后 DOM 1,284 → 137（**1,415×**）
+>   - hover 200 次 avg 0.002ms / longtask 0
+>   - 滚到底 clamp 正确
+>   - msedgewebview2 总内存预期 1.5 GB → 300-500 MB
+
 ---
 
 ## 2. 技术栈
