@@ -170,9 +170,9 @@ function getTypeLabel(entry: MediaEntry): string {
       >
         <span class="name-cell truncate">{{ entry.name }}</span>
       </span>
-      <span class="date-cell">{{ entry.modifiedAt ? formatDateTime(entry.modifiedAt * 1000, settings.locale) : '—' }}</span>
-      <span class="type-cell">{{ getTypeLabel(entry) }}</span>
-      <span class="size-cell">{{ entry.isDirectory ? '—' : formatBytes(entry.size) }}</span>
+      <span class="date-cell truncate">{{ entry.modifiedAt ? formatDateTime(entry.modifiedAt * 1000, settings.locale) : '—' }}</span>
+      <span class="type-cell truncate">{{ getTypeLabel(entry) }}</span>
+      <span class="size-cell truncate">{{ entry.isDirectory ? '—' : formatBytes(entry.size) }}</span>
       <span v-if="mark === 'reading'" class="status-badge reading">{{ statusLabel(mark) }}</span>
       <span v-else-if="mark === 'finished'" class="status-badge finished">{{ statusLabel(mark) }}</span>
     </div>
@@ -238,6 +238,16 @@ function getTypeLabel(entry: MediaEntry): string {
   box-sizing: border-box;
 }
 .row-view-details .name-wrap { position: relative; overflow: visible !important; min-width: 0; }
+.row-view-details .name-wrap > .name-cell { min-width: 0; }
+/* hotfix15 风格: 数据列 truncate ellipsis (窄面板时列收缩不重叠, 列按 minmax(0, ...) 收缩).
+   scoped CSS 兜底 (Tailwind utility .truncate 在 scoped 环境下需 data-v-XXX 选择器) */
+.row-view-details > .truncate,
+.row-view-details > .name-wrap > .name-cell {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 .row-view-details .index { text-align: right; color: var(--color-text-tertiary); font-family: ui-monospace, SFMono-Regular, monospace; font-size: 10px; }
 .row-view-details .date-cell { text-align: right; font-family: ui-monospace, SFMono-Regular, monospace; }
 .row-view-details .type-cell { text-align: center; }
