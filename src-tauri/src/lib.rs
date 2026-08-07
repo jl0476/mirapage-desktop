@@ -87,6 +87,8 @@ pub fn run() {
             commands::keep_screen_on::keep_screen_on,
             // Phase 5
             commands::find_next_volume::find_next_volume,
+            // 瀑布流布局骨架数据（masonry viewMode 预读 header）
+            commands::image_dimensions::list_image_dimensions,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

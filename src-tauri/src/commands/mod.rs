@@ -9,6 +9,7 @@ pub mod directory_sort;
 pub mod file_browser;
 pub mod find_next_volume;
 pub mod history;
+pub mod image_dimensions;
 pub mod keep_screen_on;
 pub mod library;
 pub mod likes;
