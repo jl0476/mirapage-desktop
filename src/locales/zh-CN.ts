@@ -153,6 +153,9 @@ export default {
     viewDetails: '详情',
     masonrySettings: '瀑布流设置',
     noImagesForMasonry: '该目录无图片，无法使用瀑布流视图',
+    masonryLoading: '加载中...',
+    showDetail: '属性',
+    hideDetail: '隐藏属性',
     statusBar: {
       items: '共 {count} 项',
       selected: '已选 {count} 项',

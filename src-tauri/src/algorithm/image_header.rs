@@ -150,6 +150,32 @@ mod tests {
         assert_eq!(parse_jpeg(&b), None);
     }
 
+    /// 含大 APP1(EXIF thumbnail) 的 JPEG: SOF0 被推到 ~1500 字节后 (HEADER_READ_LEN 256 够不到)。
+    /// 验证 parse_jpeg 能跳过大 APP1 segment 找到 SOF0 (回归 measuredMap 全空 bug)。
+    fn make_jpeg_large_app1(w: u16, h: u16, app1_payload: usize) -> Vec<u8> {
+        let mut b = vec![0xFF, 0xD8]; // SOI
+        b.extend_from_slice(&[0xFF, 0xE1]); // APP1 marker
+        b.extend_from_slice(&((app1_payload + 2) as u16).to_be_bytes()); // length 含自身 2B
+        b.extend(std::iter::repeat(0x00).take(app1_payload));
+        b.extend_from_slice(&[0xFF, 0xC0]); // SOF0
+        b.extend_from_slice(&[0x00, 0x11]); // length 17
+        b.push(0x08);                       // precision 8-bit
+        b.extend_from_slice(&h.to_be_bytes());
+        b.extend_from_slice(&w.to_be_bytes());
+        b.push(0x03);
+        b.extend_from_slice(&[0x01, 0x22, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01]);
+        b
+    }
+
+    #[test]
+    fn parse_jpeg_large_app1_sof0_beyond_256() {
+        // SOF0 在 offset 2+4+1500 = 1506 (> 256), 模拟实测 1.jpg (SOF0@1530)
+        let bytes = make_jpeg_large_app1(1024, 768, 1500);
+        let dim = parse_jpeg(&bytes).expect("应跳过大 APP1 找到 SOF0");
+        assert_eq!(dim.width, 1024);
+        assert_eq!(dim.height, 768);
+    }
+
     fn make_png(w: u32, h: u32) -> Vec<u8> {
         let mut b = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG signature
         // IHDR chunk

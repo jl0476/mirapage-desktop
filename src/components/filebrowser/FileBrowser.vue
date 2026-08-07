@@ -159,6 +159,15 @@ function onMasonryPopupClose() {
   masonryPopupOpen.value = false;
 }
 
+// v0.1.0-module3.0.6 UX: 详情面板默认不弹, 工具栏"属性"按钮按需唤起。
+// 切视图/目录时自动关闭, 避免下次进入残留状态。
+const showDetail = ref(false);
+watch(() => fb.viewMode, () => { showDetail.value = false; });
+watch(() => fb.currentPath, () => { showDetail.value = false; });
+function toggleDetail() {
+  showDetail.value = !showDetail.value;
+}
+
 /**
  * v0.1.0-module3.0.3: StatusBar 左段文案.
  * 始终按 displayedEntries 计数 (含 hideFinished + searchQuery 过滤后), 保证与列表行数一致.
@@ -573,6 +582,22 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           </svg>
           {{ t('fileBrowser.downloadAll') }}
         </button>
+        <button
+          data-test="btn-detail"
+          class="tb-btn"
+          :class="showDetail ? 'text-accent' : ''"
+          :disabled="!selectedEntry"
+          :title="selectedEntry ? (showDetail ? t('fileBrowser.hideDetail') : t('fileBrowser.showDetail')) : ''"
+          @click="toggleDetail"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round"
+               stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" />
+            <path d="M12 8v4M12 16h.01" />
+          </svg>
+          {{ showDetail ? t('fileBrowser.hideDetail') : t('fileBrowser.showDetail') }}
+        </button>
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <button
           data-test="btn-hide-finished"
@@ -701,7 +726,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           :view-mode="fb.viewMode"
           :descriptor="masonryDescriptor"
           :root-path="fb.rootPath"
-          :current-path="fb.lastFetchedPath || fb.rootPath || ''"
+          :current-path="fb.lastFetchedPath"
           :col-count="masonryParams.colCount"
           :h-gap="masonryParams.hGap"
           :v-gap="masonryParams.vGap"
@@ -711,12 +736,13 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           @contextmenu="onRowContextMenu"
         />
         <EntryDetailPanel
-          v-if="selectedEntry && fb.viewMode !== 'details'"
+          v-if="showDetail && selectedEntry && fb.viewMode !== 'details'"
           :entry="selectedEntry"
           :root-path="fb.rootPath"
           class="w-72 shrink-0 overflow-y-auto"
           @read-now="onReadNowClick"
           @add-to-library="onAddToLibraryClick"
+          @close="showDetail = false"
         />
       </div>
 

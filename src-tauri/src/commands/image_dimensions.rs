@@ -12,8 +12,11 @@ use tauri::State;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-/// 读 header 的字节数。JPEG SOF0 可能藏在 APPn 后，256 字节够大部分情况。
-const HEADER_READ_LEN: u64 = 256;
+/// 读 header 的字节数。JPEG SOF0 可能藏在大 APP1(EXIF 含 thumbnail) 后——
+/// 实测含 thumbnail 的 JPEG SOF0 在 ~1530 字节处, 256 不够 → image_dimensions 返回 None
+/// → measuredMap 全空 → 全估算高度(裁剪+卡顿)。增到 8192 覆盖绝大多数 EXIF JPEG
+/// (thumbnail 160x120 ≈ 4KB)。每张 8KB, 3944 张 ≈ 32MB, Local SSD < 1s; 远程挂载并发 16 可接受。
+const HEADER_READ_LEN: u64 = 8192;
 
 /// 并发上限。Local SSD 下再高也没意义；远程挂载下避免打满 SMB 连接。
 const MAX_CONCURRENT: usize = 16;

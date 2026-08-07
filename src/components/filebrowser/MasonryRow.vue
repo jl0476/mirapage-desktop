@@ -64,6 +64,7 @@ function statusLabel(m: RowMark): string {
     <img
       :src="src"
       loading="lazy"
+      decoding="async"
       class="masonry-img"
       :alt="entry.name"
       draggable="false"
@@ -75,11 +76,11 @@ function statusLabel(m: RowMark): string {
 <style scoped>
 .masonry-row {
   cursor: pointer;
-  border-radius: 6px;
+  /* 移除 border + border-radius: hGap/vGap 唯一控制间距, gap=0 时图片无缝拼接。
+     选中态用 outline (.is-selected 已有 outline-offset:-2px), 不依赖 border。 */
   overflow: hidden;
   background: var(--color-surface-1);
-  border: 1px solid var(--color-border-default);
-  transition: outline 80ms ease-out; /* v0.1.0-module3.0.5-masonry (阶段 E2) 修 D1: 替换未定义 var(--ease-out) */
+  transition: outline 80ms ease-out;
   contain: layout style;
 }
 .masonry-img {

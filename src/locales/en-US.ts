@@ -152,6 +152,9 @@ export default {
     viewDetails: 'Details',
     masonrySettings: 'Masonry settings',
     noImagesForMasonry: 'No images in this folder; masonry view unavailable',
+    masonryLoading: 'Loading...',
+    showDetail: 'Details',
+    hideDetail: 'Hide details',
     statusBar: {
       items: '{count} items',
       selected: '{count} selected',

@@ -6,22 +6,39 @@ import {
   DEFAULT_ASPECT_RATIO,
   estimateHeight,
   layoutMasonry,
+  toRootRelativePath,
   useMasonryLayout,
   type MasonryInput,
   type MasonryItem,
 } from './useMasonryLayout';
+
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 describe('computeColWidth', () => {
-  it('容器宽度按列数均分减去 gap', () => {
-    // (1000 - 3*10) / 4 = 242.5
-    expect(computeColWidth(1000, 4, 10)).toBe((1000 - 30) / 4);
+  it('容器宽度按列数均分减去 gap (取整避免亚像素缝)', () => {
+    // (1000 - 3*10) / 4 = 242.5 → floor 242 (消除 absolute 定位亚像素缝, 右侧留 8px)
+    expect(computeColWidth(1000, 4, 10)).toBe(242);
   });
   it('gap=0 时纯均分', () => {
     expect(computeColWidth(800, 4, 0)).toBe(200);
   });
   it('1 列时等于容器宽', () => {
     expect(computeColWidth(500, 1, 10)).toBe(500);
+  });
+});
+
+describe('toRootRelativePath (F1: 子目录路径拼接)', () => {
+  it('currentPath 为空（根目录）-> 原样返回 relPath', () => {
+    expect(toRootRelativePath('', 'img.png')).toBe('img.png');
+  });
+  it('currentPath 非空 -> 拼 currentPath/relPath', () => {
+    expect(toRootRelativePath('output/260805', 'img.png')).toBe('output/260805/img.png');
+  });
+  it('currentPath 尾部斜杠 -> trim 后拼接', () => {
+    expect(toRootRelativePath('output/260805/', 'img.png')).toBe('output/260805/img.png');
+  });
+  it('多斜杠归一', () => {
+    expect(toRootRelativePath('output//260805/', 'img.png')).toBe('output/260805/img.png');
   });
 });
 
@@ -175,8 +192,8 @@ describe('useMasonryLayout composable (smoke)', () => {
       scrollTop: ref(0),
       measuredMap: ref(new Map()),
     });
-    // colWidth = (1000 - 3*10)/4 = 242.5
-    expect(colWidth.value).toBeCloseTo(242.5, 1);
+    // colWidth = floor((1000 - 3*10)/4) = 242 (取整避免亚像素缝)
+    expect(colWidth.value).toBe(242);
     // layout 有 4 个 item, totalHeight > 0 (估算高度)
     expect(layout.value.map.size).toBe(4);
     expect(layout.value.totalHeight).toBeGreaterThan(0);
@@ -186,7 +203,7 @@ describe('useMasonryLayout composable (smoke)', () => {
     expect(visibleRange.value.end).toBeGreaterThan(0);
   });
 
-  it('measuredMap 更新后 layout 用真实高度', () => {
+  it('measuredMap 更新后 layout 用真实比例缩放高度', () => {
     const entries = ref<readonly MediaEntry[]>([mkEntry('a')]);
     const measuredMap = ref(new Map<string, { width: number; height: number }>());
     const { layout } = useMasonryLayout({
@@ -200,9 +217,73 @@ describe('useMasonryLayout composable (smoke)', () => {
       measuredMap,
     });
     const estimatedHeight = layout.value.totalHeight;
-    // 测量后高度变化
+    // colWidth=100 (2列 gap0); 图片 200x500 -> 缩放后高度 = 100*500/200 = 250 (按宽度等比, 非原始像素 500)
     measuredMap.value = new Map([['a', { width: 200, height: 500 }]]);
-    expect(layout.value.totalHeight).toBe(500);
+    expect(layout.value.totalHeight).toBe(250);
     expect(layout.value.totalHeight).not.toBe(estimatedHeight);
+  });
+
+  it('measured item 高度按 colWidth 等比缩放 (非原始像素)', () => {
+    // 回归: 之前用 m.height (原始像素) 导致卡片极长 + cover 裁剪, 不是实际比例
+    const entries = ref<readonly MediaEntry[]>([mkEntry('a')]);
+    const measuredMap = ref(new Map([['a', { width: 1000, height: 2000 }]]));
+    const { layout } = useMasonryLayout({
+      entries,
+      containerWidth: ref(300),
+      containerHeight: ref(600),
+      colCount: ref(1),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(0),
+      measuredMap,
+    });
+    // colWidth=300 (1列); 图片 1000x2000 (h/w=2) -> 缩放后高度 = 300*2000/1000 = 600
+    const item = layout.value.map.get('a')!;
+    expect(item.width).toBe(300);
+    expect(item.height).toBe(600);
+  });
+
+  it('prefetchPaths: 视口前后各 2 屏行的 paths (供 new Image 缓存)', () => {
+    // 50 条 entries, 4 列. PREFETCH_BUFFER=2 → 前后各 8 entries. 视口默认含前几个.
+    const entries = ref<readonly MediaEntry[]>(Array.from({ length: 50 }, (_, i) => mkEntry(`p${i}`)));
+    const { prefetchPaths, visibleRange } = useMasonryLayout({
+      entries,
+      containerWidth: ref(1000),
+      containerHeight: ref(600),
+      colCount: ref(4),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(0),
+      measuredMap: ref(new Map()),
+    });
+    const r = visibleRange.value;
+    const extend = 2 * 4;
+    const start = Math.max(0, r.start - extend);
+    const end = Math.min(50, r.end + extend);
+    expect(prefetchPaths.value).toHaveLength(end - start);
+    expect(prefetchPaths.value[0]).toBe(entries.value[start].path);
+    expect(prefetchPaths.value[prefetchPaths.value.length - 1]).toBe(entries.value[end - 1].path);
+  });
+
+  it('prefetchPaths: 滚到中段时前后扩展 (中间 start 不为 0)', () => {
+    const entries = ref<readonly MediaEntry[]>(Array.from({ length: 100 }, (_, i) => mkEntry(`p${i}`)));
+    const { prefetchPaths } = useMasonryLayout({
+      entries,
+      containerWidth: ref(1000),
+      containerHeight: ref(600),
+      colCount: ref(4),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(100000), // 强制 visibleRange 在中间
+      measuredMap: ref(new Map()),
+    });
+    // 视口前后各 8 entries
+    const paths = prefetchPaths.value;
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.length).toBeLessThanOrEqual(100);
+    // 不包含第一个 (除非 start=0)
+    if (paths[0] !== 'p0') {
+      expect(paths[0]).not.toBe('p0');
+    }
   });
 });

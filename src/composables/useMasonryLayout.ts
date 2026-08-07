@@ -20,10 +20,25 @@ export interface MasonryItem {
   col: number;
 }
 
-/** 固定列数 → 列宽。colWidth = (containerWidth - (cols-1)*hGap) / cols */
+/** 固定列数 → 列宽。colWidth = (containerWidth - (cols-1)*hGap) / cols, 取整避免 absolute
+ * 定位的亚像素缝隙 (有的行无缝有的有缝)。右侧少量留白可接受。 */
 export function computeColWidth(containerWidth: number, cols: number, hGap: number): number {
-  if (cols <= 1) return containerWidth;
-  return (containerWidth - (cols - 1) * hGap) / cols;
+  if (cols <= 1) return Math.floor(containerWidth);
+  return Math.floor((containerWidth - (cols - 1) * hGap) / cols);
+}
+
+/**
+ * entry.path 相对 currentPath（= lastFetchedPath），但 Rust list_image_dimensions → read_file
+ * 期望相对 rootPath 的完整路径。拼接 currentPath 前缀（'/' 分隔，LocalMediaSource 接受 '/'）。
+ * currentPath 为空（根目录）时原样返回。
+ *
+ * 修复 F1：之前直接传 entry.path 给 IPC，子目录（lastFetchedPath 非空）场景 read_file
+ * 读 rootPath/<entry.path>（文件不存在）→ 返回 None → measuredMap 永远空 → 全估算高度。
+ */
+export function toRootRelativePath(currentPath: string, relPath: string): string {
+  const base = currentPath.replace(/[\\/]+$/, '');
+  if (!base) return relPath;
+  return `${base}/${relPath}`.replace(/\/+/g, '/');
 }
 
 export interface MasonryLayoutResult {
@@ -34,6 +49,7 @@ export interface MasonryLayoutResult {
 /**
  * 贪心放最短列布局。inputs 必须已排序（调用方保证）。
  * 返回 path→MasonryItem 的 Map + totalHeight（最长列，含末尾 vGap）。
+ * 所有坐标取整到像素, 消除 absolute 定位的亚像素缝隙 (colWidth 已 floor, 进一步确保 width/top/height 整数)。
  */
 export function layoutMasonry(
   inputs: readonly MasonryInput[],
@@ -50,17 +66,21 @@ export function layoutMasonry(
     for (let c = 1; c < cols; c++) {
       if (colTops[c] < colTops[minCol]) minCol = c;
     }
-    const top = colTops[minCol];
-    const left = minCol * (inp.width + hGap);
+    const w = Math.round(inp.width);
+    const h = Math.round(inp.height);
+    const gapH = Math.round(hGap);
+    const gapV = Math.round(vGap);
+    const top = Math.round(colTops[minCol]);
+    const left = minCol * (w + gapH);
     map.set(inp.path, {
       path: inp.path,
-      width: inp.width,
-      height: inp.height,
+      width: w,
+      height: h,
       top,
       left,
       col: minCol,
     });
-    colTops[minCol] = top + inp.height + vGap;
+    colTops[minCol] = top + h + gapV;
   }
   const totalHeight = Math.max(...colTops);
   return { map, totalHeight };
@@ -121,10 +141,18 @@ export interface MasonryLayoutOutput {
   measuredCount: ComputedRef<number>;
   needPrefetch: ComputedRef<boolean>;
   nextBatchPaths: ComputedRef<string[]>;
+  /**
+   * 预读区 paths (visibleRange 前后各 PREFETCH_BUFFER 屏行)。
+   * MasonryView 对这些 paths 调 new Image(src) 提前 fetch + decode 进浏览器缓存,
+   * 滚动到时 <img> 命中缓存无网络+解码延迟 (对齐阅读器 preload 策略)。
+   */
+  prefetchPaths: ComputedRef<string[]>;
 }
 
 const PREFETCH_SCREENS = 3;
 const VISIBLE_BUFFER = 2;
+/** 图片字节预读区: 视口前后各 PREFETCH_BUFFER 屏行 (new Image 缓存) */
+const PREFETCH_BUFFER = 2;
 
 /**
  * 响应式瀑布流 composable 主体。把 C1/C2 纯函数接成响应式数据流，
@@ -146,7 +174,9 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
     const avgRatio = measured.size > 0 && sumH > 0 ? sumW / sumH : DEFAULT_ASPECT_RATIO;
     return params.entries.value.map((e) => {
       const m = measured.get(e.path);
-      const height = m ? m.height : estimateHeight(cw, avgRatio);
+      // 已测量: 按 colWidth 等比缩放真实高度 (m.height/m.width 是原始像素, 须缩到卡片宽度)。
+      // 不能直接用 m.height -- 否则卡片 180px 宽 × 1280px 高 (极长), cover 裁左右。
+      const height = m ? (cw * m.height) / m.width : estimateHeight(cw, avgRatio);
       return { path: e.path, width: cw, height };
     });
   });
@@ -198,5 +228,15 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
       .map((e) => e.path);
   });
 
-  return { colWidth, layout, visibleRange, measuredCount, needPrefetch, nextBatchPaths };
+  // 预读区: 视口前后各 PREFETCH_BUFFER 屏行. MasonryView 用来 new Image() 提前缓存.
+  const prefetchPaths = computed(() => {
+    const r = visibleRange.value;
+    const cols = Math.max(1, params.colCount.value);
+    const extend = PREFETCH_BUFFER * cols;
+    const start = Math.max(0, r.start - extend);
+    const end = Math.min(params.entries.value.length, r.end + extend);
+    return params.entries.value.slice(start, end).map((e) => e.path);
+  });
+
+  return { colWidth, layout, visibleRange, measuredCount, needPrefetch, nextBatchPaths, prefetchPaths };
 }
