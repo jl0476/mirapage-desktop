@@ -34,20 +34,25 @@ function entry(name: string, opts: Partial<MediaEntry> = {}): MediaEntry {
   };
 }
 
+// v0.1.0-module3.0.5-masonry (阶段 B / B4): ViewMode 收窄为 details | masonry,
+// 但 template grid/list 分支保留到 E2 删 — 测试 props 临时放宽以覆盖 dead-code 分支.
 interface TestProps {
   entries: MediaEntry[];
   loading?: boolean;
   marks?: ReadStatusMap;
   selectedPaths?: Set<string>;
-  viewMode?: 'list' | 'grid' | 'details';
+  viewMode?: 'list' | 'grid' | 'details' | 'masonry';
 }
 
 function mountList(
   props: Partial<TestProps> = {},
   opts: Record<string, unknown> = {},
 ) {
+  // v0.1.0-module3.0.5-masonry (阶段 B / B4): TestProps.viewMode 含 list/grid 仅用于测试
+  // template dead-code 分支 (E2 删), production Props 已收窄. mount props 检查走不通 —
+  // 测试 cast 'as any' 绕过 (只用于 vue-test-utils 内部, 不影响 production 类型).
   return mount(FileList, {
-    props: { entries: [], ...props } as TestProps,
+    props: { entries: [], ...props } as any,
     global: { plugins: [createPinia(), i18n] },
     ...opts,
   });
@@ -219,7 +224,7 @@ describe('FileList.vue — 虚拟化集成 (Task 3.2)', () => {
     // list view: 虚拟化, viewport 内只渲染可见 row (< 20)
     const listRowCount = w.findAll('[data-test="row"]').length
     expect(listRowCount).toBeLessThan(entries.length)
-    await w.setProps({ viewMode: 'grid' })
+    await w.setProps({ viewMode: 'grid' } as any)
     // 多等几个 tick 让 watcher + DOM patch 完成
     await nextTick(); await nextTick()
     await new Promise<void>(r => requestAnimationFrame(() => r()))
@@ -239,7 +244,7 @@ describe('FileList.vue — 虚拟化集成 (Task 3.2)', () => {
     );
     await settle();
     const beforeRow = wrapper.findAll('[data-test="row"]')[0]?.element;
-    await wrapper.setProps({ viewMode: 'list' });
+    await wrapper.setProps({ viewMode: 'list' } as any);
     await nextTick();
     const afterRow = wrapper.findAll('[data-test="row"]')[0]?.element;
     expect(afterRow).toBe(beforeRow);
@@ -301,7 +306,7 @@ describe('FileList.vue — viewMode 切换保留滚动位置 (Task 4.1)', () => 
     // 切到 grid (rowHeight 29 → 132), viewport 内 visibleRange 是 295-310,
     // DOM 第一个 row path = 'f295' → fallback 取此 path → scrollToPath('f295')
     // 在 grid 中: scrollTop = 295 * 132 = 38940
-    await wrapper.setProps({ viewMode: 'grid' });
+    await wrapper.setProps({ viewMode: 'grid' } as any);
     await nextTick();
     await nextTick();
     await new Promise(r => requestAnimationFrame(r));

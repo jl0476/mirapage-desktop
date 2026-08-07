@@ -26,7 +26,10 @@ export type FileBrowserError =
   | { kind: 'permissionDenied'; message: string }
   | { kind: 'io'; message: string };
 
-export type ViewMode = 'list' | 'grid' | 'details';
+// v0.1.0-module3.0.5-masonry (阶段 B / B4): 收窄为 details | masonry.
+// 老值 list/grid 仅用于历史持久化兼容 (loadLayout fallback → details).
+// UI 彻底清理 (删 grid/list 分支 + ViewModeDropdown) 留 E2-E4.
+export type ViewMode = 'details' | 'masonry';
 
 // ─── v0.1.0-module3.0.4-virtuallist Phase 3 ───
 // FileList 组件实例方法 scrollToPath 通过模块级 callback 注册机制反向传给 store.
@@ -221,7 +224,12 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       sortField.value = field;
     }
     if (asc === '0') sortAscending.value = false;
-    if (vm === 'list' || vm === 'grid') viewMode.value = vm;
+    if (vm === 'masonry') {
+      viewMode.value = 'masonry';
+    } else if (vm === 'list' || vm === 'grid') {
+      // v0.1.0-module3.0.5-masonry (阶段 B / B4): 老持久化值 fallback 到 details.
+      viewMode.value = 'details';
+    }
     if (hf === '1') hideFinished.value = true;
   }
 

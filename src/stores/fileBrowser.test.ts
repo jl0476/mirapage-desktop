@@ -308,13 +308,14 @@ describe('fileBrowser store — viewMode + persist', () => {
     vi.clearAllMocks();
   });
 
-  it('setViewMode 写入 settings', async () => {
+  it('setViewMode 写入 settings (masonry)', async () => {
     mockedList.mockResolvedValue([]);
     const store = useFileBrowserStore();
     await store.setRoot('C:/x');
-    store.setViewMode('grid');
-    expect(store.viewMode).toBe('grid');
-    expect(mockedSet).toHaveBeenCalledWith('fb_view_mode', 'grid');
+    // v0.1.0-module3.0.5-masonry (阶段 B / B4): 用 masonry 验证 (旧 grid 已收窄)
+    store.setViewMode('masonry');
+    expect(store.viewMode).toBe('masonry');
+    expect(mockedSet).toHaveBeenCalledWith('fb_view_mode', 'masonry');
   });
 
   it('setHideFinished 写入 settings', async () => {
@@ -326,11 +327,11 @@ describe('fileBrowser store — viewMode + persist', () => {
     expect(mockedSet).toHaveBeenCalledWith('fb_hide_finished', '1');
   });
 
-  it('loadLayout 读 settings 恢复状态', async () => {
+  it('loadLayout 读 settings 恢复状态 (masonry)', async () => {
     mockedGet.mockImplementation(async (key) => {
       if (key === 'fb_sort_field') return 'size';
       if (key === 'fb_sort_ascending') return '0';
-      if (key === 'fb_view_mode') return 'grid';
+      if (key === 'fb_view_mode') return 'masonry';
       if (key === 'fb_hide_finished') return '1';
       return null;
     });
@@ -338,8 +339,24 @@ describe('fileBrowser store — viewMode + persist', () => {
     await store.loadLayout();
     expect(store.sortField).toBe('size');
     expect(store.sortAscending).toBe(false);
-    expect(store.viewMode).toBe('grid');
+    expect(store.viewMode).toBe('masonry');
     expect(store.hideFinished).toBe(true);
+  });
+
+  // v0.1.0-module3.0.5-masonry (阶段 B / B4): 老 list/grid 持久化值 fallback → details.
+  // 老用户升级到 v0.1.0-module3.0+ 不会因为历史 fb_view_mode='list'/'grid'
+  // 而落到 ViewMode 类型外, loadLayout 白名单 fallback 保证类型边界.
+  it.each([
+    ['list', 'details'],
+    ['grid', 'details'],
+  ] as const)('loadLayout 老 fb_view_mode=%s → fallback details', async (legacy, expected) => {
+    mockedGet.mockImplementation(async (key) => {
+      if (key === 'fb_view_mode') return legacy;
+      return null;
+    });
+    const store = useFileBrowserStore();
+    await store.loadLayout();
+    expect(store.viewMode).toBe(expected);
   });
 
   it('loadLayout 无持久化 → 保持默认', async () => {

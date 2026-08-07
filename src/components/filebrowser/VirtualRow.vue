@@ -22,7 +22,9 @@ import { formatBytes, formatDateTime } from '@/locales/helpers'
 import { mimeFromName, getMimeCategory } from '@/lib/mime'
 
 type RowMark = 'reading' | 'finished' | 'none'
-type ViewMode = 'list' | 'grid' | 'details'
+// v0.1.0-module3.0.5-masonry (阶段 B / B4): 收窄为 details | masonry (对齐 fileBrowser.store ViewMode).
+// 局部 type 保留 (而非 import store) — store 走 preload/Settings/迁移的语义, 组件内只关心 row 渲染.
+type ViewMode = 'details' | 'masonry'
 type FileIconType = 'folder' | 'archive' | 'image' | 'file'
 
 interface Props {
@@ -64,8 +66,10 @@ const rowClasses = computed(() => ({
 }))
 
 const rowStyle = computed(() => {
+  // v0.1.0-module3.0.5-masonry (阶段 B / B4): grid 已收窄出 ViewMode union,
+  // 但 template 分支保留到 E2 删 — as string 绕过类型窄化检查.
   // grid 视图: 不 absolute, 让 CSS grid auto-fill 自动 wrap 多列
-  if (props.viewMode === 'grid') return {}
+  if ((props.viewMode as string) === 'grid') return {}
   // list / details 视图: absolute + translateY 虚拟滚动定位
   return {
     position: 'absolute' as const,

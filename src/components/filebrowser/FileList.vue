@@ -15,7 +15,7 @@
  */
 import { ref, computed, nextTick, onMounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useFileBrowserStore } from '@/stores/fileBrowser';
+import { useFileBrowserStore, type ViewMode } from '@/stores/fileBrowser';
 import { useReadStatusStore } from '@/stores/readStatus';
 import { useVirtualList } from '@/composables/useVirtualList';
 import VirtualRow from './VirtualRow.vue';
@@ -26,13 +26,15 @@ interface Props {
   loading?: boolean;
   marks?: ReadStatusMap;
   selectedPaths?: Set<string>;
-  viewMode?: 'list' | 'grid' | 'details';
+  // v0.1.0-module3.0.5-masonry (阶段 B / B4): 收窄为 details | masonry.
+  // 老 list/grid 仅用于持久化兼容 (fileBrowser.loadLayout fallback → details).
+  viewMode?: ViewMode;
 }
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
   marks: () => ({}),
   selectedPaths: () => new Set<string>(),
-  viewMode: 'list',
+  viewMode: 'details',
 });
 
 const emit = defineEmits<{
@@ -53,10 +55,12 @@ const readStatus = useReadStatusStore();
 const hoveredName = ref<string | null>(null);
 const hoverPos = ref<{ top: number; left: number } | null>(null);
 
-/** 三视图行高 (像素, 固定). */
-const rowHeightByView: Record<'list' | 'grid' | 'details', number> = {
+/** 行高映射 (像素, 固定). v0.1.0-module3.0.5-masonry 收窄后 list/grid 已不可达,
+ *  保留旧 key 仅作 dead-code 文档 (template `v-else-if="viewMode === 'grid'"` 分支仍存在). */
+const rowHeightByView: Record<string, number> = {
   list: 29,
   details: 29,
+  masonry: 29,
   grid: 132,
 };
 const resolvedRowHeight = computed(() => rowHeightByView[props.viewMode] ?? 29);
@@ -326,9 +330,11 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
       <span>{{ t('fileBrowser.empty') }}</span>
     </div>
 
-    <!-- grid 视图: 不虚拟化, CSS grid auto-fill wrap 多列 (每 entry 占一格) -->
+    <!-- grid 视图: 不虚拟化, CSS grid auto-fill wrap 多列 (每 entry 占一格)
+     v0.1.0-module3.0.5-masonry (阶段 B / B4): grid 已收窄出 ViewMode union,
+     但 template 分支保留到 E2 删 — 用 as string 绕过 vue-tsc 类型窄化检查 -->
     <div
-      v-else-if="viewMode === 'grid'"
+      v-else-if="(viewMode as string) === 'grid'"
       class="virt-grid-view"
       role="presentation"
     >
