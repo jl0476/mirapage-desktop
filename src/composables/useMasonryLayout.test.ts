@@ -1,13 +1,16 @@
 import { describe, it, expect } from 'vitest';
+import { ref } from 'vue';
 import {
   applyMeasuredBatch,
   computeColWidth,
   DEFAULT_ASPECT_RATIO,
   estimateHeight,
   layoutMasonry,
+  useMasonryLayout,
   type MasonryInput,
   type MasonryItem,
 } from './useMasonryLayout';
+import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 describe('computeColWidth', () => {
   it('容器宽度按列数均分减去 gap', () => {
@@ -152,5 +155,54 @@ describe('applyMeasuredBatch (滚动锚定补偿)', () => {
       newHeights: {},
     });
     expect(compensation).toBe(0);
+  });
+});
+
+describe('useMasonryLayout composable (smoke)', () => {
+  function mkEntry(path: string): MediaEntry {
+    return { name: path, path, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 };
+  }
+
+  it('colWidth + layout 响应式计算', () => {
+    const entries = ref<readonly MediaEntry[]>([mkEntry('a'), mkEntry('b'), mkEntry('c'), mkEntry('d')]);
+    const { colWidth, layout, measuredCount, visibleRange } = useMasonryLayout({
+      entries,
+      containerWidth: ref(1000),
+      containerHeight: ref(600),
+      colCount: ref(4),
+      hGap: ref(10),
+      vGap: ref(10),
+      scrollTop: ref(0),
+      measuredMap: ref(new Map()),
+    });
+    // colWidth = (1000 - 3*10)/4 = 242.5
+    expect(colWidth.value).toBeCloseTo(242.5, 1);
+    // layout 有 4 个 item, totalHeight > 0 (估算高度)
+    expect(layout.value.map.size).toBe(4);
+    expect(layout.value.totalHeight).toBeGreaterThan(0);
+    // 未测量 → measuredCount 0
+    expect(measuredCount.value).toBe(0);
+    // visibleRange 在 scrollTop=0 时包含前面的 item
+    expect(visibleRange.value.end).toBeGreaterThan(0);
+  });
+
+  it('measuredMap 更新后 layout 用真实高度', () => {
+    const entries = ref<readonly MediaEntry[]>([mkEntry('a')]);
+    const measuredMap = ref(new Map<string, { width: number; height: number }>());
+    const { layout } = useMasonryLayout({
+      entries,
+      containerWidth: ref(200),
+      containerHeight: ref(600),
+      colCount: ref(2),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(0),
+      measuredMap,
+    });
+    const estimatedHeight = layout.value.totalHeight;
+    // 测量后高度变化
+    measuredMap.value = new Map([['a', { width: 200, height: 500 }]]);
+    expect(layout.value.totalHeight).toBe(500);
+    expect(layout.value.totalHeight).not.toBe(estimatedHeight);
   });
 });

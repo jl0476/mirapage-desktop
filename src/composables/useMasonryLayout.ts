@@ -2,6 +2,9 @@
 // 借鉴 v3-waterfall 贪心放最短列算法；本实现固定列数（v3 是固定列宽，方向相反）。
 // 设计文档 §5。
 
+import type { MediaEntry } from '@/lib/sourceDescriptor';
+import { computed, type ComputedRef, type Ref } from 'vue';
+
 export interface MasonryInput {
   path: string;
   width: number;   // 列宽
@@ -98,4 +101,102 @@ export function applyMeasuredBatch(params: AnchorParams): number {
     }
   }
   return compensation;
+}
+
+export interface MasonryLayoutParams {
+  entries: Ref<readonly MediaEntry[]>;
+  containerWidth: Ref<number>;
+  containerHeight: Ref<number>;
+  colCount: Ref<number>;
+  hGap: Ref<number>;
+  vGap: Ref<number>;
+  scrollTop: Ref<number>;
+  measuredMap: Ref<Map<string, { width: number; height: number }>>;
+}
+
+export interface MasonryLayoutOutput {
+  colWidth: ComputedRef<number>;
+  layout: ComputedRef<MasonryLayoutResult>;
+  visibleRange: ComputedRef<{ start: number; end: number }>;
+  measuredCount: ComputedRef<number>;
+  needPrefetch: ComputedRef<boolean>;
+  nextBatchPaths: ComputedRef<string[]>;
+}
+
+const PREFETCH_SCREENS = 3;
+const VISIBLE_BUFFER = 2;
+
+/**
+ * 响应式瀑布流 composable 主体。把 C1/C2 纯函数接成响应式数据流，
+ * 输出 colWidth / layout / visibleRange / measuredCount / needPrefetch / nextBatchPaths 给 MasonryView 消费。
+ * 本 composable 不直接调 IPC（listImageDimensions）——预读由 MasonryView watch(needPrefetch) 触发。
+ */
+export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutput {
+  const colWidth = computed(() =>
+    computeColWidth(params.containerWidth.value, params.colCount.value, params.hGap.value),
+  );
+
+  // 每个 entry 的输入（已测量用真实宽高，未测量估算）
+  const inputs = computed<MasonryInput[]>(() => {
+    const cw = colWidth.value;
+    const measured = params.measuredMap.value;
+    // 动态平均宽高比（已测量的均值，无则默认）
+    let sumW = 0, sumH = 0;
+    for (const v of measured.values()) { sumW += v.width; sumH += v.height; }
+    const avgRatio = measured.size > 0 && sumH > 0 ? sumW / sumH : DEFAULT_ASPECT_RATIO;
+    return params.entries.value.map((e) => {
+      const m = measured.get(e.path);
+      const height = m ? m.height : estimateHeight(cw, avgRatio);
+      return { path: e.path, width: cw, height };
+    });
+  });
+
+  const layout = computed(() =>
+    layoutMasonry(inputs.value, params.colCount.value, params.hGap.value, params.vGap.value),
+  );
+
+  // 可见范围（基于 layout map 的 top/height 与 scrollTop/viewportHeight）
+  const visibleRange = computed(() => {
+    const top = params.scrollTop.value;
+    const bottom = top + params.containerHeight.value;
+    const map = layout.value.map;
+    let start = -1, end = 0;
+    const entries = params.entries.value;
+    for (let i = 0; i < entries.length; i++) {
+      const item = map.get(entries[i].path);
+      if (!item) continue;
+      const itemBottom = item.top + item.height;
+      if (itemBottom >= top && item.top <= bottom) {
+        if (start === -1) start = i;
+        end = i + 1;
+      }
+    }
+    if (start === -1) return { start: 0, end: 0 };
+    start = Math.max(0, start - VISIBLE_BUFFER);
+    end = Math.min(entries.length, end + VISIBLE_BUFFER);
+    return { start, end };
+  });
+
+  const measuredCount = computed(() => params.measuredMap.value.size);
+
+  // 预读触发：visibleRange.end 接近已测量边界
+  const needPrefetch = computed(() => {
+    const entries = params.entries.value;
+    if (entries.length === 0) return false;
+    const cw = colWidth.value;
+    const estItemH = cw / DEFAULT_ASPECT_RATIO;
+    const oneScreen = Math.max(1, Math.ceil(params.colCount.value * (params.containerHeight.value / estItemH)));
+    return visibleRange.value.end + oneScreen > measuredCount.value;
+  });
+
+  const nextBatchPaths = computed(() => {
+    if (!needPrefetch.value) return [];
+    const batchSize = PREFETCH_SCREENS * Math.max(1, params.colCount.value) * 10;
+    const start = measuredCount.value;
+    return params.entries.value
+      .slice(start, start + batchSize)
+      .map((e) => e.path);
+  });
+
+  return { colWidth, layout, visibleRange, measuredCount, needPrefetch, nextBatchPaths };
 }
