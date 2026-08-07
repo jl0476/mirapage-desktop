@@ -9,11 +9,13 @@
 //! - extension_of / is_image / is_archive / mime_from_name / supported_extensions
 //! - segments / normalize / join / parent / crumbs + PathUtils 命名空间
 
+pub mod image_header;
 pub mod mime;
 pub mod natural_sort;
 pub mod path;
 pub mod spread_planner;
 
+pub use image_header::{image_dimensions, ImageDimensions};
 pub use mime::{is_archive, is_image, mime_from_name, supported_extensions};
 pub use natural_sort::{natural_compare, natural_sort};
 pub use path::{PathUtils, join, normalize, parent, segments};

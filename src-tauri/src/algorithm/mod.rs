@@ -7,11 +7,13 @@
 //! - `DESIGN.md` §13 Domain 算法清单（待移植）
 //! - `DESIGN.md` §13.3 关键重写注意事项
 
+pub mod image_header;
 pub mod mime;
 pub mod natural_sort;
 pub mod path;
 pub mod spread_planner;
 
+pub use image_header::{image_dimensions, ImageDimensions};
 pub use mime::{is_archive, is_image, mime_from_name, supported_extensions};
 pub use natural_sort::{natural_compare, natural_sort};
 pub use path::{PathUtils, join, normalize, parent, segments};
