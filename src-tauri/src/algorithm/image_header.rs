@@ -55,14 +55,54 @@ fn parse_jpeg_impl(bytes: &[u8]) -> Option<ImageDimensions> {
     }
     None
 }
-fn parse_png(_bytes: &[u8]) -> Option<ImageDimensions> {
-    None
+/// PNG: 8 字节签名后第一个 chunk 是 IHDR，width/height 各 4 字节大端在 offset 16/20。
+fn parse_png(bytes: &[u8]) -> Option<ImageDimensions> {
+    const SIG: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    if bytes.len() < 24 || bytes[..8] != SIG {
+        return None;
+    }
+    // IHDR 在 offset 12（4 length + 4 type），width 在 16，height 在 20
+    if &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(ImageDimensions { width, height })
 }
-fn parse_gif(_bytes: &[u8]) -> Option<ImageDimensions> {
-    None
+
+/// GIF: "GIF87a"/"GIF89a" 后 width/height 各 2 字节小端。
+fn parse_gif(bytes: &[u8]) -> Option<ImageDimensions> {
+    if bytes.len() < 10 {
+        return None;
+    }
+    let sig = &bytes[..6];
+    if sig != b"GIF87a" && sig != b"GIF89a" {
+        return None;
+    }
+    let width = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
+    let height = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(ImageDimensions { width, height })
 }
-fn parse_bmp(_bytes: &[u8]) -> Option<ImageDimensions> {
-    None
+
+/// BMP: "BM" 后 DIB header 在 offset 14，BITMAPINFOHEADER 的 width/height 在 offset 18/22（4 字节小端）。
+fn parse_bmp(bytes: &[u8]) -> Option<ImageDimensions> {
+    if bytes.len() < 26 || &bytes[..2] != b"BM" {
+        return None;
+    }
+    let width = u32::from_le_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]);
+    // height 可能负（top-down 位图），取绝对值
+    let h_raw = i32::from_le_bytes([bytes[22], bytes[23], bytes[24], bytes[25]]);
+    let height = h_raw.unsigned_abs();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some(ImageDimensions { width, height })
 }
 
 #[cfg(test)]
@@ -108,5 +148,72 @@ mod tests {
         let mut b = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
         b.extend_from_slice(b"JFIF\x00\x01\x02\x00\x60\x00\x60\x00\x00");
         assert_eq!(parse_jpeg(&b), None);
+    }
+
+    fn make_png(w: u32, h: u32) -> Vec<u8> {
+        let mut b = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]; // PNG signature
+        // IHDR chunk
+        b.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D]); // length 13
+        b.extend_from_slice(b"IHDR");
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&h.to_be_bytes());
+        b.extend_from_slice(&[0x08, 0x06, 0x00, 0x00, 0x00]); // bit depth, color type, ...
+        b
+    }
+
+    #[test]
+    fn parse_png_valid() {
+        let dim = parse_png(&make_png(1920, 1080)).unwrap();
+        assert_eq!(dim.width, 1920);
+        assert_eq!(dim.height, 1080);
+    }
+
+    #[test]
+    fn parse_png_not_png() {
+        assert_eq!(parse_png(&[0x00; 16]), None);
+    }
+
+    fn make_gif(w: u16, h: u16) -> Vec<u8> {
+        let mut b = b"GIF89a".to_vec();
+        b.extend_from_slice(&w.to_le_bytes()); // little-endian
+        b.extend_from_slice(&h.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn parse_gif_valid() {
+        let dim = parse_gif(&make_gif(200, 150)).unwrap();
+        assert_eq!(dim.width, 200);
+        assert_eq!(dim.height, 150);
+    }
+
+    #[test]
+    fn parse_gif_not_gif() {
+        assert_eq!(parse_gif(b"NOTGIF" as &[u8]), None);
+    }
+
+    fn make_bmp(w: u32, h: u32) -> Vec<u8> {
+        let mut b = vec![0x42, 0x4D]; // "BM"
+        b.extend_from_slice(&[0u8; 12]); // file size + reserved + offset (占位)
+        b.extend_from_slice(&40u32.to_le_bytes()); // DIB header size
+        b.extend_from_slice(&w.to_le_bytes());  // width
+        b.extend_from_slice(&h.to_le_bytes());  // height
+        b
+    }
+
+    #[test]
+    fn parse_bmp_valid() {
+        let dim = parse_bmp(&make_bmp(640, 480)).unwrap();
+        assert_eq!(dim.width, 640);
+        assert_eq!(dim.height, 480);
+    }
+
+    #[test]
+    fn image_dimensions_dispatch() {
+        assert!(image_dimensions(&make_jpeg(10, 20)).is_some());
+        assert!(image_dimensions(&make_png(10, 20)).is_some());
+        assert!(image_dimensions(&make_gif(10, 20)).is_some());
+        assert!(image_dimensions(&make_bmp(10, 20)).is_some());
+        assert_eq!(image_dimensions(&[0x00; 32]), None);
     }
 }
