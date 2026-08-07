@@ -75,3 +75,4 @@ tauri-build-portable.bat
 # 诊断遗留 diff (git diff 输出、问题排查归档, 不入仓)
 backend.diff
 full.diff
+.superpowers/
