@@ -7,10 +7,16 @@ use crate::algorithm::image_header::image_dimensions;
 use crate::source::descriptor::SourceDescriptor;
 use crate::source::factory::MediaSourceFactory;
 use crate::source::trait_def::ByteRange;
+use std::sync::Arc;
 use tauri::State;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 /// 读 header 的字节数。JPEG SOF0 可能藏在 APPn 后，256 字节够大部分情况。
 const HEADER_READ_LEN: u64 = 256;
+
+/// 并发上限。Local SSD 下再高也没意义；远程挂载下避免打满 SMB 连接。
+const MAX_CONCURRENT: usize = 16;
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,21 +34,33 @@ pub async fn list_image_dimensions(
     paths: Vec<String>,
 ) -> Result<Vec<ImageDim>, String> {
     let source = factory.resolve(&descriptor);
-    let mut out = Vec::with_capacity(paths.len());
-    for path in &paths {
-        let bytes = match source
-            .read_file(&descriptor, path, Some(ByteRange::new(0, HEADER_READ_LEN)))
-            .await
-        {
-            Ok(b) => b,
-            Err(_) => continue, // 单张失败跳过（小图 EOF / 权限等），不阻塞整批
-        };
-        if let Some(dim) = image_dimensions(&bytes) {
-            out.push(ImageDim {
-                path: path.clone(),
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    let mut tasks: JoinSet<Option<ImageDim>> = JoinSet::new();
+
+    for path in paths {
+        let source = source.clone();
+        let descriptor = descriptor.clone();
+        let permit = semaphore.clone();
+        tasks.spawn(async move {
+            // 拿不到 permit 不读（Semaphore drop 时所有 permit 释放）
+            let _permit = permit.acquire_owned().await.ok()?;
+            let bytes = source
+                .read_file(&descriptor, &path, Some(ByteRange::new(0, HEADER_READ_LEN)))
+                .await
+                .ok()?;
+            let dim = image_dimensions(&bytes)?;
+            Some(ImageDim {
+                path,
                 width: dim.width,
                 height: dim.height,
-            });
+            })
+        });
+    }
+
+    let mut out = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(Some(dim)) = res {
+            out.push(dim);
         }
     }
     Ok(out)
