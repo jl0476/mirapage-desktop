@@ -1,10 +1,30 @@
 /**
- * shortcuts store — 模块 #1
- * 持久化"根目录快捷方式"列表 + 当前 active 追踪
+ * shortcuts store (v0.1.0-module3.0.5: 跨源 + 子目录)
+ * 持久化"目录快捷方式"列表 + 当前 active 追踪
+ *
+ * 对齐 Android ShortcutEntity:
+ *   - 存 sourceDescriptorJson (跨源) + relPath (子目录)
+ *   - iconHint 本地派生 (与 Rust 端 icon_hint_for 语义一致)
+ *
+ * 有意差异 (vs Android):
+ *   - 保留 activeId 概念 — Android 的 shortcut 是无状态跳转目标,
+ *     桌面端 active = 当前文件浏览器根, 承担 Android lastFbLocation 部分职责.
+ *   - 保留独立 /shortcuts 页面 — Android 是 sheet 嵌入式, 桌面大屏用独立页面.
  */
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
-import { listShortcuts, createShortcut, deleteShortcut, type ShortcutItem } from '@/lib/tauri';
+import {
+  listShortcuts,
+  createShortcut,
+  deleteShortcut,
+  type ShortcutItem,
+} from '@/lib/tauri';
+import type { SourceDescriptor } from '@/lib/sourceDescriptor';
+
+/** 按 descriptor 类型派生 iconHint (与 Rust 端 icon_hint_for 语义一致) */
+export function iconHintFor(desc: SourceDescriptor): string {
+  return desc.type;
+}
 
 export const useShortcutsStore = defineStore('shortcuts', () => {
   const items = ref<ShortcutItem[]>([]);
@@ -20,12 +40,25 @@ export const useShortcutsStore = defineStore('shortcuts', () => {
     }
   }
 
-  async function add(rootPath: string, label: string | null = null): Promise<number> {
-    const id = await createShortcut(rootPath, label);
-    // 后端 INSERT OR IGNORE：若 rootPath 已存在返回旧 id，本地 items 保留原条目（不重复）。
-    // 若新插入，构造新条目插入 items 头部（DB 按 created_at DESC 排序）。
+  async function add(
+    descriptor: SourceDescriptor,
+    relPath: string,
+    alias: string | null = null,
+  ): Promise<number> {
+    const sourceDescriptorJson = JSON.stringify(descriptor);
+    const iconHint = iconHintFor(descriptor);
+    const id = await createShortcut(sourceDescriptorJson, relPath, alias);
+    // 后端 INSERT OR IGNORE：若 (descriptor, relPath) 已存在返回旧 id，
+    // 本地 items 保留原条目（不重复）。若新插入，构造新条目插入 items 头部。
     if (!items.value.some((s) => s.id === id)) {
-      items.value.unshift({ id, rootPath, label, createdAt: Date.now() });
+      items.value.unshift({
+        id,
+        sourceDescriptorJson,
+        relPath,
+        alias,
+        iconHint,
+        createdAt: Date.now(),
+      });
     }
     return id;
   }

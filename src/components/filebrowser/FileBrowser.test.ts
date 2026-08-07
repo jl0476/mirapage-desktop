@@ -42,6 +42,21 @@ const mockedShortcuts = vi.mocked(listShortcuts);
 const mockedCreate = vi.mocked(createShortcut);
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
+// v0.1.0-module3.0.5: ShortcutItem mock helper (跨源 schema)
+function localJson(rootPath: string): string {
+  return JSON.stringify({ type: 'local', rootPath });
+}
+function mkShortcut(id: number, rootPath: string, alias: string | null, relPath = '') {
+  return {
+    id,
+    sourceDescriptorJson: localJson(rootPath),
+    relPath,
+    alias,
+    iconHint: 'local',
+    createdAt: id * 100,
+  };
+}
+
 async function mountFileBrowser() {
   setActivePinia(createPinia());
   const wrapper = mount(FileBrowser, {
@@ -154,8 +169,8 @@ describe('FileBrowser — dropdown 切换', () => {
 
   it('mount 时拉 shortcuts 并填入 dropdown (无 + N 项)', async () => {
     mockedShortcuts.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
-      { id: 2, rootPath: 'C:/b', label: 'B', createdAt: 200 },
+      mkShortcut(1, 'C:/a', 'A'),
+      mkShortcut(2, 'C:/b', 'B'),
     ]);
     const wrapper = await mountFileBrowser();
     const fb = useFileBrowserStore();
@@ -175,7 +190,7 @@ describe('FileBrowser — dropdown 切换', () => {
 
   it('选 dropdown option 切到对应 shortcut + 拉其根目录', async () => {
     mockedShortcuts.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
+      mkShortcut(1, 'C:/a', 'A'),
     ]);
     mockedList.mockResolvedValue([]);
     const wrapper = await mountFileBrowser();
@@ -195,7 +210,7 @@ describe('FileBrowser — dropdown 切换', () => {
 
   it('选 dropdown「无」(空 value) 仅取消激活, 不清 rootPath (#8)', async () => {
     mockedShortcuts.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
+      mkShortcut(1, 'C:/a', 'A'),
     ]);
     mockedList.mockResolvedValue([]);
     const wrapper = await mountFileBrowser();
@@ -223,7 +238,7 @@ describe('FileBrowser — dropdown 切换', () => {
 
   it('dropdown 切回已激活 shortcut → no-op (#8)', async () => {
     mockedShortcuts.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
+      mkShortcut(1, 'C:/a', 'A'),
     ]);
     mockedList.mockResolvedValue([]);
     const wrapper = await mountFileBrowser();
@@ -321,7 +336,7 @@ describe('FileBrowser — save dialog', () => {
     await wrapper.find('[data-test="btn-save-submit"]').trigger('click');
     await flushPromises();
 
-    expect(mockedCreate).toHaveBeenCalledWith('C:/comics', 'My Comics');
+    expect(mockedCreate).toHaveBeenCalledWith(localJson('C:/comics'), '', 'My Comics');
     expect(wrapper.find('[data-test="save-dialog"]').exists()).toBe(false);
   });
 
@@ -355,7 +370,31 @@ describe('FileBrowser — save dialog', () => {
     await wrapper.find('[data-test="btn-save-submit"]').trigger('click');
     await flushPromises();
 
-    expect(mockedCreate).toHaveBeenCalledWith('C:/comics', null);
+    expect(mockedCreate).toHaveBeenCalledWith(localJson('C:/comics'), '', null);
+  });
+
+  it('save dialog 子目录: 当前在子目录时 relPath 取 currentPath', async () => {
+    // v0.1.0-module3.0.5: 用户进子目录后点保存 → 存 (descriptor, currentPath) 而非根
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    // navigate 到子目录 chapter1
+    mockedList.mockResolvedValueOnce([
+      { name: 'page01.jpg', path: 'page01.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 1 },
+      { name: 'page02.jpg', path: 'page02.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 1 },
+    ]);
+    await fb.navigate('chapter1');
+    await flushPromises();
+
+    await wrapper.find('[data-test="btn-save"]').trigger('click');
+    await flushPromises();
+    await wrapper.find('[data-test="save-label-input"]').setValue('第一章');
+    await wrapper.find('[data-test="btn-save-submit"]').trigger('click');
+    await flushPromises();
+
+    // createShortcut 第 2 参数是 relPath = currentPath = 'chapter1'
+    expect(mockedCreate).toHaveBeenCalledWith(localJson('C:/comics'), 'chapter1', '第一章');
   });
 });
 

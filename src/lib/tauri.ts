@@ -302,21 +302,24 @@ export async function findNextVolume(
   });
 }
 
-// ─── Shortcuts (模块 #1) ───────────────────────────────────────────────
+// ─── Shortcuts (v0.1.0-module3.0.5: 跨源 + 子目录, Android ShortcutEntity 对齐) ──
 export interface ShortcutItem {
   id: number;
-  rootPath: string;
-  label: string | null;
+  sourceDescriptorJson: string;
+  relPath: string;
+  alias: string | null;
+  iconHint: string;
   createdAt: number;
 }
 export async function listShortcuts(): Promise<ShortcutItem[]> {
   return invoke<ShortcutItem[]>('list_shortcuts');
 }
 export async function createShortcut(
-  rootPath: string,
-  label: string | null,
+  sourceDescriptorJson: string,
+  relPath: string,
+  alias: string | null,
 ): Promise<number> {
-  return invoke<number>('create_shortcut', { rootPath, label });
+  return invoke<number>('create_shortcut', { sourceDescriptorJson, relPath, alias });
 }
 export async function deleteShortcut(id: number): Promise<void> {
   await invoke<void>('delete_shortcut', { id });

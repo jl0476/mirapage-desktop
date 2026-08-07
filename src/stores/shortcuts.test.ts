@@ -1,11 +1,12 @@
 /**
- * shortcuts store 单测 — 模块 #1
- * 覆盖 7 行为：refresh / add / remove / 移除当前 active 清空 activeId / setActive / active computed
+ * shortcuts store 单测 (v0.1.0-module3.0.5: 跨源 + 子目录)
+ * 覆盖：refresh / add (descriptor+relPath) / remove / 移除当前 active 清空 activeId / setActive / active computed
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
-import { useShortcutsStore } from './shortcuts';
+import { useShortcutsStore, iconHintFor } from './shortcuts';
 import { listShortcuts, createShortcut, deleteShortcut } from '@/lib/tauri';
+import type { SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
@@ -21,6 +22,24 @@ const mockedList = vi.mocked(listShortcuts);
 const mockedCreate = vi.mocked(createShortcut);
 const mockedDelete = vi.mocked(deleteShortcut);
 
+function localDesc(rootPath: string): SourceDescriptorLocal {
+  return { type: 'local', rootPath };
+}
+function localJson(rootPath: string): string {
+  return JSON.stringify(localDesc(rootPath));
+}
+/** 构造一条 ShortcutItem mock */
+function mkItem(id: number, rootPath: string, alias: string | null, relPath = '') {
+  return {
+    id,
+    sourceDescriptorJson: localJson(rootPath),
+    relPath,
+    alias,
+    iconHint: 'local',
+    createdAt: id * 100,
+  };
+}
+
 describe('shortcuts store', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -28,16 +47,13 @@ describe('shortcuts store', () => {
   });
 
   it('refresh() 拉取并填充 items', async () => {
-    mockedList.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
-      { id: 2, rootPath: 'C:/b', label: null, createdAt: 200 },
-    ]);
+    mockedList.mockResolvedValue([mkItem(1, 'C:/a', 'A'), mkItem(2, 'C:/b', null)]);
     const store = useShortcutsStore();
     await store.refresh();
 
     expect(store.items).toHaveLength(2);
     expect(store.items[0].id).toBe(1);
-    expect(store.items[1].label).toBeNull();
+    expect(store.items[1].alias).toBeNull();
     expect(store.loading).toBe(false);
   });
 
@@ -59,11 +75,11 @@ describe('shortcuts store', () => {
     mockedList.mockResolvedValue([]); // ensure no refresh fallback
     const store = useShortcutsStore();
     const before = Date.now();
-    const id = await store.add('C:/new', 'New');
+    const id = await store.add(localDesc('C:/new'), '', 'New');
     const after = Date.now();
 
     expect(id).toBe(42);
-    expect(mockedCreate).toHaveBeenCalledWith('C:/new', 'New');
+    expect(mockedCreate).toHaveBeenCalledWith(localJson('C:/new'), '', 'New');
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     // 不调 refresh（性能优化）
     expect(mockedList).not.toHaveBeenCalled();
@@ -71,42 +87,50 @@ describe('shortcuts store', () => {
     expect(store.items).toHaveLength(1);
     expect(store.items[0]).toMatchObject({
       id: 42,
-      rootPath: 'C:/new',
-      label: 'New',
+      sourceDescriptorJson: localJson('C:/new'),
+      relPath: '',
+      alias: 'New',
+      iconHint: 'local',
     });
     expect(store.items[0].createdAt).toBeGreaterThanOrEqual(before);
     expect(store.items[0].createdAt).toBeLessThanOrEqual(after);
   });
 
-  it('add() label 可选 (null)', async () => {
-    mockedCreate.mockResolvedValue(1);
+  it('add() 子目录: relPath 非空时存入', async () => {
+    mockedCreate.mockResolvedValue(7);
     const store = useShortcutsStore();
-    await store.add('C:/new', null);
+    await store.add(localDesc('D:/manga'), 'jujutsu/vol05', '咒术 Vol.05');
 
-    expect(mockedCreate).toHaveBeenCalledWith('C:/new', null);
-    expect(store.items[0].label).toBeNull();
+    expect(mockedCreate).toHaveBeenCalledWith(localJson('D:/manga'), 'jujutsu/vol05', '咒术 Vol.05');
+    expect(store.items[0].relPath).toBe('jujutsu/vol05');
   });
 
-  it('add() 重复 root_path 时 INSERT OR IGNORE：items 保持首次条目（不重复）', async () => {
+  it('add() alias 可选 (null)', async () => {
+    mockedCreate.mockResolvedValue(1);
+    const store = useShortcutsStore();
+    await store.add(localDesc('C:/new'), '', null);
+
+    expect(mockedCreate).toHaveBeenCalledWith(localJson('C:/new'), '', null);
+    expect(store.items[0].alias).toBeNull();
+  });
+
+  it('add() 重复 (descriptor, relPath) 时 INSERT OR IGNORE：items 保持首次条目（不重复）', async () => {
     mockedCreate.mockResolvedValue(7);
     const store = useShortcutsStore();
     // 首次添加
-    await store.add('C:/dup', '标签 A');
+    await store.add(localDesc('C:/dup'), '', '标签 A');
     expect(store.items).toHaveLength(1);
-    // 重复 root_path：后端返回已存在 id
+    // 重复：后端返回已存在 id
     mockedCreate.mockResolvedValueOnce(7);
-    await store.add('C:/dup', '标签 B');
+    await store.add(localDesc('C:/dup'), '', '标签 B');
     // items 不应增加（新条目不替换 — store 不持有上次条目信息）
     expect(store.items).toHaveLength(1);
-    expect(store.items[0].label).toBe('标签 A');
+    expect(store.items[0].alias).toBe('标签 A');
   });
 
   it('remove() 调 deleteShortcut；从 items 移除该 id；不调 refresh', async () => {
     mockedDelete.mockResolvedValue(undefined);
-    mockedList.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: null, createdAt: 100 },
-      { id: 2, rootPath: 'C:/b', label: null, createdAt: 200 },
-    ]);
+    mockedList.mockResolvedValue([mkItem(1, 'C:/a', null), mkItem(2, 'C:/b', null)]);
     const store = useShortcutsStore();
     await store.refresh();
     mockedList.mockClear();
@@ -121,9 +145,7 @@ describe('shortcuts store', () => {
 
   it('remove() 当前 active 时清空 activeId', async () => {
     mockedDelete.mockResolvedValue(undefined);
-    mockedList.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: null, createdAt: 100 },
-    ]);
+    mockedList.mockResolvedValue([mkItem(1, 'C:/a', null)]);
     const store = useShortcutsStore();
     await store.refresh();
     store.setActive(1);
@@ -141,14 +163,21 @@ describe('shortcuts store', () => {
   });
 
   it('active computed 返回 items 中 activeId 对应项', async () => {
-    mockedList.mockResolvedValue([
-      { id: 1, rootPath: 'C:/a', label: 'A', createdAt: 100 },
-      { id: 2, rootPath: 'C:/b', label: 'B', createdAt: 200 },
-    ]);
+    mockedList.mockResolvedValue([mkItem(1, 'C:/a', 'A'), mkItem(2, 'C:/b', 'B')]);
     const store = useShortcutsStore();
     await store.refresh();
     store.setActive(2);
     expect(store.active?.id).toBe(2);
-    expect(store.active?.rootPath).toBe('C:/b');
+    expect(store.active?.sourceDescriptorJson).toBe(localJson('C:/b'));
+  });
+});
+
+describe('iconHintFor', () => {
+  it('local descriptor → "local"', () => {
+    expect(iconHintFor(localDesc('C:/x'))).toBe('local');
+  });
+  it('archive descriptor → "archive"', () => {
+    const desc: SourceDescriptor = { type: 'archive', archivePath: 'C:/x.cbz', format: 'cbz' };
+    expect(iconHintFor(desc)).toBe('archive');
   });
 });

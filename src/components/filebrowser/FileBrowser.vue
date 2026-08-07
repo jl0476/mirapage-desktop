@@ -33,7 +33,7 @@ import ShortcutDropdown from './ShortcutDropdown.vue';
 import SearchInput from './SearchInput.vue';
 import StatusBar from './StatusBar.vue';
 import EntryDetailPanel from './EntryDetailPanel.vue';
-import type { MediaEntry } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
 const fb = useFileBrowserStore();
@@ -193,15 +193,29 @@ watch(
   },
 );
 
-// shortcut 切换 → 设 fb.rootPath
+// v0.1.0-module3.0.5: shortcut 切换 → 解码 descriptor + 两步打开 (setRoot + navigate relPath)
+// 复用 History.vue openEntry 模式. Phase 1 只 Local; SMB/WebDAV 实装后扩展 TODO.
 watch(
   () => shortcuts.activeId,
   async (id) => {
     if (id === null) return;
     const sc = shortcuts.items.find((s) => s.id === id);
-    if (sc && sc.rootPath !== fb.rootPath) {
-      await fb.setRoot(sc.rootPath);
+    if (!sc) return;
+    let desc: SourceDescriptor;
+    try {
+      desc = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;
+    } catch {
+      return;
     }
+    if (desc.type === 'local') {
+      if (desc.rootPath !== fb.rootPath) {
+        await fb.setRoot(desc.rootPath);
+      }
+      if (sc.relPath) {
+        await fb.navigate(sc.relPath);
+      }
+    }
+    // TODO Phase 7-8: SMB/WebDAV descriptor 打开
   },
 );
 
@@ -241,7 +255,9 @@ function onSaveCancel() {
 async function onSaveSubmit() {
   if (!fb.rootPath) return;
   const label = saveLabel.value.trim() || null;
-  await shortcuts.add(fb.rootPath, label);
+  // v0.1.0-module3.0.5: 存当前所在目录 (descriptor + currentPath 作 relPath), 支持子目录快捷方式
+  const descriptor: SourceDescriptorLocal = { type: 'local', rootPath: fb.rootPath };
+  await shortcuts.add(descriptor, fb.currentPath, label);
   showSaveDialog.value = false;
   saveLabel.value = '';
 }
@@ -317,7 +333,8 @@ const ICON_EYE_OFF = 'M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 
 const ICON_UP = 'M5 12l7-7 7 7M12 19V5';
 const ICON_REFRESH = 'M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5';
 const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z';
-const ICON_STAR = 'M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z';
+// v0.1.0-module3.0.5: PushPin 替代 STAR — 对齐 PV 教训 (Star 被多次误解为书签, 见 specs/2026-07-29-like-feature-design.md:301)
+const ICON_PIN = 'M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 z';
 const ICON_FOLDER_OPEN = 'M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2';
 const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01';
 // v0.1.0-module3.0.3-hotfix11: 加入书库 + 下载全部 移到 toolbar (一处可见, 跨视图复用).
@@ -452,7 +469,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round" aria-hidden="true">
-            <path :d="ICON_STAR" />
+            <path :d="ICON_PIN" />
           </svg>
           {{ t('fileBrowser.saveAsShortcut') }}
         </button>
@@ -626,7 +643,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
                  stroke="#6366f1" stroke-width="2" stroke-linecap="round"
                  stroke-linejoin="round" aria-hidden="true">
-              <path :d="ICON_STAR" />
+              <path :d="ICON_PIN" />
             </svg>
             {{ t('fileBrowser.saveAsShortcut') }}
           </h3>

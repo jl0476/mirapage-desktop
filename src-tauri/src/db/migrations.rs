@@ -4,6 +4,8 @@
 
 use rusqlite::Connection;
 
+use crate::source::descriptor::SourceDescriptor;
+
 /// 全部 migrations 按版本号顺序执行
 pub fn run(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
@@ -64,6 +66,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         apply_006_history_book_id(conn)?;
         conn.execute(
             "INSERT INTO _migrations (version, applied_at) VALUES (6, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
+    if current < 7 {
+        apply_007_shortcuts_cross_source(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (7, ?1)",
             [chrono_now()],
         )?;
     }
@@ -307,6 +317,69 @@ fn apply_006_history_book_id(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Migration 007 — shortcut 表跨源 + 子目录对齐 (Android ShortcutEntity 对齐)
+///
+/// 旧 schema (migration 002): `(id, root_path TEXT UNIQUE, label, created_at)` —— 只存裸路径字符串.
+/// 新 schema: `(id, source_descriptor_json, rel_path, alias, icon_hint, created_at)`
+///   UNIQUE(source_descriptor_json, rel_path) —— 跨源 (Local/Smb/WebDav/Archive) + 任意子目录.
+///
+/// SQLite 不支持直接改 UNIQUE 约束 → 用「重建表」标准模式:
+///   1. 建新表 shortcut_new (新 schema)
+///   2. 逐行迁移旧数据: root_path → SourceDescriptor::Local JSON + rel_path=''
+///      (用 Rust 行级迁移而非 SQL 字符串拼接: Windows 路径含反斜杠会被 JSON 误当转义前缀)
+///   3. DROP TABLE shortcut + RENAME shortcut_new → shortcut
+fn apply_007_shortcuts_cross_source(conn: &Connection) -> anyhow::Result<()> {
+    // 1. 建新表
+    conn.execute_batch(
+        r#"
+        CREATE TABLE shortcut_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          source_descriptor_json TEXT NOT NULL,
+          rel_path TEXT NOT NULL DEFAULT '',
+          alias TEXT,
+          icon_hint TEXT NOT NULL DEFAULT 'local',
+          created_at INTEGER NOT NULL,
+          UNIQUE(source_descriptor_json, rel_path)
+        );
+        "#,
+    )?;
+
+    // 2. 逐行迁移: root_path → SourceDescriptor::Local { root_path } JSON
+    {
+        let mut stmt = conn.prepare("SELECT id, root_path, label, created_at FROM shortcut")?;
+        let rows: Vec<(i64, String, Option<String>, i64)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut insert = conn.prepare(
+            "INSERT INTO shortcut_new (id, source_descriptor_json, rel_path, alias, icon_hint, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (id, root_path, label, created_at) in rows {
+            let descriptor = SourceDescriptor::Local { root_path };
+            let json = serde_json::to_string(&descriptor)
+                .map_err(|e| anyhow::anyhow!("serialize shortcut descriptor: {e}"))?;
+            insert.execute(rusqlite::params![id, json, "", label, "local", created_at])?;
+        }
+    }
+
+    // 3. 替换旧表
+    conn.execute_batch(
+        r#"
+        DROP TABLE shortcut;
+        ALTER TABLE shortcut_new RENAME TO shortcut;
+        "#,
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +604,119 @@ mod tests {
         assert_eq!(ap, "");
         assert_eq!(pc, 0);
         assert_eq!(aa, 0);
+    }
+
+    #[test]
+    fn migration_007_migrates_shortcut_to_cross_source_schema() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_001_init(&conn).unwrap();
+        apply_002_shortcuts(&conn).unwrap();
+
+        // 插入旧 schema 数据 (正斜杠路径，验证迁移正确)
+        conn.execute(
+            "INSERT INTO shortcut (root_path, label, created_at) VALUES ('D:/manga/x', 'A', 100)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO shortcut (root_path, label, created_at) VALUES ('C:/comics', NULL, 200)",
+            [],
+        )
+        .unwrap();
+
+        apply_007_shortcuts_cross_source(&conn).unwrap();
+
+        // 新 schema: 列存在
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(shortcut)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for expected in ["id", "source_descriptor_json", "rel_path", "alias", "icon_hint", "created_at"] {
+            assert!(cols.contains(&expected.to_string()), "shortcut 缺列 {expected}");
+        }
+        assert!(!cols.contains(&"root_path".to_string()), "旧 root_path 列应已消失");
+
+        // 旧行迁移: root_path → descriptor JSON + rel_path='' + icon_hint='local'
+        let (json1, rel1, alias1, hint1): (String, String, Option<String>, String) = conn
+            .query_row(
+                "SELECT source_descriptor_json, rel_path, alias, icon_hint FROM shortcut WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(rel1, "", "rel_path 应为空");
+        assert_eq!(hint1, "local");
+        assert_eq!(alias1, Some("A".to_string()));
+        assert_eq!(
+            json1, r#"{"type":"local","rootPath":"D:/manga/x"}"#,
+            "root_path 应序列化为 Local descriptor JSON",
+        );
+
+        // 第二行 (label=null) 也正确迁移
+        let alias2: Option<String> = conn
+            .query_row("SELECT alias FROM shortcut WHERE id = 2", [], |row| row.get(0))
+            .unwrap();
+        assert!(alias2.is_none());
+    }
+
+    #[test]
+    fn migration_007_migrates_windows_backslash_path() {
+        // Windows 路径含反斜杠: 用绑定参数插入 (避免 SQL 字面量转义混淆),
+        // 验证 serde_json 序列化不畸形
+        let conn = Connection::open_in_memory().unwrap();
+        apply_001_init(&conn).unwrap();
+        apply_002_shortcuts(&conn).unwrap();
+
+        let raw = "D:\\manga\\x"; // Rust 字面量 → 实际字符串 D:\manga\x
+        conn.execute(
+            "INSERT INTO shortcut (root_path, label, created_at) VALUES (?1, 'A', 100)",
+            rusqlite::params![raw],
+        )
+        .unwrap();
+
+        apply_007_shortcuts_cross_source(&conn).unwrap();
+
+        let json: String = conn
+            .query_row(
+                "SELECT source_descriptor_json FROM shortcut WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // 能正确反序列化回 Local descriptor，rootPath 字节级一致
+        let d: SourceDescriptor = serde_json::from_str(&json).unwrap();
+        match d {
+            SourceDescriptor::Local { root_path } => assert_eq!(root_path, raw),
+            _ => panic!("应是 Local variant"),
+        }
+    }
+
+    #[test]
+    fn migration_007_new_unique_constraint_is_descriptor_plus_relpath() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap(); // 完整迁移到 007
+
+        // 同一 descriptor + 同一 rel_path 应违反 UNIQUE
+        let json = r#"{"type":"local","rootPath":"C:/a"}"#;
+        conn.execute(
+            "INSERT INTO shortcut (source_descriptor_json, rel_path, alias, icon_hint, created_at) VALUES (?1, '', 'A', 'local', 100)",
+            rusqlite::params![json],
+        )
+        .unwrap();
+        let r = conn.execute(
+            "INSERT INTO shortcut (source_descriptor_json, rel_path, alias, icon_hint, created_at) VALUES (?1, '', 'B', 'local', 200)",
+            rusqlite::params![json],
+        );
+        assert!(r.is_err(), "同 descriptor+rel_path 应违反 UNIQUE");
+
+        // 同一 descriptor + 不同 rel_path 应成功 (子目录场景)
+        conn.execute(
+            "INSERT INTO shortcut (source_descriptor_json, rel_path, alias, icon_hint, created_at) VALUES (?1, 'sub', 'B', 'local', 200)",
+            rusqlite::params![json],
+        )
+        .unwrap();
     }
 }

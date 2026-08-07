@@ -12,6 +12,8 @@ import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
+import type { ShortcutItem } from '@/lib/tauri';
+import type { SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
 const router = useRouter();
@@ -22,19 +24,43 @@ onMounted(async () => {
   await shortcuts.refresh();
 });
 
+/** 解码 shortcut 的 sourceDescriptorJson (失败 fallback 一个空 Local) */
+function decodeDescriptor(sc: ShortcutItem): SourceDescriptorLocal | null {
+  try {
+    const d = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;
+    if (d.type === 'local') return d;
+    return null; // Phase 7-8 前 SMB/WebDAV 不可打开
+  } catch {
+    return null;
+  }
+}
+
+/** shortcut 完整路径 (rootPath + relPath 拼接) */
+function fullPath(sc: ShortcutItem): string {
+  const d = decodeDescriptor(sc);
+  if (!d) return sc.sourceDescriptorJson;
+  return d.rootPath + (sc.relPath ? '/' + sc.relPath : '');
+}
+
 function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
-function displayLabel(item: { label: string | null; rootPath: string }): string {
-  return item.label || basename(item.rootPath);
+function displayLabel(sc: ShortcutItem): string {
+  return sc.alias || basename(fullPath(sc));
 }
 
 async function onOpen(id: number) {
   const sc = shortcuts.items.find((s) => s.id === id);
   if (!sc) return;
+  const d = decodeDescriptor(sc);
+  if (!d) return; // 非 Local 暂不支持
   shortcuts.setActive(id);
-  await fb.setRoot(sc.rootPath);
+  // v0.1.0-module3.0.5: 两步打开 (复用 History.vue openEntry 模式), 支持子目录 relPath
+  await fb.setRoot(d.rootPath);
+  if (sc.relPath) {
+    await fb.navigate(sc.relPath);
+  }
   await router.push('/');
 }
 
@@ -129,8 +155,8 @@ const ICON_FOLDER_OPEN_BIG = 'M6 14l1.5-7.5A2 2 0 0 1 9.45 4.8h5.1a2 2 0 0 1 1.9
           <span class="font-semibold text-sm text-text-primary truncate">
             {{ displayLabel(item) }}
           </span>
-          <span class="font-mono text-xs text-text-tertiary truncate" :title="item.rootPath">
-            {{ item.rootPath }}
+          <span class="font-mono text-xs text-text-tertiary truncate" :title="fullPath(item)">
+            {{ fullPath(item) }}
           </span>
         </div>
         <button
