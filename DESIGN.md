@@ -57,6 +57,7 @@
 - **主题配色**（4 套色板 `color_theme`）：已存值，未接 Tailwind（v0.1.0-module3.0-settings 仅落地 `themeMode`）
 - 缩略图网格
 - 远程图加载进度条
+- 缩略图网格（瀑布流 masonry 视图 v0.1.0-module3.0.6 已覆盖"图片目录可视化浏览"需求；真正的预生成缩略图缓存网格仍未做）
 - i18n：本期仅中 / 英两种语言，其他语言为未来工作
 
 > ✅ **已落地**（v0.1.0-module3.0-settings）：
@@ -97,6 +98,16 @@
 >   - hover 200 次 avg 0.002ms / longtask 0
 >   - 滚到底 clamp 正确
 >   - msedgewebview2 总内存预期 1.5 GB → 300-500 MB
+
+> ✅ **已落地**（v0.1.0-module3.0.6-masonry，spec：`docs/superpowers/specs/2026-08-07-masonry-layout-design.md`，plan：`C:\Users\jl0476\.claude\plans\lovely-wandering-swan.md`，E2E：`docs/superpowers/reports/2026-08-07-masonry-e2e.md`）：
+> - **瀑布流视图（masonry）**——图片按真实宽高比拉伸 + 贪心放最短列（借鉴 v3-waterfall `useLayout` 算法，源码存 `docs/reference/v3-waterfall-master/` 仅供借鉴不引入依赖）。**删 list/grid 视图**，ViewMode 收窄为 `details | masonry`，工具栏图标按钮直接切换（详情在前 + 瀑布流，非下拉）。无图目录 masonry 按钮 disabled + 自动回落 details。
+> - **变高虚拟滚动**：扩展 `useVirtualList` 支持变高多列——`useMasonryLayout` composable（贪心放最短列 + 渐进式 totalHeight + visibleRange 基于 layout map top/height）。未测量 item 用估算宽高比（3:4）占位，随测量收敛。
+> - **Rust 端读图片 header**：`algorithm/image_header.rs` 纯函数手写 JPEG/PNG/GIF/BMP 字节解析（无 image crate，纯 std，双实现 TS `lib/imageHeader.ts`）；`list_image_dimensions` command（tokio JoinSet + Semaphore 16 并发批量读 256B header）。**这是对 §6 "Rust 不调 IPC 拿 metadata" 的合理边界外推**——图片宽高是布局骨架必需数据，非详情面板装饰字段。
+> - **预读策略**：不全量拉尺寸，借鉴图片懒加载——首屏可见 + 3 屏预读（动态），不滚动不查。适配本地挂载远程存储（SMB/NFS 网关）的慢速 I/O 冷路径。
+> - **布局参数双层**：工具栏 ⚙ popup（仅 masonry 出现）per-folder override（`directory_masonry` 表，三列可 NULL + COALESCE 部分更新）+ Settings 页全局默认。列数 2-8 默认 4，列间距/行间距 0-24px 默认 8。复用 `directory_sort` 的 locationKey 模式。
+> - **滚动锚定**：`applyMeasuredBatch`（上方 item 尺寸到达补偿 scrollTop）已实现于 C2；E1 MasonryView 简化为 visibleRange 重算（实测无跳动，大目录/慢速 I/O 若发现跳动再接入像素级补偿）。
+> - **E2E 实测**（`D:\Wallpaper\normal` 224 entry）：虚拟化 224 → 10-28 DOM；列数 4→6 实时重排（width 254→169px）；⚙ popup 3 slider；滚动预读正常；双击图片进 reader 兼容。单测 539→582。
+> - **待打磨**：像素级 scrollTop 锚定补偿接入、resolve in-flight cancel、hasImages 搜索态副作用。
 
 ---
 
@@ -1245,6 +1256,7 @@ maybeContinue(force, dir):
 | `TouchScheme.touchRegion` | `domain/reader/TouchScheme.kt:83` | `(x, y, w, h) -> TouchRegion` | 3×3 分区；`width/height` `coerceAtLeast(1.0)` 防除零 |
 | `PathUtils.{segments, normalize, join, parent, crumbs}` | `core/util/PathUtils.kt:12` | 字符串处理函数 | 反斜杠→`/`、去空段、面包屑累积 |
 | `MimeUtils.{isImage, isArchive, mimeFromName, supportedExtensions}` | `core/util/MimeUtils.kt:7` | 扩展名映射函数 | jpg/jpeg/png/gif/webp/bmp/heic/heif；压缩包 cbz/cbr/zip/rar/7z |
+| `image_header::image_dimensions` | 桌面端原创（无 Android 对应） | `(bytes: &[u8]) -> Option<(u32,u32)>` | 手写 JPEG SOF0 / PNG IHDR / GIF LSD / BMP DIB header 字节解析（纯 std 无 image crate）；TS 双实现 `lib/imageHeader.ts`。仅 masonry viewMode 经 `list_image_dimensions` command 调用 |
 
 ### 13.2 IO 边界函数（需要 async + DI 重组）
 

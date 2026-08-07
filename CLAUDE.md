@@ -294,7 +294,7 @@ function onMouseDown(e: MouseEvent) {
 **2.1 namespace 命名（按模块 / 上下文）**
 
 - `nav.*` — SideNav 标题（`fileBrowser / shortcuts / library / bookmarks / likes / history / accounts / settings / search`）
-- `fileBrowser.*` — 文件浏览器 (`title / pickRoot / up / refresh / empty / sortBy / sortField.{name,date,size} / sortAscending / sortDescending / search / saveAsShortcut / shortcutLabel / shortcutSaved / noShortcut / goShortcuts / status.{finished,reading} / contextMenu.resetProgress / hideFinished / showFinished / viewMode / viewList / viewGrid / statusBar.{items,selected,path}`)
+- `fileBrowser.*` — 文件浏览器 (`title / pickRoot / up / refresh / empty / sortBy / sortField.{name,date,size} / sortAscending / sortDescending / search / saveAsShortcut / shortcutLabel / shortcutSaved / noShortcut / goShortcuts / status.{finished,reading} / contextMenu.resetProgress / hideFinished / showFinished / viewMode / viewMasonry / viewDetails / masonrySettings / noImagesForMasonry / statusBar.{items,selected,path}`)
 - `properties.*` — 详情面板 (`title / labelName / labelLocation / labelSize / labelType / labelExtension / labelModified / labelCreated / labelAccessed / noFileSelected / typeDirectory / typeFile / typeArchive / typeImage`)
 - `search.*` — 搜索视图 (`placeholder / noResults / modeFuzzy / modeSubstring / resultsCount`)
 - `common.*` — 通用 (`loading / cancel / save / etc`)
@@ -382,6 +382,7 @@ function onMouseDown(e: MouseEvent) {
 - ❌ hardcode 颜色 / 字体大小（必须用 `@theme` token 或 Tailwind utility）。
 - ❌ raw Tailwind `border-white/*` / `bg-white/*`（light 模式不可见，必须用 `xp-bd` / `xp-bdt` 等 token 化 utility）。
 - ❌ scoped CSS 写 `border: 1px solid #xxx` 等硬编码 hex（与 theme token 切换冲突，应改用 utility class）。
+- ❌ scoped CSS 用 `var(--ease-out)`（**该变量在 tailwind.css 未定义**，浏览器会 fallback 无缓动；用 CSS 关键字 `ease-out` 或具体 cubic-bezier）。注：FileList.details-header button / FileBrowser.tb-btn 预存在此问题，留后续清理。
 
 ### 4. 测试约定
 
@@ -408,7 +409,7 @@ vi.mock('@/lib/tauri', async () => {
 **4.4 必须测试**
 
 - 所有 `*.test.ts` 文件**先写测试**（TDD 风格）。
-- 单测跑：220 → 259 → 393 → 397 → 462 → **535** 用例（v0.1.0-module3.0.4-virtuallist 增 pathIndex 4 + toggleSelection 3 + finishedSet 5 + displayedEntries 4 + useVirtualList 17 + VirtualRow 5 + FileList 集成 28 + FileBrowser 接入 3 + FileList 键盘/a11y 9 + FileBrowser searchMode 1 + viewMode 切换 2，删 searchFilter 孤儿 5），目标 0 fail。
+- 单测跑：220 → 259 → 393 → 397 → 462 → 535 → **582** 用例（v0.1.0-module3.0.6-masonry 增 image_header Rust 9 + TS imageHeader 3 + useMasonrySettings 4 + useMasonryLayout 18 + MasonrySettingsPopup 4 + ViewMode 收窄 fallback 用例，删 list/grid 视图相关用例），目标 0 fail。
 - 任何新组件至少 1 个 default + 1 个 edge case（null / empty / disabled）。
 
 ### 5. Tag / Commit / Branch 约定
@@ -476,6 +477,10 @@ git push github v0.1.0-module1.NN
 - **light theme token 1:1 迁移自 xplorer-next**（v0.1.0-module3.0-settings）：`tailwind.css` 在 `@theme` 块定义暗色 Tokyo Night token，在 `:root:not(.dark)` 块覆写浅色 xplorer-next `.theme-light` 同款 token（`#ffffff` bg、`#1e293b` text-primary、`#3b82f6` accent 等）。`useThemeSync` 切换 `html.dark` class。基线仍是 Tokyo Night 暗色（CLAUDE.md §1.1 设计基线不变）。
 - **reader 排序与 file browser 一致**（v0.1.0-module3.0.2-reader-polish, `83cc3d0`）：`ReaderView.loadBook` 用 `useFileBrowserStore().effectiveSortField / .effectiveSortAscending` 替代硬编码 `naturalSort(name)`，复用 `lib/fileSort.sortEntries`；含 per-folder override（`directorySort` store 自动 resolve）。`?at=` 仍按 name 找 spread index，不受排序影响。**不要**在 reader 里单独定义 `sortEntries` 逻辑，**必须**复用 fileSort。
 - **status.value = 'ready' 不能漏**（v0.1.0-module3.0.2-reader-polish, `8c04c34` 修复）：`openBook` 之后必须 `status.value = 'ready'`，否则 ReaderScreen v-else-if 永远不挂载。CLAUDE.md §0.1 注释强调过此约束（"给 openBook 之前准备 holds，openBook 之后立刻 ready"）。Contributors 改 loadBook 时务必保留此行。
+- **瀑布流视图删 list/grid**（v0.1.0-module3.0.6-masonry）：ViewMode 收窄为 `details | masonry`。grid 被 masonry（图片真实宽高比）取代，list 与 details 信息重叠删除。工具栏视图切换用图标按钮直接切换（详情 ICON_DETAILS 在前 + 瀑布流 ICON_MASONRY），**不用下拉**（只剩 2 个视图）。老持久化值 'list'/'grid' 在 `loadLayout` fallback 到 'details'。
+- **瀑布流布局参数双层**（v0.1.0-module3.0.6-masonry）：列数 / 列间距 / 行间距三个参数，per-folder override（工具栏 ⚙ popup，仅 masonry 出现）> 全局默认（Settings 页 masonry section）。复用 `directory_sort` 的 locationKey 模式（`directory_masonry` 表，三列可 NULL + COALESCE 部分更新，只写用户改过的维度）。默认列数 4（范围 2-8），默认间距 8px（范围 0-24）。
+- **图片尺寸 Rust 读 header**（v0.1.0-module3.0.6-masonry）：新增 `list_image_dimensions` command 读图片 header（手写 JPEG/PNG/GIF/BMP 字节解析，纯 std 无 image crate）返回宽高。**这是对 §6 "Rust 不调 IPC 拿 metadata" 约定的合理边界外推**——该约束本意是"不为详情面板装饰字段加 IPC"，图片宽高是瀑布流布局骨架必需数据（无它虚拟滚动无法工作），与 `list_directory` 返回 size/modifiedAt 同性质。仅 masonry viewMode 触发，不进 MediaEntry 主字段。
+- **瀑布流尺寸预读不全量**（v0.1.0-module3.0.6-masonry）：header 当懒加载资源，首屏可见 + 3 屏预读（动态，不硬编码 120 张），未测量用估算宽高比（3:4）占位，渐进式 totalHeight。适配本地挂载远程存储的慢速 I/O——不滚动不查。
 
 ---
 
