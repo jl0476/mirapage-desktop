@@ -125,7 +125,8 @@ describe('thumbnail protocol', () => {
   describe('类型契约（编译期断言）', () => {
     it('ThumbnailRequestItem 字段对齐 §13.2 + 计划任务1', () => {
       const item: ThumbnailRequestItem = {
-        path: 'D:/imgs/a.jpg',
+        path: 'a.jpg',
+        sourceRelPath: 'normal/a.jpg',
         fileSize: 5_000_000,
         modifiedAt: 1700000000,
         sourceWidth: 4000,

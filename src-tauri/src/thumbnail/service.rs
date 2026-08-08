@@ -55,6 +55,7 @@ pub enum ItemClass {
     Unsupported,
     UseOriginal,
     Cached {
+        cache_key: String,
         cache_abs: PathBuf,
         width: u32,
         height: u32,
@@ -78,10 +79,11 @@ pub fn classify_item(
     quality: Quality,
 ) -> rusqlite::Result<ItemClass> {
     let qp: QualityPolicy = policy::quality_policy(quality);
-    let target_bucket = policy::select_bucket(item.required_width);
+    // P2-3: target_bucket 不超过该清晰度最大档位（Standard 1536）
+    let target_bucket = policy::select_bucket(item.required_width).min(qp.max_bucket);
     let cache_key = key::cache_key(&CacheKeyInput {
         source_descriptor_json: descriptor_json,
-        rel_path: &item.path,
+        rel_path: &item.source_rel_path,
         source_size: item.file_size,
         source_modified_at: item.modified_at,
         target_bucket,
@@ -93,6 +95,7 @@ pub fn classify_item(
     // 命中缓存（含文件一致性校验）
     if let Some(row) = index::get_verified(conn, &cache_key, cache_root)? {
         return Ok(ItemClass::Cached {
+            cache_key: row.cache_key.clone(),
             cache_abs: cache_root.join(&row.cache_rel_path),
             width: row.output_width as u32,
             height: row.output_height as u32,
@@ -111,7 +114,7 @@ pub fn classify_item(
     }
 
     // 生成
-    let source_key = key::source_key(descriptor_json, &item.path);
+    let source_key = key::source_key(descriptor_json, &item.source_rel_path);
     let cache_rel = key::cache_rel_path(&cache_key);
     let cache_abs = cache_root.join(&cache_rel);
     let pixel_budget = policy::output_pixel_budget(item.source_width, item.source_height);
@@ -144,8 +147,6 @@ pub fn classify_item(
         estimated_memory_mb: est_mem,
         job,
     };
-    // target_bucket 不超过该清晰度最大档位
-    debug_assert!(target_bucket <= qp.max_bucket || target_bucket == 2048);
     Ok(ItemClass::Generate { task, cache_abs })
 }
 
@@ -230,6 +231,8 @@ pub struct ThumbnailService {
     cache_root: PathBuf,
     quality: Arc<RwLock<Quality>>,
     cache_limit_mb: Arc<RwLock<u64>>,
+    /// LRU 保护集合：可见 + in-flight cache key，清理时跳过。
+    protected_keys: Arc<std::sync::Mutex<HashSet<String>>>,
 }
 
 impl ThumbnailService {
@@ -253,6 +256,7 @@ impl ThumbnailService {
             cache_root,
             quality: Arc::new(RwLock::new(quality)),
             cache_limit_mb: Arc::new(RwLock::new(cache_limit_mb)),
+            protected_keys: Arc::new(std::sync::Mutex::new(HashSet::new())),
         }
     }
 
@@ -263,6 +267,11 @@ impl ThumbnailService {
     pub fn set_runtime_config(&self, worker_limit: u32, memory_budget_mb: u32, quality: Quality) {
         self.scheduler.set_config(worker_limit, memory_budget_mb);
         *self.quality.write().unwrap() = quality;
+    }
+
+    /// P1-4: 缓存容量运行时生效（设置页改完即时推送，无需重启）。
+    pub fn set_cache_limit_mb(&self, limit_mb: u64) {
+        *self.cache_limit_mb.write().unwrap() = limit_mb;
     }
 
     pub fn new_epoch(&self, epoch: u64) {
@@ -299,14 +308,22 @@ impl ThumbnailService {
 
         let mut results = Vec::with_capacity(items.len());
         // 收集需要生成的任务（先全部分类，再统一提交，避免持锁跨 await）
-        let mut to_submit: Vec<(QueuedTask, PathBuf, u32, u32)> = Vec::new();
+        // (task, cache_abs, item) —— item 携带完整源元数据供 CompletionMeta/build_row
+        let mut to_submit: Vec<(QueuedTask, PathBuf, ThumbnailRequestItem)> = Vec::new();
 
         {
             let db = self.app.state::<Db>();
             let conn = db.conn();
-            // 访问时间批量刷新（可见 key 的 LRU 保护）
+            // 访问时间批量刷新（可见 key 的 LRU 保护）+ P1-6 更新保护集合
             if !visible_cache_keys.is_empty() {
                 let _ = index::touch_many(&conn, visible_cache_keys, now_secs());
+            }
+            {
+                let mut pk = self.protected_keys.lock().unwrap();
+                pk.clear();
+                for k in visible_cache_keys {
+                    pk.insert(k.clone());
+                }
             }
             for item in items {
                 if !local {
@@ -317,7 +334,8 @@ impl ThumbnailService {
                     });
                     continue;
                 }
-                let abs = local_abs_path(&root_path, &item.path);
+                // P1-1: 用 source_rel_path（含 currentPath 前缀）定位文件，而非 UI path
+                let abs = local_abs_path(&root_path, &item.source_rel_path);
                 match classify_item(
                     &conn,
                     &self.cache_root,
@@ -338,6 +356,7 @@ impl ThumbnailService {
                         ..unset(&item.path)
                     }),
                     Ok(ItemClass::Cached {
+                        cache_key,
                         cache_abs,
                         width,
                         height,
@@ -345,16 +364,19 @@ impl ThumbnailService {
                         path: item.path.clone(),
                         status: "cached".into(),
                         cache_path: Some(cache_abs.to_string_lossy().into()),
-                        cache_key: None,
+                        cache_key: Some(cache_key),
                         width: Some(width),
                         height: Some(height),
                         error_kind: None,
                     }),
                     Ok(ItemClass::Generate { task, cache_abs }) => {
                         let ck = task.cache_key.clone();
-                        let w = task.job.target_width;
-                        let h = approx_height(item.source_width, item.source_height, w);
-                        to_submit.push((task, cache_abs, w, h));
+                        // P1-6: in-flight key 加入保护集合，避免生成期间被 LRU 清理
+                        {
+                            let mut pk = self.protected_keys.lock().unwrap();
+                            pk.insert(ck.clone());
+                        }
+                        to_submit.push((task, cache_abs, item.clone()));
                         results.push(RequestResult {
                             path: item.path.clone(),
                             status: "queued".into(),
@@ -371,12 +393,9 @@ impl ThumbnailService {
         }
 
         // 提交生成任务 + 挂完成回调
-        for (task, cache_abs, _w, _h) in to_submit {
+        for (task, cache_abs, item) in to_submit {
             let cache_key = task.cache_key.clone();
-            let rel_path = match task.job.source_path.as_ref() {
-                Some(p) => p.to_string_lossy().into_owned(),
-                None => String::new(),
-            };
+            let target_bucket = task.job.target_width;
             let rx = self.scheduler.submit(task);
             let app = self.app.clone();
             let cache_root = self.cache_root.clone();
@@ -384,10 +403,19 @@ impl ThumbnailService {
             spawn_completion(app, rx, CompletionMeta {
                 epoch,
                 cache_key,
-                rel_path,
+                ui_path: item.path.clone(),
+                source_rel_path: item.source_rel_path.clone(),
                 cache_abs,
                 cache_root,
                 cache_limit,
+                protected_keys: self.protected_keys.clone(),
+                source_key: key::source_key(&descriptor_json, &item.source_rel_path),
+                source_size: item.file_size,
+                source_modified_at: item.modified_at,
+                source_width: item.source_width,
+                source_height: item.source_height,
+                quality: quality_str(quality).to_string(),
+                target_bucket,
             });
         }
         results
@@ -434,14 +462,15 @@ impl ThumbnailService {
             _ => String::new(),
         };
         let quality = *self.quality.read().unwrap();
-        let abs = local_abs_path(&root_path, &item.path);
+        let abs = local_abs_path(&root_path, &item.source_rel_path);
 
         // 强制重建：删除旧缓存
         if delete_cache {
-            let target_bucket = policy::select_bucket(item.required_width);
+            let qp = policy::quality_policy(quality);
+            let target_bucket = policy::select_bucket(item.required_width).min(qp.max_bucket);
             let ck = key::cache_key(&CacheKeyInput {
                 source_descriptor_json: &descriptor_json,
-                rel_path: &item.path,
+                rel_path: &item.source_rel_path,
                 source_size: item.file_size,
                 source_modified_at: item.modified_at,
                 target_bucket,
@@ -473,12 +502,17 @@ impl ThumbnailService {
                     task.priority = Priority::Visible;
                     Some((task, cache_abs))
                 }
-                Ok(ItemClass::Cached { cache_abs, width, height }) => {
+                Ok(ItemClass::Cached {
+                    cache_key,
+                    cache_abs,
+                    width,
+                    height,
+                }) => {
                     return RequestResult {
                         path: item.path.clone(),
                         status: "cached".into(),
                         cache_path: Some(cache_abs.to_string_lossy().into()),
-                        cache_key: None,
+                        cache_key: Some(cache_key),
                         width: Some(width),
                         height: Some(height),
                         error_kind: None,
@@ -496,12 +530,12 @@ impl ThumbnailService {
             };
         };
         let cache_key = task.cache_key.clone();
-        let rel_path = task
-            .job
-            .source_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let target_bucket = task.job.target_width;
+        // P1-6: in-flight key 加入保护集合
+        {
+            let mut pk = self.protected_keys.lock().unwrap();
+            pk.insert(cache_key.clone());
+        }
         let rx = self.scheduler.submit(task);
         let app = self.app.clone();
         let cache_root = self.cache_root.clone();
@@ -509,10 +543,19 @@ impl ThumbnailService {
         spawn_completion(app, rx, CompletionMeta {
             epoch,
             cache_key: cache_key.clone(),
-            rel_path,
+            ui_path: item.path.clone(),
+            source_rel_path: item.source_rel_path.clone(),
             cache_abs,
             cache_root,
             cache_limit,
+            protected_keys: self.protected_keys.clone(),
+            source_key: key::source_key(&descriptor_json, &item.source_rel_path),
+            source_size: item.file_size,
+            source_modified_at: item.modified_at,
+            source_width: item.source_width,
+            source_height: item.source_height,
+            quality: quality_str(quality).to_string(),
+            target_bucket,
         });
         RequestResult {
             path: item.path.clone(),
@@ -562,10 +605,23 @@ impl ThumbnailService {
 struct CompletionMeta {
     epoch: u64,
     cache_key: String,
-    rel_path: String,
+    /// UI key（前端 entry.path），事件 `path` 字段用它。
+    ui_path: String,
+    /// 相对 source root 路径，索引 rel_path 用。
+    source_rel_path: String,
     cache_abs: PathBuf,
     cache_root: PathBuf,
     cache_limit: u64,
+    /// LRU 保护集合（可见 + in-flight），清理时跳过。
+    protected_keys: Arc<std::sync::Mutex<HashSet<String>>>,
+    // 索引元数据（P2-1）
+    source_key: String,
+    source_size: u64,
+    source_modified_at: Option<i64>,
+    source_width: u32,
+    source_height: u32,
+    quality: String,
+    target_bucket: u32,
 }
 
 fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>, meta: CompletionMeta) {
@@ -574,21 +630,29 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
             Ok(o) => o,
             Err(_) => return, // 调度器关闭
         };
+        // 完成后从 in-flight 保护集合移除（短暂保护由本次 evict 的 protected 传入）
+        {
+            let mut pk = meta.protected_keys.lock().unwrap();
+            pk.remove(&meta.cache_key);
+        }
         let db = app.state::<Db>();
         let conn = db.conn();
         match outcome {
             Outcome::Cached(g) => {
-                // 写索引
-                let row = build_row(&meta.cache_key, &meta.rel_path, &meta.cache_abs, &g);
+                // 写索引（完整元数据）
+                let row = build_row(&meta, &g);
                 let _ = index::upsert(&conn, &row);
-                // LRU 驱逐
-                let _ = evict_to_limit(&conn, &meta.cache_root, meta.cache_limit, &HashSet::new());
+                // P1-6: LRU 驱逐，保护可见 + 本次刚完成 key
+                let mut protected = meta.protected_keys.lock().unwrap().clone();
+                protected.insert(meta.cache_key.clone());
+                let _ = evict_to_limit(&conn, &meta.cache_root, meta.cache_limit, &protected);
+                // P1-2: 事件 path 用 ui_path（前端 entry.path），而非绝对磁盘路径
                 let _ = app.emit(
                     EVENT_STATE,
                     StateEvent {
                         epoch: meta.epoch,
                         cache_key: meta.cache_key,
-                        path: meta.rel_path,
+                        path: meta.ui_path,
                         state: "cached".into(),
                         cache_path: Some(meta.cache_abs.to_string_lossy().into_owned()),
                         output_width: Some(g.width),
@@ -603,7 +667,7 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
                     StateEvent {
                         epoch: meta.epoch,
                         cache_key: meta.cache_key,
-                        path: meta.rel_path,
+                        path: meta.ui_path,
                         state: "failed".into(),
                         cache_path: None,
                         output_width: None,
@@ -619,11 +683,14 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
     });
 }
 
-fn build_row(cache_key: &str, rel_path: &str, cache_abs: &Path, g: &GeneratedThumbnail) -> ThumbnailCacheRow {
-    let cache_rel = cache_abs
+/// 构造完整索引行（P2-1：填真实元数据而非空值）。
+fn build_row(meta: &CompletionMeta, g: &GeneratedThumbnail) -> ThumbnailCacheRow {
+    let cache_rel = meta
+        .cache_abs
         .file_name()
         .map(|f| {
-            let mut s = cache_abs
+            let mut s = meta
+                .cache_abs
                 .parent()
                 .and_then(|p| p.file_name())
                 .map(|f| f.to_string_lossy().into_owned())
@@ -637,16 +704,16 @@ fn build_row(cache_key: &str, rel_path: &str, cache_abs: &Path, g: &GeneratedThu
         .unwrap_or_default();
     let now = now_secs();
     ThumbnailCacheRow {
-        cache_key: cache_key.to_string(),
-        source_key: String::new(), // 由调用方按需填（这里简化）
-        rel_path: rel_path.to_string(),
-        source_size: None,
-        source_modified_at: None,
-        source_width: None,
-        source_height: None,
-        orientation: None,
-        target_bucket: g.width as i64,
-        quality: String::new(),
+        cache_key: meta.cache_key.clone(),
+        source_key: meta.source_key.clone(),
+        rel_path: meta.source_rel_path.clone(),
+        source_size: Some(meta.source_size as i64),
+        source_modified_at: meta.source_modified_at,
+        source_width: Some(meta.source_width as i64),
+        source_height: Some(meta.source_height as i64),
+        orientation: None, // generator 当前不回传 orientation；后续如回传再填
+        target_bucket: meta.target_bucket as i64,
+        quality: meta.quality.clone(),
         cache_rel_path: cache_rel,
         output_width: g.width as i64,
         output_height: g.height as i64,
@@ -680,13 +747,6 @@ fn err_result(path: &str, msg: &str) -> RequestResult {
     }
 }
 
-fn approx_height(source_w: u32, source_h: u32, out_w: u32) -> u32 {
-    if source_w == 0 {
-        return out_w;
-    }
-    ((out_w as u64 * source_h as u64) / source_w as u64) as u32
-}
-
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -708,6 +768,8 @@ mod tests {
     fn item(path: &str, w: u32, h: u32, size: u64, required: u32) -> ThumbnailRequestItem {
         ThumbnailRequestItem {
             path: path.to_string(),
+            // 默认 source_rel_path = path（根目录场景）；子目录测试单独覆盖。
+            source_rel_path: path.to_string(),
             file_size: size,
             modified_at: Some(100),
             source_width: w,
@@ -892,5 +954,70 @@ mod tests {
         let p = local_abs_path("D:/imgs", "sub/a.jpg");
         assert!(p.to_string_lossy().ends_with("sub/a.jpg"));
         assert!(p.to_string_lossy().contains("imgs"));
+    }
+
+    /// P1-1 回归：子目录场景 cache_key 与 abs 路径必须用 source_rel_path（含 currentPath 前缀），
+    /// 而非 UI path（entry.path）。否则后端读 root/a.jpg 而非 root/normal/a.jpg。
+    #[test]
+    fn classify_subdir_uses_source_rel_path_for_key_and_abs() {
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        let sd = r#"{"type":"local","rootPath":"D:/root"}"#;
+        // 子目录：UI path=a.jpg，source_rel_path=normal/a.jpg
+        let mut it = item("a.jpg", 4000, 3000, 5_000_000, 1024);
+        it.source_rel_path = "normal/a.jpg".to_string();
+        let abs = local_abs_path("D:/root", "normal/a.jpg");
+        let cls = classify_item(&conn, dir.path(), sd, abs, &it, 1, Quality::High).unwrap();
+        let task = match cls {
+            ItemClass::Generate { task, .. } => task,
+            _ => panic!("expected Generate"),
+        };
+        // cache_key 基于 source_rel_path
+        let expected_key = key::cache_key(&CacheKeyInput {
+            source_descriptor_json: sd,
+            rel_path: "normal/a.jpg",
+            source_size: 5_000_000,
+            source_modified_at: Some(100),
+            target_bucket: 1024,
+            quality: "high",
+            orientation_version: ORIENTATION_VERSION,
+            algorithm_version: THUMBNAIL_ALGORITHM_VERSION,
+        });
+        assert_eq!(task.cache_key, expected_key, "cache_key must derive from source_rel_path");
+        // abs 路径含 normal 前缀（读到 root/normal/a.jpg 而非 root/a.jpg）
+        let abs_str = task.job.source_path.as_ref().unwrap().to_string_lossy().into_owned();
+        assert!(abs_str.contains("normal"), "abs path must include subdir: {abs_str}");
+        // 根目录同名文件 key 不同 -> 子目录隔离
+        let root_cls = classify_item(
+            &conn, dir.path(), sd,
+            local_abs_path("D:/root", "a.jpg"),
+            &item("a.jpg", 4000, 3000, 5_000_000, 1024),
+            1, Quality::High,
+        ).unwrap();
+        let root_task = match root_cls {
+            ItemClass::Generate { task, .. } => task,
+            _ => panic!("expected Generate"),
+        };
+        assert_ne!(task.cache_key, root_task.cache_key, "subdir vs root must differ");
+    }
+
+    /// P2-3 回归：Standard 清晰度 max_bucket=1536，高 DPR 下不应生成 2048。
+    #[test]
+    fn classify_standard_quality_caps_bucket_at_1536() {
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        let sd = r#"{"type":"local","rootPath":"D:/root"}"#;
+        // required_width 2048 -> select_bucket(2048)=2048，但 Standard max=1536 -> 截到 1536
+        let cls = classify_item(
+            &conn, dir.path(), sd,
+            local_abs_path("D:/root", "big.jpg"),
+            &item("big.jpg", 4000, 3000, 5_000_000, 2048),
+            1, Quality::Standard,
+        ).unwrap();
+        let task = match cls {
+            ItemClass::Generate { task, .. } => task,
+            _ => panic!("expected Generate"),
+        };
+        assert_eq!(task.job.target_width, 1536, "Standard must cap at 1536");
     }
 }

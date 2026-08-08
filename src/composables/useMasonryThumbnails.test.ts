@@ -55,6 +55,7 @@ function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { wid
   const scrollTop = ref(0);
   const result = useMasonryThumbnails({
     descriptor,
+    currentPath: ref(''),
     entries,
     thumbnailWindows: computed(() => windowsRef.value),
     measuredMap,
@@ -202,6 +203,7 @@ describe('useMasonryThumbnails', () => {
     const mod = await import('./useMasonryThumbnails');
     const thumb = mod.useMasonryThumbnails({
       descriptor: ref(localDesc),
+      currentPath: ref(''),
       entries: ref<readonly MediaEntry[]>([]),
       thumbnailWindows: computed(() => ({ visible: [], ahead: [], behind: [], idle: [] })),
       measuredMap: ref(new Map()),

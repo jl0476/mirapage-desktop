@@ -141,12 +141,17 @@ export function normalizeCacheLimitMb(value: number): number {
 
 /**
  * 单张缩略图请求项（§13.2）。
+ * - `path`：UI key，即 `entry.path`（当前目录内相对路径，如 `a.jpg`），用于卡片状态 Map。
+ * - `sourceRelPath`：相对 source root 的完整路径（如 `normal/a.jpg`），后端读文件 + cache key 用。
+ *   区分两者是因为 `entry.path` 只相对当前目录，子目录场景后端需完整路径才能定位文件。
  * `requiredWidth` 已在前端按 cardWidth × dpr × quality_margin 算好；
  * `sourceWidth/Height` 为原图物理像素（尚未做 EXIF 方向归一化，Rust 端归一化）。
  */
 export interface ThumbnailRequestItem {
-  /** 相对当前 root 的图片路径（与 list_directory 返回的 entry.path 同体系）。 */
+  /** UI key（entry.path，当前目录内相对），前端状态 Map 用。 */
   path: string;
+  /** 相对 source root 的完整路径（含 currentPath 前缀），后端读文件 + cache key 用。 */
+  sourceRelPath: string;
   /** 原文件字节数。 */
   fileSize: number;
   /** 原文件 modifiedAt（秒），可空。 */

@@ -76,6 +76,7 @@ const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1
 const thumbQuality = computed(() => settingsStore.thumbnailQuality);
 const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateThumbnail } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
+  currentPath: toRef(props, 'currentPath'),
   entries: entriesRef,
   thumbnailWindows,
   measuredMap,

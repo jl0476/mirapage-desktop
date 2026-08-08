@@ -84,7 +84,11 @@ pub struct ResourcePreset {
 /// 单张缩略图请求项（§13.2）。`required_width` 已在前端按列宽 × dpr × quality_margin 算好。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThumbnailRequestItem {
+    /// UI key（前端 entry.path，当前目录内相对），完成事件 `path` 字段用它。
     pub path: String,
+    /// 相对 source root 的完整路径（含 currentPath 前缀，如 `normal/a.jpg`），
+    /// 后端读文件 + cache key + 索引 rel_path 用。子目录场景必需。
+    pub source_rel_path: String,
     pub file_size: u64,
     pub modified_at: Option<i64>,
     pub source_width: u32,

@@ -24,6 +24,7 @@ import {
   type ThumbnailState,
 } from '@/lib/thumbnail';
 import type { ThumbnailWindows } from './useMasonryLayout';
+import { toRootRelativePath } from './useMasonryLayout';
 
 const REQUEST_DEBOUNCE_MS = 80;
 /** 停止滚动后多久才允许提交 idle（§5.3）。 */
@@ -31,6 +32,8 @@ const IDLE_SETTLE_MS = 250;
 
 export interface UseMasonryThumbnailsParams {
   descriptor: Ref<SourceDescriptor>;
+  /** 当前目录相对 source root 的路径（如 `normal`），拼 sourceRelPath 用。 */
+  currentPath: Ref<string>;
   entries: Ref<readonly MediaEntry[]>;
   thumbnailWindows: ComputedRef<ThumbnailWindows>;
   measuredMap: Ref<Map<string, { width: number; height: number }>>;
@@ -135,6 +138,7 @@ export function useMasonryThumbnails(
       if (!m) continue; // 未测量尺寸的不请求（等 header 到达）
       items.push({
         path,
+        sourceRelPath: toRootRelativePath(params.currentPath.value, path),
         fileSize: entry.size,
         modifiedAt: entry.modifiedAt ?? null,
         sourceWidth: m.width,
@@ -246,6 +250,7 @@ export function useMasonryThumbnails(
       entry,
       item: {
         path,
+        sourceRelPath: toRootRelativePath(params.currentPath.value, path),
         fileSize: entry.size,
         modifiedAt: entry.modifiedAt ?? null,
         sourceWidth: m.width,
