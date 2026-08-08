@@ -10,6 +10,7 @@ mod commands;
 mod db;
 mod log;
 mod source;
+mod thumbnail;
 
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;

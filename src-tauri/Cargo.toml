@@ -71,6 +71,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 percent-encoding = "2"
 
+# 图像处理（v0.1.0-module3.0.7 缩略图缓存：EXIF 方向归一化 + 缩放 + WebP 编码）
+# image 0.24 系列对 MSRV 1.75 友好；禁用默认特性按需启用解码器，避免拉入不需要的依赖。
+# 仅启用瀑布流需要的 5 种格式解码；JPEG/PNG/GIF/BMP/WebP。
+image = { version = "0.24.9", default-features = false, features = ["jpeg", "png", "gif", "bmp", "webp"] }
+# EXIF Orientation 解析（只读 Orientation tag，不复制其它元数据）。
+kamadak-exif = "0.6.1"
+# WebP 编码器（image crate 的 webp feature 只做解码，编码用独立 webp crate）。
+webp = { version = "0.2.6", default-features = false }
+
 # 阅读器屏幕常亮 (v0.1.0-module2.0). Windows 用 SetThreadExecutionState;
 # macOS/Linux 暂 stub (IOPMAssertion / org.freedesktop.ScreenSaver 等需要
 # 平台专有 crate, Phase 9 跨平台分发时再补).
