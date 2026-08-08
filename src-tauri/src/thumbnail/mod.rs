@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 pub mod generator;
 pub mod index;
 pub mod key;
+pub mod migration;
 pub mod orientation;
 pub mod policy;
 pub mod scheduler;
