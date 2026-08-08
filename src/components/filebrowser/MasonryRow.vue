@@ -1,15 +1,18 @@
 <script setup lang="ts">
-// MasonryRow.vue — 瀑布流单卡片（图片 + 选中态 + 阅读状态 badge）
+// MasonryRow.vue — 瀑布流单卡片（缩略图 + 选中态 + 阅读状态 badge）
+// 图片区域委托给 MasonryThumbnail（占位/spinner/淡入/失败重试）。
 // 事件签名与 VirtualRow 一致（复用 FileList 的事件转发逻辑）。
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
+import type { ThumbnailState } from '@/lib/thumbnail';
+import MasonryThumbnail from './MasonryThumbnail.vue';
 
 type RowMark = 'reading' | 'finished' | 'none';
 
 interface Props {
   entry: MediaEntry;
-  src: string;          // 父级 convertFileSrc 后的图片 URL
+  thumbState?: ThumbnailState;
   width: number;
   height: number;
   top: number;
@@ -23,6 +26,7 @@ defineEmits<{
   (e: 'row-click', entry: MediaEntry, event: MouseEvent): void;
   (e: 'row-dblclick', entry: MediaEntry, event: MouseEvent): void;
   (e: 'row-contextmenu', entry: MediaEntry, event: MouseEvent): void;
+  (e: 'row-retry', entry: MediaEntry): void;
 }>();
 
 const { t } = useI18n();
@@ -61,13 +65,10 @@ function statusLabel(m: RowMark): string {
     @contextmenu="$emit('row-contextmenu', entry, $event)"
     tabindex="-1"
   >
-    <img
-      :src="src"
-      loading="lazy"
-      decoding="async"
-      class="masonry-img"
+    <MasonryThumbnail
+      :state="thumbState"
       :alt="entry.name"
-      draggable="false"
+      @retry="$emit('row-retry', entry)"
     />
     <span v-if="mark !== 'none'" class="masonry-badge" :class="mark">{{ statusLabel(mark) }}</span>
   </div>
@@ -83,17 +84,12 @@ function statusLabel(m: RowMark): string {
   transition: outline 80ms ease-out;
   contain: layout style;
 }
-.masonry-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
 .masonry-row.is-selected {
   outline: 2px solid var(--color-accent);
   outline-offset: -2px;
 }
-.masonry-row.is-finished .masonry-img { opacity: 0.55; }
+/* 已读完卡片半透明（作用到子组件 MasonryThumbnail 的 img） */
+.masonry-row.is-finished :deep(.thumbnail-image) { opacity: 0.55; }
 .masonry-badge {
   position: absolute;
   top: 4px;
@@ -103,6 +99,7 @@ function statusLabel(m: RowMark): string {
   padding: 1px 5px;
   border-radius: 3px;
   line-height: 1.4;
+  z-index: 2;
 }
 .masonry-badge.reading { background: rgb(99 102 241 / 0.18); color: var(--color-status-reading); }
 .masonry-badge.finished { background: rgb(52 211 153 / 0.15); color: var(--color-status-finished); }

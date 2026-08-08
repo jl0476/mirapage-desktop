@@ -31,7 +31,7 @@ describe('MasonryRow.vue', () => {
 
   const mkProps = (overrides: Record<string, unknown> = {}): any => ({
     entry: entry('page-001.jpg'),
-    src: 'https://example.com/001.jpg',
+    thumbState: undefined,
     width: 200,
     height: 280,
     top: 0,
@@ -41,16 +41,26 @@ describe('MasonryRow.vue', () => {
     ...overrides,
   });
 
-  it('渲染 img (src + loading=lazy + decoding=async)', () => {
+  it('cached 状态渲染 MasonryThumbnail 的 img (src + loading=lazy + decoding=async)', () => {
+    const w = mount(MasonryRow, {
+      props: mkProps({
+        thumbState: { kind: 'cached', cacheKey: 'k', path: 'asset://001.webp', width: 200, height: 280 },
+      }),
+      global: { plugins: [createPinia(), i18n] },
+    });
+    const img = w.find('.thumbnail-image');
+    expect(img.exists()).toBe(true);
+    expect(img.attributes('src')).toBe('asset://001.webp');
+    expect(img.attributes('loading')).toBe('lazy');
+    expect(img.attributes('decoding')).toBe('async');
+  });
+
+  it('placeholder（无 thumbState）不渲染 img', () => {
     const w = mount(MasonryRow, {
       props: mkProps(),
       global: { plugins: [createPinia(), i18n] },
     });
-    const img = w.find('.masonry-img');
-    expect(img.exists()).toBe(true);
-    expect(img.attributes('src')).toBe('https://example.com/001.jpg');
-    expect(img.attributes('loading')).toBe('lazy');
-    expect(img.attributes('decoding')).toBe('async');
+    expect(w.find('.thumbnail-image').exists()).toBe(false);
   });
 
   it('absolute 定位 (top/left/width/height 写入 style)', () => {

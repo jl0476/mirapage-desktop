@@ -7,6 +7,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
 import { useVirtualList } from '@/composables/useVirtualList';
 import { useMasonryLayout, toRootRelativePath } from '@/composables/useMasonryLayout';
+import { useMasonryThumbnails } from '@/composables/useMasonryThumbnails';
 import { listImageDimensions } from '@/lib/tauri';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
@@ -57,7 +58,7 @@ onMounted(async () => {
 });
 onUnmounted(() => ro?.disconnect());
 
-const { layout, visibleRange, needPrefetch, nextBatchPaths, prefetchPaths } = useMasonryLayout({
+const { layout, visibleRange, needPrefetch, nextBatchPaths, colWidth, thumbnailWindows } = useMasonryLayout({
   entries: entriesRef,
   containerWidth,
   containerHeight: viewportHeight,
@@ -66,6 +67,21 @@ const { layout, visibleRange, needPrefetch, nextBatchPaths, prefetchPaths } = us
   vGap: toRef(props, 'vGap'),
   scrollTop,
   measuredMap,
+});
+
+// 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 默认 high（任务11 接 settings）。
+const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
+const thumbQuality = ref<'standard' | 'high' | 'ultra'>('high');
+const { stateMap: thumbStateMap, retry: retryThumbnail } = useMasonryThumbnails({
+  descriptor: toRef(props, 'descriptor'),
+  entries: entriesRef,
+  thumbnailWindows,
+  measuredMap,
+  colWidth,
+  dpr,
+  quality: thumbQuality,
+  scrollTop,
+  originalUrlFor: (e) => convertFileSrc(joinPath(joinPath(props.rootPath, props.currentPath), e.name)),
 });
 
 // 预读 header
@@ -96,24 +112,6 @@ async function triggerPrefetch() {
 }
 watch(needPrefetch, () => { void triggerPrefetch(); });
 
-// 图片字节预读: 视口前后 2 屏行的图用 new Image() 提前 fetch + decode 进浏览器缓存,
-// 滚动到时 <img> 命中缓存, 无网络+解码延迟 (对齐阅读器 preload 策略)。
-// 注意: Image() 不挂 DOM, 浏览器 fetch+decode 后缓存, GC 回收 Image 对象。
-const prefetchedSet = new Set<string>();
-function prefetchImage(path: string): void {
-  if (prefetchedSet.has(path)) return;
-  const e = props.entries.find((en) => en.path === path);
-  if (!e || !isImage(e.name)) return;
-  prefetchedSet.add(path);
-  const baseDir = joinPath(props.rootPath, props.currentPath);
-  const url = convertFileSrc(joinPath(baseDir, e.name));
-  const img = new Image();
-  img.src = url;
-}
-watch(prefetchPaths, (paths) => {
-  for (const p of paths) prefetchImage(p);
-});
-
 // 路径拼接（Windows \ 分隔符，ReaderView.joinPath 模式）
 function joinPath(...parts: string[]): string {
   const cleaned = parts.filter((s) => s && s.length > 0).map((s) => s.replace(/[\\/]+$/, ''));
@@ -129,11 +127,11 @@ function getMark(entry: MediaEntry): 'reading' | 'finished' | 'none' {
   return 'none';
 }
 
-// 可见区 items（含 src 算好）
+// 可见区 items（含缩略图状态）
 const visibleItems = computed(() => {
   const { start, end } = visibleRange.value;
   const map = layout.value.map;
-  const baseDir = joinPath(props.rootPath, props.currentPath);
+  const tmap = thumbStateMap.value;
   return props.entries
     .slice(start, end)
     .filter((e) => isImage(e.name))
@@ -145,7 +143,7 @@ const visibleItems = computed(() => {
         item,
         mark: getMark(e),
         selected: props.selectedPaths.has(e.path),
-        src: convertFileSrc(joinPath(baseDir, e.name)),
+        thumbState: tmap.get(e.path),
       };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -173,7 +171,7 @@ const loading = computed(() => {
         v-for="v in visibleItems"
         :key="v.entry.path"
         :entry="v.entry"
-        :src="v.src"
+        :thumb-state="v.thumbState"
         :width="v.item.width"
         :height="v.item.height"
         :top="v.item.top"
@@ -183,6 +181,7 @@ const loading = computed(() => {
         @row-click="(e, ev) => emit('row-click', e, ev)"
         @row-dblclick="(e, ev) => emit('row-dblclick', e, ev)"
         @row-contextmenu="(e, ev) => emit('row-contextmenu', e, ev)"
+        @row-retry="(e) => retryThumbnail(e.path)"
       />
     </div>
     <!-- 加载提示: 首屏图片测量/字节未就绪时显示, 完成后自动隐藏 -->
