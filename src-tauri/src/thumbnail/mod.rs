@@ -26,6 +26,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod generator;
+pub mod orientation;
 pub mod policy;
 
 /// 缓存索引 / cache key 的算法版本。任何会改变缩略图输出的策略调整都递增此值，
@@ -85,6 +87,19 @@ pub struct ThumbnailRequestItem {
     pub source_height: u32,
     pub required_width: u32,
     pub priority: Priority,
+}
+
+/// 缩略图生成 / 缓存操作的统一错误类型。
+#[derive(Debug, thiserror::Error)]
+pub enum ThumbnailError {
+    #[error("decode failed: {0}")]
+    Decode(String),
+    #[error("encode failed: {0}")]
+    Encode(String),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("invalid input: {0}")]
+    Invalid(String),
 }
 
 #[cfg(test)]
