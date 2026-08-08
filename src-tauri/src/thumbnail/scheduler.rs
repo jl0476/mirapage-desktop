@@ -105,6 +105,9 @@ enum Command {
     },
     /// 触发一次调度扫描（测试用 / 周期 tick）。
     Pump,
+    /// 取消全部未开始任务（清空缓存/维护用）：bump epoch，drain pending 发 Stale；
+    /// in-flight 任务完成时因 epoch < current 自动变 Stale（不写索引）。
+    CancelAll,
     Completed {
         cache_key: String,
         epoch: u64,
@@ -147,6 +150,7 @@ impl SchedulerHandle {
             running_count: 0,
             running_memory: 0,
             current_epoch: 0,
+            max_task_epoch: 0,
             fast_scrolling: false,
             seq: 0,
         };
@@ -178,6 +182,11 @@ impl SchedulerHandle {
     pub fn pump(&self) {
         let _ = self.tx.send(Command::Pump);
     }
+
+    /// P2-2: 取消全部未开始任务（清空缓存/维护用）。in-flight 任务完成后自动 Stale。
+    pub fn cancel_all(&self) {
+        let _ = self.tx.send(Command::CancelAll);
+    }
 }
 
 impl Drop for SchedulerHandle {
@@ -198,6 +207,8 @@ struct Actor {
     running_count: u32,
     running_memory: u64,
     current_epoch: u64,
+    /// 曾提交过的最大 task epoch，cancel_all 时据此 bump current_epoch 使全部任务变 stale。
+    max_task_epoch: u64,
     fast_scrolling: bool,
     seq: u64,
 }
@@ -218,6 +229,7 @@ impl Actor {
                 }
                 Command::SetFastScrolling { fast } => self.fast_scrolling = fast,
                 Command::Pump => {}
+                Command::CancelAll => self.handle_cancel_all(),
                 Command::Completed {
                     cache_key,
                     epoch,
@@ -241,6 +253,9 @@ impl Actor {
             return;
         }
         self.seq += 1;
+        if task.epoch > self.max_task_epoch {
+            self.max_task_epoch = task.epoch;
+        }
         self.pending.push(Pending {
             task,
             subscribers: vec![reply],
@@ -264,6 +279,20 @@ impl Actor {
             }
         }
         // in-flight 保留（让其完成写缓存）；完成时按 epoch 决定是否发 Cached。
+    }
+
+    /// P2-2: 清空缓存/维护用。bump 内部 epoch 使所有现存任务（pending + in-flight）
+    /// 的 epoch 都 < current：pending 立即 drain 发 Stale；in-flight 完成时自动 Stale
+    /// （spawn_completion 的 Stale 分支不写索引，避免清空后被后台任务重新写回）。
+    fn handle_cancel_all(&mut self) {
+        // bump 到超过所有曾提交任务的 epoch，使 pending + in-flight 全部变 stale。
+        self.current_epoch = self.max_task_epoch.wrapping_add(1);
+        let drained = std::mem::take(&mut self.pending);
+        for p in drained {
+            for s in p.subscribers {
+                let _ = s.send(Outcome::Stale);
+            }
+        }
     }
 
     fn handle_completed(
@@ -640,6 +669,28 @@ mod tests {
         let _ = reply_v.send(Ok(ok_thumb()));
         let (ji, _reply_i) = recv_job(&mut rx).await;
         assert_eq!(ji.cache_path.to_string_lossy(), "/tmp/idle.webp");
+    }
+
+    /// P2-2: cancel_all 使排队任务立即 Stale，in-flight 任务完成后 Stale（不写索引）。
+    #[tokio::test]
+    async fn cancel_all_makes_pending_and_inflight_stale() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        // holder 占住唯一 worker（held 不完成）
+        let r_holder = handle.submit(task("h", Priority::Visible, 1, 10));
+        let (_j, reply) = recv_job(&mut rx).await;
+        // queued 任务（worker 满，未开始）
+        let r_q = handle.submit(task("q", Priority::Visible, 1, 10));
+        assert_no_job(&mut rx).await;
+        // cancel_all：queued 立即 Stale
+        handle.cancel_all();
+        assert!(matches!(r_q.await.unwrap(), Outcome::Stale));
+        // holder 完成后也 Stale（epoch 已 bump，不再发 Cached）
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(r_holder.await.unwrap(), Outcome::Stale));
     }
 
     #[tokio::test(start_paused = true)]

@@ -580,7 +580,12 @@ impl ThumbnailService {
     }
 
     /// 清空缓存：删全部文件 + 索引（不删根目录）。
+    /// P2-2: 先 cancel_all 使排队/in-flight 任务变 Stale（完成后不写索引），避免清空后被后台任务重新写回。
     pub fn clear(&self) {
+        // 取消全部未开始任务 + 让 in-flight 完成后不发 Cached（不写索引）
+        self.scheduler.cancel_all();
+        // 清空保护集合
+        self.protected_keys.lock().unwrap().clear();
         let db = self.app.state::<Db>();
         let conn = db.conn();
         // 取所有 rel_path，删文件
