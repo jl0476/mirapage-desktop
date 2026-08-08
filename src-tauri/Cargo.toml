@@ -79,6 +79,8 @@ image = { version = "0.24.9", default-features = false, features = ["jpeg", "png
 kamadak-exif = "0.6.1"
 # WebP 编码器（image crate 的 webp feature 只做解码，编码用独立 webp crate）。
 webp = { version = "0.2.6", default-features = false }
+# 缓存 key 稳定哈希（SHA-256；缩略图 cache_key/source_key 需跨运行/版本稳定且低碰撞）。
+sha2 = "0.10"
 
 # 阅读器屏幕常亮 (v0.1.0-module2.0). Windows 用 SetThreadExecutionState;
 # macOS/Linux 暂 stub (IOPMAssertion / org.freedesktop.ScreenSaver 等需要

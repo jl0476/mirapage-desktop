@@ -86,6 +86,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 9 {
+        apply_009_thumbnail_cache(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (9, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -397,6 +405,42 @@ fn apply_008_directory_masonry(conn: &Connection) -> anyhow::Result<()> {
            h_gap       INTEGER,
            v_gap       INTEGER
          );",
+    )?;
+    Ok(())
+}
+
+/// Migration 009 — 缩略图缓存索引（v0.1.0-module3.0.7-masonry-thumbnail-cache）
+///
+/// 表结构按实现计划任务4 字段：cache_key/source_key/rel_path/source_size/
+/// source_modified_at/source_width/source_height/orientation/target_bucket/quality/
+/// cache_rel_path/output_width/output_height/byte_size/created_at/last_accessed_at。
+/// 失败状态不持久化（调度器内存态），故无 failure_count/failure_until 列。
+/// `cache_rel_path` 只存相对路径，缓存根迁移时无需逐行更新。
+fn apply_009_thumbnail_cache(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE thumbnail_cache (
+          cache_key          TEXT PRIMARY KEY,
+          source_key         TEXT NOT NULL,
+          rel_path           TEXT NOT NULL,
+          source_size        INTEGER,
+          source_modified_at INTEGER,
+          source_width       INTEGER,
+          source_height      INTEGER,
+          orientation        INTEGER,
+          target_bucket      INTEGER NOT NULL,
+          quality            TEXT NOT NULL,
+          cache_rel_path     TEXT NOT NULL,
+          output_width       INTEGER NOT NULL,
+          output_height      INTEGER NOT NULL,
+          byte_size          INTEGER NOT NULL,
+          created_at         INTEGER NOT NULL,
+          last_accessed_at   INTEGER NOT NULL
+        );
+
+        CREATE INDEX idx_thumbnail_cache_lru
+            ON thumbnail_cache(last_accessed_at);
+        "#,
     )?;
     Ok(())
 }
@@ -739,5 +783,74 @@ mod tests {
             rusqlite::params![json],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn migration_009_creates_thumbnail_cache_and_lru_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        // 表存在
+        let table_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='thumbnail_cache'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_exists, 1, "thumbnail_cache 表未创建");
+
+        // LRU 索引存在
+        let idx_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_thumbnail_cache_lru'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_exists, 1, "idx_thumbnail_cache_lru 索引未创建");
+
+        // 16 列全部存在
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(thumbnail_cache)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for expected in [
+            "cache_key", "source_key", "rel_path", "source_size", "source_modified_at",
+            "source_width", "source_height", "orientation", "target_bucket", "quality",
+            "cache_rel_path", "output_width", "output_height", "byte_size", "created_at",
+            "last_accessed_at",
+        ] {
+            assert!(cols.contains(&expected.to_string()), "thumbnail_cache 缺列 {expected}");
+        }
+
+        // 版本号到 9
+        let v: i32 = conn
+            .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 9);
+    }
+
+    #[test]
+    fn migration_009_preserves_old_tables_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        // 旧表仍在
+        let library_exists: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='library'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(library_exists, 1, "旧 library 表应保留");
+
+        // 重复执行幂等
+        super::run(&conn).expect("重复 run 应幂等无错");
+        super::run(&conn).expect("三次 run 仍幂等");
     }
 }
