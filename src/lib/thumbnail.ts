@@ -27,6 +27,17 @@ export type ThumbnailPriority = 'visible' | 'ahead' | 'behind' | 'idle';
 export const THUMBNAIL_SIZE_BUCKETS = [512, 768, 1024, 1536, 2048] as const;
 export type ThumbnailSizeBucket = (typeof THUMBNAIL_SIZE_BUCKETS)[number];
 
+/**
+ * 清晰度余量（§6.1），与 Rust `policy::quality_policy().margin` 一致。
+ * 用于前端计算 `requiredWidth = cardWidth × dpr × margin`；bucket 选择在 Rust 端。
+ * 不暴露到设置层（用户只见 standard/high/ultra 三档）。
+ */
+export const THUMBNAIL_QUALITY_MARGIN: Record<ThumbnailQuality, number> = {
+  standard: 1.0,
+  high: 1.25,
+  ultra: 1.5,
+};
+
 // ─── 默认值 ────────────────────────────────────────────────────────────
 
 export const DEFAULT_THUMBNAIL_RESOURCE_MODE: ThumbnailResourceMode = 'balanced';

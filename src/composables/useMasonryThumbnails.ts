@@ -1,0 +1,288 @@
+// useMasonryThumbnails.ts — 缩略图队列前端 composable（§12 §13）
+//
+// 职责：把像素窗口（visible/ahead/behind/idle）合成去重 batch，80ms debounce 后批量
+// 请求；监听 thumbnail://state 事件更新单卡状态；cached 路径转 asset URL；retry/regenerate；
+// 切目录/列宽/DPR/质量递增 epoch，旧 epoch 事件忽略；unmount 解绑。
+
+import { computed, onBeforeUnmount, ref, shallowRef, watch, type ComputedRef, type Ref } from 'vue';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import {
+  notifyThumbnailEpoch,
+  notifyThumbnailFastScrolling,
+  regenerateThumbnail,
+  requestThumbnails,
+  retryThumbnail,
+  thumbnailCacheUrl,
+  type ThumbnailStateEvent,
+} from '@/lib/tauri';
+import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
+import {
+  THUMBNAIL_QUALITY_MARGIN,
+  type ThumbnailPriority,
+  type ThumbnailQuality,
+  type ThumbnailRequestItem,
+  type ThumbnailState,
+} from '@/lib/thumbnail';
+import type { ThumbnailWindows } from './useMasonryLayout';
+
+const REQUEST_DEBOUNCE_MS = 80;
+/** 停止滚动后多久才允许提交 idle（§5.3）。 */
+const IDLE_SETTLE_MS = 250;
+
+export interface UseMasonryThumbnailsParams {
+  descriptor: Ref<SourceDescriptor>;
+  entries: Ref<readonly MediaEntry[]>;
+  thumbnailWindows: ComputedRef<ThumbnailWindows>;
+  measuredMap: Ref<Map<string, { width: number; height: number }>>;
+  colWidth: ComputedRef<number>;
+  dpr: Ref<number>;
+  quality: Ref<ThumbnailQuality>;
+  scrollTop: Ref<number>;
+  /** 构造原图 img URL（service 返回 original / 阅读器双击时用）。 */
+  originalUrlFor: (entry: MediaEntry) => string;
+}
+
+export interface UseMasonryThumbnailsReturn {
+  stateMap: ComputedRef<Map<string, ThumbnailState>>;
+  retry: (path: string) => void;
+  regenerate: (path: string) => void;
+  epoch: Ref<number>;
+}
+
+/** 把窗口四组（保持优先级）合成去重 path->priority 映射；优先级 visible>ahead>behind>idle。 */
+export function mergeWindowsToPriorities(w: ThumbnailWindows): Map<string, ThumbnailPriority> {
+  const order: ThumbnailPriority[] = ['visible', 'ahead', 'behind', 'idle'];
+  const rank: Record<ThumbnailPriority, number> = { visible: 0, ahead: 1, behind: 2, idle: 3 };
+  const out = new Map<string, ThumbnailPriority>();
+  for (const group of order) {
+    for (const path of w[group]) {
+      const existing = out.get(path);
+      if (existing === undefined || rank[group] < rank[existing]) {
+        out.set(path, group);
+      }
+    }
+  }
+  return out;
+}
+
+export function useMasonryThumbnails(
+  params: UseMasonryThumbnailsParams,
+): UseMasonryThumbnailsReturn {
+  const state = shallowRef<Map<string, ThumbnailState>>(new Map());
+  const epoch = ref(0);
+  const pathToCacheKey = ref<Map<string, string>>(new Map());
+  let lastScrollAt = 0;
+  let unlisten: UnlistenFn | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const setState = (path: string, s: ThumbnailState) => {
+    const next = new Map(state.value);
+    next.set(path, s);
+    state.value = next;
+  };
+
+  // epoch 递增：切目录/列宽/DPR/质量变化
+  const bumpEpoch = () => {
+    epoch.value += 1;
+    void notifyThumbnailEpoch(epoch.value);
+  };
+
+  watch(
+    () => [params.descriptor.value, params.colWidth.value, params.dpr.value, params.quality.value] as const,
+    () => bumpEpoch(),
+  );
+
+  // 滚动节流记录（用于 idle settle 判定）
+  watch(
+    () => params.scrollTop.value,
+    () => {
+      lastScrollAt = Date.now();
+    },
+  );
+
+  const scheduleRequest = () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(flushRequest, REQUEST_DEBOUNCE_MS);
+  };
+
+  watch(
+    () => params.thumbnailWindows.value,
+    () => scheduleRequest(),
+    { deep: false },
+  );
+
+  const flushRequest = async () => {
+    debounceTimer = null;
+    const reqEpoch = epoch.value;
+    const w = params.thumbnailWindows.value;
+    const prioMap = mergeWindowsToPriorities(w);
+    if (prioMap.size === 0) return;
+
+    const margin = THUMBNAIL_QUALITY_MARGIN[params.quality.value];
+    const requiredWidth = Math.round(params.colWidth.value * params.dpr.value * margin);
+    const measured = params.measuredMap.value;
+    const entriesByPath = new Map(params.entries.value.map((e) => [e.path, e]));
+    const fastScrolling = Date.now() - lastScrollAt < IDLE_SETTLE_MS;
+
+    const items: ThumbnailRequestItem[] = [];
+    const visibleKeys: string[] = [];
+    for (const [path, prio] of prioMap) {
+      // 快速滚动期间不提交 idle
+      if (fastScrolling && prio === 'idle') continue;
+      const entry = entriesByPath.get(path);
+      if (!entry) continue;
+      const m = measured.get(path);
+      if (!m) continue; // 未测量尺寸的不请求（等 header 到达）
+      items.push({
+        path,
+        fileSize: entry.size,
+        modifiedAt: entry.modifiedAt ?? null,
+        sourceWidth: m.width,
+        sourceHeight: m.height,
+        requiredWidth,
+        priority: prio,
+      });
+      const ck = pathToCacheKey.value.get(path);
+      if (ck && (prio === 'visible' || prio === 'ahead')) visibleKeys.push(ck);
+    }
+    if (items.length === 0) return;
+
+    void notifyThumbnailFastScrolling(fastScrolling);
+
+    let results;
+    try {
+      results = await requestThumbnails(params.descriptor.value, items, reqEpoch, visibleKeys);
+    } catch {
+      return;
+    }
+    // 请求期间 epoch 已变（切目录/列宽）则丢弃响应，避免污染新目录状态
+    if (epoch.value !== reqEpoch) return;
+    applyResults(results, entriesByPath);
+  };
+
+  const applyResults = (
+    results: Awaited<ReturnType<typeof requestThumbnails>>,
+    entriesByPath: Map<string, MediaEntry>,
+  ) => {
+    for (const r of results) {
+      const entry = entriesByPath.get(r.path);
+      switch (r.status) {
+        case 'original':
+          if (entry) setState(r.path, { kind: 'original', url: params.originalUrlFor(entry) });
+          break;
+        case 'cached':
+          if (r.cachePath && r.width && r.height) {
+            setState(r.path, {
+              kind: 'cached',
+              cacheKey: r.cacheKey ?? '',
+              path: thumbnailCacheUrl(r.cachePath),
+              width: r.width,
+              height: r.height,
+            });
+          }
+          break;
+        case 'queued':
+          setState(r.path, { kind: 'queued', cacheKey: r.cacheKey ?? '' });
+          if (r.cacheKey) {
+            const next = new Map(pathToCacheKey.value);
+            next.set(r.path, r.cacheKey);
+            pathToCacheKey.value = next;
+          }
+          break;
+        case 'failed':
+          setState(r.path, {
+            kind: 'failed',
+            cacheKey: r.cacheKey ?? '',
+            retryable: true,
+            message: r.errorKind ?? 'failed',
+          });
+          break;
+        default:
+          break;
+      }
+    }
+  };
+
+  // 监听 Rust 状态事件
+  void listen<ThumbnailStateEvent>('thumbnail://state', (event) => {
+    const payload = event.payload;
+    if (payload.epoch !== epoch.value) return; // 旧 epoch 忽略
+    switch (payload.state) {
+      case 'cached':
+        if (payload.cachePath) {
+          setState(payload.path, {
+            kind: 'cached',
+            cacheKey: payload.cacheKey,
+            path: thumbnailCacheUrl(payload.cachePath),
+            width: payload.outputWidth ?? 0,
+            height: payload.outputHeight ?? 0,
+          });
+        }
+        break;
+      case 'failed':
+        setState(payload.path, {
+          kind: 'failed',
+          cacheKey: payload.cacheKey,
+          retryable: true,
+          message: payload.message ?? 'failed',
+        });
+        break;
+      case 'stale':
+        // 旧目录事件忽略（已由 epoch 过滤）；不做 UI 更新
+        break;
+    }
+  }).then((fn) => {
+    unlisten = fn;
+  });
+
+  const findEntry = (path: string): { entry: MediaEntry; item: ThumbnailRequestItem } | null => {
+    const entry = params.entries.value.find((e) => e.path === path);
+    if (!entry) return null;
+    const m = params.measuredMap.value.get(path);
+    if (!m) return null;
+    const margin = THUMBNAIL_QUALITY_MARGIN[params.quality.value];
+    const requiredWidth = Math.round(params.colWidth.value * params.dpr.value * margin);
+    return {
+      entry,
+      item: {
+        path,
+        fileSize: entry.size,
+        modifiedAt: entry.modifiedAt ?? null,
+        sourceWidth: m.width,
+        sourceHeight: m.height,
+        requiredWidth,
+        priority: 'visible',
+      },
+    };
+  };
+
+  const retry = (path: string) => {
+    const found = findEntry(path);
+    if (!found) return;
+    setState(path, { kind: 'queued', cacheKey: pathToCacheKey.value.get(path) ?? '' });
+    void retryThumbnail(params.descriptor.value, found.item, epoch.value).then((r) => {
+      applyResults([r], new Map([[path, found.entry]]));
+    });
+  };
+
+  const regenerate = (path: string) => {
+    const found = findEntry(path);
+    if (!found) return;
+    setState(path, { kind: 'queued', cacheKey: pathToCacheKey.value.get(path) ?? '' });
+    void regenerateThumbnail(params.descriptor.value, found.item, epoch.value).then((r) => {
+      applyResults([r], new Map([[path, found.entry]]));
+    });
+  };
+
+  onBeforeUnmount(() => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    if (unlisten) unlisten();
+  });
+
+  return {
+    stateMap: computed(() => state.value),
+    retry,
+    regenerate,
+    epoch,
+  };
+}
