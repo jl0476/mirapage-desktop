@@ -157,5 +157,16 @@ describe('thumbnail protocol', () => {
       const preset: ThumbnailPreset | null = resolveThumbnailPreset('balanced');
       expect(preset).not.toBeNull();
     });
+
+    it('资源模式 / 清晰度 / 档位枚举类型可构造', () => {
+      const mode: ThumbnailResourceMode = 'balanced';
+      const quality: ThumbnailQuality = 'high';
+      const bucket: ThumbnailSizeBucket = 512;
+      expect(mode).toBe('balanced');
+      expect(quality).toBe('high');
+      expect(bucket).toBe(512);
+      // 档位属于固定集合
+      expect(THUMBNAIL_SIZE_BUCKETS).toContain(bucket);
+    });
   });
 });

@@ -32,6 +32,7 @@ pub mod key;
 pub mod orientation;
 pub mod policy;
 pub mod scheduler;
+pub mod service;
 
 /// 缓存索引 / cache key 的算法版本。任何会改变缩略图输出的策略调整都递增此值，
 /// 使旧缓存自然失效（由 LRU 清理）。参与 cache key 计算。

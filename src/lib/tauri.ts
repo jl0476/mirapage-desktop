@@ -9,7 +9,7 @@
 //   set<X>(id, ...) → update / toggle
 //   record<X>(...) → upsert(用于 history 等)
 
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import type { SourceDescriptor, MediaEntry } from './sourceDescriptor';
 
 // ─── Settings ───────────────────────────────────────────────────────────
@@ -227,6 +227,89 @@ export async function setDirectoryMasonry(
   await invoke<void>('set_directory_masonry', {
     args: { sourceDescriptor, relPath, colCount, hGap, vGap },
   });
+}
+
+// ─── 缩略图缓存 (v0.1.0-module3.0.7) ─────────────────────────────────────
+// 图片字节不进前端；Rust 返回缓存绝对路径，前端 convertFileSrc 转 asset URL。
+import type {
+  ThumbnailRequestItem,
+  ThumbnailRequestResult,
+  ThumbnailQuality,
+} from './thumbnail';
+
+export interface ThumbnailStateEvent {
+  epoch: number;
+  cacheKey: string;
+  path: string;
+  state: 'cached' | 'failed' | 'stale';
+  cachePath: string | null;
+  outputWidth: number | null;
+  outputHeight: number | null;
+  message: string | null;
+}
+
+/** 批量请求缩略图状态（命中直返 cached/original，未命中 queued 后由事件通知）。 */
+export async function requestThumbnails(
+  descriptor: SourceDescriptor,
+  items: ThumbnailRequestItem[],
+  epoch: number,
+  visibleCacheKeys: string[],
+): Promise<ThumbnailRequestResult[]> {
+  return invoke<ThumbnailRequestResult[]>('request_thumbnails', {
+    descriptor,
+    items,
+    epoch,
+    visibleCacheKeys,
+  });
+}
+
+export async function retryThumbnail(
+  descriptor: SourceDescriptor,
+  item: ThumbnailRequestItem,
+  epoch: number,
+): Promise<ThumbnailRequestResult> {
+  return invoke<ThumbnailRequestResult>('retry_thumbnail', { descriptor, item, epoch });
+}
+
+export async function regenerateThumbnail(
+  descriptor: SourceDescriptor,
+  item: ThumbnailRequestItem,
+  epoch: number,
+): Promise<ThumbnailRequestResult> {
+  return invoke<ThumbnailRequestResult>('regenerate_thumbnail', { descriptor, item, epoch });
+}
+
+export async function updateThumbnailRuntimeConfig(
+  workerLimit: number,
+  memoryBudgetMb: number,
+  quality: ThumbnailQuality,
+): Promise<void> {
+  await invoke<void>('update_thumbnail_runtime_config', {
+    workerLimit,
+    memoryBudgetMb,
+    quality,
+  });
+}
+
+export async function getThumbnailCacheInfo(): Promise<{ bytes: number; count: number }> {
+  return invoke<{ bytes: number; count: number }>('get_thumbnail_cache_info');
+}
+
+export async function clearThumbnailCache(): Promise<void> {
+  await invoke<void>('clear_thumbnail_cache');
+}
+
+export async function notifyThumbnailEpoch(epoch: number): Promise<void> {
+  await invoke<void>('notify_thumbnail_epoch', { epoch });
+}
+
+export async function notifyThumbnailFastScrolling(fast: boolean): Promise<void> {
+  await invoke<void>('notify_thumbnail_fast_scrolling', { fast });
+}
+
+/** 缓存绝对路径转 asset URL（前端 <img> 直接加载）。 */
+export function thumbnailCacheUrl(cachePath: string): string {
+  return convertFileSrc(cachePath);
 }
 
 // ─── Progress (Phase 4) ─────────────────────────────────────────────────

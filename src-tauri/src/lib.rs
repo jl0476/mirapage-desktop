@@ -41,6 +41,9 @@ pub fn run() {
             let factory = source::MediaSourceFactory::new();
             app.manage(factory);
 
+            // 初始化缩略图缓存服务（v0.1.0-module3.0.7）
+            init_thumbnail_service(app_handle)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -93,7 +96,70 @@ pub fn run() {
             // 瀑布流布局参数覆盖 (v0.1.0-module3.0.6)
             commands::directory_masonry::get_directory_masonry,
             commands::directory_masonry::set_directory_masonry,
+            // 缩略图缓存 (v0.1.0-module3.0.7)
+            commands::thumbnails::request_thumbnails,
+            commands::thumbnails::retry_thumbnail,
+            commands::thumbnails::regenerate_thumbnail,
+            commands::thumbnails::update_thumbnail_runtime_config,
+            commands::thumbnails::get_thumbnail_cache_info,
+            commands::thumbnails::clear_thumbnail_cache,
+            commands::thumbnails::notify_thumbnail_epoch,
+            commands::thumbnails::notify_thumbnail_fast_scrolling,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 初始化缩略图缓存服务：解析 cache 目录、读 settings、建 ThumbnailService。
+fn init_thumbnail_service(app: &tauri::AppHandle) -> anyhow::Result<()> {
+    let cache_root = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| anyhow::anyhow!("failed to resolve app cache dir: {e}"))?
+        .join("masonry-thumbnails");
+    std::fs::create_dir_all(&cache_root)?;
+    tracing::info!("thumbnail cache root at {}", cache_root.display());
+
+    let db = app.state::<db::Db>();
+    let conn = db.conn();
+    let worker = setting_u32(&conn, "fb_thumbnail_worker_limit", 2);
+    let mem = setting_u32(&conn, "fb_thumbnail_decode_memory_mb", 128);
+    let quality = match setting_str(&conn, "fb_thumbnail_quality", "high").as_str() {
+        "standard" => thumbnail::Quality::Standard,
+        "ultra" => thumbnail::Quality::Ultra,
+        _ => thumbnail::Quality::High,
+    };
+    let limit = setting_u64(&conn, "fb_thumbnail_cache_limit_mb", 512);
+
+    let service = thumbnail::service::ThumbnailService::new(
+        app.clone(),
+        cache_root,
+        worker,
+        mem,
+        quality,
+        limit,
+    );
+    app.manage(service);
+    Ok(())
+}
+
+fn setting_str(conn: &rusqlite::Connection, key: &str, default: &str) -> String {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        rusqlite::params![key],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| default.to_string())
+}
+
+fn setting_u32(conn: &rusqlite::Connection, key: &str, default: u32) -> u32 {
+    setting_str(conn, key, &default.to_string())
+        .parse()
+        .unwrap_or(default)
+}
+
+fn setting_u64(conn: &rusqlite::Connection, key: &str, default: u64) -> u64 {
+    setting_str(conn, key, &default.to_string())
+        .parse()
+        .unwrap_or(default)
 }

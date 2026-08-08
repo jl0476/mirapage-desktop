@@ -19,3 +19,4 @@ pub mod progress;
 pub mod settings;
 pub mod shortcuts;
 pub mod tags;
+pub mod thumbnails;
