@@ -113,6 +113,14 @@ cargo test --manifest-path src-tauri/Cargo.toml thumbnail   # 缩略图相关全
 
 ## 5. 未完成项（计划任务 12–13）
 
+> **2026-08-08 代码审查修复（P1/P2 全部已修）**：路径模型（`path`/`sourceRelPath`/`ui_path` 拆分，
+> 子目录图片正确读取 + 完成事件用 UI key 不再返回绝对磁盘路径）；LRU 保护可见/in-flight/刚完成 key
+> + cached 响应回传 cache_key；设置真实控制运行（`thumbnailWindows` 由设置驱动、缓存容量运行时生效、
+> idle 关闭生效）；`list_image_dimensions` 应用 EXIF Orientation 返回显示方向尺寸；Standard 清晰度
+> max_bucket=1536 截断；索引完整元数据；清空缓存 `cancel_all` 协调（不被后台任务重新写回）；
+> ThumbnailCacheSettings 复用 EnumRow；scheduler.source_path 提交完整（HEAD 可独立构建）。
+> 详见 `docs/superpowers/reports/2026-08-08-masonry-thumbnail-code-review.md`。
+
 - **任务12 缓存位置迁移**：`thumbnail/migration.rs`（manifest 状态机、同盘 rename / 跨盘复制校验、
   resume / rollback）+ 6 个管理命令 + 设置页目录选择 UI。**未实现**；当前缓存固定在系统 cache 目录。
 - **任务13 集成测试**：`tests/thumbnail_pipeline.rs`（冷/热缓存端到端 + 并发/内存断言）、
