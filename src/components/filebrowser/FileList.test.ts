@@ -50,7 +50,8 @@ function mountList(
 ) {
   return mount(FileList, {
     props: { entries: [], ...props } as any,
-    global: { plugins: [createPinia(), i18n] },
+    // stub MasonryView：其内部 useMasonryThumbnails 依赖 Tauri event/IPC，单元测试里不应触发。
+    global: { plugins: [createPinia(), i18n], stubs: { MasonryView: true } },
     ...opts,
   });
 }
