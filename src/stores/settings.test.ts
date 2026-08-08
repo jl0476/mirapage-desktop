@@ -16,6 +16,11 @@ vi.mock('@/lib/tauri', () => ({
     return null;
   }),
   setSetting: vi.fn(async () => undefined),
+  updateThumbnailRuntimeConfig: vi.fn(async () => undefined),
+  getThumbnailCacheInfo: vi.fn(async () => ({ bytes: 0, count: 0 })),
+  clearThumbnailCache: vi.fn(async () => undefined),
+  notifyThumbnailEpoch: vi.fn(async () => undefined),
+  notifyThumbnailFastScrolling: vi.fn(async () => undefined),
 }));
 
 import { useSettingsStore } from './settings';
@@ -90,5 +95,68 @@ describe('settings store', () => {
     expect(setSetting).toHaveBeenCalledWith('touch_top_left', 'fit-width');
     expect(setSetting).toHaveBeenCalledWith('touch_bot_right', 'folder-next');
     expect(setSetting).toHaveBeenCalledTimes(9);
+  });
+});
+
+describe('settings store: 缩略图缓存', () => {
+  it('九个 key 默认值', async () => {
+    const store = useSettingsStore();
+    await store.load();
+    expect(store.thumbnailResourceMode).toBe('balanced');
+    expect(store.thumbnailWorkerLimit).toBe(2);
+    expect(store.thumbnailDecodeMemoryMb).toBe(128);
+    expect(store.thumbnailQuality).toBe('high');
+    expect(store.thumbnailPrefetchScreens).toBe(1.5);
+    expect(store.thumbnailIdleGeneration).toBe(true);
+    expect(store.thumbnailIdlePrefetchScreens).toBe(1);
+    expect(store.thumbnailCacheRoot).toBe('');
+    expect(store.thumbnailCacheLimitMb).toBe(512);
+  });
+
+  it('选预设一次性覆盖资源参数并推送 runtime', async () => {
+    const { updateThumbnailRuntimeConfig } = await import('@/lib/tauri');
+    const store = useSettingsStore();
+    await store.load();
+    await store.setThumbnailResourceMode('performance');
+    expect(store.thumbnailResourceMode).toBe('performance');
+    expect(store.thumbnailWorkerLimit).toBe(3);
+    expect(store.thumbnailDecodeMemoryMb).toBe(256);
+    expect(store.thumbnailPrefetchScreens).toBe(2.5);
+    expect(store.thumbnailIdlePrefetchScreens).toBe(2);
+    expect(updateThumbnailRuntimeConfig).toHaveBeenCalledWith(3, 256, 'high');
+  });
+
+  it('手改 worker -> 模式切 custom', async () => {
+    const store = useSettingsStore();
+    await store.load();
+    await store.setThumbnailResourceMode('balanced');
+    await store.setThumbnailWorkerLimit(4);
+    expect(store.thumbnailResourceMode).toBe('custom');
+    expect(store.thumbnailWorkerLimit).toBe(4);
+  });
+
+  it('手改 worker 越界归一化（9 -> 4）', async () => {
+    const store = useSettingsStore();
+    await store.load();
+    await store.setThumbnailWorkerLimit(9);
+    expect(store.thumbnailWorkerLimit).toBe(4);
+  });
+
+  it('改清晰度不改资源模式，但推送 runtime', async () => {
+    const { updateThumbnailRuntimeConfig } = await import('@/lib/tauri');
+    const store = useSettingsStore();
+    await store.load();
+    await store.setThumbnailQuality('ultra');
+    expect(store.thumbnailResourceMode).toBe('balanced');
+    expect(store.thumbnailQuality).toBe('ultra');
+    expect(updateThumbnailRuntimeConfig).toHaveBeenCalledWith(2, 128, 'ultra');
+  });
+
+  it('改缓存上限不改资源模式', async () => {
+    const store = useSettingsStore();
+    await store.load();
+    await store.setThumbnailCacheLimitMb(1024);
+    expect(store.thumbnailResourceMode).toBe('balanced');
+    expect(store.thumbnailCacheLimitMb).toBe(1024);
   });
 });

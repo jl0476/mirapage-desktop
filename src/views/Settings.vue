@@ -15,6 +15,7 @@ import {
 import { useSectionAnchors } from '@/composables/useSectionAnchors';
 import EnumRow from '@/components/settings/EnumRow.vue';
 import BooleanRow from '@/components/settings/BooleanRow.vue';
+import ThumbnailCacheSettings from '@/components/settings/ThumbnailCacheSettings.vue';
 import NumberRow from '@/components/settings/NumberRow.vue';
 
 const { t } = useI18n();
@@ -394,6 +395,10 @@ function closeOpenCell(e: MouseEvent) {
                      @input="(e) => settings.setMasonryDefaultVGap(Number((e.target as HTMLInputElement).value))" />
             </div>
           </div>
+
+          <!-- 缩略图缓存资源 / 清晰度 / 容量（v0.1.0-module3.0.7） -->
+          <hr class="my-4 border-[color:var(--color-border-default)]" />
+          <ThumbnailCacheSettings />
         </section>
       </div>
     </main>

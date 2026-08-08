@@ -3,7 +3,7 @@
 
 import { defineStore } from 'pinia';
 import { reactive, ref } from 'vue';
-import { getSetting, setSetting } from '@/lib/tauri';
+import { getSetting, setSetting, updateThumbnailRuntimeConfig } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import {
   TOUCH_ZONES, TOUCH_ZONE_KEY, DEFAULT_TOUCH_SCHEME,
@@ -11,6 +11,10 @@ import {
   type ScaleMode, type ReadDirection,
   type TouchZone, type TouchAction,
 } from '@/lib/readerSettings';
+import {
+  resolveThumbnailPreset, normalizeWorkerLimit, normalizeDecodeMemoryMb, normalizeCacheLimitMb,
+  type ThumbnailResourceMode, type ThumbnailQuality,
+} from '@/lib/thumbnail';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 export type ColorTheme = 'blue' | 'purple' | 'amber' | 'neutral';
@@ -44,6 +48,17 @@ export const useSettingsStore = defineStore('settings', () => {
   const masonryDefaultHGap = ref(8);
   const masonryDefaultVGap = ref(8);
 
+  // v0.1.0-module3.0.7: 缩略图缓存资源 / 清晰度 / 容量（§14 九个 key）
+  const thumbnailResourceMode = ref<ThumbnailResourceMode>('balanced');
+  const thumbnailWorkerLimit = ref(2);
+  const thumbnailDecodeMemoryMb = ref(128);
+  const thumbnailQuality = ref<ThumbnailQuality>('high');
+  const thumbnailPrefetchScreens = ref(1.5);
+  const thumbnailIdleGeneration = ref(true);
+  const thumbnailIdlePrefetchScreens = ref(1);
+  const thumbnailCacheRoot = ref('');   // 空值 = 系统默认 cache dir（迁移在任务12）
+  const thumbnailCacheLimitMb = ref(512);
+
   const initialized = ref(false);
 
   /** 加载所有 settings（启动时调用） */
@@ -65,6 +80,16 @@ export const useSettingsStore = defineStore('settings', () => {
       ['fb_masonry_default_cols', (v) => (masonryDefaultCols.value = Number(v))],
       ['fb_masonry_default_h_gap', (v) => (masonryDefaultHGap.value = Number(v))],
       ['fb_masonry_default_v_gap', (v) => (masonryDefaultVGap.value = Number(v))],
+      // 缩略图缓存（带值域归一化兜底越界/脏值）
+      ['fb_thumbnail_resource_mode', (v) => (thumbnailResourceMode.value = v as ThumbnailResourceMode)],
+      ['fb_thumbnail_worker_limit', (v) => (thumbnailWorkerLimit.value = normalizeWorkerLimit(Number(v)))],
+      ['fb_thumbnail_decode_memory_mb', (v) => (thumbnailDecodeMemoryMb.value = normalizeDecodeMemoryMb(Number(v)))],
+      ['fb_thumbnail_quality', (v) => (thumbnailQuality.value = v as ThumbnailQuality)],
+      ['fb_thumbnail_prefetch_screens', (v) => (thumbnailPrefetchScreens.value = Number(v))],
+      ['fb_thumbnail_idle_generation', (v) => (thumbnailIdleGeneration.value = v === '1')],
+      ['fb_thumbnail_idle_prefetch_screens', (v) => (thumbnailIdlePrefetchScreens.value = Number(v))],
+      ['fb_thumbnail_cache_root', (v) => (thumbnailCacheRoot.value = v)],
+      ['fb_thumbnail_cache_limit_mb', (v) => (thumbnailCacheLimitMb.value = normalizeCacheLimitMb(Number(v)))],
       ...TOUCH_ZONES.map((z) =>
         [`touch_${TOUCH_ZONE_KEY[z]}`, (v) => (touchScheme[z] = v as TouchAction)] as [string, (v: string) => void],
       ),
@@ -112,6 +137,93 @@ export const useSettingsStore = defineStore('settings', () => {
   async function setMasonryDefaultVGap(v: number): Promise<void> {
     masonryDefaultVGap.value = v;
     await update('fb_masonry_default_v_gap', v);
+  }
+
+  // ─── 缩略图缓存资源 / 清晰度 / 容量（v0.1.0-module3.0.7）──────────────
+  /** 推送 worker/内存/清晰度运行时配置到 Rust 调度器。 */
+  async function pushThumbnailRuntime(): Promise<void> {
+    try {
+      await updateThumbnailRuntimeConfig(
+        thumbnailWorkerLimit.value,
+        thumbnailDecodeMemoryMb.value,
+        thumbnailQuality.value,
+      );
+    } catch (e) {
+      log('[settings] pushThumbnailRuntime failed', e);
+    }
+  }
+
+  /** 手改任一高级资源参数后模式自动切 custom。 */
+  async function markThumbnailCustom(): Promise<void> {
+    if (thumbnailResourceMode.value !== 'custom') {
+      thumbnailResourceMode.value = 'custom';
+      await update('fb_thumbnail_resource_mode', 'custom');
+    }
+  }
+
+  /** 选择资源预设：一次性覆盖 worker/内存/预读/idle 并推送一次 runtime。 */
+  async function setThumbnailResourceMode(mode: ThumbnailResourceMode): Promise<void> {
+    thumbnailResourceMode.value = mode;
+    await update('fb_thumbnail_resource_mode', mode);
+    const preset = resolveThumbnailPreset(mode);
+    if (preset) {
+      thumbnailWorkerLimit.value = preset.workerLimit;
+      thumbnailDecodeMemoryMb.value = preset.decodeMemoryMb;
+      thumbnailPrefetchScreens.value = preset.prefetchScreens;
+      thumbnailIdleGeneration.value = preset.idleGeneration;
+      thumbnailIdlePrefetchScreens.value = preset.idlePrefetchScreens;
+      await Promise.all([
+        update('fb_thumbnail_worker_limit', preset.workerLimit),
+        update('fb_thumbnail_decode_memory_mb', preset.decodeMemoryMb),
+        update('fb_thumbnail_prefetch_screens', preset.prefetchScreens),
+        update('fb_thumbnail_idle_generation', preset.idleGeneration ? '1' : '0'),
+        update('fb_thumbnail_idle_prefetch_screens', preset.idlePrefetchScreens),
+      ]);
+      await pushThumbnailRuntime();
+    }
+  }
+
+  async function setThumbnailWorkerLimit(v: number): Promise<void> {
+    thumbnailWorkerLimit.value = normalizeWorkerLimit(v);
+    await update('fb_thumbnail_worker_limit', thumbnailWorkerLimit.value);
+    await markThumbnailCustom();
+    await pushThumbnailRuntime();
+  }
+
+  async function setThumbnailDecodeMemoryMb(v: number): Promise<void> {
+    thumbnailDecodeMemoryMb.value = normalizeDecodeMemoryMb(v);
+    await update('fb_thumbnail_decode_memory_mb', thumbnailDecodeMemoryMb.value);
+    await markThumbnailCustom();
+    await pushThumbnailRuntime();
+  }
+
+  async function setThumbnailQuality(v: ThumbnailQuality): Promise<void> {
+    thumbnailQuality.value = v;
+    await update('fb_thumbnail_quality', v);
+    await pushThumbnailRuntime();
+  }
+
+  async function setThumbnailPrefetchScreens(v: number): Promise<void> {
+    thumbnailPrefetchScreens.value = v;
+    await update('fb_thumbnail_prefetch_screens', v);
+    await markThumbnailCustom();
+  }
+
+  async function setThumbnailIdleGeneration(v: boolean): Promise<void> {
+    thumbnailIdleGeneration.value = v;
+    await update('fb_thumbnail_idle_generation', v ? '1' : '0');
+    await markThumbnailCustom();
+  }
+
+  async function setThumbnailIdlePrefetchScreens(v: number): Promise<void> {
+    thumbnailIdlePrefetchScreens.value = v;
+    await update('fb_thumbnail_idle_prefetch_screens', v);
+    await markThumbnailCustom();
+  }
+
+  async function setThumbnailCacheLimitMb(v: number): Promise<void> {
+    thumbnailCacheLimitMb.value = normalizeCacheLimitMb(v);
+    await update('fb_thumbnail_cache_limit_mb', thumbnailCacheLimitMb.value);
   }
 
   /**
@@ -178,6 +290,15 @@ export const useSettingsStore = defineStore('settings', () => {
     masonryDefaultCols,
     masonryDefaultHGap,
     masonryDefaultVGap,
+    thumbnailResourceMode,
+    thumbnailWorkerLimit,
+    thumbnailDecodeMemoryMb,
+    thumbnailQuality,
+    thumbnailPrefetchScreens,
+    thumbnailIdleGeneration,
+    thumbnailIdlePrefetchScreens,
+    thumbnailCacheRoot,
+    thumbnailCacheLimitMb,
     initialized,
     // 方法
     load,
@@ -186,6 +307,14 @@ export const useSettingsStore = defineStore('settings', () => {
     setMasonryDefaultCols,
     setMasonryDefaultHGap,
     setMasonryDefaultVGap,
+    setThumbnailResourceMode,
+    setThumbnailWorkerLimit,
+    setThumbnailDecodeMemoryMb,
+    setThumbnailQuality,
+    setThumbnailPrefetchScreens,
+    setThumbnailIdleGeneration,
+    setThumbnailIdlePrefetchScreens,
+    setThumbnailCacheLimitMb,
     cycleReaderMode,
     cycleReadDirection,
     setTouchAction,

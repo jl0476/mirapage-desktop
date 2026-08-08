@@ -69,9 +69,11 @@ const { layout, visibleRange, needPrefetch, nextBatchPaths, colWidth, thumbnailW
   measuredMap,
 });
 
-// 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 默认 high（任务11 接 settings）。
+// 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 来自设置 store。
+import { useSettingsStore } from '@/stores/settings';
+const settingsStore = useSettingsStore();
 const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
-const thumbQuality = ref<'standard' | 'high' | 'ultra'>('high');
+const thumbQuality = computed(() => settingsStore.thumbnailQuality);
 const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateThumbnail } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
   entries: entriesRef,
