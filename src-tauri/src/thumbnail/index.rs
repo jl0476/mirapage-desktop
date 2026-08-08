@@ -8,6 +8,35 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
+/// 建表（幂等）。生产由 migration 009 创建；测试/非 app 上下文用此函数确保 schema。
+pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS thumbnail_cache (
+          cache_key          TEXT PRIMARY KEY,
+          source_key         TEXT NOT NULL,
+          rel_path           TEXT NOT NULL,
+          source_size        INTEGER,
+          source_modified_at INTEGER,
+          source_width       INTEGER,
+          source_height      INTEGER,
+          orientation        INTEGER,
+          target_bucket      INTEGER NOT NULL,
+          quality            TEXT NOT NULL,
+          cache_rel_path     TEXT NOT NULL,
+          output_width       INTEGER NOT NULL,
+          output_height      INTEGER NOT NULL,
+          byte_size          INTEGER NOT NULL,
+          created_at         INTEGER NOT NULL,
+          last_accessed_at   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_lru
+            ON thumbnail_cache(last_accessed_at);
+        "#,
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThumbnailCacheRow {
     pub cache_key: String,

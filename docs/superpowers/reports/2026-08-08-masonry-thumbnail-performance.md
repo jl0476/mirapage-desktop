@@ -106,12 +106,12 @@ npm test                              # 前端 658 测试
 cargo test --manifest-path src-tauri/Cargo.toml thumbnail   # 缩略图相关全绿
 ```
 
-**当前验证状态**：前端 658 测试 0 error；Rust 缩略图相关 145 测试全绿
+**当前验证状态**：前端 665 测试 0 error；Rust 缩略图相关 94 单测 + 4 管线集成 + 8 生成器集成全绿
 （另有 `algorithm::path::test_crumbs` / `source::webdav_impl` 2 个**预存在** Windows 平台测试与本模块无关）。
 
 ---
 
-## 5. 未完成项（计划任务 12–13）
+## 5. 完成与待跑项
 
 > **2026-08-08 代码审查修复（P1/P2 全部已修）**：路径模型（`path`/`sourceRelPath`/`ui_path` 拆分，
 > 子目录图片正确读取 + 完成事件用 UI key 不再返回绝对磁盘路径）；LRU 保护可见/in-flight/刚完成 key
@@ -121,8 +121,14 @@ cargo test --manifest-path src-tauri/Cargo.toml thumbnail   # 缩略图相关全
 > ThumbnailCacheSettings 复用 EnumRow；scheduler.source_path 提交完整（HEAD 可独立构建）。
 > 详见 `docs/superpowers/reports/2026-08-08-masonry-thumbnail-code-review.md`。
 
-- **任务12 缓存位置迁移**：`thumbnail/migration.rs`（manifest 状态机、同盘 rename / 跨盘复制校验、
-  resume / rollback）+ 6 个管理命令 + 设置页目录选择 UI。**未实现**；当前缓存固定在系统 cache 目录。
-- **任务13 集成测试**：`tests/thumbnail_pipeline.rs`（冷/热缓存端到端 + 并发/内存断言）、
-  `MasonryThumbnail.integration.test.ts`（1000 entry 滚动 DOM/事件）**未编写**；
-  本文实时数值待本地实跑补全。
+- **任务12 缓存位置迁移 ✅ 已实现**：`thumbnail/migration.rs`（FsOps trait + MigrationManifest phase 状态机
+  + validate_target + 逐文件 copy→.tmp→校验大小→rename + resume/cancel + commit/rollback，整体校验前不删源）；
+  service cache_root 可切换 + 迁移方法（cancel_all 暂停生成 + spawn_blocking + 切根 + 持久化设置 + 进度事件）；
+  6 个管理命令（validate/migrate/cancel/resume/rollback/state）；init 读 `fb_thumbnail_cache_root`；
+  设置 UI 目录选择（dialog）+ 迁移进度 + 启动恢复（继续/回滚）。7 个迁移单测 + 文件一致性。
+- **任务13 集成测试 ✅ 已编写（算法/虚拟化/管线层）**：`tests/thumbnail_pipeline.rs`（4：冷生成→热命中+WebP 重解码、
+  坏图不阻塞、LRU 超限→80%、protected key 跳过）；`MasonryThumbnail.integration.test.ts`（4：1000 entry 虚拟化有界、
+  窗口总数远小于 N、滚动中段窗口定位、0px gap 相邻边相接）。
+- **任务13 实时性能数据 ⏳ 待本地实跑**：改造后冷缓存首张时间、冷缓存主要可见区完成、热缓存帧时间、
+  最大滚动帧、>100ms 掉帧数、瀑布流直加载超阈值原图统计——需 `npm run tauri:dev` 在本地 Windows 环境用
+  DevTools/rAF 采样补全；改造前基线已知不达标（§1，max 313ms / 5 次 >100ms）。
