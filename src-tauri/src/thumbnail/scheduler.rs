@@ -37,9 +37,11 @@ pub type GenerateFn =
     Arc<dyn Fn(GenerationJob) -> Result<GeneratedThumbnail, ThumbnailError> + Send + Sync>;
 
 /// 一次生成的全部输入（owned，便于跨 spawn_blocking 边界）。
+/// Local 源走 `source_path`（blocking 线程内 std::fs::read）；其它源可填 `source_bytes`。
 #[derive(Debug, Clone)]
 pub struct GenerationJob {
     pub source_bytes: Vec<u8>,
+    pub source_path: Option<PathBuf>,
     pub target_width: u32,
     pub pixel_budget: u32,
     pub clarity_floor_width: u32,
@@ -405,6 +407,7 @@ mod tests {
     fn job_for(key: &str) -> GenerationJob {
         GenerationJob {
             source_bytes: Vec::new(),
+            source_path: None,
             target_width: 512,
             pixel_budget: 3_000_000,
             clarity_floor_width: 0,
