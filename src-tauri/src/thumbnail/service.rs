@@ -13,15 +13,18 @@ use tauri::{AppHandle, Emitter, Manager};
 use super::generator::{generate_thumbnail, GenerateRequest, GeneratedThumbnail};
 use super::index::{self, ThumbnailCacheRow};
 use super::key::{self, CacheKeyInput};
+use super::migration::{self, MigrationMode, RealFs};
 use super::policy::{self, QualityPolicy, SourceDecision};
 use super::scheduler::{self, GenerateFn, GenerationJob, Outcome, QueuedTask, SchedulerConfig, SchedulerHandle};
 use super::{Priority, Quality, ThumbnailError, ThumbnailRequestItem, THUMBNAIL_ALGORITHM_VERSION};
 use crate::db::Db;
 use crate::source::descriptor::SourceDescriptor;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 事件名。
 pub const EVENT_STATE: &str = "thumbnail://state";
 pub const EVENT_CACHE_INFO: &str = "thumbnail://cache-info";
+pub const EVENT_MIGRATION_PROGRESS: &str = "thumbnail://migration-progress";
 
 const ORIENTATION_VERSION: u32 = 1;
 
@@ -228,11 +231,16 @@ pub struct StateEvent {
 pub struct ThumbnailService {
     app: AppHandle,
     scheduler: SchedulerHandle,
-    cache_root: PathBuf,
+    /// 当前缓存根（可切换：迁移提交后更新）。读写锁，迁移切根时短暂持写锁。
+    cache_root: Arc<RwLock<PathBuf>>,
     quality: Arc<RwLock<Quality>>,
     cache_limit_mb: Arc<RwLock<u64>>,
     /// LRU 保护集合：可见 + in-flight cache key，清理时跳过。
     protected_keys: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// 当前迁移的取消标志。
+    migration_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// 当前/最近一次迁移的 manifest（供 get_migration_state + 启动恢复检测）。
+    migration_state: Arc<RwLock<Option<migration::MigrationManifest>>>,
 }
 
 impl ThumbnailService {
@@ -253,15 +261,23 @@ impl ThumbnailService {
         Self {
             app,
             scheduler,
-            cache_root,
+            cache_root: Arc::new(RwLock::new(cache_root)),
             quality: Arc::new(RwLock::new(quality)),
             cache_limit_mb: Arc::new(RwLock::new(cache_limit_mb)),
             protected_keys: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            migration_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            migration_state: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub fn cache_root(&self) -> &Path {
-        &self.cache_root
+    /// 当前缓存根快照。
+    pub fn cache_root(&self) -> PathBuf {
+        self.cache_root.read().unwrap().clone()
+    }
+
+    /// 设置缓存根（迁移提交后调用）。
+    pub fn set_cache_root(&self, root: PathBuf) {
+        *self.cache_root.write().unwrap() = root;
     }
 
     pub fn set_runtime_config(&self, worker_limit: u32, memory_budget_mb: u32, quality: Quality) {
@@ -305,6 +321,8 @@ impl ThumbnailService {
             _ => String::new(),
         };
         let quality = *self.quality.read().unwrap();
+        // 快照当前缓存根（迁移切根时更新；request 内一致使用此快照）
+        let cache_root = self.cache_root();
 
         let mut results = Vec::with_capacity(items.len());
         // 收集需要生成的任务（先全部分类，再统一提交，避免持锁跨 await）
@@ -338,7 +356,7 @@ impl ThumbnailService {
                 let abs = local_abs_path(&root_path, &item.source_rel_path);
                 match classify_item(
                     &conn,
-                    &self.cache_root,
+                    &cache_root,
                     &descriptor_json,
                     abs,
                     item,
@@ -398,7 +416,7 @@ impl ThumbnailService {
             let target_bucket = task.job.target_width;
             let rx = self.scheduler.submit(task);
             let app = self.app.clone();
-            let cache_root = self.cache_root.clone();
+            let root_for_completion = cache_root.clone();
             let cache_limit = *self.cache_limit_mb.read().unwrap() * 1_000_000;
             spawn_completion(app, rx, CompletionMeta {
                 epoch,
@@ -406,7 +424,7 @@ impl ThumbnailService {
                 ui_path: item.path.clone(),
                 source_rel_path: item.source_rel_path.clone(),
                 cache_abs,
-                cache_root,
+                cache_root: root_for_completion,
                 cache_limit,
                 protected_keys: self.protected_keys.clone(),
                 source_key: key::source_key(&descriptor_json, &item.source_rel_path),
@@ -462,6 +480,7 @@ impl ThumbnailService {
             _ => String::new(),
         };
         let quality = *self.quality.read().unwrap();
+        let cache_root = self.cache_root();
         let abs = local_abs_path(&root_path, &item.source_rel_path);
 
         // 强制重建：删除旧缓存
@@ -481,7 +500,7 @@ impl ThumbnailService {
             let rel = key::cache_rel_path(&ck);
             let db = self.app.state::<Db>();
             let conn = db.conn();
-            let _ = std::fs::remove_file(self.cache_root.join(&rel));
+            let _ = std::fs::remove_file(cache_root.join(&rel));
             let _ = index::remove(&conn, &ck);
         }
 
@@ -491,7 +510,7 @@ impl ThumbnailService {
             let conn = db.conn();
             match classify_item(
                 &conn,
-                &self.cache_root,
+                &cache_root,
                 &descriptor_json,
                 abs,
                 item,
@@ -538,7 +557,7 @@ impl ThumbnailService {
         }
         let rx = self.scheduler.submit(task);
         let app = self.app.clone();
-        let cache_root = self.cache_root.clone();
+        let cache_root = cache_root.clone();
         let cache_limit = *self.cache_limit_mb.read().unwrap() * 1_000_000;
         spawn_completion(app, rx, CompletionMeta {
             epoch,
@@ -600,10 +619,98 @@ impl ThumbnailService {
                 .unwrap_or_default()
         };
         for rel in rels {
-            let _ = std::fs::remove_file(self.cache_root.join(rel));
+            let _ = std::fs::remove_file(self.cache_root().join(rel));
         }
         let _ = index::clear_all(&conn);
         let _ = self.app.emit(EVENT_CACHE_INFO, serde_json::json!({"bytes":0,"count":0}));
+    }
+
+    // ─── 缓存位置迁移（§11）──────────────────────────────────────────────
+
+    /// 校验目标目录是否可作为新缓存根。
+    pub fn validate_cache_location(&self, target: &Path) -> Result<(), String> {
+        let root = self.cache_root();
+        let fs = RealFs;
+        migration::validate_target(&root, target, &fs).map_err(|e| e.to_string())
+    }
+
+    /// 当前/最近一次迁移状态（启动恢复检测 + 进度查询）。
+    pub fn migration_state(&self) -> Option<migration::MigrationManifest> {
+        self.migration_state.read().unwrap().clone()
+    }
+
+    /// 启动/继续迁移。cancel_all 暂停生成；spawn_blocking 跑 run_migration；
+    /// 成功后切 cache_root + commit（Move 删源）；进度通过 thumbnail://migration-progress 事件。
+    pub fn start_migration(&self, target: PathBuf, mode: MigrationMode) {
+        let app = self.app.clone();
+        let source = self.cache_root();
+        let target_clone = target.clone();
+        let cancel = self.migration_cancel.clone();
+        let state = self.migration_state.clone();
+        let cache_root_lock = self.cache_root.clone();
+        cancel.store(false, Ordering::Relaxed);
+        // 暂停生成（排队/in-flight 变 stale，不再写索引）
+        self.scheduler.cancel_all();
+
+        tokio::task::spawn_blocking(move || {
+            let fs = RealFs;
+            // 先校验
+            if let Err(e) = migration::validate_target(&source, &target, &fs) {
+                let _ = app.emit(EVENT_MIGRATION_PROGRESS, serde_json::json!({"phase":"failed","error":e.to_string()}));
+                return;
+            }
+            let app_for_progress = app.clone();
+            let state_for_progress = state.clone();
+            let mut on_progress = |m: &migration::MigrationManifest| {
+                *state_for_progress.write().unwrap() = Some(m.clone());
+                let _ = app_for_progress.emit(EVENT_MIGRATION_PROGRESS, serde_json::json!({
+                    "phase": format!("{:?}", m.phase).to_lowercase(),
+                    "completed": m.completed.len(),
+                    "totalFiles": m.total_files,
+                    "copiedBytes": m.copied_bytes,
+                    "totalBytes": m.total_bytes,
+                }));
+            };
+            let result = migration::run_migration(&source, &target, mode, &fs, &cancel, &mut on_progress);
+            match result {
+                Ok(m) if m.phase == migration::MigrationPhase::Completed => {
+                    // 提交：切根 + 持久化设置 + commit（删源/删 manifest）
+                    *cache_root_lock.write().unwrap() = target_clone.clone();
+                    // 持久化新缓存根到 settings（重启后从新位置加载）
+                    if let Some(db) = app.try_state::<crate::db::Db>() {
+                        let conn = db.conn();
+                        let _ = conn.execute(
+                            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                            rusqlite::params!["fb_thumbnail_cache_root", target_clone.to_string_lossy()],
+                        );
+                    }
+                    let _ = migration::commit_migration(&source, &target_clone, mode, &fs);
+                    *state.write().unwrap() = None;
+                    let _ = app.emit(EVENT_MIGRATION_PROGRESS, serde_json::json!({"phase":"completed"}));
+                }
+                Ok(_) | Err(migration::MigrationError::Cancelled) => {
+                    // 取消（手动或启动恢复后再次取消）：根保持旧位置
+                    let _ = app.emit(EVENT_MIGRATION_PROGRESS, serde_json::json!({"phase":"cancelled"}));
+                }
+                Err(e) => {
+                    *state.write().unwrap() = None;
+                    let _ = app.emit(EVENT_MIGRATION_PROGRESS, serde_json::json!({"phase":"failed","error":e.to_string()}));
+                }
+            }
+        });
+    }
+
+    /// 取消当前迁移（run_migration 在下一个文件边界退出）。
+    pub fn cancel_migration(&self) {
+        self.migration_cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// 回滚：删 target 副本 + manifest，根保持旧位置。
+    pub fn rollback_migration(&self, target: PathBuf) -> Result<(), String> {
+        let fs = RealFs;
+        migration::rollback_migration(&target, &fs).map_err(|e| e.to_string())?;
+        *self.migration_state.write().unwrap() = None;
+        Ok(())
     }
 }
 

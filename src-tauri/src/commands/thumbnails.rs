@@ -99,3 +99,68 @@ pub async fn notify_thumbnail_fast_scrolling(
     service.set_fast_scrolling(fast);
     Ok(())
 }
+
+// ─── 缓存位置迁移（§11）──────────────────────────────────────────────
+
+/// 校验目标目录是否可作为新缓存根。
+#[tauri::command]
+pub async fn validate_thumbnail_cache_location(
+    service: State<'_, ThumbnailService>,
+    target: String,
+) -> Result<(), String> {
+    service.validate_cache_location(std::path::Path::new(&target))
+}
+
+/// 启动迁移（mode: "move" | "copy"）。进度通过 thumbnail://migration-progress 事件。
+#[tauri::command]
+pub async fn migrate_thumbnail_cache(
+    service: State<'_, ThumbnailService>,
+    target: String,
+    mode: String,
+) -> Result<(), String> {
+    let mode = match mode.as_str() {
+        "copy" => crate::thumbnail::migration::MigrationMode::Copy,
+        _ => crate::thumbnail::migration::MigrationMode::Move,
+    };
+    service.start_migration(std::path::PathBuf::from(target), mode);
+    Ok(())
+}
+
+/// 取消当前迁移（根保持旧位置）。
+#[tauri::command]
+pub async fn cancel_thumbnail_cache_migration(service: State<'_, ThumbnailService>) -> Result<(), String> {
+    service.cancel_migration();
+    Ok(())
+}
+
+/// 继续未完成的迁移（启动恢复后用户选继续）。
+#[tauri::command]
+pub async fn resume_thumbnail_cache_migration(
+    service: State<'_, ThumbnailService>,
+    target: String,
+    mode: String,
+) -> Result<(), String> {
+    let mode = match mode.as_str() {
+        "copy" => crate::thumbnail::migration::MigrationMode::Copy,
+        _ => crate::thumbnail::migration::MigrationMode::Move,
+    };
+    service.start_migration(std::path::PathBuf::from(target), mode);
+    Ok(())
+}
+
+/// 回滚：删 target 副本 + manifest，根保持旧位置。
+#[tauri::command]
+pub async fn rollback_thumbnail_cache_migration(
+    service: State<'_, ThumbnailService>,
+    target: String,
+) -> Result<(), String> {
+    service.rollback_migration(std::path::PathBuf::from(target))
+}
+
+/// 当前迁移状态（启动恢复检测 + 进度）。
+#[tauri::command]
+pub async fn get_thumbnail_migration_state(
+    service: State<'_, ThumbnailService>,
+) -> Result<Option<crate::thumbnail::migration::MigrationManifest>, String> {
+    Ok(service.migration_state())
+}

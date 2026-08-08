@@ -106,23 +106,38 @@ pub fn run() {
             commands::thumbnails::clear_thumbnail_cache,
             commands::thumbnails::notify_thumbnail_epoch,
             commands::thumbnails::notify_thumbnail_fast_scrolling,
+            // 缓存位置迁移 (§11)
+            commands::thumbnails::validate_thumbnail_cache_location,
+            commands::thumbnails::migrate_thumbnail_cache,
+            commands::thumbnails::cancel_thumbnail_cache_migration,
+            commands::thumbnails::resume_thumbnail_cache_migration,
+            commands::thumbnails::rollback_thumbnail_cache_migration,
+            commands::thumbnails::get_thumbnail_migration_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
 
-/// 初始化缩略图缓存服务：解析 cache 目录、读 settings、建 ThumbnailService。
+/// 初始化缩略图缓存服务：解析 cache 目录（支持自定义位置）、读 settings、建 ThumbnailService。
 fn init_thumbnail_service(app: &tauri::AppHandle) -> anyhow::Result<()> {
-    let cache_root = app
+    let default_root = app
         .path()
         .app_cache_dir()
         .map_err(|e| anyhow::anyhow!("failed to resolve app cache dir: {e}"))?
         .join("masonry-thumbnails");
-    std::fs::create_dir_all(&cache_root)?;
-    tracing::info!("thumbnail cache root at {}", cache_root.display());
 
     let db = app.state::<db::Db>();
     let conn = db.conn();
+    // 自定义缓存位置（fb_thumbnail_cache_root 非空则用之，否则系统默认）
+    let configured = setting_str(&conn, "fb_thumbnail_cache_root", "");
+    let cache_root = if configured.is_empty() {
+        default_root
+    } else {
+        std::path::PathBuf::from(&configured)
+    };
+    std::fs::create_dir_all(&cache_root)?;
+    tracing::info!("thumbnail cache root at {}", cache_root.display());
+
     let worker = setting_u32(&conn, "fb_thumbnail_worker_limit", 2);
     let mem = setting_u32(&conn, "fb_thumbnail_decode_memory_mb", 128);
     let quality = match setting_str(&conn, "fb_thumbnail_quality", "high").as_str() {

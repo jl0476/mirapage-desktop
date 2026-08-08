@@ -22,7 +22,7 @@ beforeEach(() => {
 
 describe('Settings.vue', () => {
   it('renders all 6 sections with anchors', () => {
-    const wrapper = mount(Settings, { global: { plugins: [i18n] } });
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const anchors = wrapper.findAll('[data-test^="anchor-"]');
     expect(anchors.length).toBe(6);
     for (const id of ['reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry']) {
@@ -31,7 +31,7 @@ describe('Settings.vue', () => {
   });
 
   it('EnumRow change triggers store setter', async () => {
-    const wrapper = mount(Settings, { global: { plugins: [i18n] } });
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const store = useSettingsStore();
     store.continueToNextVolume = 'manual';
 
@@ -46,7 +46,7 @@ describe('Settings.vue', () => {
 
   it('clicking reset shows confirm and resets touch scheme', async () => {
     const store = useSettingsStore();
-    const wrapper = mount(Settings, { global: { plugins: [i18n] } });
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     // 篡改 store 一格
     store.touchScheme.tl = 'jump-first';
     await flushPromises();
@@ -65,7 +65,7 @@ describe('Settings.vue', () => {
   });
 
   it('anchor click triggers scrollTo for the matching section', async () => {
-    const wrapper = mount(Settings, { global: { plugins: [i18n] } });
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const scrollIntoView = vi.fn();
     document.getElementById = vi.fn().mockReturnValue({
       scrollIntoView,

@@ -1,10 +1,17 @@
 <script setup lang="ts">
-// ThumbnailCacheSettings.vue — 缩略图缓存资源 / 清晰度 / 容量设置（§11 §14）
+// ThumbnailCacheSettings.vue — 缩略图缓存资源 / 清晰度 / 容量 / 位置设置（§11 §14）
 // 挂在 Settings 页 masonry section 下。复用 EnumRow（与设置页其它行一致的 dropdown 模式）。
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { open } from '@tauri-apps/plugin-dialog';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useSettingsStore } from '@/stores/settings';
-import { getThumbnailCacheInfo, clearThumbnailCache } from '@/lib/tauri';
+import {
+  cancelThumbnailCacheMigration, clearThumbnailCache,
+  getThumbnailCacheInfo, getThumbnailMigrationState, migrateThumbnailCache,
+  resumeThumbnailCacheMigration, rollbackThumbnailCacheMigration,
+  validateThumbnailCacheLocation, type ThumbnailMigrationState,
+} from '@/lib/tauri';
 import EnumRow from '@/components/settings/EnumRow.vue';
 import type { ThumbnailQuality, ThumbnailResourceMode } from '@/lib/thumbnail';
 
@@ -15,6 +22,22 @@ const advancedOpen = ref(false);
 const cacheBytes = ref(0);
 const cacheCount = ref(0);
 
+// 迁移进度（thumbnail://migration-progress 事件）
+interface MigrationProgress {
+  phase?: string;
+  completed?: number;
+  totalFiles?: number;
+  copiedBytes?: number;
+  totalBytes?: number;
+  error?: string;
+}
+const migrationProgress = ref<MigrationProgress | null>(null);
+// 启动恢复：检测到未完成迁移的 manifest
+const recovery = ref<ThumbnailMigrationState | null>(null);
+let unlistenProgress: UnlistenFn | null = null;
+
+const cacheRootDisplay = computed(() => s.thumbnailCacheRoot || t('settings.thumbnail.cacheRootSystemDefault'));
+
 async function refreshInfo() {
   try {
     const info = await getThumbnailCacheInfo();
@@ -24,7 +47,54 @@ async function refreshInfo() {
     /* ignore */
   }
 }
-onMounted(refreshInfo);
+
+async function refreshRecovery() {
+  try {
+    recovery.value = await getThumbnailMigrationState();
+  } catch {
+    recovery.value = null;
+  }
+}
+
+onMounted(async () => {
+  await refreshInfo();
+  await refreshRecovery();
+  unlistenProgress = await listen<MigrationProgress>('thumbnail://migration-progress', (e) => {
+    migrationProgress.value = e.payload;
+    if (e.payload?.phase === 'completed' || e.payload?.phase === 'cancelled' || e.payload?.phase === 'failed') {
+      recovery.value = null;
+      void refreshInfo();
+    }
+  });
+});
+onBeforeUnmount(() => { if (unlistenProgress) unlistenProgress(); });
+
+/** 更改缓存位置：选目录 → 校验 → 迁移（移动现有缓存）。 */
+async function onChangeLocation() {
+  const picked = await open({ directory: true, multiple: false });
+  if (!picked || typeof picked !== 'string') return;
+  try {
+    await validateThumbnailCacheLocation(picked);
+  } catch (e) {
+    migrationProgress.value = { phase: 'failed', error: String(e) };
+    return;
+  }
+  // 移动现有缓存到新位置（spec §11.2 首选）
+  await migrateThumbnailCache(picked, 'move');
+}
+
+async function onContinueMigration() {
+  if (!recovery.value) return;
+  await resumeThumbnailCacheMigration(recovery.value.targetRoot, recovery.value.mode);
+}
+async function onRollbackMigration() {
+  if (!recovery.value) return;
+  await rollbackThumbnailCacheMigration(recovery.value.targetRoot);
+  recovery.value = null;
+}
+async function onCancelMigration() {
+  await cancelThumbnailCacheMigration();
+}
 
 async function onClear() {
   await clearThumbnailCache();
@@ -86,6 +156,37 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
       <button class="link-btn" type="button" @click="onClear">{{ t('settings.thumbnail.clearCache') }}</button>
     </div>
 
+    <!-- 缓存位置（§11）-->
+    <div class="row location">
+      <span class="label">{{ t('settings.thumbnail.cacheLocation') }}</span>
+      <div class="location-right">
+        <span class="location-path" :title="cacheRootDisplay">{{ cacheRootDisplay }}</span>
+        <button class="link-btn" type="button" :disabled="!!migrationProgress" @click="onChangeLocation">
+          {{ t('settings.thumbnail.changeLocation') }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 迁移进度 -->
+    <div v-if="migrationProgress" class="progress">
+      <span class="info-label">
+        {{ t('settings.thumbnail.migrating') }}：
+        {{ migrationProgress.completed ?? 0 }} / {{ migrationProgress.totalFiles ?? 0 }}
+        ({{ Math.round(((migrationProgress.copiedBytes ?? 0) / Math.max(1, migrationProgress.totalBytes ?? 1)) * 100) }}%)
+      </span>
+      <button v-if="migrationProgress.phase === 'moving' || migrationProgress.phase === 'preparing'" class="link-btn" type="button" @click="onCancelMigration">
+        {{ t('common.cancel') }}
+      </button>
+      <span v-if="migrationProgress.phase === 'failed'" class="error">{{ migrationProgress.error }}</span>
+    </div>
+
+    <!-- 启动恢复：检测到未完成迁移 -->
+    <div v-if="recovery" class="recovery">
+      <span class="info-label">{{ t('settings.thumbnail.recoveryDetected') }}</span>
+      <button class="link-btn" type="button" @click="onContinueMigration">{{ t('settings.thumbnail.continueMigration') }}</button>
+      <button class="link-btn" type="button" @click="onRollbackMigration">{{ t('settings.thumbnail.rollbackMigration') }}</button>
+    </div>
+
     <button class="advanced-toggle" type="button" @click="advancedOpen = !advancedOpen">
       {{ advancedOpen ? '▾' : '▸' }} {{ t('settings.thumbnail.advanced') }}
     </button>
@@ -139,4 +240,9 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
 .advanced { display: flex; flex-direction: column; gap: 10px; padding-left: 12px; border-left: 2px solid var(--color-border-default); }
 .bool-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .bool-label { font-size: 13px; color: var(--color-text-secondary); }
+.location { align-items: flex-start; }
+.location-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.location-path { font-size: 11px; color: var(--color-text-muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: right; }
+.progress, .recovery { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 8px; border: 1px solid var(--color-border-default); border-radius: 4px; }
+.error { color: var(--color-error); font-size: 11px; }
 </style>

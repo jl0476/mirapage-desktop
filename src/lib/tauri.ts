@@ -296,6 +296,43 @@ export async function updateThumbnailCacheLimit(limitMb: number): Promise<void> 
   await invoke<void>('update_thumbnail_cache_limit', { limitMb });
 }
 
+// ─── 缓存位置迁移（§11）──────────────────────────────────────────────
+export interface ThumbnailMigrationState {
+  version: number;
+  sourceRoot: string;
+  targetRoot: string;
+  mode: 'move' | 'copy';
+  phase: string;
+  completed: string[];
+  totalFiles: number;
+  totalBytes: number;
+  copiedBytes: number;
+}
+
+export async function validateThumbnailCacheLocation(target: string): Promise<void> {
+  await invoke<void>('validate_thumbnail_cache_location', { target });
+}
+
+export async function migrateThumbnailCache(target: string, mode: 'move' | 'copy'): Promise<void> {
+  await invoke<void>('migrate_thumbnail_cache', { target, mode });
+}
+
+export async function cancelThumbnailCacheMigration(): Promise<void> {
+  await invoke<void>('cancel_thumbnail_cache_migration');
+}
+
+export async function resumeThumbnailCacheMigration(target: string, mode: 'move' | 'copy'): Promise<void> {
+  await invoke<void>('resume_thumbnail_cache_migration', { target, mode });
+}
+
+export async function rollbackThumbnailCacheMigration(target: string): Promise<void> {
+  await invoke<void>('rollback_thumbnail_cache_migration', { target });
+}
+
+export async function getThumbnailMigrationState(): Promise<ThumbnailMigrationState | null> {
+  return invoke<ThumbnailMigrationState | null>('get_thumbnail_migration_state');
+}
+
 export async function getThumbnailCacheInfo(): Promise<{ bytes: number; count: number }> {
   return invoke<{ bytes: number; count: number }>('get_thumbnail_cache_info');
 }

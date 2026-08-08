@@ -337,6 +337,13 @@ export default {
         qualityStandard: 'Standard',
         qualityHigh: 'High',
         qualityUltra: 'Ultra',
+        cacheLocation: 'Cache location',
+        cacheRootSystemDefault: 'System default',
+        changeLocation: 'Change',
+        migrating: 'Migrating',
+        recoveryDetected: 'Incomplete cache migration detected',
+        continueMigration: 'Continue',
+        rollbackMigration: 'Rollback',
       },
     },
     scale: {

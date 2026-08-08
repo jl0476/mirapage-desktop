@@ -338,6 +338,13 @@ export default {
         qualityStandard: '标准',
         qualityHigh: '高清',
         qualityUltra: '超清',
+        cacheLocation: '缓存位置',
+        cacheRootSystemDefault: '系统默认',
+        changeLocation: '更改',
+        migrating: '迁移中',
+        recoveryDetected: '检测到未完成的缓存迁移',
+        continueMigration: '继续迁移',
+        rollbackMigration: '回滚到原位置',
       },
     },
     scale: {
