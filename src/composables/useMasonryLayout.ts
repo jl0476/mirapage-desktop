@@ -123,6 +123,70 @@ export function applyMeasuredBatch(params: AnchorParams): number {
   return compensation;
 }
 
+// ─── 像素窗口（缩略图生成需求，§5.1）────────────────────────────────────
+
+export interface PixelWindowParams {
+  scrollTop: number;
+  viewportHeight: number;
+  /** 向下预生成屏数。 */
+  aheadScreens: number;
+  /** 向上保留屏数。 */
+  behindScreens: number;
+  /** 空闲额外向下屏数。 */
+  idleScreens: number;
+}
+
+export interface ThumbnailWindows {
+  visible: string[];
+  ahead: string[];
+  behind: string[];
+  idle: string[];
+}
+
+/**
+ * 按 layout 的 `top/height` 像素范围把 entries 划成四组（§5.1 §5.2）：
+ * - visible：与视口 [scrollTop, scrollTop+vh] 相交
+ * - behind：视口上方 [scrollTop-vh*behind, scrollTop]
+ * - ahead：视口下方 [scrollTop+vh, scrollTop+vh*(1+ahead)]
+ * - idle：ahead 之后再向下 [.., +vh*idle]
+ *
+ * 四组互斥（visible 优先，再 behind/ahead/idle），每组保持 entries 原顺序。
+ * 与视口/窗口都不相交的 item（例如远处未滚动区）不进入任何组。
+ */
+export function selectPathsInPixelWindow(
+  layout: Map<string, MasonryItem>,
+  entries: readonly { path: string }[],
+  p: PixelWindowParams,
+): ThumbnailWindows {
+  const vh = p.viewportHeight;
+  const visTop = p.scrollTop;
+  const visBottom = p.scrollTop + vh;
+  const aheadTop = visBottom;
+  const aheadBottom = visBottom + vh * p.aheadScreens;
+  const behindBottom = visTop;
+  const behindTop = Math.max(0, visTop - vh * p.behindScreens);
+  const idleTop = aheadBottom;
+  const idleBottom = aheadBottom + vh * p.idleScreens;
+
+  const result: ThumbnailWindows = { visible: [], ahead: [], behind: [], idle: [] };
+  // 半开区间相交：[a, b) 与 [itemTop, itemBottom] 相交当且仅当 itemTop < b && itemBottom > a。
+  // 四组范围依次相接（behind/visible/ahead/idle），相邻 item 边界恰好相接时不重不漏。
+  const intersect = (itemTop: number, itemBottom: number, a: number, b: number) =>
+    itemTop < b && itemBottom > a;
+
+  for (const e of entries) {
+    const item = layout.get(e.path);
+    if (!item) continue;
+    const itTop = item.top;
+    const itBottom = item.top + item.height;
+    if (intersect(itTop, itBottom, visTop, visBottom)) result.visible.push(e.path);
+    else if (intersect(itTop, itBottom, behindTop, behindBottom)) result.behind.push(e.path);
+    else if (intersect(itTop, itBottom, aheadTop, aheadBottom)) result.ahead.push(e.path);
+    else if (intersect(itTop, itBottom, idleTop, idleBottom)) result.idle.push(e.path);
+  }
+  return result;
+}
+
 export interface MasonryLayoutParams {
   entries: Ref<readonly MediaEntry[]>;
   containerWidth: Ref<number>;
@@ -145,8 +209,14 @@ export interface MasonryLayoutOutput {
    * 预读区 paths (visibleRange 前后各 PREFETCH_BUFFER 屏行)。
    * MasonryView 对这些 paths 调 new Image(src) 提前 fetch + decode 进浏览器缓存,
    * 滚动到时 <img> 命中缓存无网络+解码延迟 (对齐阅读器 preload 策略)。
+   * @deprecated 任务9 接入缩略图队列后由 thumbnailWindows 取代。
    */
   prefetchPaths: ComputedRef<string[]>;
+  /**
+   * 像素窗口四组 paths（visible/ahead/behind/idle），缩略图生成需求窗口（§5.1）。
+   * 默认 balanced 预设（ahead 1.5 / behind 0.5 / idle 1）；任务 8/11 接 settings。
+   */
+  thumbnailWindows: ComputedRef<ThumbnailWindows>;
 }
 
 const PREFETCH_SCREENS = 3;
@@ -238,5 +308,20 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
     return params.entries.value.slice(start, end).map((e) => e.path);
   });
 
-  return { colWidth, layout, visibleRange, measuredCount, needPrefetch, nextBatchPaths, prefetchPaths };
+  // 像素窗口（缩略图生成需求窗口）。默认 balanced 预设；任务 8/11 接 settings。
+  const thumbnailWindows = computed<ThumbnailWindows>(() =>
+    selectPathsInPixelWindow(
+      layout.value.map,
+      params.entries.value,
+      {
+        scrollTop: params.scrollTop.value,
+        viewportHeight: params.containerHeight.value,
+        aheadScreens: 1.5,
+        behindScreens: 0.5,
+        idleScreens: 1,
+      },
+    ),
+  );
+
+  return { colWidth, layout, visibleRange, measuredCount, needPrefetch, nextBatchPaths, prefetchPaths, thumbnailWindows };
 }

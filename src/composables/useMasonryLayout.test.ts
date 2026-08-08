@@ -287,3 +287,131 @@ describe('useMasonryLayout composable (smoke)', () => {
     }
   });
 });
+
+import { selectPathsInPixelWindow } from './useMasonryLayout';
+
+/** 手工构造 layout map（path -> {top, height, ...}），避免依赖 layoutMasonry 的列分配。 */
+function layoutMap(items: { path: string; top: number; height: number }[]): Map<string, MasonryItem> {
+  const m = new Map<string, MasonryItem>();
+  for (const it of items) {
+    m.set(it.path, { path: it.path, width: 100, height: it.height, top: it.top, left: 0, col: 0 });
+  }
+  return m;
+}
+
+describe('selectPathsInPixelWindow', () => {
+  // 单列 5 个 item，每个高 100，top 0/100/200/300/400，视口高 100
+  const items = [
+    { path: 'a', top: 0, height: 100 },
+    { path: 'b', top: 100, height: 100 },
+    { path: 'c', top: 200, height: 100 },
+    { path: 'd', top: 300, height: 100 },
+    { path: 'e', top: 400, height: 100 },
+  ];
+  const entries = items.map((i) => ({ path: i.path }));
+
+  it('视口在顶部：a 可见，b/c ahead，无 behind，d/e 视 ahead 范围而定', () => {
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 0, viewportHeight: 100, aheadScreens: 1, behindScreens: 0.5, idleScreens: 1,
+    });
+    // 视口 [0,100] -> a 可见
+    expect(win.visible).toContain('a');
+    expect(win.behind).toEqual([]); // 顶部无 behind
+    // ahead [100,200] -> b（也可能 c 在边界）
+    expect(win.ahead).toContain('b');
+  });
+
+  it('视口中段：b 可见，a behind，c/d ahead', () => {
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 100, viewportHeight: 100, aheadScreens: 1, behindScreens: 1, idleScreens: 1,
+    });
+    // 视口 [100,200] -> b 可见（b top100 height100 跨 [100,200]）
+    expect(win.visible).toContain('b');
+    // behind [0,100] -> a
+    expect(win.behind).toContain('a');
+    // ahead [200,300] -> c
+    expect(win.ahead).toContain('c');
+  });
+
+  it('四组互斥：每个 path 最多出现在一组', () => {
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 100, viewportHeight: 100, aheadScreens: 2, behindScreens: 1, idleScreens: 2,
+    });
+    const all = [...win.visible, ...win.ahead, ...win.behind, ...win.idle];
+    const set = new Set(all);
+    expect(set.size).toBe(all.length); // 无重复
+  });
+
+  it('每组保持 entries 原顺序', () => {
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 0, viewportHeight: 100, aheadScreens: 3, behindScreens: 0.5, idleScreens: 0,
+    });
+    // ahead 应按 entries 顺序（b 在 c 前）
+    const ai = win.ahead;
+    if (ai.length >= 2) {
+      expect(ai.indexOf('b')).toBeLessThan(ai.indexOf('c'));
+    }
+  });
+
+  it('不规则高度：高 item 跨多区时归 visible（优先）', () => {
+    const tall = [
+      { path: 'big', top: 50, height: 500 }, // 跨视口+ahead
+      { path: 'x', top: 600, height: 50 },
+    ];
+    const win = selectPathsInPixelWindow(layoutMap(tall), [{ path: 'big' }, { path: 'x' }], {
+      scrollTop: 0, viewportHeight: 100, aheadScreens: 1, behindScreens: 0.5, idleScreens: 1,
+    });
+    expect(win.visible).toContain('big'); // 跨视口 -> visible 优先
+  });
+
+  it('scrollTop=0 时 behind 为空', () => {
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 0, viewportHeight: 100, aheadScreens: 1, behindScreens: 1, idleScreens: 1,
+    });
+    expect(win.behind).toEqual([]);
+  });
+
+  it('接近底部时 ahead/idle 为空', () => {
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 400, viewportHeight: 100, aheadScreens: 1, behindScreens: 1, idleScreens: 1,
+    });
+    // 视口 [400,500]，e(top400) 可见；下方无 item -> ahead/idle 空
+    expect(win.visible).toContain('e');
+    expect(win.ahead).toEqual([]);
+    expect(win.idle).toEqual([]);
+  });
+
+  it('viewportHeight=0 不崩溃（窗口退化为空）', () => {
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 200, viewportHeight: 0, aheadScreens: 1, behindScreens: 1, idleScreens: 1,
+    });
+    // vh=0 时各屏范围高度均为 0 -> 全部退化为空，只要不崩溃即可
+    expect(win.visible).toEqual([]);
+  });
+
+  it('0px gap：相邻 item 边界恰好相接不漏不重', () => {
+    // a [0,100], b [100,200]：视口 [0,100]，a visible，b ahead（边界归 ahead，不重 visible）
+    const win = selectPathsInPixelWindow(layoutMap(items), entries, {
+      scrollTop: 0, viewportHeight: 100, aheadScreens: 1, behindScreens: 0, idleScreens: 0,
+    });
+    expect(win.visible).toContain('a');
+    expect(win.visible).not.toContain('b');
+    expect(win.ahead).toContain('b');
+  });
+
+  it('多列布局：不同列不同 top 都能被选到', () => {
+    // 模拟 2 列：a/c 在 col0，b/d 在 col1，top 错开
+    const multi = [
+      { path: 'a', top: 0, height: 100 },
+      { path: 'b', top: 0, height: 120 },
+      { path: 'c', top: 100, height: 100 },
+      { path: 'd', top: 120, height: 100 },
+    ];
+    const win = selectPathsInPixelWindow(layoutMap(multi), multi.map((m) => ({ path: m.path })), {
+      scrollTop: 0, viewportHeight: 110, aheadScreens: 1, behindScreens: 0.5, idleScreens: 0,
+    });
+    // 视口 [0,110]：a[0,100] 和 b[0,120] 都相交
+    expect(win.visible).toContain('a');
+    expect(win.visible).toContain('b');
+  });
+});
