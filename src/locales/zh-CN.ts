@@ -137,6 +137,7 @@ export default {
       resetProgress: '重置阅读进度',
       readNow: '立即阅读',
       addToLibrary: '加入书库',
+      regenerateThumbnail: '重新生成缩略图',
     },
     // v0.1.0-module2.0: 触发阅读 / 加入书库 (不靠双击)
     readNow: '立即阅读',
@@ -154,6 +155,7 @@ export default {
     masonrySettings: '瀑布流设置',
     noImagesForMasonry: '该目录无图片，无法使用瀑布流视图',
     masonryLoading: '加载中...',
+    thumbnailRetry: '点击重试',
     showDetail: '属性',
     hideDetail: '隐藏属性',
     statusBar: {

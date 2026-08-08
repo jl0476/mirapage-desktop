@@ -136,6 +136,7 @@ export default {
       resetProgress: 'Reset reading progress',
       readNow: 'Read now',
       addToLibrary: 'Add to library',
+      regenerateThumbnail: 'Regenerate thumbnail',
     },
     // v0.1.0-module2.0: read trigger / add to library (no double-click)
     readNow: 'Read now',
@@ -153,6 +154,7 @@ export default {
     masonrySettings: 'Masonry settings',
     noImagesForMasonry: 'No images in this folder; masonry view unavailable',
     masonryLoading: 'Loading...',
+    thumbnailRetry: 'Retry',
     showDetail: 'Details',
     hideDetail: 'Hide details',
     statusBar: {

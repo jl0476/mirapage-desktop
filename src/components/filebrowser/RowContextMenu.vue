@@ -13,6 +13,7 @@ import { useLibraryStore } from '@/stores/library';
 import { useReadStatusStore } from '@/stores/readStatus';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { markFinished } from '@/lib/tauri';
+import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
@@ -28,6 +29,7 @@ interface Emits {
   (e: 'close'): void;
   (e: 'read-now', entry: MediaEntry): void;
   (e: 'add-to-library', entry: MediaEntry): void;
+  (e: 'regenerate-thumbnail', entry: MediaEntry): void;
 }
 const emit = defineEmits<Emits>();
 
@@ -128,6 +130,15 @@ async function onResetProgress() {
       @click="onResetProgress"
     >
       {{ t('fileBrowser.contextMenu.resetProgress') }}
+    </button>
+    <!-- 图片：强制重建缩略图（删旧缓存后重新生成） -->
+    <button
+      v-if="entry && !entry.isDirectory && isImage(entry.name)"
+      data-test="regenerate-thumbnail"
+      class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
+      @click="emit('regenerate-thumbnail', entry); emit('close')"
+    >
+      ⟳ {{ t('fileBrowser.contextMenu.regenerateThumbnail') }}
     </button>
   </div>
 </template>

@@ -72,7 +72,7 @@ const { layout, visibleRange, needPrefetch, nextBatchPaths, colWidth, thumbnailW
 // 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 默认 high（任务11 接 settings）。
 const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
 const thumbQuality = ref<'standard' | 'high' | 'ultra'>('high');
-const { stateMap: thumbStateMap, retry: retryThumbnail } = useMasonryThumbnails({
+const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateThumbnail } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
   entries: entriesRef,
   thumbnailWindows,
@@ -83,6 +83,9 @@ const { stateMap: thumbStateMap, retry: retryThumbnail } = useMasonryThumbnails(
   scrollTop,
   originalUrlFor: (e) => convertFileSrc(joinPath(joinPath(props.rootPath, props.currentPath), e.name)),
 });
+
+// 暴露 regenerate 给父级 FileBrowser（右键强制重建）
+defineExpose({ regenerate: regenerateThumbnail });
 
 // 预读 header
 async function triggerPrefetch() {

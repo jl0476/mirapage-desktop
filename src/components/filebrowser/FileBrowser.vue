@@ -375,6 +375,11 @@ function onCtxClose() {
   ctxMenu.value = null;
 }
 
+/** 右键"重新生成缩略图"：转发到 FileList -> MasonryView.regenerate（删旧缓存后重新生成）。 */
+function onRegenerateThumbnail(entry: MediaEntry) {
+  fileListRef.value?.regenerateThumbnail(entry.path);
+}
+
 async function onBreadcrumbNavigate(path: string) {
   await fb.navigate(path);
 }
@@ -810,6 +815,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
       @close="onCtxClose"
       @read-now="onReadNowFromCtx"
       @add-to-library="onAddToLibraryFromCtx"
+      @regenerate-thumbnail="onRegenerateThumbnail"
     />
   </main>
 </template>

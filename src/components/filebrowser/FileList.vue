@@ -249,8 +249,13 @@ const containerClass = computed(() => ({
 const ICON_ARROW_UP = 'M5 12l7-7 7 7';
 const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 
-/* ─── 暴露 scrollToPath / scrollToIndex 给父级 (Task 3.4 FileBrowser 接入) ─── */
-defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
+/* ─── 暴露 scrollToPath / scrollToIndex / regenerateThumbnail 给父级 ─── */
+const masonryRef = ref<InstanceType<typeof MasonryView> | null>(null);
+/** 强制重建指定图片缩略图（右键菜单），转发到 MasonryView.regenerate。 */
+function regenerateThumbnail(path: string): void {
+  masonryRef.value?.regenerate(path);
+}
+defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight, regenerateThumbnail });
 </script>
 
 <template>
@@ -341,9 +346,10 @@ defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight });
       <span>{{ t('fileBrowser.empty') }}</span>
     </div>
 
-    <!-- masonry 视图: 变高瀑布流, 由 MasonryView 自己管布局 -->
+    <!-- masonry 视图: 变高卡片, 由 MasonryView 自己管布局 -->
     <MasonryView
       v-else-if="viewMode === 'masonry'"
+      ref="masonryRef"
       :entries="entries"
       :marks="marks || {}"
       :selected-paths="selectedPaths || new Set()"
