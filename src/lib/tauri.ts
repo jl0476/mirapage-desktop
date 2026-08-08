@@ -291,6 +291,11 @@ export async function updateThumbnailRuntimeConfig(
   });
 }
 
+/** P1-4: 缓存容量运行时生效（设置页改完即时推送）。 */
+export async function updateThumbnailCacheLimit(limitMb: number): Promise<void> {
+  await invoke<void>('update_thumbnail_cache_limit', { limitMb });
+}
+
 export async function getThumbnailCacheInfo(): Promise<{ bytes: number; count: number }> {
   return invoke<{ bytes: number; count: number }>('get_thumbnail_cache_info');
 }

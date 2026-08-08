@@ -196,6 +196,12 @@ export interface MasonryLayoutParams {
   vGap: Ref<number>;
   scrollTop: Ref<number>;
   measuredMap: Ref<Map<string, { width: number; height: number }>>;
+  /** 缩略图生成窗口：向下预生成屏数（默认 1.5 = balanced）。 */
+  thumbnailAheadScreens?: Ref<number>;
+  /** 是否启用空闲额外生成（默认 true）。false 时 idle 窗口为 0。 */
+  thumbnailIdleGeneration?: Ref<boolean>;
+  /** 空闲额外向下屏数（默认 1）。 */
+  thumbnailIdleScreens?: Ref<number>;
 }
 
 export interface MasonryLayoutOutput {
@@ -308,20 +314,25 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
     return params.entries.value.slice(start, end).map((e) => e.path);
   });
 
-  // 像素窗口（缩略图生成需求窗口）。默认 balanced 预设；任务 8/11 接 settings。
-  const thumbnailWindows = computed<ThumbnailWindows>(() =>
-    selectPathsInPixelWindow(
+  // 像素窗口（缩略图生成需求窗口）。来自设置（balanced 默认）；任务 11 接 settings。
+  // behind 按 ahead 约 1/3 自动计算，启用预生成时至少 0.5 屏（§8.4）。
+  const thumbnailWindows = computed<ThumbnailWindows>(() => {
+    const ahead = params.thumbnailAheadScreens?.value ?? 1.5;
+    const idleGen = params.thumbnailIdleGeneration?.value ?? true;
+    const idle = idleGen ? (params.thumbnailIdleScreens?.value ?? 1) : 0;
+    const behind = ahead > 0 ? Math.max(0.5, ahead / 3) : 0;
+    return selectPathsInPixelWindow(
       layout.value.map,
       params.entries.value,
       {
         scrollTop: params.scrollTop.value,
         viewportHeight: params.containerHeight.value,
-        aheadScreens: 1.5,
-        behindScreens: 0.5,
-        idleScreens: 1,
+        aheadScreens: ahead,
+        behindScreens: behind,
+        idleScreens: idle,
       },
-    ),
-  );
+    );
+  });
 
   return { colWidth, layout, visibleRange, measuredCount, needPrefetch, nextBatchPaths, prefetchPaths, thumbnailWindows };
 }

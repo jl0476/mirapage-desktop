@@ -54,6 +54,16 @@ pub async fn update_thumbnail_runtime_config(
     Ok(())
 }
 
+/// P1-4: 缓存容量运行时生效（设置页改完即时推送，无需重启）。
+#[tauri::command]
+pub async fn update_thumbnail_cache_limit(
+    service: State<'_, ThumbnailService>,
+    limit_mb: u64,
+) -> Result<(), String> {
+    service.set_cache_limit_mb(limit_mb);
+    Ok(())
+}
+
 /// 缓存统计：{ bytes, count }。
 #[tauri::command]
 pub async fn get_thumbnail_cache_info(

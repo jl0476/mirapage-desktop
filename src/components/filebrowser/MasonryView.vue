@@ -67,6 +67,10 @@ const { layout, visibleRange, needPrefetch, nextBatchPaths, colWidth, thumbnailW
   vGap: toRef(props, 'vGap'),
   scrollTop,
   measuredMap,
+  // P1-4: 像素窗口由设置驱动（节能/均衡/高性能预读范围不同）
+  thumbnailAheadScreens: computed(() => settingsStore.thumbnailPrefetchScreens),
+  thumbnailIdleGeneration: computed(() => settingsStore.thumbnailIdleGeneration),
+  thumbnailIdleScreens: computed(() => settingsStore.thumbnailIdlePrefetchScreens),
 });
 
 // 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 来自设置 store。

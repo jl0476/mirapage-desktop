@@ -17,6 +17,7 @@ vi.mock('@/lib/tauri', () => ({
   }),
   setSetting: vi.fn(async () => undefined),
   updateThumbnailRuntimeConfig: vi.fn(async () => undefined),
+  updateThumbnailCacheLimit: vi.fn(async () => undefined),
   getThumbnailCacheInfo: vi.fn(async () => ({ bytes: 0, count: 0 })),
   clearThumbnailCache: vi.fn(async () => undefined),
   notifyThumbnailEpoch: vi.fn(async () => undefined),
@@ -158,5 +159,22 @@ describe('settings store: 缩略图缓存', () => {
     await store.setThumbnailCacheLimitMb(1024);
     expect(store.thumbnailResourceMode).toBe('balanced');
     expect(store.thumbnailCacheLimitMb).toBe(1024);
+  });
+
+  it('P1-4: 改缓存上限即时推送 runtime（无需重启）', async () => {
+    const { updateThumbnailCacheLimit } = await import('@/lib/tauri');
+    const store = useSettingsStore();
+    await store.load();
+    await store.setThumbnailCacheLimitMb(2048);
+    expect(updateThumbnailCacheLimit).toHaveBeenCalledWith(2048);
+  });
+
+  it('P1-4: 节能预设预读范围 = 0.5 屏 / 空闲关闭', async () => {
+    const store = useSettingsStore();
+    await store.load();
+    await store.setThumbnailResourceMode('powerSaver');
+    expect(store.thumbnailPrefetchScreens).toBe(0.5);
+    expect(store.thumbnailIdleGeneration).toBe(false);
+    expect(store.thumbnailIdlePrefetchScreens).toBe(0);
   });
 });

@@ -414,4 +414,31 @@ describe('selectPathsInPixelWindow', () => {
     expect(win.visible).toContain('a');
     expect(win.visible).toContain('b');
   });
+
+  it('P1-4: thumbnailWindows 由 ahead/idle 设置参数驱动', () => {
+    // 7 个 item 每个 100 高，视口 100。ahead=3 时 ahead 窗口覆盖更多 item。
+    const mkE = (p: string): MediaEntry => ({ name: p, path: p, isDirectory: false, isArchive: false, size: 0 });
+    const entries = ref<readonly MediaEntry[]>(['a', 'b', 'c', 'd', 'e', 'f', 'g'].map(mkE));
+    // 用真实 layoutMasonry 造 layout（单列，各 100 高）
+    const measured = ref(new Map<string, { width: number; height: number }>(
+      ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((p) => [p, { width: 100, height: 100 }]),
+    ));
+    const mk = (ahead: number, idleGen: boolean) => {
+      const { thumbnailWindows } = useMasonryLayout({
+        entries, containerWidth: ref(100), containerHeight: ref(100),
+        colCount: ref(1), hGap: ref(0), vGap: ref(0), scrollTop: ref(0), measuredMap: measured,
+        thumbnailAheadScreens: ref(ahead),
+        thumbnailIdleGeneration: ref(idleGen),
+        thumbnailIdleScreens: ref(1),
+      });
+      return thumbnailWindows.value;
+    };
+    const small = mk(1, true);
+    const large = mk(3, true);
+    // ahead=3 比 ahead=1 覆盖更多 ahead 区 item
+    expect(large.ahead.length).toBeGreaterThan(small.ahead.length);
+    // 关闭 idle -> idle 为空
+    const noIdle = mk(1, false);
+    expect(noIdle.idle).toEqual([]);
+  });
 });

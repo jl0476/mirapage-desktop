@@ -3,7 +3,7 @@
 
 import { defineStore } from 'pinia';
 import { reactive, ref } from 'vue';
-import { getSetting, setSetting, updateThumbnailRuntimeConfig } from '@/lib/tauri';
+import { getSetting, setSetting, updateThumbnailRuntimeConfig, updateThumbnailCacheLimit } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import {
   TOUCH_ZONES, TOUCH_ZONE_KEY, DEFAULT_TOUCH_SCHEME,
@@ -224,6 +224,12 @@ export const useSettingsStore = defineStore('settings', () => {
   async function setThumbnailCacheLimitMb(v: number): Promise<void> {
     thumbnailCacheLimitMb.value = normalizeCacheLimitMb(v);
     await update('fb_thumbnail_cache_limit_mb', thumbnailCacheLimitMb.value);
+    // P1-4: 运行时即时生效，无需重启
+    try {
+      await updateThumbnailCacheLimit(thumbnailCacheLimitMb.value);
+    } catch (e) {
+      log('[settings] updateThumbnailCacheLimit failed', e);
+    }
   }
 
   /**

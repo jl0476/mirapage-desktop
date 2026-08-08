@@ -101,6 +101,7 @@ pub fn run() {
             commands::thumbnails::retry_thumbnail,
             commands::thumbnails::regenerate_thumbnail,
             commands::thumbnails::update_thumbnail_runtime_config,
+            commands::thumbnails::update_thumbnail_cache_limit,
             commands::thumbnails::get_thumbnail_cache_info,
             commands::thumbnails::clear_thumbnail_cache,
             commands::thumbnails::notify_thumbnail_epoch,

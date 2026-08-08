@@ -7,6 +7,7 @@ use crate::algorithm::image_header::image_dimensions;
 use crate::source::descriptor::SourceDescriptor;
 use crate::source::factory::MediaSourceFactory;
 use crate::source::trait_def::ByteRange;
+use crate::thumbnail::orientation::{displayed_dimensions, read_orientation};
 use std::sync::Arc;
 use tauri::State;
 use tokio::sync::Semaphore;
@@ -52,10 +53,14 @@ pub async fn list_image_dimensions(
                 .await
                 .ok()?;
             let dim = image_dimensions(&bytes)?;
+            // P1-5: 应用 EXIF Orientation，返回「显示方向」宽高（5-8 交换），
+            // 使瀑布流布局比例与缩略图（生成器已归一化方向）一致。
+            let orientation = read_orientation(&bytes);
+            let (w, h) = displayed_dimensions(dim.width, dim.height, orientation);
             Some(ImageDim {
                 path,
-                width: dim.width,
-                height: dim.height,
+                width: w,
+                height: h,
             })
         });
     }
