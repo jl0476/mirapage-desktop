@@ -38,6 +38,11 @@ interface Props {
   colCount?: number;
   hGap?: number;
   vGap?: number;
+  // v0.1.0-module3.0.8 (任务 10): 全序列图片名 — FileBrowser 派生
+  // (fb.sortedEntries 过滤图片), 透传给 MasonryView (任务 8 已接 prop).
+  // UI 过滤 (搜索/隐藏已读) 不影响此 prop, 保证 useMasonryBrowsePosition
+  // 计算的 page 索引稳定.
+  canonicalImageNames?: string[];
 }
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
@@ -49,6 +54,7 @@ const props = withDefaults(defineProps<Props>(), {
   colCount: 4,
   hGap: 8,
   vGap: 8,
+  canonicalImageNames: () => [] as string[],
 });
 
 const emit = defineEmits<{
@@ -405,6 +411,7 @@ defineExpose({
       :col-count="colCount"
       :h-gap="hGap"
       :v-gap="vGap"
+      :canonical-image-names="canonicalImageNames"
       @row-click="onRowClick"
       @row-dblclick="onRowDblclick"
       @row-contextmenu="onRowContextmenu"

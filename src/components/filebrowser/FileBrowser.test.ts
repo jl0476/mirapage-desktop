@@ -1107,3 +1107,250 @@ describe('FileBrowser — 接入 scrollToPath (Task 3.4)', () => {
     expect(scrollToIndexStub).not.toHaveBeenCalled();
   });
 });
+
+// ─── v0.1.0-module3.0.8 (任务 10): masonry 浏览位置接入 toolbar ───
+//
+// spec: docs/superpowers/specs/2026-08-10-masonry-browse-position-design.md v4
+// 5 处改动:
+//   1. canonicalImageNames computed (FB → FileList → MasonryView)
+//   2. canReadNow 扩展: 未选中 + masonryLastBrowseProgress 有 imageName → true
+//   3. onReadNowClick 改: 未选中 + cachedProgress → readFromCurrentPath
+//   4. onJumpToLastClick: 转发到 fileListRef.masonryJumpToLast
+//   5. toolbar「↶ 跳到上次」按钮 (仅 masonry 视图)
+//
+// 测试策略: 用 FileList stub 暴露 masonryLastBrowseProgress (computed) +
+// masonryJumpToLast (action), 验证 canReadNow + jumpToLast 按钮 + 转发链.
+// canonicalImageNames 用真实 FileList 验证 (改 entries + ViewMode = masonry).
+
+describe('FileBrowser — masonry 浏览位置接入 toolbar (Task 10)', () => {
+  let scrollToPathStub: ReturnType<typeof vi.fn>;
+  let scrollToIndexStub: ReturnType<typeof vi.fn>;
+  let masonryJumpToLastStub: ReturnType<typeof vi.fn>;
+  let masonryLastBrowseProgressValue: { current: { bookId: number; page: number; imageName: string | null; readerMode: 'single' | 'double'; updatedAt: number } | null };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    routerPushSpy.mockClear();
+    scrollToPathStub = vi.fn();
+    scrollToIndexStub = vi.fn();
+    masonryJumpToLastStub = vi.fn();
+    masonryLastBrowseProgressValue = { current: null };
+  });
+
+  function mountWithFileListStub() {
+    const FileListStub = {
+      name: 'FileList',
+      setup(_: unknown, { expose }: { expose: (e: Record<string, unknown>) => void }) {
+        expose({
+          scrollToPath: scrollToPathStub,
+          scrollToIndex: scrollToIndexStub,
+          masonryJumpToLast: masonryJumpToLastStub,
+          // Vue 3 `<script setup>` defineExpose 暴露 ref/computed 时自动 unwrap.
+          // 在测试 stub 中直接暴露 unwrapped value (对象引用), 让 FileBrowser
+          // 通过 fileListRef.value.masonryLastBrowseProgress 拿到的就是 ProgressItem | null.
+          // masonryLastBrowseProgressValue.current 变化 → 解引用触发响应式更新.
+          get masonryLastBrowseProgress() {
+            return masonryLastBrowseProgressValue.current;
+          },
+        });
+        return () => null;
+      },
+    };
+    return mount(FileBrowser, {
+      global: {
+        plugins: [i18n],
+        stubs: { FileList: FileListStub },
+      },
+      attachTo: document.body,
+    });
+  }
+
+  it('canReadNow: 未选中 + masonryLastBrowseProgress 有 imageName → 立即阅读按钮可点', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    masonryLastBrowseProgressValue.current = {
+      bookId: 1, page: 0, imageName: 'p1.jpg', readerMode: 'single', updatedAt: 0,
+    };
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 立即阅读按钮: 未选中, 但 masonryLastBrowseProgress.imageName 有值 → 可点
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('canReadNow: 未选中 + masonryLastBrowseProgress 空 → 立即阅读按钮不可点', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    masonryLastBrowseProgressValue.current = null;
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 立即阅读按钮: 未选中 + 无 progress → 不可点
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(true);
+    wrapper.unmount();
+  });
+
+  it('canReadNow: 未选中 + masonryLastBrowseProgress.imageName = null → 立即阅读按钮不可点', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    masonryLastBrowseProgressValue.current = {
+      bookId: 1, page: 0, imageName: null, readerMode: 'single', updatedAt: 0,
+    };
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(true);
+    wrapper.unmount();
+  });
+
+  it('toolbar「↶ 跳到上次」按钮: masonry 视图可见 + 点击调 masonryJumpToLast', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    masonryLastBrowseProgressValue.current = {
+      bookId: 1, page: 0, imageName: 'p1.jpg', readerMode: 'single', updatedAt: 0,
+    };
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 切到 masonry 视图
+    fb.setViewMode('masonry');
+    await flushPromises();
+
+    // masonry 视图下按钮可见
+    const btn = wrapper.find('[data-test="btn-jump-to-last"]');
+    expect(btn.exists()).toBe(true);
+
+    // 点击 → masonryJumpToLast 被调
+    await btn.trigger('click');
+    await flushPromises();
+    expect(masonryJumpToLastStub).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it('toolbar「↶ 跳到上次」按钮: details 视图不可见 (v-if="fb.viewMode === \'masonry\'")', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    masonryLastBrowseProgressValue.current = {
+      bookId: 1, page: 0, imageName: 'p1.jpg', readerMode: 'single', updatedAt: 0,
+    };
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 默认 details 视图 → 按钮不存在
+    expect(wrapper.find('[data-test="btn-jump-to-last"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('toolbar「↶ 跳到上次」按钮: masonry + 无 progress → 按钮 disabled', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    masonryLastBrowseProgressValue.current = null;
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    fb.setViewMode('masonry');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-jump-to-last"]');
+    expect(btn.exists()).toBe(true);
+    expect((btn.element as HTMLButtonElement).disabled).toBe(true);
+    wrapper.unmount();
+  });
+
+  it('onReadNowClick 未选中 + masonryLastBrowseProgress 有 imageName → 调 readFromCurrentPath (cachedProgress 透传)', async () => {
+    // 验证无选中 entry 调立即阅读按钮时, 走 readFromCurrentPath
+    // (而非 readNow / readFromImage)
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    masonryLastBrowseProgressValue.current = {
+      bookId: 1, page: 0, imageName: 'p1.jpg', readerMode: 'single', updatedAt: 0,
+    };
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 未选中 → 点 立即阅读按钮
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    await btn.trigger('click');
+    await flushPromises();
+
+    // router.push 应被 readFromCurrentPath 调 (cachedProgress 命中, 无需 IPC)
+    // 注意: readFromCurrentPath 用 name: 'reader' 而非 path: '/reader/:bookId'
+    // (name-based 路由 + params + query, 与 readFromImage 一致).
+    expect(routerPushSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'reader',
+        params: { bookId: '1' },
+        query: { at: 'p1.jpg' },
+      }),
+    );
+    wrapper.unmount();
+  });
+});
+
+describe('FileBrowser — canonicalImageNames 传给 FileList (Task 10)', () => {
+  // canonicalImageNames: fb.sortedEntries 过滤图片 → name[] (computed 派生)
+  // 传给 FileList prop, 内部转发到 MasonryView (任务 8 已接 prop)
+  // 验证 FileList 收到正确数组 (仅图片, 顺序与 sortedEntries 一致)
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+  });
+
+  it('canonicalImageNames: 仅图片 (过滤目录/压缩包), 顺序与 sortedEntries 一致', async () => {
+    // 3 个图片 + 1 个目录 + 1 个压缩包 → 3 个名字
+    mockedList.mockResolvedValueOnce([
+      { name: 'chapter1', path: 'chapter1', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'page1.jpg', path: 'page1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+      { name: 'manga.cbz', path: 'manga.cbz', isDirectory: false, isArchive: true, size: 1, modifiedAt: 0 },
+      { name: 'page2.jpg', path: 'page2.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+      { name: 'page3.jpg', path: 'page3.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const fileList = wrapper.findComponent({ name: 'FileList' });
+    const names = fileList.props('canonicalImageNames') as string[];
+    // 仅 3 个图片 (按 sortedEntries 顺序 — image_first 不排序, 自然顺序)
+    expect(names).toEqual(['page1.jpg', 'page2.jpg', 'page3.jpg']);
+  });
+});

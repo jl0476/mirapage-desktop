@@ -139,6 +139,14 @@ const masonryParams = ref({
 // 当前目录是否有图片（masonry 守卫）
 const hasImages = computed(() => fb.sortedEntries.some((e) => isImage(e.name)));
 
+// v0.1.0-module3.0.8 (任务 10): 全序列图片名（不受 UI 过滤影响）
+// 派生 fb.sortedEntries → 过滤图片 → name[]，按 sortedEntries 顺序（dir-first 自然顺序）。
+// 传给 FileList → MasonryView，作为 useMasonryBrowsePosition.canonicalImageNames，
+// 用于 topmostImage page 索引（filtered images.indexOf 不准 — 目录过滤时偏移）。
+const canonicalImageNames = computed(() =>
+  fb.sortedEntries.filter((e) => isImage(e.name)).map((e) => e.name),
+);
+
 // 进无图目录且当前是 masonry → 回落 details
 watch([() => fb.viewMode, hasImages], ([mode, has]) => {
   if (mode === 'masonry' && !has) {
@@ -428,12 +436,17 @@ const ICON_DOWNLOAD = 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12
 // (v-html 渲染保留 fill + viewBox 0 0 1024 1024 原貌, 尺寸 12px 由 scoped CSS 限制).
 // 之前的 lucide path d 常量已被 SVG 资产替代 — 资产文件位于 src/icons/.
 
-// selectedEntry 已在前面声明 (line 46, 复用 store.selectedPaths + sortedEntries)
-// Cluster A: 选中图片时立即阅读按钮也可点 (issue #3)
+// v0.1.0-module3.0.2-reader-polish (Cluster A): 选中图片时立即阅读按钮也可点 (issue #3)
+// v0.1.0-module3.0.8 (任务 10): 扩展 — 未选中时, 当前 masonry 目录有 progress 记录 → 启用
+// (走 readFromCurrentPath 带 cachedProgress, 不需 IPC).
+// masonryLastBrowseProgress 是 FileList defineExpose 的 ComputedRef.
+// Vue 3 `<script setup>` defineExpose 暴露的 ref/computed 在父级访问时
+// 自动 unwrap (proxyRefs 机制), 因此 fileListRef.value.masonryLastBrowseProgress
+// 直接是 ProgressItem | null, 不要再 .value.
 const canReadNow = computed(() => {
   const e = selectedEntry.value;
-  if (!e) return false;
-  return e.isDirectory === true || isImage(e.name);
+  if (e) return e.isDirectory === true || isImage(e.name);
+  return fileListRef.value?.masonryLastBrowseProgress?.imageName != null;
 });
 
 // v0.1.0-module3.0.3-hotfix11: toolbar 加的「加入书库」/「下载全部」按钮
@@ -443,17 +456,25 @@ const canAddToLibrary = computed(() => selectedEntry.value?.isDirectory === true
 const canDownloadAll = computed(() => false);
 
 function onReadNowClick() {
-  log('[FileBrowser] onReadNowClick fired', selectedEntry.value?.name, 'canReadNow=', canReadNow.value);
-  if (!selectedEntry.value) {
-    log('[FileBrowser] onReadNowClick: no selectedEntry');
+  const e = selectedEntry.value;
+  if (e) {
+    log('[FileBrowser] onReadNowClick: selectedEntry', e.name, 'isDir=', e.isDirectory);
+    if (e.isDirectory) void readerActions.readNow(e);
+    else void readerActions.readFromImage(e);
     return;
   }
-  if (selectedEntry.value.isDirectory) {
-    void readerActions.readNow(selectedEntry.value);
-  } else {
-    // Cluster A: 图片 entry 走 readFromImage (从该图开始)
-    void readerActions.readFromImage(selectedEntry.value);
-  }
+  // v0.1.0-module3.0.8 (任务 10): 未选中 + 当前目录有 progress → 走 readFromCurrentPath
+  // 传 cachedProgress 避免 IPC getProgress (useMasonryBrowsePosition 已查过).
+  log('[FileBrowser] onReadNowClick: no selection, use cachedProgress');
+  void readerActions.readFromCurrentPath({
+    cachedProgress: fileListRef.value?.masonryLastBrowseProgress ?? null,
+  });
+}
+
+/** v0.1.0-module3.0.8 (任务 10): toolbar「↶ 跳到上次」按钮 — 转发到 MasonryView.jumpToLast */
+function onJumpToLastClick() {
+  log('[FileBrowser] onJumpToLastClick fired');
+  void fileListRef.value?.masonryJumpToLast();
 }
 function onAddToLibraryClick() {
   log('[FileBrowser] onAddToLibraryClick fired', selectedEntry.value?.name);
@@ -571,6 +592,28 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
             <polygon points="6 4 20 12 6 20 6 4" />
           </svg>
           {{ t('fileBrowser.readNow') }}
+        </button>
+        <!-- v0.1.0-module3.0.8 (任务 10): masonry 浏览位置跳转按钮
+             仅在 masonry 视图显示 (其他视图无浏览位置概念)
+             disable 取决于 masonryLastBrowseProgress 是否有 imageName -->
+        <button
+          v-if="fb.viewMode === 'masonry'"
+          data-test="btn-jump-to-last"
+          type="button"
+          class="tb-btn"
+          :disabled="!fileListRef?.masonryLastBrowseProgress?.imageName"
+          :title="fileListRef?.masonryLastBrowseProgress?.imageName ? t('fileBrowser.jumpToLast') : t('fileBrowser.noRecordedProgress')"
+          @click="onJumpToLastClick"
+        >
+          <svg
+            width="14" height="14" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="1 4 1 10 7 10" />
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+          </svg>
+          {{ t('fileBrowser.jumpToLast') }}
         </button>
         <!-- v0.1.0-module3.0.3-hotfix11: 加入书库 / 下载全部 提到顶栏, 跨视图复用.
              详情 (details) 视图已把属性显示在列上, attribute panel 隐藏; 但这两个
@@ -743,6 +786,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           :col-count="masonryParams.colCount"
           :h-gap="masonryParams.hGap"
           :v-gap="masonryParams.vGap"
+          :canonical-image-names="canonicalImageNames"
           data-test="filelist"
           @open="onEntryOpen"
           @select="onEntrySelect"
