@@ -136,11 +136,11 @@ describe('settings store: 缩略图缓存', () => {
     expect(store.thumbnailWorkerLimit).toBe(4);
   });
 
-  it('手改 worker 越界归一化（9 -> 4）', async () => {
+  it('手改 worker 越界归一化（17 -> 16）', async () => {
     const store = useSettingsStore();
     await store.load();
-    await store.setThumbnailWorkerLimit(9);
-    expect(store.thumbnailWorkerLimit).toBe(4);
+    await store.setThumbnailWorkerLimit(17);
+    expect(store.thumbnailWorkerLimit).toBe(16);
   });
 
   it('改清晰度不改资源模式，但推送 runtime', async () => {
@@ -176,5 +176,41 @@ describe('settings store: 缩略图缓存', () => {
     expect(store.thumbnailPrefetchScreens).toBe(0.5);
     expect(store.thumbnailIdleGeneration).toBe(false);
     expect(store.thumbnailIdlePrefetchScreens).toBe(0);
+  });
+});
+
+describe('settings store: masonry 浏览位置（v0.1.0-module3.0.8 任务 11）', () => {
+  it('默认 recordBrowsePosition=true（DB 无值）', async () => {
+    const store = useSettingsStore();
+    await store.load();
+    expect(store.recordBrowsePosition).toBe(true);
+  });
+
+  it('默认 restoreBrowsePositionOnEnter=true（DB 无值）', async () => {
+    const store = useSettingsStore();
+    await store.load();
+    expect(store.restoreBrowsePositionOnEnter).toBe(true);
+  });
+
+  it('setRecordBrowsePosition(false) 持久化到 DB', async () => {
+    const setSetting = vi.mocked((await import('@/lib/tauri')).setSetting);
+    const store = useSettingsStore();
+    await store.load();
+    await store.setRecordBrowsePosition(false);
+    expect(store.recordBrowsePosition).toBe(false);
+    expect(setSetting).toHaveBeenCalledWith('fb_record_browse_position', 'false');
+  });
+
+  it('load 从 DB 读 fb_record_browse_position="false" → ref=false', async () => {
+    const { getSetting } = await import('@/lib/tauri');
+    vi.mocked(getSetting).mockImplementation(async (key: string) => {
+      if (key === 'fb_record_browse_position') return 'false';
+      if (key === 'fb_restore_browse_position_on_enter') return 'false';
+      return null;
+    });
+    const store = useSettingsStore();
+    await store.load();
+    expect(store.recordBrowsePosition).toBe(false);
+    expect(store.restoreBrowsePositionOnEnter).toBe(false);
   });
 });

@@ -59,6 +59,11 @@ export const useSettingsStore = defineStore('settings', () => {
   const thumbnailCacheRoot = ref('');   // 空值 = 系统默认 cache dir（迁移在任务12）
   const thumbnailCacheLimitMb = ref(512);
 
+  // v0.1.0-module3.0.8 (任务 11): masonry 浏览位置记录 / 进目录恢复开关
+  //  - DB 用 'true'/'false' 字符串（spec §5.1），区别于其他 bool key 的 '1'/'0'
+  const recordBrowsePosition = ref(true);
+  const restoreBrowsePositionOnEnter = ref(true);
+
   const initialized = ref(false);
 
   /** 加载所有 settings（启动时调用） */
@@ -90,6 +95,9 @@ export const useSettingsStore = defineStore('settings', () => {
       ['fb_thumbnail_idle_prefetch_screens', (v) => (thumbnailIdlePrefetchScreens.value = Number(v))],
       ['fb_thumbnail_cache_root', (v) => (thumbnailCacheRoot.value = v)],
       ['fb_thumbnail_cache_limit_mb', (v) => (thumbnailCacheLimitMb.value = normalizeCacheLimitMb(Number(v)))],
+      // v0.1.0-module3.0.8 (任务 11): masonry 浏览位置 2 开关（'true'/'false' 字符串语义）
+      ['fb_record_browse_position', (v) => (recordBrowsePosition.value = v !== 'false')],
+      ['fb_restore_browse_position_on_enter', (v) => (restoreBrowsePositionOnEnter.value = v !== 'false')],
       ...TOUCH_ZONES.map((z) =>
         [`touch_${TOUCH_ZONE_KEY[z]}`, (v) => (touchScheme[z] = v as TouchAction)] as [string, (v: string) => void],
       ),
@@ -232,6 +240,17 @@ export const useSettingsStore = defineStore('settings', () => {
     }
   }
 
+  // ─── v0.1.0-module3.0.8 (任务 11): masonry 浏览位置 2 开关 setter ────
+  /** 'true'/'false' 字符串语义（区别于 update() 的 '1'/'0'，spec §5.1 一致）。 */
+  async function setRecordBrowsePosition(v: boolean): Promise<void> {
+    recordBrowsePosition.value = v;
+    await setSetting('fb_record_browse_position', v ? 'true' : 'false');
+  }
+  async function setRestoreBrowsePositionOnEnter(v: boolean): Promise<void> {
+    restoreBrowsePositionOnEnter.value = v;
+    await setSetting('fb_restore_browse_position_on_enter', v ? 'true' : 'false');
+  }
+
   /**
    * v0.1.0-reader-review-fix-9: 切换 reader_default_mode (in-memory + 持久化).
    *  - 修复 settings.update() 只持久化不更新 in-memory 的 bug
@@ -305,6 +324,9 @@ export const useSettingsStore = defineStore('settings', () => {
     thumbnailIdlePrefetchScreens,
     thumbnailCacheRoot,
     thumbnailCacheLimitMb,
+    // v0.1.0-module3.0.8 (任务 11): masonry 浏览位置 2 开关
+    recordBrowsePosition,
+    restoreBrowsePositionOnEnter,
     initialized,
     // 方法
     load,
@@ -321,6 +343,8 @@ export const useSettingsStore = defineStore('settings', () => {
     setThumbnailIdleGeneration,
     setThumbnailIdlePrefetchScreens,
     setThumbnailCacheLimitMb,
+    setRecordBrowsePosition,
+    setRestoreBrowsePositionOnEnter,
     cycleReaderMode,
     cycleReadDirection,
     setTouchAction,
