@@ -257,7 +257,9 @@ impl ThumbnailService {
             memory_budget_mb,
             starvation_threshold: std::time::Duration::from_secs(5),
         };
-        let scheduler = SchedulerHandle::start(config, production_generate_fn());
+        // build + tauri::async_runtime::spawn（setup() 同步上下文里 tokio::spawn 会 panic）
+        let (scheduler, actor) = SchedulerHandle::build(config, production_generate_fn());
+        tauri::async_runtime::spawn(actor.run());
         Self {
             app,
             scheduler,
@@ -795,25 +797,11 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
     });
 }
 
-/// 构造完整索引行（P2-1：填真实元数据而非空值）。
+/// 构造完整索引行（P2-1：填真实源元数据）。
+/// `cache_rel_path` 必须与 `key::cache_rel_path` 完全一致（`v1/{prefix}/{key}.webp`），
+/// 不能从 `cache_abs` 用 path 解析重构（容易写错且与 key 耦合）—— 用 `meta.cache_key` 调用 key 模块。
 fn build_row(meta: &CompletionMeta, g: &GeneratedThumbnail) -> ThumbnailCacheRow {
-    let cache_rel = meta
-        .cache_abs
-        .file_name()
-        .map(|f| {
-            let mut s = meta
-                .cache_abs
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if !s.is_empty() {
-                s.push('/');
-            }
-            s.push_str(&f.to_string_lossy());
-            s
-        })
-        .unwrap_or_default();
+    let cache_rel = key::cache_rel_path(&meta.cache_key);
     let now = now_secs();
     ThumbnailCacheRow {
         cache_key: meta.cache_key.clone(),
@@ -1131,5 +1119,36 @@ mod tests {
             _ => panic!("expected Generate"),
         };
         assert_eq!(task.job.target_width, 1536, "Standard must cap at 1536");
+    }
+
+    /// 回归 P0：`build_row` 的 cache_rel_path 必须与 `key::cache_rel_path` 一致（`v1/{prefix}/{key}.webp`）。
+    /// 之前用 `cache_abs` path 解析重构只走一层 parent（`v1/ab/` 缺 `v1/`），导致 get_verified miss
+    /// + 孤儿文件 + evict 删索引不删文件 + 缓存永不命中。修复：直接用 `meta.cache_key` 调 `key::cache_rel_path`。
+    #[test]
+    fn build_row_cache_rel_path_matches_key() {
+        let cache_key = "abcdef1234567890"; // 16 chars -> prefix "ab"
+        let cache_abs = PathBuf::from(format!("/tmp/cache/v1/ab/{cache_key}.webp"));
+        let meta = CompletionMeta {
+            epoch: 1,
+            cache_key: cache_key.to_string(),
+            ui_path: "a.jpg".into(),
+            source_rel_path: "normal/a.jpg".into(),
+            cache_abs,
+            cache_root: PathBuf::from("/tmp/cache"),
+            cache_limit: 1_000_000,
+            protected_keys: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            source_key: "sk".into(),
+            source_size: 1000,
+            source_modified_at: Some(100),
+            source_width: 2000,
+            source_height: 1500,
+            quality: "high".into(),
+            target_bucket: 1024,
+        };
+        let g = GeneratedThumbnail { width: 1024, height: 768, byte_size: 500 };
+        let row = build_row(&meta, &g);
+        // 必须与 key::cache_rel_path 一致
+        assert_eq!(row.cache_rel_path, key::cache_rel_path(&meta.cache_key));
+        assert_eq!(row.cache_rel_path, format!("v1/ab/{cache_key}.webp"));
     }
 }
