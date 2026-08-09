@@ -400,7 +400,7 @@ function closeOpenCell(e: MouseEvent) {
           <div class="flex flex-col gap-3">
             <div>
               <div class="flex items-center justify-between mb-1">
-                <span class="text-sm text-text-secondary">{{ t('settings.masonry.defaultCols') }}</span>
+                <span class="text-xs text-text-muted">{{ t('settings.masonry.defaultCols') }}</span>
                 <span class="text-xs text-accent font-mono">{{ settings.masonryDefaultCols }}</span>
               </div>
               <input type="range" min="2" max="8" step="1" :value="settings.masonryDefaultCols"
@@ -409,7 +409,7 @@ function closeOpenCell(e: MouseEvent) {
             </div>
             <div>
               <div class="flex items-center justify-between mb-1">
-                <span class="text-sm text-text-secondary">{{ t('settings.masonry.defaultHGap') }}</span>
+                <span class="text-xs text-text-muted">{{ t('settings.masonry.defaultHGap') }}</span>
                 <span class="text-xs text-accent font-mono">{{ settings.masonryDefaultHGap }}px</span>
               </div>
               <input type="range" min="0" max="24" step="1" :value="settings.masonryDefaultHGap"
@@ -418,7 +418,7 @@ function closeOpenCell(e: MouseEvent) {
             </div>
             <div>
               <div class="flex items-center justify-between mb-1">
-                <span class="text-sm text-text-secondary">{{ t('settings.masonry.defaultVGap') }}</span>
+                <span class="text-xs text-text-muted">{{ t('settings.masonry.defaultVGap') }}</span>
                 <span class="text-xs text-accent font-mono">{{ settings.masonryDefaultVGap }}px</span>
               </div>
               <input type="range" min="0" max="24" step="1" :value="settings.masonryDefaultVGap"
