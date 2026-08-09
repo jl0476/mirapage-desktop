@@ -224,6 +224,7 @@ describe('ReaderView.vue', () => {
     vi.mocked(getProgress).mockResolvedValueOnce({
       bookId: 7,
       page: 2,
+      imageName: null,
       readerMode: 'single',
       updatedAt: 100,
     });
@@ -415,7 +416,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // saved progress = page 0
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 0, readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 0, imageName: null, readerMode: 'single', updatedAt: 100,
     });
     const fb = useFileBrowserStore();
     fb.entries = [

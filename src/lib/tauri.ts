@@ -358,6 +358,9 @@ export function thumbnailCacheUrl(cachePath: string): string {
 export interface ProgressItem {
   bookId: number;
   page: number;
+  /** v0.1.0-module3.0.8: 瀑布流浏览位置锚点——masonry 滚动时写入 top visible image 名。
+   *  reader 翻页路径不传（保持 null），reload 时按 imageName 找 spread index 恢复。 */
+  imageName: string | null;
   readerMode: 'single' | 'double';
   updatedAt: number;
 }
@@ -367,18 +370,29 @@ export interface ProgressItem {
  * - true: 翻到末页（永久 true，翻回不清零）
  * - false: 主动重置（清 browse_history）
  * - undefined: 普通翻页，保留已有 finished 值
+ *
+ * v0.1.0-module3.0.8 imageName 语义：
+ * - undefined / null: 保留旧值（reader 翻页路径不传，走 page 路径）
+ * - string: 覆盖为该值（masonry 滚动时写入 top visible image 名）
+ *
+ * 调用约定：
+ * - reader 翻页：`saveProgress(bookId, page, readerMode)`  → 4 参，imageName=undefined 保留
+ * - reader 翻末页：`saveProgress(bookId, page, readerMode, true)` → finished=true, imageName 保留
+ * - masonry 滚动：`saveProgress(bookId, page, 'single', undefined, imageName)` → finished 保留
  */
 export async function saveProgress(
   bookId: number,
   page: number,
   readerMode: 'single' | 'double',
   finished?: boolean,
+  imageName?: string,
 ): Promise<void> {
   await invoke<void>('save_progress', {
     bookId,
     page,
     readerMode,
     finished: finished ?? null,
+    imageName: imageName ?? null,
   });
 }
 
