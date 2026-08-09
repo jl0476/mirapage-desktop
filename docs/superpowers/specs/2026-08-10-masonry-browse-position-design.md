@@ -390,12 +390,16 @@ const canonicalImageNames = computed(() =>
 
 排序规则已在 fb.sortedEntries 内部封装，不再需要额外同步。
 
-async function ensureBookIdForCurrentDir(): Promise<number | null> {
-  const currentPath = params.currentPath.value;
-  const descriptor = params.descriptor.value;
-  const absPath = currentPath;
+/** P1 修复：接 desc/path 参数（让 recordCurrentTop 早捕获目录，避免 await 后目录已变）。
+ *  P1 小建议：pathAtRequest === '' 时 title fallback 到 rootPath 的 basename。 */
+async function ensureBookIdForCurrentDir(
+  descAtEntry: SourceDescriptor,
+  pathAtEntry: string,
+): Promise<number | null> {
+  const absPath = pathAtEntry;
+  const descriptor = descAtEntry;
 
-  // P2 修复：bookId 必须缓存 + in-flight 去重，且 RPC 期间校验目录
+  // P2 修复：bookId 必须缓存 + in-flight 去重
   const cacheKey = `${JSON.stringify(descriptor)}|${absPath}`;
   const cached = bookIdCache.get(cacheKey);
   if (cached) return cached;
@@ -405,48 +409,76 @@ async function ensureBookIdForCurrentDir(): Promise<number | null> {
   const descAtRequest = JSON.parse(JSON.stringify(descriptor)) as SourceDescriptor;
 
   const promise = (async (): Promise<number | null> => {
+    // title fallback：pathAtRequest 非空用其 basename；否则用 descriptor 内 rootPath basename；最后 'root'
+    const localRoot =
+      descAtRequest.type === 'local' ? (descAtRequest as any).rootPath : '';
+    const title =
+      pathAtRequest.split(/[\\/]/).filter(Boolean).pop() ||
+      localRoot.split(/[\\/]/).filter(Boolean).pop() ||
+      'root';
     const cover = await enumerateCover(descAtRequest, pathAtRequest);
     const bookId = await createBook({
-      title: pathAtRequest.split(/[\\/]/).filter(Boolean).pop() || pathAtRequest,
+      title,
       sourceDescriptor: descAtRequest,
       absolutePath: pathAtRequest,
       sourceType: descAtRequest.type === 'local' ? 'Local' : capitalize(descAtRequest.type),
       favorite: false,
       ...cover,
     });
-    // RPC 返回后校验仍是同一目录
+    // RPC 返回后校验仍是同一目录（descriptor + path 都比）
     if (params.currentPath.value !== pathAtRequest) return null;
+    if (JSON.stringify(params.descriptor.value) !== JSON.stringify(descAtRequest)) return null;
     return bookId;
   })();
 
   bookIdCache.set(cacheKey, promise);
-  // 30s 后清理缓存（防堆积；用户在同一目录 30s 内持续滚动可复用）
   setTimeout(() => bookIdCache.delete(cacheKey), 30000);
   return promise;
 }
 
+/** P1 修复：竞态保护。
+ *   - 在函数开始就捕获 startSeq、descriptor/path、imageName、page
+ *     （避免 await 后 topmostImage/topmostPage 已变导致写错）
+ *   - 设 writeSeq：每次 scheduleRecord 递增；晚返回的旧写入不能覆盖较新滚动位置
+ *   - 目录校验同时比 descriptor 与 path（仅 currentPath 不够，跨源同 path 算不同目录）
+ */
+let activeWriteSeq = 0;  // 每次 scheduleRecord() 调时 +1，写入前捕获
 async function recordCurrentTop(): Promise<void> {
-  if (!params.enabled.value) return;
+  // 1) 早捕获：所有写入数据来自这一刻，await 后不再读取 topmostImage/topmostPage
+  const seqAtEntry = activeStartSeq;
+  const descAtEntry = JSON.parse(JSON.stringify(params.descriptor.value)) as SourceDescriptor;
+  const pathAtEntry = params.currentPath.value;
   const e = topmostImage.value;
   if (!e) return;
   if (e.path === lastWrittenPath.value) return;
+  // P0 修复：page 与 imageName 必须同时从这一刻的 topmostImage 算
+  // 但 imageName 已通过 e.name 捕获；page 也立即算并捕获，避免 await 后 topmostPage 已变
+  const pageAtEntry = params.canonicalImageNames.value.indexOf(e.name);
+  const writeSeqAtEntry = activeWriteSeq;
+
   try {
-    const bookId = await ensureBookIdForCurrentDir();
+    const bookId = await ensureBookIdForCurrentDir(descAtEntry, pathAtEntry);
+    // 2) ensureBookId 后立即校验：目录是否已变
+    if (seqAtEntry !== activeStartSeq) return;
+    if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
     if (bookId == null) return;
-    // P2 修复：保存后校验当前 startSeq（与函数入口 seq 比对）
-    const seqAtEntry = activeStartSeq;
+    // 3) writeSeq 校验：若期间有更新的 schedule（更晚 scroll），旧的 write 不能盖新的
+    if (writeSeqAtEntry !== activeWriteSeq) return;
     await saveProgress(
       bookId,
-      topmostPage.value,
+      pageAtEntry,
       'single',
       undefined,
       e.name,
     );
-    if (seqAtEntry !== activeStartSeq) return;  // 已被新 start() 或 stop() 抢占，丢弃写入
+    // 4) saveProgress 后再校验一次：写入期间目录/seq/wseq 都不能变
+    if (seqAtEntry !== activeStartSeq) return;
+    if (writeSeqAtEntry !== activeWriteSeq) return;
+    if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
     lastWrittenPath.value = e.path;
     lastBrowseProgress.value = {
       bookId,
-      page: topmostPage.value,
+      page: pageAtEntry,
       imageName: e.name,
       readerMode: 'single',
       updatedAt: Date.now(),
@@ -456,7 +488,16 @@ async function recordCurrentTop(): Promise<void> {
   }
 }
 
+/** 目录等同性比较：descriptor + path 同时一致。 */
+function sameDir(
+  d1: SourceDescriptor, p1: string,
+  d2: SourceDescriptor, p2: string,
+): boolean {
+  return p1 === p2 && JSON.stringify(d1) === JSON.stringify(d2);
+}
+
 function scheduleRecord(): void {
+  activeWriteSeq += 1;  // 每次新调度让旧的写失效
   if (debounceTimer) clearTimeout(debounceTimer);
   debounceTimer = setTimeout(() => {
     debounceTimer = null;
@@ -479,12 +520,16 @@ function disableWatcher(): void {
 
 async function restoreAndScroll(): Promise<void> {
   const seqAtEntry = activeStartSeq;
+  const descAtEntry = JSON.parse(JSON.stringify(params.descriptor.value)) as SourceDescriptor;
+  const pathAtEntry = params.currentPath.value;
   try {
-    const bookId = await ensureBookIdForCurrentDir();
-    if (seqAtEntry !== activeStartSeq) return;  // P2 校验
+    const bookId = await ensureBookIdForCurrentDir(descAtEntry, pathAtEntry);
+    if (seqAtEntry !== activeStartSeq) return;
+    if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
     if (bookId == null) return;
     const progress = await getProgress(bookId);
-    if (seqAtEntry !== activeStartSeq) return;  // P2 校验
+    if (seqAtEntry !== activeStartSeq) return;
+    if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
     lastBrowseProgress.value = progress;
     if (!params.autoRestoreOnMount.value) return;
     if (!progress?.imageName) return;
@@ -528,11 +573,15 @@ async function jumpToLast(): Promise<void> {
   let progress = lastBrowseProgress.value;
   if (!progress) {
     try {
-      const bookId = await ensureBookIdForCurrentDir();
+      const descAtEntry = JSON.parse(JSON.stringify(params.descriptor.value)) as SourceDescriptor;
+      const pathAtEntry = params.currentPath.value;
+      const bookId = await ensureBookIdForCurrentDir(descAtEntry, pathAtEntry);
       if (seqAtEntry !== activeStartSeq) return;
+      if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
       if (bookId == null) return;
       progress = await getProgress(bookId);
       if (seqAtEntry !== activeStartSeq) return;
+      if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
       lastBrowseProgress.value = progress;
     } catch (err) {
       log('[useMasonryBrowsePosition] jumpToLast failed', err);
@@ -683,16 +732,19 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
   }
   if (containerRef.value) containerRef.value.scrollTop = item.top;
 
-  // 渐进校正：每次 measuredMap 更新都重新对齐锚点（最多 3s 或 5 批）
+  // P1 修复：watch 目标图自身的 layout.top（不是 measuredMap 条目）。
+  //   目标上方任意图片的尺寸到达都会改变目标的 layout.top，
+  //   但目标本身的 measuredMap 不会变；watch measuredMap 抓不到。
+  //   watch layout.map.get(targetPath)?.top 直接锚定目标位置。
   const targetPath = target.path;
   let corrections = 0;
   const stop = watch(
-    () => measuredMap.value.get(targetPath),
-    () => {
+    () => layout.value.map.get(targetPath)?.top,
+    (newTop) => {
+      if (newTop === undefined) return;
       if (corrections >= 5) return;
-      const updated = layout.value.map.get(targetPath);
-      if (updated && containerRef.value) {
-        containerRef.value.scrollTop = updated.top;
+      if (containerRef.value) {
+        containerRef.value.scrollTop = newTop;
         corrections += 1;
       }
     },
@@ -785,11 +837,16 @@ async function readFromCurrentPath(
   } catch (e) {
     log('[useReaderActions] readFromCurrentPath: saveNavigationContext failed (容错)', e);
   }
-  await router!.push({
-    name: 'reader',
-    params: { bookId: String(progress.bookId) },
-    query: { at: encodeURIComponent(progress.imageName) },
-  });
+  // P1 修复：router 守卫，与 readFromImage (useReaderActions.ts:267-273) 一致
+  if (router) {
+    await router.push({
+      name: 'reader',
+      params: { bookId: String(progress.bookId) },
+      query: { at: encodeURIComponent(progress.imageName) },
+    });
+  } else {
+    log('[useReaderActions] readFromCurrentPath: router unavailable, cannot navigate');
+  }
 }
 ```
 
@@ -973,14 +1030,25 @@ Settings 开关是 reactive ref——composable 接 `enabled / autoRestoreOnMoun
 
 ### 6.1 Rust 单测（`src-tauri/src/commands/progress.rs` 同文件测试模块）
 
+**SQL 语义断言（核心 4 组合）**：
+
+| 用例 | 前提 | 断言 |
+|---|---|---|
+| `save_progress(finished=None, image_name=None)` 新行 INSERT | 行不存在 | finished=0（COALESCE 默认 0），image_name=NULL |
+| `save_progress(finished=None, image_name=None)` UPSERT 已有行 | 已有 finished=1 image_name="a.jpg" | finished=1（CASE WHEN 保留），image_name="a.jpg"（COALESCE 保留）—— **测试断言"不动已有 anchor"，避免与 SQL COALESCE 语义矛盾** |
+| `save_progress(finished=None, image_name=Some("b.jpg"))` UPSERT | 已有 finished=1 image_name="a.jpg" | finished=1，image_name="b.jpg"（新值覆盖） |
+| `save_progress(finished=Some(true), image_name=None)` UPSERT | 已有 finished=0 image_name="a.jpg" | finished=1（强制），image_name="a.jpg"（保留） |
+
+**接口 / 兼容性**：
+
 | 用例 | 断言 |
 |---|---|
-| `save_progress` 带 image_name | 读回 `image_name == Some("x.jpg")` |
-| `save_progress` 不带 image_name（旧调用兼容） | 读回 `image_name == None` |
-| `save_progress` 重复调（UPSERT） | bookId 唯一，第二次 page/image_name/finished 按入参更新（现有 save_progress 已是 UPSERT 模式 progress.rs:64-99，本版本扩展 image_name 分支处理） |
-| `get_progress` 返回新字段 | shape 含 imageName |
-| `mark_finished` 不动 image_name | page=0（保持），image_name 保留，finished=1 |
-| migration 010 跑后旧行 | image_name 默认 NULL |
+| `get_progress` 返回新字段 | shape 含 imageName（Option<String>） |
+| `get_progress` 读旧行（image_name NULL） | 返回 `imageName: None` |
+| `mark_finished(finished=true)` | page=0（保持），image_name 保留，finished=1（**不动 image_name**，避免覆盖浏览位置） |
+| migration 010 跑后旧行 | image_name 列存在，默认 NULL |
+
+⚠️ **测试-语义一致性**：所有 UPSERT 测试必须**显式设置前提行**，避免"无前提直接断言 imageName=None"——后者与 COALESCE 保留旧值的语义矛盾（虽然新行确实落 NULL）。
 
 ### 6.2 前端单测
 
@@ -1134,3 +1202,14 @@ SQLite TEXT 列无长度限制（实际限 1GB）。`imageNames.indexOf` 严格�
 | 6 | Settings 运行时切换不生效 | start() 内 watch enabled 动态启停 |
 | 7 | startSeq 未整合 | activeStartSeq 在所有 await 后校验 |
 | 8 | 根目录 currentPath='' | readFromCurrentPath 不再 abort；dirName fallback 到 rootPath.basename |
+
+## §12 v4 修订摘要
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 9 | recordCurrentTop 竞态保护过晚 | 早捕获 startSeq/desc/path/imageName/page；writeSeq 防晚返回覆盖；ensureBookId/saveProgress 后立即校验 desc+path |
+| 10 | scrollToEntry 只 watch measuredMap 不抓上方图片变化 | 改 watch `layout.value.map.get(targetPath)?.top`，目标位置任何变化都触发校正 |
+| 11 | readFromCurrentPath router! 会抛异常 | `if (router)` 守卫，与 readFromImage (useReaderActions.ts:267-273) 一致 |
+| 12 | rootPath 自身是图片目录时 title 空 | ensureBookIdForCurrentDir title fallback：pathAtRequest basename → localRoot basename → 'root' |
+| 13 | 测试与 SQL COALESCE 语义矛盾 | §6.1 拆为"SQL 语义断言（4 组合）"+"接口 / 兼容性"两类；UPSERT 测试显式设前提行 |
+| 14 | ensureBookIdForCurrentDir 接 desc/path 参数 | recordCurrentTop / restoreAndScroll / jumpToLast 全部传 descAtEntry+pathAtEntry；不再读实时 descriptor/currentPath |
