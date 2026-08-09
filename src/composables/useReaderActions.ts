@@ -4,6 +4,8 @@
  * - addToLibrary(entry): 手动加入书库 (favorite=true)，Library 可见
  * - readFromImage(entry) [Cluster A]: 双击/选中图片入口, 从该图开始阅读
  *   用父目录合成 entry 调 ensureBookId, route 带 ?at=imageName
+ * - readFromCurrentPath() [m3.0.8]: 顶栏「立即阅读」无选中 entry 时,
+ *   从当前目录 progress 恢复阅读位置。cachedProgress 优先, 未命中走 IPC.
  *
  * 不再调 recordHistory（browse_history 已重写为 folder-level，由 FileBrowser.fetch 自动 upsert）
  *
@@ -20,7 +22,7 @@
  *   currentPath), ReaderView 退出时 restore. FileBrowser.onMounted 优先 restore.
  */
 import { useRouter } from 'vue-router';
-import { createBook, listDirectory, recordHistory, type CreateBookArgs } from '@/lib/tauri';
+import { createBook, listDirectory, recordHistory, getProgress, type CreateBookArgs, type ProgressItem } from '@/lib/tauri';
 import { isImage } from '@/lib/mime';
 import { naturalCompare } from '@/lib/naturalSort';
 import { PathUtils } from '@/lib/path';
@@ -273,5 +275,69 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     }
   }
 
-  return { readNow, addToLibrary, readFromImage };
+  /**
+   * v0.1.0-module3.0.8: 顶栏「立即阅读」无选中 entry 时的入口.
+   *
+   * 流程:
+   * 1) FileBrowser 传 cachedProgress (从 fb store 取的 progress 缓存).
+   *    命中 (有 imageName) → 直接 router.push 带 ?at=imageName, 不走 IPC.
+   * 2) cachedProgress 未命中 → 用当前 currentPath / localRoot fallback
+   *    合成 dirEntry 调 ensureBookId(favorite=false), 取 bookId.
+   *    bookId null → abort.
+   * 3) ensureBookId 拿到的 bookId 调 getProgress(bookId). 仍无 imageName → abort.
+   * 4) 有 imageName → saveNavigationContext (容错) → router.push 带 ?at=imageName.
+   * 5) router 不存在 → 仅 log, 不抛 (测试场景友好).
+   *
+   * opts.getCurrentPath 缺省或根目录 currentPath='' 时, 用 localRoot (resolveRootPath)
+   * 最后一段做 dirName fallback, 保证不 abort.
+   */
+  async function readFromCurrentPath(
+    args: { cachedProgress?: ProgressItem | null } = {},
+  ): Promise<void> {
+    log('[useReaderActions] readFromCurrentPath called');
+    const rootPath = opts.resolveRootPath();
+    const currentPath = opts.getCurrentPath?.() ?? '';
+    const descriptor = opts.buildSourceDescriptor(rootPath);
+
+    let progress = args.cachedProgress ?? null;
+    if (!progress?.imageName) {
+      const localRoot = descriptor.type === 'local' ? (descriptor as { rootPath: string }).rootPath : '';
+      const dirName =
+        currentPath.split(/[\\/]/).filter(Boolean).pop() ||
+        localRoot.split(/[\\/]/).filter(Boolean).pop() ||
+        'root';
+      const dirEntry: MediaEntry = {
+        name: dirName, path: '', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0,
+      };
+      const { bookId } = await ensureBookId(dirEntry, /*favorite=*/false);
+      if (bookId === null) {
+        log('[useReaderActions] readFromCurrentPath: bookId null, abort');
+        return;
+      }
+      progress = await getProgress(bookId);
+    }
+    if (!progress?.imageName) {
+      log('[useReaderActions] readFromCurrentPath: no progress.imageName, abort');
+      return;
+    }
+    if (opts.saveNavigationContext) {
+      try {
+        opts.saveNavigationContext();
+      } catch (e) {
+        log('[useReaderActions] readFromCurrentPath: saveNavigationContext failed (容错)', e);
+      }
+    }
+    if (router) {
+      log('[useReaderActions] readFromCurrentPath: router.push /reader/' + progress.bookId, '?at=', progress.imageName);
+      await router.push({
+        name: 'reader',
+        params: { bookId: String(progress.bookId) },
+        query: { at: encodeURIComponent(progress.imageName) },
+      });
+    } else {
+      log('[useReaderActions] readFromCurrentPath: router unavailable, cannot navigate');
+    }
+  }
+
+  return { readNow, addToLibrary, readFromImage, readFromCurrentPath };
 }

@@ -18,6 +18,7 @@ vi.mock('@/lib/tauri', async () => {
     createBook: vi.fn(),
     listDirectory: vi.fn(),
     recordHistory: vi.fn(),
+    getProgress: vi.fn(),
   };
 });
 
@@ -25,7 +26,7 @@ vi.mock('vue-router', () => ({
   useRouter: () => null,
 }));
 
-import { createBook, listDirectory, recordHistory } from '@/lib/tauri';
+import { createBook, listDirectory, recordHistory, getProgress, type ProgressItem } from '@/lib/tauri';
 import { useReaderActions } from './useReaderActions';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
@@ -462,5 +463,135 @@ describe('useReaderActions', () => {
       { type: 'local', rootPath: 'U:/H/AI' },
       'output/260715/260715',  // 错位 — 这是需要避免的
     );
+  });
+
+  // ─── v0.1.0-module3.0.8: readFromCurrentPath (顶栏「立即阅读」无选中 entry 时) ───
+  // 入口: FileBrowser.vue 在无选中时调 useReaderActions.readFromCurrentPath(),
+  //   FileBrowser 传入 cachedProgress (从 fb store 取的 progress),
+  //   缓存命中 → 直接 router.push; 缓存未命中 → 走 IPC ensureBookId + getProgress.
+
+  it('readFromCurrentPath: cachedProgress 命中 → 走 router.push, 不调 IPC (ensureBookId/getProgress)', async () => {
+    const cached: ProgressItem = {
+      bookId: 42, page: 5, imageName: 'p5.jpg',
+      readerMode: 'single', updatedAt: 0,
+    };
+    const router = { push: vi.fn() };
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'VOL.01',
+      router: router as never,
+    });
+    await actions.readFromCurrentPath({ cachedProgress: cached });
+    // cachedProgress 命中: 不走 IPC (ensureBookId / getProgress)
+    expect(getProgress).not.toHaveBeenCalled();
+    expect(createBook).not.toHaveBeenCalled();
+    expect(listDirectory).not.toHaveBeenCalled();
+    // router.push 用 { name, params, query } 形态
+    expect(router.push).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'reader',
+      params: { bookId: '42' },
+      query: { at: 'p5.jpg' },
+    }));
+  });
+
+  it('readFromCurrentPath: cachedProgress 空 → 走 ensureBookId + getProgress, 取回 imageName 后 router.push', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(77);
+    vi.mocked(getProgress).mockResolvedValue({
+      bookId: 77, page: 3, imageName: 'x.jpg',
+      readerMode: 'single', updatedAt: 1,
+    });
+    const router = { push: vi.fn() };
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'VOL.01',
+      router: router as never,
+    });
+    await actions.readFromCurrentPath({ cachedProgress: null });
+    // 走了 ensureBookId (listDirectory + createBook)
+    expect(createBook).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'VOL.01',
+      sourceDescriptor: { type: 'local', rootPath: '/manga' },
+      absolutePath: 'VOL.01',
+      favorite: false,
+    }));
+    // 走了 getProgress(bookId)
+    expect(getProgress).toHaveBeenCalledWith(77);
+    // router.push 用从 IPC 取回的 imageName
+    expect(router.push).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'reader',
+      params: { bookId: '77' },
+      query: { at: 'x.jpg' },
+    }));
+  });
+
+  it('readFromCurrentPath: cachedProgress 空 + getProgress.imageName=null → noop, 不 router.push', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(77);
+    vi.mocked(getProgress).mockResolvedValue({
+      bookId: 77, page: 3, imageName: null,  // 没浏览过, imageName=null
+      readerMode: 'single', updatedAt: 0,
+    });
+    const router = { push: vi.fn() };
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'VOL.01',
+      router: router as never,
+    });
+    await actions.readFromCurrentPath({ cachedProgress: null });
+    // noop: router.push 不调
+    expect(router.push).not.toHaveBeenCalled();
+  });
+
+  it('readFromCurrentPath: router null (useRouter 返 null + opts 未传) → 不抛', async () => {
+    const cached: ProgressItem = {
+      bookId: 42, page: 5, imageName: 'p5.jpg',
+      readerMode: 'single', updatedAt: 0,
+    };
+    // 不传 router → useRouter() mock 返 null, opts.router 也无, router 最终为 null
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'VOL.01',
+    });
+    await expect(actions.readFromCurrentPath({ cachedProgress: cached })).resolves.not.toThrow();
+    // ensureBookId/getProgress 也不应被调 (cachedProgress 命中短路)
+    expect(getProgress).not.toHaveBeenCalled();
+    expect(createBook).not.toHaveBeenCalled();
+  });
+
+  it('readFromCurrentPath: 根目录 currentPath="" → 用 localRoot fallback dirName, 不 abort', async () => {
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(5);
+    vi.mocked(getProgress).mockResolvedValue({
+      bookId: 5, page: 1, imageName: 'r.jpg',
+      readerMode: 'single', updatedAt: 0,
+    });
+    const router = { push: vi.fn() };
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',  // localRoot = '/manga', fallback dirName = 'manga'
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => '',  // 根目录
+      router: router as never,
+    });
+    await actions.readFromCurrentPath({ cachedProgress: null });
+    // 用 fallback dirName='manga' 走 ensureBookId, 不 abort
+    expect(createBook).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'manga',  // localRoot 最后一段
+      favorite: false,
+    }));
+    expect(router.push).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'reader',
+      params: { bookId: '5' },
+      query: { at: 'r.jpg' },
+    }));
   });
 });
