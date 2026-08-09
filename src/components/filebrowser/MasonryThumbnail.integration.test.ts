@@ -9,7 +9,7 @@
  * 注：真实 rAF 帧时间 / 浏览器 paint 需在本地 Tauri 环境实跑（性能报告标注）。
  */
 import { describe, it, expect } from 'vitest';
-import { ref, computed } from 'vue';
+import { ref } from 'vue';
 import { useMasonryLayout } from '@/composables/useMasonryLayout';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 

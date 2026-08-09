@@ -35,6 +35,11 @@ import SearchInput from './SearchInput.vue';
 import StatusBar from './StatusBar.vue';
 import EntryDetailPanel from './EntryDetailPanel.vue';
 import MasonrySettingsPopup from './MasonrySettingsPopup.vue';
+// v0.1.0-module3.0.7-masonry: 视图切换按钮用 SVG 资产 (v-html 渲染, 保留 fill +
+// viewBox 0 0 1024 1024 原貌). 资产文件位于 src/icons/, 与 src-tauri/icons/
+// 设计源镜像 (后者不进 IPC, 仅为 Tauri 打包资源).
+import ICON_DETAILS_SVG from '@/icons/详情列表_view-list.svg?raw';
+import ICON_MASONRY_SVG from '@/icons/瀑布流.svg?raw';
 import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
@@ -407,10 +412,9 @@ const ICON_DOWNLOAD = 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12
 // v0.1.0-module2.0: emit 'open' 已废弃 (双击只进目录, 触发阅读走 useReaderActions)
 //  保留 emit 类型仅出于向后兼容 — 不再 emit
 
-// v0.1.0-module3.0.5-masonry (阶段 E3): 视图切换图标按钮 (替代已删 ViewModeDropdown).
-// ICON_DETAILS 从已删 ViewModeDropdown 搬. ICON_MASONRY 新增.
-const ICON_DETAILS = 'M3 4h18M3 9h18M3 14h18M3 19h18';
-const ICON_MASONRY = 'M3 21V10h5v11M10 21V4h5v17M17 21v-7h4v7';
+// v0.1.0-module3.0.7-masonry-task14: 视图切换按钮图标用 SVG 资产
+// (v-html 渲染保留 fill + viewBox 0 0 1024 1024 原貌, 尺寸 12px 由 scoped CSS 限制).
+// 之前的 lucide path d 常量已被 SVG 资产替代 — 资产文件位于 src/icons/.
 
 // selectedEntry 已在前面声明 (line 46, 复用 store.selectedPaths + sortedEntries)
 // Cluster A: 选中图片时立即阅读按钮也可点 (issue #3)
@@ -626,22 +630,14 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
                   :class="fb.viewMode === 'details' ? 'text-accent' : ''"
                   :title="t('fileBrowser.viewDetails')"
                   @click="fb.setViewMode('details')">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round" aria-hidden="true">
-              <path :d="ICON_DETAILS" />
-            </svg>
+            <span class="vbtn-icon" aria-hidden="true" v-html="ICON_DETAILS_SVG" />
           </button>
           <button data-test="view-masonry" class="tb-btn"
                   :class="fb.viewMode === 'masonry' ? 'text-accent' : ''"
                   :disabled="!hasImages"
                   :title="hasImages ? t('fileBrowser.viewMasonry') : t('fileBrowser.noImagesForMasonry')"
                   @click="fb.setViewMode('masonry')">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-                 stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                 stroke-linejoin="round" aria-hidden="true">
-              <path :d="ICON_MASONRY" />
-            </svg>
+            <span class="vbtn-icon" aria-hidden="true" v-html="ICON_MASONRY_SVG" />
           </button>
           <button v-if="fb.viewMode === 'masonry'" data-test="btn-masonry-settings"
                   class="tb-btn" :title="t('fileBrowser.masonrySettings')"
@@ -846,5 +842,26 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
 .tb-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* v0.1.0-module3.0.7-masonry-task14: 视图按钮 SVG 资产容器.
+   v-html 注入的 SVG 不会带 Vue scoped data-attribute, 但因为是 .vbtn-icon 的
+   descendant, 普通后代选择器 *.vbtn-icon svg* 仍能命中 — 不需要 :global()
+   (后者会把选择器写成裸 svg, 影响本组件所有 svg 元素). */
+.vbtn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  line-height: 0;
+}
+.vbtn-icon svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+.vbtn-icon svg path {
+  fill: currentColor;
 }
 </style>
