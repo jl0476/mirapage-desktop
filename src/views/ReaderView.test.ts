@@ -588,6 +588,183 @@ describe('ReaderView.vue', () => {
     expect(reader.currentSpreadIndex).toBe(1);
   });
 
+  // ─── v0.1.0-module3.0.8: 进度恢复 imageName 优先 + page fallback ───
+  // 4 个 fallback 用例: 命中 / 不命中 / imageName=null 旧行 / ?at= 优先
+
+  it('恢复路径：progress.imageName 命中 imageNames → 用 imageName（不走 page）', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    // imageName='b.jpg' (index=1) 应胜出; page=0 → spread=0 (与 imageName 不同,
+    // 旧实现走 page 会得到 0; 新实现命中 imageName 应得到 1 — 这是 RED 测试)
+    vi.mocked(getProgress).mockResolvedValueOnce({
+      bookId: 7, page: 0, imageName: 'b.jpg', readerMode: 'single', updatedAt: 100,
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // b.jpg 是第 2 张 (0-indexed=1) → spread=1 (singlePage mode)
+    expect(reader.currentSpreadIndex).toBe(1);
+  });
+
+  it('恢复路径：progress.imageName 不在 imageNames 中（改名/删除） → fallback page', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    // imageName='deleted.jpg' 不在 imageNames (a/b/c) 中 → 走 page=1
+    vi.mocked(getProgress).mockResolvedValueOnce({
+      bookId: 7, page: 1, imageName: 'deleted.jpg', readerMode: 'single', updatedAt: 100,
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // page=1 → spread=1 (singlePage mode)
+    expect(reader.currentSpreadIndex).toBe(1);
+  });
+
+  it('恢复路径：progress.imageName=null（旧行 image_name=NULL） → fallback page', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    // imageName=null（旧行 image_name=NULL, migration 010 之前）
+    vi.mocked(getProgress).mockResolvedValueOnce({
+      bookId: 7, page: 1, imageName: null, readerMode: 'single', updatedAt: 100,
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // page=1 → spread=1
+    expect(reader.currentSpreadIndex).toBe(1);
+  });
+
+  it('恢复路径：?at=imageName 优先于 progress.imageName（用户显式选择胜出）', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    // progress.imageName='a.jpg' (index=0), 但 ?at='c.jpg' 应胜出
+    vi.mocked(getProgress).mockResolvedValueOnce({
+      bookId: 7, page: 0, imageName: 'a.jpg', readerMode: 'single', updatedAt: 100,
+    });
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    const reader = useReaderStore();
+    useSlideshowStore();
+    // ?at=c.jpg → index=2 → spread=2 (singlePage mode)
+    const router = makeRouterWithQuery('/reader/7', { at: 'c.jpg' });
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // ?at=c.jpg (index=2) 优先于 progress.imageName=a.jpg (index=0)
+    expect(reader.currentSpreadIndex).toBe(2);
+  });
+
   // v0.1.0-module3.0.3-hotfix4: book 目录排序独立于 fileBrowser 上次 fetch.
   // 之前用 effectiveSortField (fileBrowser 上次 fetch 的目录排序), 错把父目录排序
   // 应用到子目录 book. 现在直接用 directorySort.resolve(book 目录的绝对路径).

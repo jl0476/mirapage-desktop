@@ -55,6 +55,10 @@ const { t } = useI18n();
 const status = ref('loading' as 'loading' | 'ready' | 'error');
 const errorMessage = ref('');
 const pageUrls = ref([] as string[]);
+// v0.1.0-module3.0.8: 当前阅读的图片名数组（按 sortedNames 顺序，与 reader.pages / reader.spreads 一一对应）
+// 1) 注入 reader store: reader.imageNames, 供 emitChanged 计算 imageName 锚点
+// 2) 局部 ref: 供 currentReadImageName() / resolveInitialSpreadIndex 同步访问
+const imageNames = ref([] as string[]);
 const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
 // 需求4-C: 模板访问 book.isFavorite / book.id, loadBook 写入此 ref
@@ -268,6 +272,9 @@ async function loadBook() {
     const sortedEntries = sortEntries(imageEntries, bookSortField, bookSortAscending);
     const sortedNames = sortedEntries.map((e) => e.name);
     log('[ReaderView/loadBook] imageEntries', sortedNames.length, sortedNames.slice(0, 5), '(sort=', bookSortField, bookSortAscending, ', path=', b.absolutePath, ')');
+    // v0.1.0-module3.0.8: 同步注入 reader store imageNames + 局部 imageNames ref,
+    // 供 emitChanged (store) + currentReadImageName / resolveInitialSpreadIndex (本组件) 使用.
+    imageNames.value = sortedNames;
     if (sortedNames.length === 0) {
       status.value = 'error';
       errorMessage.value = `${absDir} 下找不到图片`;
@@ -293,6 +300,9 @@ async function loadBook() {
       spreads: SpreadPlanner.plan(pageUrls.value.length, true, isSinglePage),
       initialSpreadIndex,
     });
+    // v0.1.0-module3.0.8: openBook payload 未带 imageNames (spec §3.2 OpenBookPayload 保持稳定),
+    // 改在 openBook 后注入 store. closeBook 时 store 已重置 imageNames=[].
+    reader.imageNames = sortedNames;
     log('[ReaderView/loadBook] reader.openBook done, status=ready');
     status.value = 'ready';
   } catch (e) {
@@ -380,7 +390,7 @@ async function resolveInitialSpreadIndex(
   singlePage: boolean = false,
   imageNames: string[] = [],
 ): Promise<number> {
-  // 优先: Cluster A 入口 (双击/选中图片) — 用户显式选择, 不做末页钳位
+  // 1. 优先: Cluster A 入口 (双击/选中图片) — 用户显式选择, 不做末页钳位
   const atName = initialImageName.value;
   if (atName && imageNames.includes(atName)) {
     const idx = imageNames.indexOf(atName);
@@ -392,13 +402,26 @@ async function resolveInitialSpreadIndex(
     log('[ReaderView/resolveInitialSpreadIndex] from ?at=', atName, '→ idx=', idx, '→ spread=', clamped, '(last=', last, ') [no last-clamp for explicit choice]');
     return clamped;
   }
-  // 缺省: 读 saved progress (H5)
+  // 2. 缺省: 读 saved progress (H5)
   try {
     const progress = await getProgress(bookId);
     if (!progress) return 0;
     const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
     const last = spreads.length - 1;
     if (last < 0) return 0;
+    // v0.1.0-module3.0.8: imageName 优先（masonry 写入的 anchor）.
+    // 命中走 imageNames.indexOf，末页钳位保留（spec §4.1）.
+    if (progress.imageName) {
+      const nameIdx = imageNames.indexOf(progress.imageName);
+      if (nameIdx >= 0) {
+        const target = SpreadPlanner.spreadIndexForPage(nameIdx, spreads);
+        const clamped = Math.max(0, Math.min(target, last));
+        log('[ReaderView/resolveInitialSpreadIndex] from saved progress imageName=', progress.imageName, '→ idx=', nameIdx, '→ spread=', clamped, '(last=', last, ')');
+        return clamped >= last ? Math.max(0, last - 1) : clamped;
+      }
+      log('[ReaderView/resolveInitialSpreadIndex] imageName not found', progress.imageName, 'fallback to page');
+    }
+    // 3. fallback page（旧行 / 改名 / 换源）
     const idx = SpreadPlanner.spreadIndexForPage(progress.page, spreads);
     const clamped = Math.max(0, Math.min(idx, last));
     log('[ReaderView/resolveInitialSpreadIndex] from saved progress page=', progress.page, '→ spread=', clamped, '(last=', last, ')');
@@ -469,12 +492,23 @@ function currentReadPage(): number {
   return page;
 }
 
+// v0.1.0-module3.0.8: 当前 spread 起始图的文件名（用于 progress.image_name 锚点）.
+// onUnmounted 显式双写到 saveProgress, 与 emitChanged 内部 saveProgress 形成冗余路径
+// (unmount 不等 debounce 500ms, 立刻同步写).
+function currentReadImageName(): string | null {
+  const idx = reader.currentSpreadIndex;
+  const sp = reader.spreads[idx];
+  if (!sp) return null;
+  return imageNames.value[sp.start] ?? null;
+}
+
 onUnmounted(() => {
   log('[ReaderView/onUnmounted] start; bookId=', reader.bookId, 'currentSpreadIndex=', reader.currentSpreadIndex);
   if (reader.bookId !== null) {
     const page = currentReadPage();
-    log('[ReaderView/onUnmounted] IPC[saveProgress] →', { bookId: reader.bookId, page, mode: 'single' });
-    void saveProgress(reader.bookId, page, 'single');
+    const imageName = currentReadImageName();
+    log('[ReaderView/onUnmounted] IPC[saveProgress] →', { bookId: reader.bookId, page, mode: 'single', imageName });
+    void saveProgress(reader.bookId, page, 'single', undefined, imageName ?? undefined);
   }
   slideshow.pause();
   reader.closeBook();
