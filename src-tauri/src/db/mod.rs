@@ -19,6 +19,16 @@ impl Db {
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().expect("db mutex poisoned")
     }
+
+    /// 测试 helper：建一个跑完 migrations 的 in-memory DB。
+    /// 生产路径用 `init()`（带文件路径 + tauri AppHandle）。
+    pub fn open_in_memory() -> anyhow::Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        migrations::run(&conn)?;
+        Ok(Db {
+            conn: Mutex::new(conn),
+        })
+    }
 }
 
 /// 初始化数据库
