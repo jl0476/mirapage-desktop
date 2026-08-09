@@ -94,6 +94,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 10 {
+        apply_010_progress_image_name(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (10, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -442,6 +450,21 @@ fn apply_009_thumbnail_cache(conn: &Connection) -> anyhow::Result<()> {
             ON thumbnail_cache(last_accessed_at);
         "#,
     )?;
+    Ok(())
+}
+
+/// Migration 010 — progress 加 `image_name` 列（v0.1.0-module3.0.8-masonry-browse-position）
+///
+/// 用途：瀑布流浏览位置复用 progress 表——滚动到某图记录 image_name（持久锚点，
+/// 不依赖滚动位置数值）。重启 / 跨会话跳回瀑布流目录时按 image_name 找 spread。
+///
+/// 不改 `page INTEGER`：bookmark / 旧行迁移 / mark_finished 都依赖 page 兜底，
+/// 保留 page 作为 reader 恢复的次选锚点（spec §4.1 fallback 链：image_name → page → cover）。
+///
+/// 旧行 image_name 默认 NULL——`ReaderView` / `MasonryView` 加载时 NULL 行走 page
+/// fallback（spec §4.1），新行由 `commands::progress::save_progress` 写入。
+fn apply_010_progress_image_name(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch("ALTER TABLE progress ADD COLUMN image_name TEXT")?;
     Ok(())
 }
 
@@ -827,11 +850,11 @@ mod tests {
             assert!(cols.contains(&expected.to_string()), "thumbnail_cache 缺列 {expected}");
         }
 
-        // 版本号到 9
+        // 版本号到 ≥9（migration 010 后整体版本号为 10）
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 9);
+        assert!(v >= 9, "thumbnail_cache migration 009 应已应用, 当前 {v}");
     }
 
     #[test]
@@ -852,5 +875,108 @@ mod tests {
         // 重复执行幂等
         super::run(&conn).expect("重复 run 应幂等无错");
         super::run(&conn).expect("三次 run 仍幂等");
+    }
+
+    #[test]
+    fn migration_010_adds_image_name_column() {
+        // v0.1.0-module3.0.8-masonry-browse-position:
+        // progress 加 image_name 锚点列（瀑布流浏览位置 = 阅读进度）
+        let conn = Connection::open_in_memory().unwrap();
+        apply_001_init(&conn).unwrap();
+        apply_003_finished_flag(&conn).unwrap();
+
+        // 旧列仍在：book_id / page / reader_mode / updated_at / finished
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(progress)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for expected in ["book_id", "page", "reader_mode", "updated_at", "finished"] {
+            assert!(cols.contains(&expected.to_string()), "progress 缺旧列 {expected}");
+        }
+        assert!(
+            !cols.contains(&"image_name".to_string()),
+            "应用 migration 前不应有 image_name 列"
+        );
+
+        // 应用 migration 010
+        super::apply_010_progress_image_name(&conn).unwrap();
+
+        // image_name 列出现
+        let cols_after: Vec<String> = conn
+            .prepare("PRAGMA table_info(progress)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            cols_after.contains(&"image_name".to_string()),
+            "progress 应有 image_name 列"
+        );
+
+        // page / finished 列未改（保留 page 兜底 + finished 三态）
+        assert!(cols_after.contains(&"page".to_string()), "page 列应保留");
+        assert!(cols_after.contains(&"finished".to_string()), "finished 列应保留");
+
+        // 新列可空：旧行未迁移，INSERT 新行 image_name 默认 NULL
+        conn.execute(
+            "INSERT INTO progress (book_id, page, reader_mode, updated_at) VALUES (1, 0, 'single', 100)",
+            [],
+        )
+        .unwrap();
+        let image_name: Option<String> = conn
+            .query_row(
+                "SELECT image_name FROM progress WHERE book_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(image_name.is_none(), "新行 image_name 应默认为 NULL");
+
+        // image_name 可写入 + 读回（瀑布流路径存图像文件名）
+        conn.execute(
+            "UPDATE progress SET image_name = ?1 WHERE book_id = 1",
+            rusqlite::params!["page_001.jpg"],
+        )
+        .unwrap();
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT image_name FROM progress WHERE book_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("page_001.jpg"));
+    }
+
+    #[test]
+    fn migration_010_run_bumps_version_to_10() {
+        // 走完整 run()，验证版本号到 10 且幂等
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let v: i32 = conn
+            .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 10, "完整 run 后版本号应为 10");
+
+        // image_name 列存在
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(progress)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            cols.contains(&"image_name".to_string()),
+            "完整 run 后 progress 应有 image_name 列"
+        );
+
+        // 幂等
+        super::run(&conn).expect("重复 run 应幂等无错");
     }
 }
