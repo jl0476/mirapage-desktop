@@ -6,6 +6,7 @@
  * 设计参考 DESIGN §12.4 + §15.6 进度保存策略。
  *
  * v0.1.0-module1.21: saveProgress 多了一个 finished 入参.
+ * v0.1.0-module3.0.8: saveProgress 第 5 参 imageName（瀑布流端共用锚点）.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
@@ -20,6 +21,7 @@ vi.mock('@/lib/logger', () => ({
 }));
 
 import { useReaderStore } from './reader';
+import { saveProgress } from '@/lib/tauri';
 
 describe('reader store — initial state', () => {
   beforeEach(() => {
@@ -240,5 +242,94 @@ describe('reader store — debounced saveProgress (500ms)', () => {
     await vi.advanceTimersByTimeAsync(500); // 再过 500 触发
     expect(saves.length).toBe(1);
     expect(saves[0]).toBe(3); // 最后一次 jumpTo(3) 的页码
+  });
+});
+
+describe('reader store — v0.1.0-module3.0.8 emitChanged imageName 锚点', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setActivePinia(createPinia());
+    vi.mocked(saveProgress).mockClear();
+  });
+
+  it('emitChanged payload includes imageName (jump 到 spread 2 → c.jpg)', async () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+        { start: 2, end: 3 },
+        { start: 3, end: 4 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    // 任务 5 之前由 ReaderView loadBook 填充；此处直接赋值模拟
+    r.imageNames = ['a.jpg', 'b.jpg', 'c.jpg', 'd.jpg'];
+
+    const received: Array<{ bookId: number; page: number; imageName: string | null }> = [];
+    r.onPageChanged((info) => {
+      received.push({ bookId: info.bookId, page: info.page, imageName: info.imageName });
+    });
+
+    r.jumpToSpread(2); // → spread 2, start=2, imageNames[2]='c.jpg'
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(received.length).toBe(1);
+    expect(received[0]).toEqual({ bookId: 1, page: 2, imageName: 'c.jpg' });
+    // saveProgress 收到 imageName 作为第 5 参
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+    expect(saveProgress).toHaveBeenCalledWith(1, 2, 'single', undefined, 'c.jpg');
+  });
+
+  it('imageNames 未设置时 → imageName=null, saveProgress 5 参 = undefined', async () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 2,
+      title: 'no-names',
+      pages: ['x.jpg', 'y.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    // 不设 imageNames, 留默认空数组 → imageNames[0] = undefined → imageName = null
+
+    const received: Array<{ imageName: string | null }> = [];
+    r.onPageChanged((info) => received.push({ imageName: info.imageName }));
+
+    r.nextPage(); // → spread 1 (last), start=1, imageNames[1] = undefined → imageName = null
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(received.length).toBe(1);
+    expect(received[0].imageName).toBeNull();
+    // null ?? undefined → undefined, 由 saveProgress ?? null 走保留分支
+    expect(saveProgress).toHaveBeenCalledWith(2, 1, 'single', true, undefined);
+  });
+
+  it('imageNames 短于 spreads → 越界 index → imageName=null', async () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 3,
+      title: 'short',
+      pages: ['p0.jpg', 'p1.jpg', 'p2.jpg', 'p3.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+        { start: 2, end: 3 },
+        { start: 3, end: 4 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    // 只设 2 个名字, spread 3 (start=3) 越界
+    r.imageNames = ['p0.jpg', 'p1.jpg'];
+
+    r.jumpToSpread(3);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(saveProgress).toHaveBeenCalledWith(3, 3, 'single', true, undefined);
   });
 });

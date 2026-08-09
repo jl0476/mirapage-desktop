@@ -34,6 +34,9 @@ export interface PageChangeInfo {
   /** 当前 spread 的首页索引 (0-based) */
   page: number;
   spreadIndex: number;
+  /** v0.1.0-module3.0.8: 当前 spread 起始图的文件名（瀑布流端复用同一锚点）。
+   *  reader 翻页时由 emitChanged 计算, masonry 端不用此字段. */
+  imageName: string | null;
 }
 
 type PageChangeListener = (info: PageChangeInfo) => void;
@@ -46,6 +49,9 @@ export const useReaderStore = defineStore('reader', () => {
   const title = ref<string>('');
   const pages = ref<string[]>([]);
   const spreads = ref<Array<{ start: number; end: number }>>([]);
+  // v0.1.0-module3.0.8: 当前阅读的 image 名数组（用于 emitChanged 计算 imageName 锚点）.
+  // 暂由外部（ReaderView loadBook, 见任务 5）填充；未填充时 emitChanged 输出 null.
+  const imageNames = ref<string[]>([]);
   const currentSpreadIndex = ref<number>(0);
   const chromeVisible = ref<boolean>(true);
   // v0.1.0-module3.0.2 (L3): 删 continueSwipePull / accumulateContinuePull
@@ -65,10 +71,14 @@ export const useReaderStore = defineStore('reader', () => {
   /** 内部:通知订阅器当前页状态 */
   function emitChanged() {
     if (bookId.value === null || spreads.value.length === 0) return;
+    const spread = spreads.value[currentSpreadIndex.value];
+    const page = spread?.start ?? 0;
+    const imageName = spread ? (imageNames.value[spread.start] ?? null) : null;
     pendingEmit = {
       bookId: bookId.value,
-      page: spreads.value[currentSpreadIndex.value]?.start ?? 0,
+      page,
       spreadIndex: currentSpreadIndex.value,
+      imageName,
     };
     if (debounceTimer !== null) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
@@ -76,7 +86,15 @@ export const useReaderStore = defineStore('reader', () => {
         const info = pendingEmit;
         // 末页判定：finished=true (永久 true, Rust 端保证不降级)
         const isLast = info.spreadIndex >= spreads.value.length - 1;
-        saveProgress(info.bookId, info.page, 'single', isLast ? true : undefined).catch(
+        // v0.1.0-module3.0.8: 双写 imageName 锚点 (瀑布流端用同一字段恢复).
+        // 旧 reader 路径不传时由 saveProgress ?? null 走保留分支.
+        saveProgress(
+          info.bookId,
+          info.page,
+          'single',
+          isLast ? true : undefined,
+          info.imageName ?? undefined,
+        ).catch(
           (e) => log('[reader] saveProgress failed', e),
         );
         for (const listener of listeners) listener(info);
@@ -119,6 +137,7 @@ export const useReaderStore = defineStore('reader', () => {
     title.value = '';
     pages.value = [];
     spreads.value = [];
+    imageNames.value = [];
     currentSpreadIndex.value = 0;
     errorKind.value = null;
     if (debounceTimer !== null) {
@@ -171,6 +190,7 @@ export const useReaderStore = defineStore('reader', () => {
     title,
     pages,
     spreads,
+    imageNames,
     currentSpreadIndex,
     chromeVisible,
     errorKind,
