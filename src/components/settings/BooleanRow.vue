@@ -3,6 +3,8 @@
 // - 父开关关闭时禁用子开关（restoreBrowsePositionOnEnter 的 BooleanRow :disabled="!recordBrowsePosition"）
 // - description: 开关下方的说明文字（可选）
 // - data-test 通过 $attrs 自动 fallthrough 到根 <label>
+// v0.1.0-module3.0.8 (fix): off 态 border-white/10 → xp-bd（CLAUDE.md §3.6 禁用 raw border-white/*，
+// light 模式不可见；xp-bd 调用 var(--color-border-default)，dark/light 主题自动切换）
 defineProps<{ label: string; value: boolean; disabled?: boolean; description?: string }>();
 const emit = defineEmits<{ (e: 'change', v: boolean): void }>();
 </script>
@@ -21,7 +23,7 @@ const emit = defineEmits<{ (e: 'change', v: boolean): void }>();
       :disabled="disabled"
       :class="[
         'w-9 h-5 rounded-full transition-colors relative shrink-0 mt-0.5',
-        value ? 'bg-accent' : 'bg-surface-2 border border-white/10',
+        value ? 'bg-accent' : 'bg-surface-2 xp-bd',
       ]"
       @click="disabled ? undefined : emit('change', !value)"
     >

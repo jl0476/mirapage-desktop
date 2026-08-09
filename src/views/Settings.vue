@@ -201,7 +201,11 @@ function closeOpenCell(e: MouseEvent) {
       </header>
 
       <div class="flex flex-col gap-6 max-w-[800px]">
-        <!-- v0.1.0-module3.0.8 (任务 12): File Browser - masonry 浏览位置 2 开关 -->
+        <!-- v0.1.0-module3.0.8 (任务 12): File Browser - masonry 浏览位置 2 开关
+             注意：section title 用 `settings.section.fileBrowser`（与现有 6 个 section 一致：
+             reader / appearance / behavior / slideshow / touch / masonry 都用 `settings.section.X`，
+             所以新 section 也走同一命名空间），内部 BooleanRow label/description 走
+             `settings.fileBrowser.{recordBrowsePosition,...}` 的二级分组。 -->
         <section id="fileBrowser" data-test="settings-filebrowser" class="scroll-mt-4 bg-surface-1 xp-bd rounded-lg p-6">
           <h3 class="text-sm font-semibold text-accent uppercase tracking-wider mb-4">
             {{ t('settings.section.fileBrowser') }}

@@ -80,6 +80,10 @@ describe('Settings.vue', () => {
 });
 
 describe('Settings.vue fileBrowser section (任务 12)', () => {
+  // i18n key 命名说明：section 标题用 `settings.section.fileBrowser`（与现有 6 个 section
+  // reader / appearance / behavior / slideshow / touch / masonry 一致），不是
+  // `settings.fileBrowser.title`。这是有意选择——保持 section namespace 统一。
+  // 内部 BooleanRow 走 `settings.fileBrowser.{recordBrowsePosition,...}` 二级分组。
   it('renders fileBrowser section + 2 BooleanRow', () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const section = wrapper.find('[data-test="settings-filebrowser"]');
