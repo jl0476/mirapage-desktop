@@ -196,16 +196,8 @@ fn bench_thumbnail_quality() {
 
         // Triangle 基线输出（保留原图 color type）
         let tri = img.resize_exact(out_w, out_h, FilterType::Triangle);
-        // thumbnail（area resampling）输出，按原图 alpha 转回对应 type（与 generator.rs 一致）
-        let thumb = {
-            let t = image::imageops::thumbnail(&img, out_w, out_h);
-            let dt = image::DynamicImage::ImageRgba8(t);
-            if img.color().has_alpha() {
-                dt
-            } else {
-                image::DynamicImage::ImageRgb8(dt.to_rgb8())
-            }
-        };
+        // thumbnail 直接返回 RGBA（与 generator.rs 一致，不转回 RGB）
+        let thumb = image::DynamicImage::ImageRgba8(image::imageops::thumbnail(&img, out_w, out_h));
 
         // 尺寸一致
         assert_eq!(
@@ -214,13 +206,8 @@ fn bench_thumbnail_quality() {
             "{}: output dim mismatch",
             label
         );
-        // alpha 一致（透明 PNG 保留 alpha，RGB 图仍无 alpha）
-        assert_eq!(
-            tri.color().has_alpha(),
-            thumb.color().has_alpha(),
-            "{}: alpha mismatch",
-            label
-        );
+        // 注：thumbnail 强制 RGBA，tri 保留原图 type；RGB 图下 alpha 不一致是预期
+        // （换取去掉 to_rgb8 转换开销）。尺寸 + PSNR 是质量主指标。
 
         let psnr = psnr_rgba(&tri.to_rgba8(), &thumb.to_rgba8());
         println!(
