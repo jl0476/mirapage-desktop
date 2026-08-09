@@ -134,8 +134,10 @@ pub struct SchedulerHandle {
 }
 
 impl SchedulerHandle {
-    /// 启动调度器 actor，返回句柄。
-    pub fn start(config: SchedulerConfig, generate: GenerateFn) -> Self {
+    /// 构建调度器（handle + actor），**不 spawn**。调用方负责在合适的 runtime 上 spawn `actor.run()`：
+    /// 测试用 `tokio::spawn`（#[tokio::test] 上下文），生产 service 用 `tauri::async_runtime::spawn`
+    /// （setup() 同步上下文里 `tokio::spawn` 会 panic「no reactor running」）。
+    pub fn build(config: SchedulerConfig, generate: GenerateFn) -> (Self, Actor) {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = SchedulerHandle { tx: tx.clone() };
         let actor = Actor {
@@ -154,6 +156,13 @@ impl SchedulerHandle {
             fast_scrolling: false,
             seq: 0,
         };
+        (handle, actor)
+    }
+
+    /// 便捷启动（在已有 tokio runtime 上下文里用，如 #[tokio::test]）。
+    /// 生产代码（setup 同步上下文）用 `build` + `tauri::async_runtime::spawn`。
+    pub fn start(config: SchedulerConfig, generate: GenerateFn) -> Self {
+        let (handle, actor) = Self::build(config, generate);
         tokio::spawn(actor.run());
         handle
     }
@@ -195,7 +204,7 @@ impl Drop for SchedulerHandle {
     }
 }
 
-struct Actor {
+pub struct Actor {
     rx: mpsc::UnboundedReceiver<Command>,
     tx: mpsc::UnboundedSender<Command>,
     generate: GenerateFn,
@@ -214,7 +223,7 @@ struct Actor {
 }
 
 impl Actor {
-    async fn run(mut self) {
+    pub async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
                 Command::Shutdown => break,

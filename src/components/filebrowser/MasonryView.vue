@@ -159,7 +159,11 @@ const visibleItems = computed(() => {
     .filter((x): x is NonNullable<typeof x> => x !== null);
 });
 
-/** 加载中: entries 空 (fetch 中) 或首屏可见图片未全部测量完成 (Rust header 未到) */
+/** 加载中: entries 空 (fetch 中) 或首屏一张都没测量完成 (Rust header 未到).
+ *  容忍个别 header 解析失败 (EXIF JPEG SOF0 超出 8KB 读取范围 -> image_dimensions
+ *  返回 None -> 该 path 不进 measuredMap): 首屏有任意一张 measured 即认为加载完成,
+ *  未测量的用估算高度 fallback (inputs 已有 avgRatio 估算). 之前要求全部 measured,
+ *  个别失败导致永久 loading (3.0.7 接缩略图队列后暴露, 因 overlay 盖住卡片). */
 const loading = computed(() => {
   if (props.entries.length === 0) return true;
   const r = visibleRange.value;
@@ -168,9 +172,9 @@ const loading = computed(() => {
   if (!(mm instanceof Map)) return true;
   for (let i = r.start; i < r.end; i++) {
     const e = props.entries[i];
-    if (!e || !mm.has(e.path)) return true;
+    if (e && mm.has(e.path)) return false; // 有任意 measured 即加载完成
   }
-  return false;
+  return true;
 });
 </script>
 

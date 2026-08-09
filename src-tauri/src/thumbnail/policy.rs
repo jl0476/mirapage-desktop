@@ -135,6 +135,15 @@ pub fn decide_source(
     file_size: u64,
     target_bucket: u32,
 ) -> SourceDecision {
+    // 尺寸未知（header 预读失败，前端传 0）：不能判 UseOriginal（不知真实尺寸），
+    // 强制 Generate 让生成器 decode 完整文件拿真实尺寸兜底。Opportunistic 低优先级
+    //（尺寸未知不命中硬阈值 Required，避免和明确的大图抢 worker）。
+    if oriented_width == 0 || oriented_height == 0 {
+        return SourceDecision::Generate {
+            bucket: target_bucket,
+            priority: GenerationUrgency::Opportunistic,
+        };
+    }
     let pixels = (oriented_width as u64) * (oriented_height as u64);
     let max_edge = oriented_width.max(oriented_height);
     let bucket_f = target_bucket as f32;
@@ -398,6 +407,26 @@ mod tests {
         } else {
             panic!("expected Generate");
         }
+    }
+
+    #[test]
+    fn decide_source_zero_dims_forces_generate() {
+        // header 预读失败 -> 前端传 0 尺寸：即使小文件也不判 UseOriginal，
+        // 强制 Generate 让生成器 decode 完整文件兜底（避免误判后用原图加载慢）。
+        let d = decide_source(0, 0, 500_000, 1024);
+        assert!(matches!(
+            d,
+            SourceDecision::Generate { priority: GenerationUrgency::Opportunistic, bucket: 1024 }
+        ));
+        // 单边为 0 同样强制生成
+        assert!(matches!(
+            decide_source(1000, 0, 500_000, 1024),
+            SourceDecision::Generate { .. }
+        ));
+        assert!(matches!(
+            decide_source(0, 1000, 500_000, 1024),
+            SourceDecision::Generate { .. }
+        ));
     }
 
     // ── output_pixel_budget ────────────────────────────────────────────

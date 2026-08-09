@@ -36,7 +36,7 @@ const migrationProgress = ref<MigrationProgress | null>(null);
 const recovery = ref<ThumbnailMigrationState | null>(null);
 let unlistenProgress: UnlistenFn | null = null;
 
-const cacheRootDisplay = computed(() => s.thumbnailCacheRoot || t('settings.thumbnail.cacheRootSystemDefault'));
+const cacheRootDisplay = computed(() => s.thumbnailCacheRoot || t('settings.masonry.thumbnail.cacheRootSystemDefault'));
 
 async function refreshInfo() {
   try {
@@ -64,6 +64,9 @@ onMounted(async () => {
     if (e.payload?.phase === 'completed' || e.payload?.phase === 'cancelled' || e.payload?.phase === 'failed') {
       recovery.value = null;
       void refreshInfo();
+      // completed: 后端已持久化 fb_thumbnail_cache_root 到 DB，前端重读 settings 刷新位置显示
+      //（否则 cacheRootDisplay 仍显示旧位置，虽然实际已迁移）
+      if (e.payload?.phase === 'completed') void s.load();
     }
   });
 });
@@ -104,22 +107,22 @@ async function onClear() {
 const cacheMb = computed(() => Math.round(cacheBytes.value / 1_000_000));
 
 const modeOptions = computed(() => [
-  { value: 'powerSaver', label: t('settings.thumbnail.modePowerSaver') },
-  { value: 'balanced', label: t('settings.thumbnail.modeBalanced') },
-  { value: 'performance', label: t('settings.thumbnail.modePerformance') },
+  { value: 'powerSaver', label: t('settings.masonry.thumbnail.modePowerSaver') },
+  { value: 'balanced', label: t('settings.masonry.thumbnail.modeBalanced') },
+  { value: 'performance', label: t('settings.masonry.thumbnail.modePerformance') },
 ]);
 const modeValue = computed(() => (modeOptions.value.some((o) => o.value === s.thumbnailResourceMode)
   ? s.thumbnailResourceMode
   : 'custom'));
 const modeLabel = computed(() => {
   const found = modeOptions.value.find((o) => o.value === s.thumbnailResourceMode);
-  return found ? found.label : t('settings.thumbnail.modeCustom');
+  return found ? found.label : t('settings.masonry.thumbnail.modeCustom');
 });
 
 const qualityOptions = [
-  { value: 'standard', label: t('settings.thumbnail.qualityStandard') },
-  { value: 'high', label: t('settings.thumbnail.qualityHigh') },
-  { value: 'ultra', label: t('settings.thumbnail.qualityUltra') },
+  { value: 'standard', label: t('settings.masonry.thumbnail.qualityStandard') },
+  { value: 'high', label: t('settings.masonry.thumbnail.qualityHigh') },
+  { value: 'ultra', label: t('settings.masonry.thumbnail.qualityUltra') },
 ];
 const cacheLimitOptions = [256, 512, 1024, 2048].map((m) => ({ value: String(m), label: `${m} MB` }));
 const workerOptions = [1, 2, 3, 4].map((w) => ({ value: String(w), label: String(w) }));
@@ -131,7 +134,7 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
 <template>
   <div class="thumb-settings">
     <EnumRow
-      :label="t('settings.thumbnail.resourceMode')"
+      :label="t('settings.masonry.thumbnail.resourceMode')"
       :value="modeValue"
       :options="modeValue === 'custom'
         ? [...modeOptions, { value: 'custom', label: modeLabel }]
@@ -139,30 +142,30 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
       @change="(v) => s.setThumbnailResourceMode(v as ThumbnailResourceMode)"
     />
     <EnumRow
-      :label="t('settings.thumbnail.quality')"
+      :label="t('settings.masonry.thumbnail.quality')"
       :value="s.thumbnailQuality"
       :options="qualityOptions"
       @change="(v) => s.setThumbnailQuality(v as ThumbnailQuality)"
     />
     <EnumRow
-      :label="t('settings.thumbnail.cacheLimit')"
+      :label="t('settings.masonry.thumbnail.cacheLimit')"
       :value="String(s.thumbnailCacheLimitMb)"
       :options="cacheLimitOptions"
       @change="(v) => s.setThumbnailCacheLimitMb(Number(v))"
     />
 
     <div class="info">
-      <span class="info-label">{{ t('settings.thumbnail.cacheUsed', { mb: cacheMb, count: cacheCount }) }}</span>
-      <button class="link-btn" type="button" @click="onClear">{{ t('settings.thumbnail.clearCache') }}</button>
+      <span class="info-label">{{ t('settings.masonry.thumbnail.cacheUsed', { mb: cacheMb, count: cacheCount }) }}</span>
+      <button class="link-btn" type="button" @click="onClear">{{ t('settings.masonry.thumbnail.clearCache') }}</button>
     </div>
 
     <!-- 缓存位置（§11）-->
     <div class="row location">
-      <span class="label">{{ t('settings.thumbnail.cacheLocation') }}</span>
+      <span class="label">{{ t('settings.masonry.thumbnail.cacheLocation') }}</span>
       <div class="location-right">
         <span class="location-path" :title="cacheRootDisplay">{{ cacheRootDisplay }}</span>
         <button class="link-btn" type="button" :disabled="!!migrationProgress" @click="onChangeLocation">
-          {{ t('settings.thumbnail.changeLocation') }}
+          {{ t('settings.masonry.thumbnail.changeLocation') }}
         </button>
       </div>
     </div>
@@ -170,7 +173,7 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
     <!-- 迁移进度 -->
     <div v-if="migrationProgress" class="progress">
       <span class="info-label">
-        {{ t('settings.thumbnail.migrating') }}：
+        {{ t('settings.masonry.thumbnail.migrating') }}：
         {{ migrationProgress.completed ?? 0 }} / {{ migrationProgress.totalFiles ?? 0 }}
         ({{ Math.round(((migrationProgress.copiedBytes ?? 0) / Math.max(1, migrationProgress.totalBytes ?? 1)) * 100) }}%)
       </span>
@@ -182,35 +185,35 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
 
     <!-- 启动恢复：检测到未完成迁移 -->
     <div v-if="recovery" class="recovery">
-      <span class="info-label">{{ t('settings.thumbnail.recoveryDetected') }}</span>
-      <button class="link-btn" type="button" @click="onContinueMigration">{{ t('settings.thumbnail.continueMigration') }}</button>
-      <button class="link-btn" type="button" @click="onRollbackMigration">{{ t('settings.thumbnail.rollbackMigration') }}</button>
+      <span class="info-label">{{ t('settings.masonry.thumbnail.recoveryDetected') }}</span>
+      <button class="link-btn" type="button" @click="onContinueMigration">{{ t('settings.masonry.thumbnail.continueMigration') }}</button>
+      <button class="link-btn" type="button" @click="onRollbackMigration">{{ t('settings.masonry.thumbnail.rollbackMigration') }}</button>
     </div>
 
     <button class="advanced-toggle" type="button" @click="advancedOpen = !advancedOpen">
-      {{ advancedOpen ? '▾' : '▸' }} {{ t('settings.thumbnail.advanced') }}
+      {{ advancedOpen ? '▾' : '▸' }} {{ t('settings.masonry.thumbnail.advanced') }}
     </button>
     <div v-if="advancedOpen" class="advanced">
       <EnumRow
-        :label="t('settings.thumbnail.workerLimit')"
+        :label="t('settings.masonry.thumbnail.workerLimit')"
         :value="String(s.thumbnailWorkerLimit)"
         :options="workerOptions"
         @change="(v) => s.setThumbnailWorkerLimit(Number(v))"
       />
       <EnumRow
-        :label="t('settings.thumbnail.decodeMemory')"
+        :label="t('settings.masonry.thumbnail.decodeMemory')"
         :value="String(s.thumbnailDecodeMemoryMb)"
         :options="memoryOptions"
         @change="(v) => s.setThumbnailDecodeMemoryMb(Number(v))"
       />
       <EnumRow
-        :label="t('settings.thumbnail.prefetchScreens')"
+        :label="t('settings.masonry.thumbnail.prefetchScreens')"
         :value="String(s.thumbnailPrefetchScreens)"
         :options="prefetchOptions"
         @change="(v) => s.setThumbnailPrefetchScreens(Number(v))"
       />
       <label class="bool-row">
-        <span class="bool-label">{{ t('settings.thumbnail.idleGeneration') }}</span>
+        <span class="bool-label">{{ t('settings.masonry.thumbnail.idleGeneration') }}</span>
         <input
           type="checkbox"
           :checked="s.thumbnailIdleGeneration"
@@ -219,7 +222,7 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
       </label>
       <EnumRow
         v-if="s.thumbnailIdleGeneration"
-        :label="t('settings.thumbnail.idlePrefetchScreens')"
+        :label="t('settings.masonry.thumbnail.idlePrefetchScreens')"
         :value="String(s.thumbnailIdlePrefetchScreens)"
         :options="idleOptions"
         @change="(v) => s.setThumbnailIdlePrefetchScreens(Number(v))"

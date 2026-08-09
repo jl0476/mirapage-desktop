@@ -27,10 +27,11 @@ function mountThumb(state?: ThumbnailState) {
 describe('MasonryThumbnail.vue', () => {
   beforeEach(() => setActivePinia(createPinia()));
 
-  it('placeholder（无 state）：无 img 无 spinner 无 failed', () => {
+  it('placeholder（无 state）：无 img 有 spinner（加载中反馈，避免白屏）无 failed', () => {
     const w = mountThumb(undefined);
     expect(w.find('img').exists()).toBe(false);
-    expect(w.find('.thumb-spinner').exists()).toBe(false);
+    // 无 state 视为加载中（尚未进入窗口/请求未返回/header 失败待兜底），显示 spinner 而非白屏
+    expect(w.find('.thumb-spinner').exists()).toBe(true);
     expect(w.find('.thumb-failed').exists()).toBe(false);
   });
 

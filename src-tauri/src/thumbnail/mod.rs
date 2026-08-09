@@ -83,7 +83,13 @@ pub struct ResourcePreset {
 }
 
 /// 单张缩略图请求项（§13.2）。`required_width` 已在前端按列宽 × dpr × quality_margin 算好。
+///
+/// **P0 修复**：必须 `rename_all = "camelCase"`。Tauri 2 对 struct 字段不做自动 case
+/// 转换（只转顶层命令参数名），前端 `src/lib/thumbnail.ts` 发 camelCase（`sourceRelPath`
+/// 等），漏标会导致反序列化失败 `missing field source_rel_path` -> `flushRequest` catch
+/// 静默吞错 -> stateMap 永远空 -> 瀑布流卡片全 spinner。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThumbnailRequestItem {
     /// UI key（前端 entry.path，当前目录内相对），完成事件 `path` 字段用它。
     pub path: String,
@@ -171,5 +177,25 @@ mod tests {
     #[test]
     fn size_buckets_match_design() {
         assert_eq!(THUMBNAIL_SIZE_BUCKETS, &[512, 768, 1024, 1536, 2048]);
+    }
+
+    /// 回归 P0：`ThumbnailRequestItem` 必须接受前端发出的 camelCase JSON。
+    /// 之前漏标 `rename_all = "camelCase"`，Tauri 2 不自动转 struct 字段 case，
+    /// 导致 `missing field source_rel_path` -> 缩略图请求 100% 失败 -> 瀑布流全 spinner。
+    #[test]
+    fn thumbnail_request_item_deserializes_camel_case() {
+        let json = r#"{"path":"a.jpg","sourceRelPath":"dir/a.jpg","fileSize":1234,"modifiedAt":1700000000,"sourceWidth":3840,"sourceHeight":2400,"requiredWidth":461,"priority":"visible"}"#;
+        let item: ThumbnailRequestItem = serde_json::from_str(json).unwrap();
+        assert_eq!(item.path, "a.jpg");
+        assert_eq!(item.source_rel_path, "dir/a.jpg");
+        assert_eq!(item.file_size, 1234);
+        assert_eq!(item.source_width, 3840);
+        assert_eq!(item.source_height, 2400);
+        assert_eq!(item.required_width, 461);
+        assert!(matches!(item.priority, Priority::Visible));
+        // modifiedAt: null 也应可反序列化
+        let json_null = r#"{"path":"b.jpg","sourceRelPath":"b.jpg","fileSize":0,"modifiedAt":null,"sourceWidth":100,"sourceHeight":100,"requiredWidth":100,"priority":"ahead"}"#;
+        let item2: ThumbnailRequestItem = serde_json::from_str(json_null).unwrap();
+        assert_eq!(item2.modified_at, None);
     }
 }

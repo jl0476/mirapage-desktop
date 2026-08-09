@@ -128,6 +128,13 @@ fn init_thumbnail_service(app: &tauri::AppHandle) -> anyhow::Result<()> {
 
     let db = app.state::<db::Db>();
     let conn = db.conn();
+    // 一次性兼容修复：P0 修复前旧索引 cache_rel_path 缺 v1/ 段，补前缀让文件命中缓存，
+    // 避免迁移后 get_verified miss 重新生成 4K 图（慢）。幂等，无旧行时 0 更新。
+    match thumbnail::index::repair_legacy_cache_rel_paths(&conn) {
+        Ok(n) if n > 0 => tracing::info!("repaired {} legacy cache_rel_path rows", n),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("repair legacy cache_rel_path failed: {e}"),
+    }
     // 自定义缓存位置（fb_thumbnail_cache_root 非空则用之，否则系统默认）
     let configured = setting_str(&conn, "fb_thumbnail_cache_root", "");
     let cache_root = if configured.is_empty() {

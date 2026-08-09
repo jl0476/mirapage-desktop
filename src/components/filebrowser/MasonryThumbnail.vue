@@ -27,7 +27,9 @@ const imgSrc = computed(() => {
 
 const showSpinner = computed(() => {
   const k = props.state?.kind;
-  return k === 'queued' || k === 'generating' || (k === 'cached' && !loaded.value);
+  // undefined（尚未进入窗口/请求未返回）也显示 spinner，避免白屏；
+  // header 失败的图现在也会请求（传 0 尺寸），spinner 是正确反馈。
+  return !k || k === 'queued' || k === 'generating' || (k === 'cached' && !loaded.value);
 });
 
 const isFailed = computed(() => props.state?.kind === 'failed');

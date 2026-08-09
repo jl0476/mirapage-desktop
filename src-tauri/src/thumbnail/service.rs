@@ -688,7 +688,15 @@ impl ThumbnailService {
                     }
                     let _ = migration::commit_migration(&source, &target_clone, mode, &fs);
                     *state.write().unwrap() = None;
-                    let _ = app.emit(EVENT_MIGRATION_PROGRESS, serde_json::json!({"phase":"completed"}));
+                    // 完成事件保留 final manifest 的 completed/totalFiles/copiedBytes/totalBytes，
+                    // 否则前端 migrationProgress 被覆盖为 {phase:"completed"} -> 显示 0/0
+                    let _ = app.emit(EVENT_MIGRATION_PROGRESS, serde_json::json!({
+                        "phase": "completed",
+                        "completed": m.completed.len(),
+                        "totalFiles": m.total_files,
+                        "copiedBytes": m.copied_bytes,
+                        "totalBytes": m.total_bytes,
+                    }));
                 }
                 Ok(_) | Err(migration::MigrationError::Cancelled) => {
                     // 取消（手动或启动恢复后再次取消）：根保持旧位置
@@ -744,26 +752,30 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
             Ok(o) => o,
             Err(_) => return, // 调度器关闭
         };
-        // 完成后从 in-flight 保护集合移除（短暂保护由本次 evict 的 protected 传入）
-        {
-            let mut pk = meta.protected_keys.lock().unwrap();
-            pk.remove(&meta.cache_key);
-        }
-        let db = app.state::<Db>();
-        let conn = db.conn();
-        match outcome {
-            Outcome::Cached(g) => {
-                // 写索引（完整元数据）
-                let row = build_row(&meta, &g);
-                let _ = index::upsert(&conn, &row);
-                // P1-6: LRU 驱逐，保护可见 + 本次刚完成 key
-                let mut protected = meta.protected_keys.lock().unwrap().clone();
-                protected.insert(meta.cache_key.clone());
-                let _ = evict_to_limit(&conn, &meta.cache_root, meta.cache_limit, &protected);
-                // P1-2: 事件 path 用 ui_path（前端 entry.path），而非绝对磁盘路径
-                let _ = app.emit(
-                    EVENT_STATE,
-                    StateEvent {
+        // 稳定性：Db（rusqlite 同步）+ evict（文件 IO）+ std::sync::Mutex 放 spawn_blocking，
+        // 不在 async worker 线程直接 lock/IO —— 否则多任务竞争 Db Mutex 时阻塞 worker，
+        // 连锁卡死 get_thumbnail_cache_info 等命令（同走 Db Mutex，偶发死锁/饥饿）。
+        // pk remove 移入 Db 锁内统一锁顺序（Db -> pk），消除与 request（持 Db 后锁 pk）的交叉。
+        let app_for_blocking = app.clone();
+        let event = tokio::task::spawn_blocking(move || -> Option<StateEvent> {
+            let db = app_for_blocking.state::<Db>();
+            let conn = db.conn();
+            // 从 in-flight 保护集合移除（Db 锁内，统一锁顺序 Db -> pk）
+            {
+                let mut pk = meta.protected_keys.lock().unwrap();
+                pk.remove(&meta.cache_key);
+            }
+            match outcome {
+                Outcome::Cached(g) => {
+                    // 写索引（完整元数据）
+                    let row = build_row(&meta, &g);
+                    let _ = index::upsert(&conn, &row);
+                    // P1-6: LRU 驱逐，保护可见 + 本次刚完成 key
+                    let mut protected = meta.protected_keys.lock().unwrap().clone();
+                    protected.insert(meta.cache_key.clone());
+                    let _ = evict_to_limit(&conn, &meta.cache_root, meta.cache_limit, &protected);
+                    // P1-2: 事件 path 用 ui_path（前端 entry.path），而非绝对磁盘路径
+                    Some(StateEvent {
                         epoch: meta.epoch,
                         cache_key: meta.cache_key,
                         path: meta.ui_path,
@@ -772,27 +784,30 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
                         output_width: Some(g.width),
                         output_height: Some(g.height),
                         message: None,
-                    },
-                );
+                    })
+                }
+                Outcome::Failed(msg) => Some(StateEvent {
+                    epoch: meta.epoch,
+                    cache_key: meta.cache_key,
+                    path: meta.ui_path,
+                    state: "failed".into(),
+                    cache_path: None,
+                    output_width: None,
+                    output_height: None,
+                    message: Some(msg),
+                }),
+                Outcome::Stale => {
+                    // 旧 epoch：不发 UI 更新。
+                    None
+                }
             }
-            Outcome::Failed(msg) => {
-                let _ = app.emit(
-                    EVENT_STATE,
-                    StateEvent {
-                        epoch: meta.epoch,
-                        cache_key: meta.cache_key,
-                        path: meta.ui_path,
-                        state: "failed".into(),
-                        cache_path: None,
-                        output_width: None,
-                        output_height: None,
-                        message: Some(msg),
-                    },
-                );
-            }
-            Outcome::Stale => {
-                // 旧 epoch：不发 UI 更新。
-            }
+        })
+        .await
+        .ok()
+        .flatten();
+        // emit 在 spawn_blocking 外（async），不占 blocking 线程，也不持 Db 锁
+        if let Some(ev) = event {
+            let _ = app.emit(EVENT_STATE, ev);
         }
     });
 }

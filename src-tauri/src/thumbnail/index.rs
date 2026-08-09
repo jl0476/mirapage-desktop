@@ -37,6 +37,19 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// 一次性兼容修复：P0 修复前 `build_row` 的 `cache_rel_path` 缺 `v1/` 段
+/// （`ab/<key>.webp`），文件实际在 `v1/ab/<key>.webp`。迁移后 `get_verified`
+/// 校验文件不存在 -> miss -> 删脏行 + 重新生成 4K 图（慢）。
+/// 给旧索引补 `v1/` 前缀即可命中文件，避免重新生成。幂等：已 `v1/` 开头的行不更新。
+/// 返回更新的行数。
+pub fn repair_legacy_cache_rel_paths(conn: &Connection) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE thumbnail_cache SET cache_rel_path = 'v1/' || cache_rel_path \
+         WHERE cache_rel_path != '' AND cache_rel_path NOT LIKE 'v1/%'",
+        [],
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThumbnailCacheRow {
     pub cache_key: String,
@@ -227,6 +240,30 @@ mod tests {
             created_at: accessed,
             last_accessed_at: accessed,
         }
+    }
+
+    #[test]
+    fn repair_legacy_cache_rel_paths_adds_v1_prefix() {
+        let conn = open();
+        // 旧格式（缺 v1/，P0 修复前）+ 新格式（有 v1/）
+        let mut old = sample_row("old1", 1000, 5000);
+        old.cache_rel_path = "ab/oldkey.webp".into();
+        let new_row = sample_row("new1", 2000, 6000); // v1/ne/new1.webp
+        upsert(&conn, &old).unwrap();
+        upsert(&conn, &new_row).unwrap();
+        let n = repair_legacy_cache_rel_paths(&conn).unwrap();
+        assert_eq!(n, 1, "只修旧格式行");
+        assert_eq!(
+            get(&conn, "old1").unwrap().unwrap().cache_rel_path,
+            "v1/ab/oldkey.webp"
+        );
+        assert_eq!(
+            get(&conn, "new1").unwrap().unwrap().cache_rel_path,
+            "v1/ne/new1.webp",
+            "新格式不变"
+        );
+        // 幂等：再跑 0 行
+        assert_eq!(repair_legacy_cache_rel_paths(&conn).unwrap(), 0);
     }
 
     #[test]

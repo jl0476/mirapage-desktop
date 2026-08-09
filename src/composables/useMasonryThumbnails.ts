@@ -135,14 +135,15 @@ export function useMasonryThumbnails(
       const entry = entriesByPath.get(path);
       if (!entry) continue;
       const m = measured.get(path);
-      if (!m) continue; // 未测量尺寸的不请求（等 header 到达）
+      // header 失败的图（m 为空）也请求：传 0 尺寸，Rust 生成器 decode 完整文件兜底
+      // （decide_source 对 0 尺寸强制 Generate，不判 UseOriginal）
       items.push({
         path,
         sourceRelPath: toRootRelativePath(params.currentPath.value, path),
         fileSize: entry.size,
         modifiedAt: entry.modifiedAt ?? null,
-        sourceWidth: m.width,
-        sourceHeight: m.height,
+        sourceWidth: m ? m.width : 0,
+        sourceHeight: m ? m.height : 0,
         requiredWidth,
         priority: prio,
       });
@@ -243,7 +244,7 @@ export function useMasonryThumbnails(
     const entry = params.entries.value.find((e) => e.path === path);
     if (!entry) return null;
     const m = params.measuredMap.value.get(path);
-    if (!m) return null;
+    // header 失败的图（m 为空）也允许 retry/regenerate：传 0 尺寸兜底
     const margin = THUMBNAIL_QUALITY_MARGIN[params.quality.value];
     const requiredWidth = Math.round(params.colWidth.value * params.dpr.value * margin);
     return {
@@ -253,8 +254,8 @@ export function useMasonryThumbnails(
         sourceRelPath: toRootRelativePath(params.currentPath.value, path),
         fileSize: entry.size,
         modifiedAt: entry.modifiedAt ?? null,
-        sourceWidth: m.width,
-        sourceHeight: m.height,
+        sourceWidth: m ? m.width : 0,
+        sourceHeight: m ? m.height : 0,
         requiredWidth,
         priority: 'visible',
       },
