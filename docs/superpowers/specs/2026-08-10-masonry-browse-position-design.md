@@ -80,7 +80,7 @@ pub struct ProgressItem {
 
 ⚠️ **P0 修复**：现有 `save_progress(book_id, page, reader_mode, finished: Option<bool>)` 签名**追加** image_name 参数（放最后），**不删 finished 参数**。reader 翻末页的 `finished=Some(true)` 路径必须继续工作。
 
-参考 progress.rs:51-103 现有 3 分支（Some(true) / Some(false) / None），本版本扩展为 4 分支（image_name × finished 各 2 维 = 4 组合）：
+**SQL 设计**：用 **固定参数化** + `COALESCE / CASE WHEN`，**不再用 `format!` 拼接**：
 
 ```rust
 #[tauri::command]
@@ -89,62 +89,58 @@ pub fn save_progress(
     book_id: i64,
     page: i64,
     reader_mode: String,
-    finished: Option<bool>,
-    image_name: Option<String>,  // 新增参数（放最后）
+    finished: Option<bool>,         // 现有（位置不动）
+    image_name: Option<String>,     // 新增（最后）
 ) -> Result<(), String> {
     let conn = db.conn();
     let now = chrono_now();
 
-    // 8 组合 → 拆为 2 维：(finished 3 态) × (image_name 3 态)
-    // 规则：
-    //   - finished=Some(true) → 强制 finished=1
-    //   - finished=Some(false) → 强制 finished=0
-    //   - finished=None → 保留旧 finished（COALESCE 写法）
-    //   - image_name=Some(_) → 写新值
-    //   - image_name=None → 保留旧 image_name（column self-ref in ON CONFLICT）
+    // 固定参数化 SQL：
+    //   - INSERT: finished 用 COALESCE(?finished, 0)，image_name 直接绑 nullable
+    //     （None → SQL NULL 而非空字符串，与设计承诺一致）
+    //   - ON CONFLICT UPDATE: 用 CASE WHEN/CASE WHEN
+    //     finished = CASE WHEN ?finished IS NULL THEN progress.finished ELSE ?finished END
+    //     image_name = COALESCE(excluded.image_name, progress.image_name)
+    //     （None 入参时保留旧值，Some(_) 覆盖）
+    //
+    // 5 个 bind 参数（?1..?5）：
+    //   ?1=book_id  ?2=page  ?3=reader_mode  ?4=image_name  ?5=finished  ?6=updated_at
 
-    let finished_set = match finished {
-        Some(true) => "1",
-        Some(false) => "0",
-        None => "finished",  // ON CONFLICT 分支保留旧值
-    };
-    let image_name_set = if image_name.is_some() {
-        "excluded.image_name"
-    } else {
-        "image_name"  // ON CONFLICT 分支保留旧值
-    };
-
-    // image_name=None 时绑空串占位（INSERT 列），UPSERT 写回 image_name 旧值
-    let img_placeholder = image_name.as_deref().unwrap_or("");
-
-    let sql = format!(
-        "INSERT INTO progress (book_id, page, reader_mode, image_name, updated_at, finished)
-         VALUES (?1, ?2, ?3, ?4, ?5, {finished_set})
-         ON CONFLICT(book_id) DO UPDATE SET
+    let sql = "
+        INSERT INTO progress (book_id, page, reader_mode, image_name, updated_at, finished)
+        VALUES (?1, ?2, ?3, ?4, ?6, COALESCE(?5, 0))
+        ON CONFLICT(book_id) DO UPDATE SET
             page = excluded.page,
             reader_mode = excluded.reader_mode,
-            image_name = {image_name_set},
+            image_name = COALESCE(excluded.image_name, progress.image_name),
             updated_at = excluded.updated_at,
-            finished = {finished_set}",
-    );
+            finished = CASE WHEN ?5 IS NULL THEN progress.finished ELSE ?5 END
+    ";
+
+    // finished 在 tauri command 边界转 i64（None → NULL 不传值）
+    let finished_param: Option<i64> = finished.map(|b| if b { 1 } else { 0 });
 
     conn.execute(
-        &sql,
-        rusqlite::params![book_id, page, reader_mode, img_placeholder, now],
+        sql,
+        rusqlite::params![book_id, page, reader_mode, image_name, finished_param, now],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
 ```
 
 **关键不变量**：
-- reader 翻页调 `saveProgress(bookId, page, readerMode, finished?, undefined /* imageName */)` → image_name 列保留旧值；finished 按入参更新
-- reader 翻末页 `saveProgress(bookId, page, readerMode, true, undefined)` → finished=1，image_name 不变
-- masonry 滚动调 `saveProgress(bookId, page, 'single' /* readerMode */, undefined, imageName)` → image_name 更新；finished 保留旧值
+- reader 翻页调 `saveProgress(bookId, page, readerMode, finished?, undefined /* imageName */)` → image_name 列保留旧值（COALESCE）；finished 按入参更新（CASE WHEN）
+- reader 翻末页 `saveProgress(bookId, page, readerMode, true, undefined)` → finished=1（Some(true)），image_name 不变
+- masonry 滚动调 `saveProgress(bookId, page, 'single', undefined, imageName)` → image_name 更新；finished 保留旧值（CASE WHEN ?5 IS NULL → 旧 finished）
 - masonry 写入**不能传 finished**——若误传 Some(false) 会把已读重置为未读，这是 P0 风险
 
 ⚠️ **前端 saveProgress 包装**：保持 finished 在 imageName 之前的参数顺序（兼容现有 reader 调用点），新增 imageName 作为最后一个参数。
 
-⚠️ **completed test**：Rust 单测必须覆盖 8 组合中的关键 4 个：reader 翻末页（Some(true)+None）+ reader 普通翻页（None+None）+ masonry 滚动（None+Some）+ 重复调 masonry 不影响 finished。
+⚠️ **completed test**：Rust 单测必须覆盖关键 4 组合：
+1. `finished=Some(true), image_name=None`：行不存在 → INSERT finished=1 image_name=NULL；行存在 → UPSERT finished=1 image_name 保留
+2. `finished=None, image_name=None`（reader 普通翻页）：finished 保留旧，image_name 保留旧
+3. `finished=None, image_name=Some("x.jpg")`（masonry 滚动）：finished 保留旧，image_name=x.jpg
+4. 重复 masonry 写入（finished 始终 None）：image_name 每次覆盖，finished 不被重置
 
 #### 2.2.3 `get_progress` 返回新字段
 
@@ -297,17 +293,18 @@ emitChanged({ bookId, page, imageName, mode: 'single', finished: isLast });
 export interface UseMasonryBrowsePositionParams {
   descriptor: Ref<SourceDescriptor>;
   currentPath: Ref<string>;
-  entries: Ref<readonly MediaEntry[]>;
-  /** P0 修复：用 layout.map 找顶部可见图，不能用 visibleRange.start */
+  /** P1 修复：渲染用 entries（来自 displayedEntries，可能被搜索/隐藏已读过滤） */
+  renderEntries: Ref<readonly MediaEntry[]>;
+  /** P1 修复：page 计算用 canonicalImageNames（来自 fb.sortedEntries 过滤图片，不受 UI 过滤影响） */
+  canonicalImageNames: ComputedRef<string[]>;
+  /** layout map 来自 useMasonryLayout（基于 renderEntries） */
   layoutMap: ComputedRef<Map<string, { top: number; height: number }>>;
-  /** P0 修复：page 必须用 imageNames 数组索引，与 ReaderView 同源 */
-  imageNames: ComputedRef<string[]>;
   scrollTop: Ref<number>;
-  /** P1 修复：MasonryView 实现 scrollToEntry，等待 layout 收敛 */
+  /** MasonryView.scrollToEntry：渐进校正版本（见 §4.2 P1 修复） */
   scrollToEntry: (imageName: string) => Promise<boolean>;
   /** settings 开关：自动跳转（不影响 lastBrowseProgress 查询） */
   autoRestoreOnMount: ComputedRef<boolean>;
-  /** settings 开关：是否记录（关闭后不写 progress，但仍查询 lastBrowseProgress） */
+  /** settings 开关：是否记录 */
   enabled: ComputedRef<boolean>;
 }
 
@@ -315,9 +312,9 @@ export interface UseMasonryBrowsePositionReturn {
   start: () => Promise<void>;
   stop: () => void;
   jumpToLast: () => Promise<void>;
-  /** P1 修复：不论 enabled/autoRestore，进入目录总是查一次。手动按钮 + 顶栏立即阅读都用这个。 */
+  /** 缓存 progress（不论 enabled/autoRestore，进入目录总是查一次） */
   lastBrowseProgress: ComputedRef<ProgressItem | null>;
-  /** 是否有 imageName 可跳转（FileBrowser canReadNow 用）。 */
+  /** 是否有 imageName 可跳转 */
   hasRecordedProgress: ComputedRef<boolean>;
 }
 ```
@@ -328,56 +325,70 @@ export interface UseMasonryBrowsePositionReturn {
 const DEBOUNCE_MS = 300;
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let stopScrollWatch: (() => void) | null = null;
-let stopEntriesWatch: (() => void) | null = null;
+let stopEnabledWatch: (() => void) | null = null;
+let activeStartSeq = 0;  // P2 修复：每次 start()/stop() 递增，await 后校验
 const lastWrittenPath = ref<string | null>(null);
-const lastBrowseProgress = ref<ProgressItem | null>(null);  // P1 修复：进入目录时查询一次缓存
+const lastBrowseProgress = ref<ProgressItem | null>(null);
 /** P2 修复：bookId 按 source+absPath 缓存，in-flight 去重。 */
 const bookIdCache = new Map<string, Promise<number | null>>();
 
-/** P0 修复：顶部可见图必须从 layout map 算，不是 visibleRange.start。
- *  entries 包含文件夹，visibleRange.start 可能是文件夹 index。
- *  正确算法：在 layout.map 里找 top >= scrollTop 且 top 最小的项。 */
+/** P0 修复：顶部可见图算法。
+ *  反例（之前）：`item.top <= scrollTop && item.top < bestTop` → 滚到任何位置都选 top 最小的图（即首图）。
+ *  正解：
+ *    1) 优先找与滚动基线相交（baseline 在图内）的图片 → 取 top 最大者（最接近基线上方的图）。
+ *    2) 无相交项（基线落在图间空隙）→ 退而求其次：top <= scrollTop 中 top 最大者（同样最接近上方）。
+ *    3) 仍无 → 退而求其次：top > scrollTop 中 top 最小者（视口内首图）。
+ *    4) 全无 → null（layout 未就绪）。 */
 const topmostImage = computed<MediaEntry | null>(() => {
   const scrollTop = params.scrollTop.value;
-  const map = params.layoutMap.value;  // 见下方"依赖"
-  const entries = params.entries.value;
-  let bestPath: string | null = null;
-  let bestTop = Infinity;
+  const map = params.layoutMap.value;
+  const entries = params.renderEntries.value;  // P1 修复：用渲染列表
+  let intersectingBest: { path: string; top: number } | null = null;  // (1) 相交
+  let aboveBest: { path: string; top: number } | null = null;          // (2) 仅上方
+  let belowBest: { path: string; top: number } | null = null;          // (3) 仅下方
   for (const e of entries) {
-    if (!isImage(e.name)) continue;  // 跳过文件夹
+    if (!isImage(e.name)) continue;
     const item = map.get(e.path);
     if (!item) continue;
-    if (item.top <= scrollTop && item.top < bestTop) {
-      bestTop = item.top;
-      bestPath = e.path;
+    const baselineIn = item.top <= scrollTop && item.top + item.height > scrollTop;
+    if (baselineIn) {
+      if (!intersectingBest || item.top > intersectingBest.top) intersectingBest = { path: e.path, top: item.top };
+    } else if (item.top <= scrollTop) {
+      if (!aboveBest || item.top > aboveBest.top) aboveBest = { path: e.path, top: item.top };
+    } else {
+      if (!belowBest || item.top < belowBest.top) belowBest = { path: e.path, top: item.top };
     }
   }
-  if (bestPath) return entries.find((e) => e.path === bestPath) ?? null;
-  return null;
+  const pick = intersectingBest ?? aboveBest ?? belowBest;
+  if (!pick) return null;
+  return entries.find((e) => e.path === pick.path) ?? null;
 });
 
-/** P0 修复：page 必须用与 ReaderView 同排序的图片-only 数组索引。
- *  layout.map 里的 path 是 entries（含文件夹）的 index → 不能直接当 page。
- *  page = 当前排序下、未过滤的 imageNames 数组中 imageName 的下标。 */
+/** P0 修复：page 必须用 canonicalImageNames（来自 fb.sortedEntries，未被 UI 过滤）的下标。
+ *  这是与 ReaderView 完全一致的图片序列——reader 翻页用 canonical page。
+ *  即使 masonry 视图过滤掉某些图，page 仍按全序列算。 */
 const topmostPage = computed<number>(() => {
   const e = topmostImage.value;
   if (!e) return 0;
-  // imageNames 是经 effectiveSortField 排序的图片文件名数组（ReaderView 同源）
-  const imageNames = params.imageNames.value;
-  return imageNames.indexOf(e.name);
+  return params.canonicalImageNames.value.indexOf(e.name);
 });
 ```
 
-⚠️ **`imageNames` 来源**：要新增 `imageNames: ComputedRef<string[]>` 参数，由 MasonryView 传入：
+⚠️ **`canonicalImageNames` 来源**（P1 修复）：不是从 `props.entries` 派生（`props.entries` 实际是 `displayedEntries`，受搜索/隐藏已读过滤）。改由 **父级 FileBrowser 传 `fb.sortedEntries`（未过滤的排序后列表）+ 过滤图片**：
 
 ```ts
-// MasonryView 内
-const imageNames = computed(() =>
-  props.entries.filter((e) => isImage(e.name)).map((e) => e.name)
+// FileBrowser.vue 内
+const canonicalImageNames = computed(() =>
+  fb.sortedEntries.filter((e) => isImage(e.name)).map((e) => e.name)
 );
+
+// 传给 MasonryView 新的 prop
+<MasonryView :canonical-image-names="canonicalImageNames" ... />
 ```
 
-排序规则 `effectiveSortField / effectiveSortAscending` 与 reader 一致（CLAUDE.md §3.0.2-reader-polish），复用 `useFileBrowserStore.effectiveSortField`。
+`fb.sortedEntries` 已含 `effectiveSortField / effectiveSortAscending`（per-folder override 自动 resolve，CLAUDE.md §3.0.2-reader-polish）——与 ReaderView 完全同源。
+
+排序规则已在 fb.sortedEntries 内部封装，不再需要额外同步。
 
 async function ensureBookIdForCurrentDir(): Promise<number | null> {
   const currentPath = params.currentPath.value;
@@ -418,17 +429,20 @@ async function recordCurrentTop(): Promise<void> {
   if (!params.enabled.value) return;
   const e = topmostImage.value;
   if (!e) return;
-  if (e.path === lastWrittenPath.value) return;  // 去重：连续可见同一图不重复写
+  if (e.path === lastWrittenPath.value) return;
   try {
     const bookId = await ensureBookIdForCurrentDir();
     if (bookId == null) return;
+    // P2 修复：保存后校验当前 startSeq（与函数入口 seq 比对）
+    const seqAtEntry = activeStartSeq;
     await saveProgress(
       bookId,
-      topmostPage.value,  // P0 修复：page = 当前排序下 imageNames 数组索引
-      'single',           // reader_mode 占位（masonry 没真实 reader_mode，但保留字段语义一致）
-      undefined,          // finished 严格 undefined —— masonry 写入不能改 finished
-      e.name,             // imageName = 文件名
+      topmostPage.value,
+      'single',
+      undefined,
+      e.name,
     );
+    if (seqAtEntry !== activeStartSeq) return;  // 已被新 start() 或 stop() 抢占，丢弃写入
     lastWrittenPath.value = e.path;
     lastBrowseProgress.value = {
       bookId,
@@ -450,50 +464,75 @@ function scheduleRecord(): void {
   }, DEBOUNCE_MS);
 }
 
+/** 启用/禁用 scroll watcher（Settings.enabled 切换时调）。 */
+function enableWatcher(): void {
+  if (stopScrollWatch) return;  // 幂等
+  stopScrollWatch = watch(
+    () => [params.scrollTop.value, params.renderEntries.value.length] as const,
+    () => scheduleRecord(),
+  );
+}
+function disableWatcher(): void {
+  if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+  if (stopScrollWatch) { stopScrollWatch(); stopScrollWatch = null; }
+}
+
 async function restoreAndScroll(): Promise<void> {
+  const seqAtEntry = activeStartSeq;
   try {
-    // P1 修复：进入目录总是查询一次 lastBrowseProgress，不依赖 enabled
     const bookId = await ensureBookIdForCurrentDir();
+    if (seqAtEntry !== activeStartSeq) return;  // P2 校验
     if (bookId == null) return;
     const progress = await getProgress(bookId);
+    if (seqAtEntry !== activeStartSeq) return;  // P2 校验
     lastBrowseProgress.value = progress;
-    // 关闭"自动跳转"开关 → 只查不跳
     if (!params.autoRestoreOnMount.value) return;
     if (!progress?.imageName) return;
-    // P1 修复：MasonryView.scrollToEntry 等待 layout 收敛
     await params.scrollToEntry(progress.imageName);
   } catch (err) {
     log('[useMasonryBrowsePosition] restoreAndScroll failed', err);
   }
 }
 
+/** P1 修复：start() 幂等 + Settings.enabled 切换时 watcher 动态启停。
+ *  P2 修复：每次 start() 递增 activeStartSeq，await 后校验。 */
 async function start(): Promise<void> {
+  activeStartSeq += 1;  // 抢占旧 start() / stop()
+  // 关闭 debounce + 旧 watcher（start 幂等：允许重复调）
+  if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+  if (stopScrollWatch) { stopScrollWatch(); stopScrollWatch = null; }
+  lastWrittenPath.value = null;
+
+  // P1 修复：单独 watch enabled，运行时切换时注册/注销 watcher
+  if (stopEnabledWatch) stopEnabledWatch();
+  stopEnabledWatch = watch(
+    () => params.enabled.value,
+    (now) => { now ? enableWatcher() : disableWatcher(); },
+    { immediate: true },  // 进入时立即同步
+  );
+
   await restoreAndScroll();
-  if (params.enabled.value) {
-    stopScrollWatch = watch(
-      () => [params.scrollTop.value, params.entries.value.length] as const,
-      () => scheduleRecord(),
-    );
-  }
 }
 
+/** stop() 销毁所有 watcher 并抢占 startSeq。 */
 function stop(): void {
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = null;
-  if (stopScrollWatch) { stopScrollWatch(); stopScrollWatch = null; }
-  if (stopEntriesWatch) { stopEntriesWatch(); stopEntriesWatch = null; }
+  activeStartSeq += 1;  // 抢占：在飞的 await 都失效
+  disableWatcher();
+  if (stopEnabledWatch) { stopEnabledWatch(); stopEnabledWatch = null; }
   lastWrittenPath.value = null;
   // lastBrowseProgress 不清 —— 关闭"记录进度"开关后仍可手动跳转
 }
 
 async function jumpToLast(): Promise<void> {
-  // P1 修复：优先用缓存的 lastBrowseProgress，避免重复 IPC
+  const seqAtEntry = activeStartSeq;
   let progress = lastBrowseProgress.value;
   if (!progress) {
     try {
       const bookId = await ensureBookIdForCurrentDir();
+      if (seqAtEntry !== activeStartSeq) return;
       if (bookId == null) return;
       progress = await getProgress(bookId);
+      if (seqAtEntry !== activeStartSeq) return;
       lastBrowseProgress.value = progress;
     } catch (err) {
       log('[useMasonryBrowsePosition] jumpToLast failed', err);
@@ -618,35 +657,56 @@ const idx = resolveInitialSpreadIndex(progress, spreads);
 
 ### 4.2 进 masonry 自动跳转（MasonryView.scrollToEntry 实现）
 
-⚠️ **P1 修复**：现有 `useVirtualList.scrollToPath` 是固定行高虚拟列表的方法，**MasonryView 没有 scrollToPath expose**；两次 `nextTick()` 也不能保证异步图片尺寸预读和 layout 收敛。**新增 MasonryView.scrollToEntry**：等待目标 entry 出现在 layout map，设容器 `scrollTop = item.top`，找不到时返回 false。
+⚠️ **P1 修复**：现有 `useVirtualList.scrollToPath` 是固定行高虚拟列表的方法，**MasonryView 没有 scrollToPath expose**；layout map 首次就有所有条目（基于估算尺寸），但**位置仍会随测量批次到达而漂移**——不能"等 layout 收敛"然后跳一次了事。
+
+**新设计语义：「立即跳估算位置 + 渐进校正」**：
 
 ```ts
 // MasonryView.vue 内新增
 async function scrollToEntry(imageName: string): Promise<boolean> {
   const target = props.entries.find((e) => e.name === imageName);
   if (!target) {
-    log('[MasonryView] scrollToEntry: imageName not found in entries', imageName);
+    log('[MasonryView] scrollToEntry: imageName not in current entries (filter?)', imageName);
     return false;
   }
-  // 等 layout 收敛：measuredMap 异步到达 + applyMeasuredBatch 补偿 scrollTop
-  // 最多等 3 秒（实测 measuredMap 到达时间 < 500ms，3s 是安全上限）
-  const deadline = Date.now() + 3000;
+  // 等目标进入 layout map（layout 必然含所有 entries，最多等 200ms）
+  let item: MasonryItem | undefined;
+  const deadline = Date.now() + 200;
   while (Date.now() < deadline) {
-    const item = layout.value.map.get(target.path);
-    if (item) {
-      // 设容器 scrollTop = item.top（layout 已经收敛）
-      if (containerRef.value) containerRef.value.scrollTop = item.top;
-      log('[MasonryView] scrollToEntry: scrolled', imageName, '→', item.top);
-      return true;
-    }
+    item = layout.value.map.get(target.path);
+    if (item) break;
     await nextTick();
   }
-  log('[MasonryView] scrollToEntry: timeout waiting for layout', imageName);
-  return false;
+  if (!item) {
+    log('[MasonryView] scrollToEntry: layout map missing after timeout', imageName);
+    return false;
+  }
+  if (containerRef.value) containerRef.value.scrollTop = item.top;
+
+  // 渐进校正：每次 measuredMap 更新都重新对齐锚点（最多 3s 或 5 批）
+  const targetPath = target.path;
+  let corrections = 0;
+  const stop = watch(
+    () => measuredMap.value.get(targetPath),
+    () => {
+      if (corrections >= 5) return;
+      const updated = layout.value.map.get(targetPath);
+      if (updated && containerRef.value) {
+        containerRef.value.scrollTop = updated.top;
+        corrections += 1;
+      }
+    },
+    { flush: 'post' },
+  );
+  setTimeout(() => stop(), 3000);
+  log('[MasonryView] scrollToEntry: jumped + started anchor correction', imageName);
+  return true;
 }
 ```
 
-`MasonryView.defineExpose` 加 `scrollToEntry`，同时通过 composable params 暴露给 useMasonryBrowsePosition。
+**目标图片被 UI 过滤掉时（搜索/隐藏已读）的决策**：用户开启过滤后，目标图不在 `props.entries` 里 → `scrollToEntry` 返回 false → 不自动恢复，按钮仍可点（用户清除过滤后手动跳）。**不做临时取消过滤跳转**（会破坏用户的过滤状态，违反 §1.5 选择）。
+
+`MasonryView.defineExpose` 加 `scrollToEntry`，通过 composable params 暴露给 useMasonryBrowsePosition。
 
 ### 4.3 顶栏「立即阅读」按钮无选中走 progress
 
@@ -683,42 +743,49 @@ function onReadNowClick() {
 
 #### 4.3.3 useReaderActions.ts::readFromCurrentPath（新增）
 
-⚠️ **P2 修复**：避免重复 IPC。FileBrowser 调 readFromCurrentPath 时**优先用 MasonryView 暴露的 lastBrowseProgress 缓存**，缓存为空才调 IPC。
+⚠️ **P0 修复**：之前的伪代码把函数参数命名为 `opts`，与外层 `useReaderActions` 的 `opts`（ReaderActionsOptions 接口）冲突，类型过不了。同时 `saveNavigationContext` 是无参回调，不接 4 参数。
+
+**修正**：readFromCurrentPath 接 `{ cachedProgress }`，其他依赖继续从外层 `opts` 取。
 
 ```ts
-// useReaderActions.ts 接收 opts.lastBrowseProgress 注入
-async function readFromCurrentPath(opts: {
-  cachedProgress?: ProgressItem | null;
-}): Promise<void> {
+// useReaderActions.ts 内（与 readNow / readFromImage 同 scope）
+async function readFromCurrentPath(
+  args: { cachedProgress?: ProgressItem | null } = {},
+): Promise<void> {
   log('[useReaderActions] readFromCurrentPath called');
+  // 根目录作为图片目录时 currentPath === '' 也允许（不 abort）
   const rootPath = opts.resolveRootPath();
   const currentPath = opts.getCurrentPath?.() ?? '';
-  if (!currentPath) {
-    log('[useReaderActions] readFromCurrentPath: no currentPath, abort');
-    return;
-  }
+  // currentPath === '' 是合法的（用户选了 rootPath 本身作为图片目录），不 abort
+  // 仅在 opts 完全没提供 getCurrentPath 时降级到 rootPath
+  const descriptor = opts.buildSourceDescriptor(rootPath);
+
   // 优先缓存，避免重复 getProgress IPC
-  let progress = opts.cachedProgress ?? null;
+  let progress = args.cachedProgress ?? null;
   if (!progress?.imageName) {
-    const descriptor = opts.buildSourceDescriptor(rootPath);
-    const dirName = currentPath.split(/[\\/]/).filter(Boolean).pop() || currentPath;
+    // 缓存空 → 走 IPC 兜底（复用 readNow 同样的 ensureBookId 路径）
+    const dirName = currentPath.split(/[\\/]/).filter(Boolean).pop() || rootPath.split(/[\\/]/).filter(Boolean).pop() || 'root';
     const dirEntry: MediaEntry = {
       name: dirName, path: '', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0,
     };
     const { bookId } = await ensureBookId(dirEntry, /*favorite=*/false);
-    if (bookId === null) return;
+    if (bookId === null) {
+      log('[useReaderActions] readFromCurrentPath: bookId null, abort');
+      return;
+    }
     progress = await getProgress(bookId);
   }
   if (!progress?.imageName) {
     log('[useReaderActions] readFromCurrentPath: no progress.imageName, abort');
     return;
   }
+  // saveNavigationContext 是无参回调（opts.saveNavigationContext?: () => void）
   try {
-    saveNavigationContext(rootPath, opts.buildSourceDescriptor(rootPath), currentPath, false);
+    opts.saveNavigationContext?.();
   } catch (e) {
     log('[useReaderActions] readFromCurrentPath: saveNavigationContext failed (容错)', e);
   }
-  await router.push({
+  await router!.push({
     name: 'reader',
     params: { bookId: String(progress.bookId) },
     query: { at: encodeURIComponent(progress.imageName) },
@@ -726,7 +793,9 @@ async function readFromCurrentPath(opts: {
 }
 ```
 
-`router` 注入：useReaderActions 现有 `useRouter()` 调用（`useReaderActions.ts:21` 附近）— 复用。
+**根目录支持**：当 rootPath 本身就是图片目录（currentPath === ''），`readFromCurrentPath` 仍工作——`ensureBookId` 接受 entry.path === '' 时 absPath = currentPath = ''，`createBook` 用 rootPath.basename 作 title，IPC 路径正确。
+
+`router` 注入：useReaderActions 顶部已有 `let router: Router | null; try { router = useRouter() ?? null; } catch ...; if (!router && opts.router) router = opts.router;`（line 63-69）——复用 `router!`。
 
 ### 4.4 手动跳转按钮（toolbar）
 
@@ -1027,29 +1096,41 @@ SQLite TEXT 列无长度限制（实际限 1GB）。`imageNames.indexOf` 严格�
 
 参见设计稿（同 §9 内容，writing-plans 阶段展开为可勾选任务列表）。
 
-## §10 规格自检（修稿后 v2）
+## §10 规格自检（修稿后 v3）
 
 1. **占位符扫描**：未发现 "TODO / 待定"
 2. **内部一致性**：
-   - §2.2.2 SQL format! 与 §6.1 测试用例匹配
+   - §2.2.2 SQL 固定参数化与 §6.1 测试用例匹配
    - §3.2.2 ensureBookId 缓存 + §4.3.3 readFromCurrentPath 优先缓存：避免重复 IPC 一致
-   - §3.4 显式 watch descriptor/currentPath → 与 §3.3 边界处理"目录切换"行匹配
+   - §3.4 显式 watch descriptor/currentPath + §3.2.2 activeStartSeq 抢占：start/stop/restoreAndScroll/jumpToLast/recordCurrentTop 全部 await 后校验
+   - §4.2 scrollToEntry 「立即跳估算 + 渐进校正」语义
 3. **范围检查**：14 步实施，可由单个 plan 覆盖
 4. **模糊性检查**：
-   - "顶部可见图"：用 layout map `item.top <= scrollTop && top < bestTop` 找最小 top 的图片（非文件夹）
-   - "page"：imageNames 数组下标（与 ReaderView 同源）
-   - "imageName 找不到"：`imageNames.indexOf === -1`
-   - "fallback page"：走 spreadIndexForPage(progress.page)
+   - "顶部可见图"：3 级优先级（相交 > 上方 > 下方）取最接近滚动基线的图片（非文件夹）
+   - "page"：canonicalImageNames 数组下标（fb.sortedEntries 过滤图片）
+   - "imageName 找不到"：`indexOf === -1`（ReaderView 走 page fallback）
+   - "fallback page"：spreadIndexForPage(progress.page)
 5. **P0/P1/P2 用户反馈覆盖**：
-   - ✅ P0 finished 参数保留（§2.2.2 + §2.3）
-   - ✅ P0 visibleRange.start 不用，改用 layout map（§3.2.2）
-   - ✅ P1 scrollToEntry 实现（MasonryView 内部，§4.2）
-   - ✅ P1 key 位置错误已修正：选做法 A 显式 watch（§3.4）
-   - ✅ P1 hasRecordedProgress 改用 lastBrowseProgress 缓存（§3.2 + §4.3 + §4.4）
-   - ✅ P2 enumerateCover 缓存 + 路径快照校验（§3.2.2）
+   - ✅ P0 顶部锚点算法 3 级优先级（相交 → 上方 → 下方）
+   - ✅ P0 save_progress SQL 固定参数化 + COALESCE/CASE WHEN，无 format!
+   - ✅ P0 readFromCurrentPath 类型修正（参数名为 args，外层 opts 不冲突）
+   - ✅ P1 imageNames 改 canonicalImageNames（来自 fb.sortedEntries，不受 UI 过滤）
+   - ✅ P1 scrollToEntry 「立即跳估算 + 渐进校正」+ 过滤态决策（不过滤掉目标）
+   - ✅ P1 Settings 运行时切换：start() 内 watch enabled 动态注册/注销 watcher
+   - ✅ P2 startSeq 整合进所有 await 后校验 + stop() 递增抢占
+   - ✅ 根目录 currentPath=''：readFromCurrentPath 不再 abort；dirName fallback 到 rootPath.basename
 6. **用户额外要求覆盖**：
-   - ✅ 文件夹混排场景（§6.3 #10）
-   - ✅ 搜索过滤场景（§6.3 #11）
-   - ✅ 隐藏已读场景（§6.3 #12）
-   - ✅ 异步目录切换竞态（§6.3 #13 + §3.4 startSeq 保护）
-   - ✅ 关闭自动跳转但手动跳转（§6.3 #6 + §3.3 边界表）
+   - ✅ 文件夹混排 / 搜索过滤 / 隐藏已读 / 异步目录切换 / 关闭自动跳转但手动跳转（§6.2 + §6.3）
+
+## §11 v3 修订摘要
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | topmostImage 反选首图 | 3 级优先级：相交 > 上方 > 下方 |
+| 2 | save_progress SQL 首次失败 | 固定参数化 + COALESCE/CASE WHEN，无 format! |
+| 3 | readFromCurrentPath 类型错 | 参数 args，外层 opts 不冲突 |
+| 4 | imageNames 受 UI 过滤 | 改 canonicalImageNames 来自 fb.sortedEntries |
+| 5 | scrollToEntry 不收敛 | 改「立即跳估算 + 渐进校正」 |
+| 6 | Settings 运行时切换不生效 | start() 内 watch enabled 动态启停 |
+| 7 | startSeq 未整合 | activeStartSeq 在所有 await 后校验 |
+| 8 | 根目录 currentPath='' | readFromCurrentPath 不再 abort；dirName fallback 到 rootPath.basename |
