@@ -6,11 +6,13 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, toRef } from 'v
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
 import { useVirtualList } from '@/composables/useVirtualList';
-import { useMasonryLayout, toRootRelativePath } from '@/composables/useMasonryLayout';
+import { useMasonryLayout, toRootRelativePath, type MasonryItem } from '@/composables/useMasonryLayout';
 import { useMasonryThumbnails } from '@/composables/useMasonryThumbnails';
+import { useMasonryBrowsePosition } from '@/composables/useMasonryBrowsePosition';
 import { listImageDimensions } from '@/lib/tauri';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
+import { useSettingsStore } from '@/stores/settings';
 import MasonryRow from './MasonryRow.vue';
 import type { MediaEntry, ReadStatusMap, SourceDescriptor } from '@/lib/sourceDescriptor';
 
@@ -24,8 +26,17 @@ interface Props {
   colCount: number;
   hGap: number;
   vGap: number;
+  // v0.1.0-module3.0.8 (任务 8): 全序列图片名（来自 fb.sortedEntries 过滤图片），
+  // 不受 UI 过滤（搜索/隐藏已读）影响 —— topmostImage.page 计算的下标。
+  // FileBrowser 通过 prop 传（任务 10 加 FileList 转发链）。
+  // 当前为可选 + 默认 []：FileList 还未传（MasonryView 单独使用或测试时仍可工作），
+  // useMasonryBrowsePosition 拿到 [] 时 canonicalImageNames.indexOf 永远 -1，
+  // page 始终 0（无害 —— masonry 目录目前仅 FileBrowser 触发）。
+  canonicalImageNames?: string[];
 }
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  canonicalImageNames: () => [] as string[],
+});
 
 const { t } = useI18n();
 
@@ -55,8 +66,24 @@ onMounted(async () => {
   containerWidth.value = containerRef.value.clientWidth || 1;
   // 首次预读
   triggerPrefetch();
+  // v0.1.0-module3.0.8 (任务 8): 启动浏览位置监听 + 查 progress + 可选自动滚
+  await browsePosition.start();
 });
 onUnmounted(() => ro?.disconnect());
+
+/** v0.1.0-module3.0.8 (任务 8): 目录切换时让 composable 重新初始化（spec §3.4 做法 A）。
+ *  用 stop+start 模式：停止滚动监听 + 清理 lastWrittenPath，再 start 触发
+ *  restoreAndScroll（查 progress + 可选自动滚）。 */
+watch(
+  () => [props.descriptor, props.currentPath] as const,
+  () => {
+    browsePosition.stop();
+    void browsePosition.start();
+  },
+);
+
+// settings store 在 useMasonryLayout 之前声明（依赖其 thumbnail*Screens 字段）
+const settingsStore = useSettingsStore();
 
 const { layout, visibleRange, needPrefetch, nextBatchPaths, colWidth, thumbnailWindows } = useMasonryLayout({
   entries: entriesRef,
@@ -74,8 +101,6 @@ const { layout, visibleRange, needPrefetch, nextBatchPaths, colWidth, thumbnailW
 });
 
 // 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 来自设置 store。
-import { useSettingsStore } from '@/stores/settings';
-const settingsStore = useSettingsStore();
 const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
 const thumbQuality = computed(() => settingsStore.thumbnailQuality);
 const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateThumbnail, retryBatch: retryBatchFn, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
@@ -91,8 +116,89 @@ const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateTh
   originalUrlFor: (e) => convertFileSrc(joinPath(joinPath(props.rootPath, props.currentPath), e.name)),
 });
 
-// 暴露 regenerate 给父级 FileBrowser（右键强制重建）
-defineExpose({ regenerate: regenerateThumbnail, regenerateBatch: regenerateBatchFn, retry: retryThumbnail, retryBatch: retryBatchFn });
+// 暴露给父级 FileBrowser（移动到 browsePosition 定义后，见下方）
+
+/** v0.1.0-module3.0.8 (任务 8): scrollToEntry 渐进校正（spec §4.2 P1 修复）。
+ *  - 立即跳到当前 layout 估算位置（layout 首帧就含所有 entries 的估算位置）
+ *  - 然后 watch `layout.value.map.get(targetPath)?.top`：目标上方任意图片
+ *    尺寸到达都会改变目标的 layout.top（spec v4 P1 修复：不是 measuredMap），
+ *    触发渐进校正（最多 SCROLL_CORRECTION_LIMIT 次，SCROLL_CORRECTION_TIMEOUT_MS 后停）
+ *  - 目标不在 entries（filter）→ 返回 false，不强制取消过滤跳转（spec v4 决策） */
+const SCROLL_CORRECTION_LIMIT = 5;
+const SCROLL_CORRECTION_TIMEOUT_MS = 3000;
+
+async function scrollToEntry(imageName: string): Promise<boolean> {
+  const target = props.entries.find((e) => e.name === imageName);
+  if (!target) {
+    log('[MasonryView] scrollToEntry: imageName not in current entries (filter?)', imageName);
+    return false;
+  }
+  // 等目标进入 layout map（layout 必然含所有 entries，最多等 200ms）
+  let item: MasonryItem | undefined;
+  const deadline = Date.now() + 200;
+  while (Date.now() < deadline) {
+    item = layout.value.map.get(target.path);
+    if (item) break;
+    await nextTick();
+  }
+  if (!item) {
+    log('[MasonryView] scrollToEntry: layout map missing after timeout', imageName);
+    return false;
+  }
+  if (containerRef.value) containerRef.value.scrollTop = item.top;
+
+  // P1 修复：watch 目标图自身的 layout.top（不是 measuredMap 条目）。
+  //   目标上方任意图片的尺寸到达都会改变目标的 layout.top，
+  //   但目标本身的 measuredMap 不会变；watch measuredMap 抓不到。
+  const targetPath = target.path;
+  let corrections = 0;
+  const stop = watch(
+    () => layout.value.map.get(targetPath)?.top,
+    (newTop) => {
+      if (newTop === undefined) return;
+      if (corrections >= SCROLL_CORRECTION_LIMIT) return;
+      if (containerRef.value) {
+        containerRef.value.scrollTop = newTop;
+        corrections += 1;
+      }
+    },
+    { flush: 'post' },
+  );
+  setTimeout(() => stop(), SCROLL_CORRECTION_TIMEOUT_MS);
+  log('[MasonryView] scrollToEntry: jumped + started anchor correction', imageName);
+  return true;
+}
+
+/** v0.1.0-module3.0.8 (任务 8): 浏览位置 composable（任务 7 实现）。
+ *  - 监听 scrollTop + 300ms debounce 写入顶部可见图（progress image_name + page）
+ *  - 进目录查 progress，可选自动 scrollToEntry（autoRestoreOnMount 开关）
+ *  - 提供 jumpToLast 给 toolbar「↶ 跳到上次」按钮（任务 10）
+ *  - 目录切换由 spec §3.4 做法 A（MasonryView 内部 watch + stop+start）
+ *  - enabled / autoRestoreOnMount 默认 true（任务 9 会接入 settings 开关） */
+const browsePosition = useMasonryBrowsePosition({
+  descriptor: toRef(props, 'descriptor'),
+  currentPath: toRef(props, 'currentPath'),
+  renderEntries: entriesRef,
+  canonicalImageNames: computed(() => props.canonicalImageNames),
+  layoutMap: computed(() => layout.value.map),
+  scrollTop,
+  scrollToEntry,
+  enabled: computed(() => true),
+  autoRestoreOnMount: computed(() => true),
+});
+
+// 暴露给父级 FileBrowser：
+//  - 缩略图操作（右键菜单重建/重试）
+//  - 任务 8：scrollToEntry / jumpToLast / browsePosition（masonry 浏览位置）
+defineExpose({
+  regenerate: regenerateThumbnail,
+  regenerateBatch: regenerateBatchFn,
+  retry: retryThumbnail,
+  retryBatch: retryBatchFn,
+  scrollToEntry,
+  jumpToLast: () => browsePosition.jumpToLast(),
+  browsePosition,
+});
 
 // 预读 header
 async function triggerPrefetch() {
