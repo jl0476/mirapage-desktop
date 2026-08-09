@@ -168,3 +168,89 @@ fn bench_resize_compare() {
         );
     }
 }
+
+/// 质量验证：thumbnail vs Triangle 输出的 PSNR + 尺寸/alpha 一致性。
+/// PSNR > 30dB 通常质量可接受；> 40dB 几乎无视觉差异。
+/// 跑法：cargo test --test thumbnail_bench bench_thumbnail_quality -- --ignored --nocapture
+#[test]
+#[ignore]
+fn bench_thumbnail_quality() {
+    use image::imageops::FilterType;
+    let cases = [
+        (r"F:\WallPaper\normal\wallhaven-m388vm.png", "1080p PNG"),
+        (r"F:\WallPaper\normal\wallhaven-gpxv57.jpg", "4K JPEG"),
+        (r"F:\WallPaper\normal\wallhaven-859prj.png", "7802x4389 PNG"),
+    ];
+    for (path, label) in cases {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => {
+                eprintln!("skip {}", label);
+                continue;
+            }
+        };
+        let img = image::load_from_memory(&bytes).unwrap();
+        let (w, h) = (img.width(), img.height());
+        let out_w = 512u32.min(w);
+        let out_h = (out_w as f64 * h as f64 / w as f64).round() as u32;
+
+        // Triangle 基线输出（保留原图 color type）
+        let tri = img.resize_exact(out_w, out_h, FilterType::Triangle);
+        // thumbnail（area resampling）输出，按原图 alpha 转回对应 type（与 generator.rs 一致）
+        let thumb = {
+            let t = image::imageops::thumbnail(&img, out_w, out_h);
+            let dt = image::DynamicImage::ImageRgba8(t);
+            if img.color().has_alpha() {
+                dt
+            } else {
+                image::DynamicImage::ImageRgb8(dt.to_rgb8())
+            }
+        };
+
+        // 尺寸一致
+        assert_eq!(
+            (tri.width(), tri.height()),
+            (thumb.width(), thumb.height()),
+            "{}: output dim mismatch",
+            label
+        );
+        // alpha 一致（透明 PNG 保留 alpha，RGB 图仍无 alpha）
+        assert_eq!(
+            tri.color().has_alpha(),
+            thumb.color().has_alpha(),
+            "{}: alpha mismatch",
+            label
+        );
+
+        let psnr = psnr_rgba(&tri.to_rgba8(), &thumb.to_rgba8());
+        println!(
+            "[{}] {}x{}->{}x{} psnr={:.2}dB {}",
+            label,
+            w,
+            h,
+            out_w,
+            out_h,
+            psnr,
+            if psnr > 40.0 { "(几乎无差)" } else if psnr > 30.0 { "(可接受)" } else { "(质量差异明显)" }
+        );
+    }
+}
+
+/// RGBA 两图 PSNR（4 通道 MSE -> dB）。相同返回 INFINITY。
+fn psnr_rgba(a: &image::RgbaImage, b: &image::RgbaImage) -> f64 {
+    assert_eq!(a.dimensions(), b.dimensions());
+    let mut sum_sq: f64 = 0.0;
+    for (pa, pb) in a.pixels().zip(b.pixels()) {
+        for k in 0..4 {
+            let d = pa[k] as f64 - pb[k] as f64;
+            sum_sq += d * d;
+        }
+    }
+    let n = (a.width() * a.height()) as f64 * 4.0;
+    let mse = sum_sq / n;
+    if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0 * 255.0 / mse).log10()
+    }
+}

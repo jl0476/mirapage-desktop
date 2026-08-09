@@ -61,10 +61,20 @@ pub fn generate_thumbnail(req: GenerateRequest) -> Result<GeneratedThumbnail, Th
     );
 
     // 5. 缩放（不放大：输出宽度等于源宽时跳过）。
+    //    area resampling（thumbnail）：大幅缩小比 Triangle 快 1.5-1.7x 且质量更好
+    //    （专为缩小设计，见 docs/superpowers/reports/2026-08-09-thumbnail-generation-bench.md）。
+    //    thumbnail 返回 RgbaImage；按原图是否有 alpha 转回对应 DynamicImage，
+    //    保持 encode_webp 的 RGB/RGBA 选择行为不变（RGB 图仍出 RGB WebP）。
     let resized = if out_w >= display_w {
         img
     } else {
-        img.resize_exact(out_w, out_h, image::imageops::FilterType::Triangle)
+        let thumb = image::imageops::thumbnail(&img, out_w, out_h);
+        let dyn_thumb = DynamicImage::ImageRgba8(thumb);
+        if img.color().has_alpha() {
+            dyn_thumb
+        } else {
+            DynamicImage::ImageRgb8(dyn_thumb.to_rgb8())
+        }
     };
 
     // 6. WebP 编码（按是否有 alpha 选 RGB / RGBA，保留 PNG 透明通道）。

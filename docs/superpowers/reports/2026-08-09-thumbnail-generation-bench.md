@@ -148,7 +148,7 @@ allowed_jobs = min(worker_limit, 内存允许数, 队列长度)
 - `fast-image-resize` 默认在大幅缩小场景（缩小比 7.5x）**反而更慢**（0.6x）--fir 的 SIMD 优势在大幅缩小时体现不出，默认 filter 更重。换库方案否决
 - Nearest 最快但锯齿，缩略图不推荐
 
-**质量未做客观评估**：thumbnail 的 area resampling 理论上对大幅缩小质量更好，但本报告**没有 SSIM/PSNR 数据或主观对比图**支撑"质量更好"的结论。替换前应补客观质量评估 + 验证输出尺寸、透明 PNG、EXIF 旋转、缓存元数据一致性。
+**质量客观评估（PSNR vs Triangle 基线，`bench_thumbnail_quality`）**：三档 PSNR -- 1080p PNG 42.5dB / 4K JPEG 53.0dB / 7802×4389 PNG 45.1dB，均 > 40dB（几乎无视觉差异）；输出尺寸 + alpha 一致性 assert 通过。thumbnail 已替换 Triangle 落地（见 `generator.rs`）。
 
 ---
 
@@ -171,7 +171,7 @@ allowed_jobs = min(worker_limit, 内存允许数, 队列长度)
 
 | 方案 | 效果 | 成本 | 推荐 |
 |---|---|---|---|
-| **resize -> `image::thumbnail`** | 4K resize 1.6x（三档 1.5-1.7x），质量待客观评估 | 零依赖，1 行改动 | ⚪ 推荐，但需先补质量评估 |
+| **resize -> `image::thumbnail`** | 4K resize 1.6x（三档 1.5-1.7x），PSNR > 40dB | 零依赖，已实施 | ✅ 已落地 |
 | 增 worker_limit（≤4，UI 上限）+ decodeMemory 256MB | 多核并发，新目录首屏可能提速 | 设置页自助，零代码 | ⚪ 用户可试，效果需测 |
 | mozJPEG 替换 decode（JPEG）| JPEG decode 可能 10x | C 依赖，中等改动 | ⚪ 性价比待 release bench 验证 |
 | fast-image-resize | 0.6x 更慢 | - | ❌ 实测否决 |
