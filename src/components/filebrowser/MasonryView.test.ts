@@ -55,6 +55,25 @@ import zhCN from '@/locales/zh-CN';
 import MasonryView from './MasonryView.vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 import type { MasonryItem } from '@/composables/useMasonryLayout';
+import type { UseMasonryBrowsePositionParams } from '@/composables/useMasonryBrowsePosition';
+import { useSettingsStore } from '@/stores/settings';
+
+const browsePositionParams = vi.hoisted(() => ({
+  current: null as UseMasonryBrowsePositionParams | null,
+}));
+
+vi.mock('@/composables/useMasonryBrowsePosition', () => ({
+  useMasonryBrowsePosition: (params: UseMasonryBrowsePositionParams) => {
+    browsePositionParams.current = params;
+    return {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(),
+      jumpToLast: vi.fn(async () => undefined),
+      lastBrowseProgress: computed(() => null),
+      hasRecordedProgress: computed(() => false),
+    };
+  },
+}));
 
 vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
@@ -158,5 +177,57 @@ describe('MasonryView.scrollToEntry', () => {
     expect(ok).toBe(false);
 
     w.unmount();
+  });
+});
+
+// ─── v0.1.0-module3.0.8 — settings 闭环（任务 14 补的集成守卫）─────────────
+// 验证：Settings 关闭「记录进度」（recordBrowsePosition=false）时，
+// MasonryView 传给 useMasonryBrowsePosition 的 enabled 立刻变 false。
+// 这覆盖模块闭环：Settings UI 真的能关闭瀑布流写入。
+
+describe('MasonryView.settings 闭环', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    fakeLayoutMap.current = new Map<string, MasonryItem>();
+    browsePositionParams.current = null;
+  });
+
+  it('Settings 关 recordBrowsePosition → useMasonryBrowsePosition.enabled=false', async () => {
+    const pinia = createPinia();
+    const settings = useSettingsStore(pinia);
+    // 直接改 ref（settings 初始默认 true）；不走 update() 避免触发 Tauri invoke
+    settings.recordBrowsePosition = false;
+
+    mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [pinia, i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    expect(browsePositionParams.current).not.toBeNull();
+    expect(browsePositionParams.current!.enabled.value).toBe(false);
+    // restoreBrowsePositionOnEnter 没动 → 仍 true
+    expect(browsePositionParams.current!.autoRestoreOnMount.value).toBe(true);
+  });
+
+  it('Settings 关 restoreBrowsePositionOnEnter → useMasonryBrowsePosition.autoRestoreOnMount=false', async () => {
+    const pinia = createPinia();
+    const settings = useSettingsStore(pinia);
+    settings.restoreBrowsePositionOnEnter = false;
+
+    mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [pinia, i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    expect(browsePositionParams.current).not.toBeNull();
+    expect(browsePositionParams.current!.autoRestoreOnMount.value).toBe(false);
+    // recordBrowsePosition 没动 → 仍 true
+    expect(browsePositionParams.current!.enabled.value).toBe(true);
   });
 });

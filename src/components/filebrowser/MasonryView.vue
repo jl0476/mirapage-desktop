@@ -183,8 +183,10 @@ const browsePosition = useMasonryBrowsePosition({
   layoutMap: computed(() => layout.value.map),
   scrollTop,
   scrollToEntry,
-  enabled: computed(() => true),
-  autoRestoreOnMount: computed(() => true),
+  // v0.1.0-module3.0.8 (任务 14 闭环): 接入 settings 开关。
+  // enabled=false → 不写 DB；autoRestoreOnMount=false → 进目录不自动跳（按钮仍可点）。
+  enabled: computed(() => settingsStore.recordBrowsePosition),
+  autoRestoreOnMount: computed(() => settingsStore.restoreBrowsePositionOnEnter),
 });
 
 // 暴露给父级 FileBrowser：
