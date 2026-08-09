@@ -20,6 +20,7 @@ import { useReadStatusStore } from '@/stores/readStatus';
 import { useVirtualList } from '@/composables/useVirtualList';
 import VirtualRow from './VirtualRow.vue';
 import MasonryView from './MasonryView.vue';
+import type { ProgressItem } from '@/lib/tauri';
 import type { MediaEntry, ReadStatusMap, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 interface Props {
@@ -276,7 +277,31 @@ function retryBatch(items: MediaEntry[]): void {
     }
   }
 }
-defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight, regenerateThumbnail, regenerateBatch, retryBatch });
+
+/* ─── v0.1.0-module3.0.8 (任务 9): 转发 masonry 浏览位置到 FileBrowser ─── */
+/** 监听 MasonryView 暴露的 browsePosition.lastBrowseProgress（FileList 是中间层） */
+const masonryLastBrowseProgress = ref<ProgressItem | null>(null);
+watch(
+  () => masonryRef.value?.browsePosition?.lastBrowseProgress?.value ?? null,
+  (v) => { masonryLastBrowseProgress.value = v; },
+  { immediate: true },
+);
+/** 转发 masonry 跳到上次浏览位置（FileBrowser toolbar「↶ 跳到上次」按钮用） */
+async function masonryJumpToLast(): Promise<void> {
+  await masonryRef.value?.jumpToLast();
+}
+
+defineExpose({
+  scrollToPath,
+  scrollToIndex,
+  scrollTop,
+  viewportHeight,
+  regenerateThumbnail,
+  regenerateBatch,
+  retryBatch,
+  masonryJumpToLast,
+  masonryLastBrowseProgress: computed(() => masonryLastBrowseProgress.value),
+});
 </script>
 
 <template>
