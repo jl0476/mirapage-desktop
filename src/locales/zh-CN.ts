@@ -279,12 +279,19 @@ export default {
     title: '设置',
     back: '返回',
     section: {
+      fileBrowser: '文件浏览器',
       reader: '阅读器默认值',
       appearance: '外观',
       behavior: '行为',
       slideshow: '幻灯片',
       touch: '触控分区',
       masonry: '瀑布流',
+    },
+    fileBrowser: {
+      recordBrowsePosition: '记录瀑布流浏览位置',
+      recordBrowsePositionDesc: '在瀑布流视图滚动时自动记录最近浏览的图片。',
+      restoreBrowsePosition: '进入目录时自动跳转',
+      restoreBrowsePositionDesc: '关闭后只会记录，需要手动点击工具栏的「↶ 跳到上次」按钮。',
     },
     reader: {
       mode: '默认阅读模式',

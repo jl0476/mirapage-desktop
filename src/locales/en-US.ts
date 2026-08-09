@@ -278,12 +278,19 @@ export default {
     title: 'Settings',
     back: 'Back',
     section: {
+      fileBrowser: 'File Browser',
       reader: 'Reader defaults',
       appearance: 'Appearance',
       behavior: 'Behavior',
       slideshow: 'Slideshow',
       touch: 'Touch zones',
       masonry: 'Masonry',
+    },
+    fileBrowser: {
+      recordBrowsePosition: 'Record masonry browse position',
+      recordBrowsePositionDesc: 'Automatically record the topmost visible image while scrolling in masonry view.',
+      restoreBrowsePosition: 'Auto-jump on directory enter',
+      restoreBrowsePositionDesc: 'When disabled, the position is still recorded but you must click the toolbar "↶ Jump to last" button manually.',
     },
     reader: {
       mode: 'Default reading mode',

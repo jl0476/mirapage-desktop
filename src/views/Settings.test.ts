@@ -1,6 +1,7 @@
 /**
  * Settings.vue DOM 渲染 + 交互测试
  * v0.1.0-module3.0: 6 section + 锚点 nav + 9 宫格 + reset
+ * v0.1.0-module3.0.8 (任务 12): +1 fileBrowser section (7 sections total)
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
@@ -21,11 +22,11 @@ beforeEach(() => {
 });
 
 describe('Settings.vue', () => {
-  it('renders all 6 sections with anchors', () => {
+  it('renders all 7 sections with anchors', () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const anchors = wrapper.findAll('[data-test^="anchor-"]');
-    expect(anchors.length).toBe(6);
-    for (const id of ['reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry']) {
+    expect(anchors.length).toBe(7);
+    for (const id of ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry']) {
       expect(wrapper.find(`#${id}`).exists()).toBe(true);
     }
   });
@@ -75,5 +76,49 @@ describe('Settings.vue', () => {
     expect(anchor.exists()).toBe(true);
     await anchor.trigger('click');
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+  });
+});
+
+describe('Settings.vue fileBrowser section (任务 12)', () => {
+  it('renders fileBrowser section + 2 BooleanRow', () => {
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    const section = wrapper.find('[data-test="settings-filebrowser"]');
+    expect(section.exists()).toBe(true);
+    // 2 个 BooleanRow（按 data-test 定位）
+    const recordRow = wrapper.find('[data-test="record-browse-position"]');
+    const restoreRow = wrapper.find('[data-test="restore-browse-position"]');
+    expect(recordRow.exists()).toBe(true);
+    expect(restoreRow.exists()).toBe(true);
+  });
+
+  it('点击 record-browse-position BooleanRow 调 setRecordBrowsePosition', async () => {
+    const store = useSettingsStore();
+    const spy = vi.spyOn(store, 'setRecordBrowsePosition');
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    const recordRow = wrapper.find('[data-test="record-browse-position"]');
+    expect(recordRow.exists()).toBe(true);
+    // 找到内部按钮并点击
+    const btn = recordRow.find('button');
+    expect(btn.exists()).toBe(true);
+    await btn.trigger('click');
+    await flushPromises();
+    expect(spy).toHaveBeenCalledWith(false);  // 默认 true → 点击后变 false
+    expect(store.recordBrowsePosition).toBe(false);
+  });
+
+  it('父开关关闭时子开关 disabled', async () => {
+    const store = useSettingsStore();
+    // 父开关默认 true，子开关 enabled
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    const restoreRow = wrapper.find('[data-test="restore-browse-position"]');
+    const restoreBtn = restoreRow.find('button');
+    expect((restoreBtn.element as HTMLButtonElement).disabled).toBe(false);
+
+    // 关父开关
+    store.recordBrowsePosition = false;
+    await flushPromises();
+    const restoreRowAfter = wrapper.find('[data-test="restore-browse-position"]');
+    const restoreBtnAfter = restoreRowAfter.find('button');
+    expect((restoreBtnAfter.element as HTMLButtonElement).disabled).toBe(true);
   });
 });
