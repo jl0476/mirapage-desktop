@@ -47,12 +47,46 @@ describe('RowContextMenu 重新生成缩略图', () => {
     expect(w.find('[data-test="regenerate-thumbnail"]').exists()).toBe(false);
   });
 
-  it('点击 regenerate -> emit regenerate-thumbnail + close', async () => {
+  it('点击 regenerate -> emit regenerate-thumbnail (entries 数组) + close', async () => {
     const e = imgEntry('x.jpg');
     const w = await mountCtx(e);
     await w.find('[data-test="regenerate-thumbnail"]').trigger('click');
     expect(w.emitted('regenerate-thumbnail')).toBeTruthy();
-    expect(w.emitted('regenerate-thumbnail')![0][0]).toEqual(e);
+    expect(w.emitted('regenerate-thumbnail')![0][0]).toEqual([e]);
     expect(w.emitted('close')).toBeTruthy();
+  });
+
+  it('多选 (entries) -> regenerate 文案带 N 张 + emit 整个 entries', async () => {
+    const entries = [imgEntry('a.jpg'), imgEntry('b.jpg'), imgEntry('c.jpg')];
+    const w = mount(RowContextMenu, {
+      props: { entry: null, entries, x: 10, y: 10 },
+      global: { plugins: [i18n] },
+    });
+    await w.vm.$nextTick();
+    const btn = w.find('[data-test="regenerate-thumbnail"]');
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain('3');
+    // 目录专属项多选时隐藏
+    expect(w.find('[data-test="ctx-read-now"]').exists()).toBe(false);
+    expect(w.find('[data-test="ctx-add-to-library"]').exists()).toBe(false);
+    await btn.trigger('click');
+    expect(w.emitted('regenerate-thumbnail')![0][0]).toEqual(entries);
+  });
+
+  it('目录 (单选 isDirectory=true) -> 显示 read-now / add-to-library', async () => {
+    const w = await mountCtx(dirEntry('vol01'));
+    expect(w.find('[data-test="ctx-read-now"]').exists()).toBe(true);
+    expect(w.find('[data-test="ctx-add-to-library"]').exists()).toBe(true);
+  });
+
+  it('目录 + 多选 -> 目录项隐藏 (isBatch)', async () => {
+    const entries = [dirEntry('vol01'), dirEntry('vol02')];
+    const w = mount(RowContextMenu, {
+      props: { entry: null, entries, x: 10, y: 10 },
+      global: { plugins: [i18n] },
+    });
+    await w.vm.$nextTick();
+    expect(w.find('[data-test="ctx-read-now"]').exists()).toBe(false);
+    expect(w.find('[data-test="ctx-add-to-library"]').exists()).toBe(false);
   });
 });

@@ -249,13 +249,34 @@ const containerClass = computed(() => ({
 const ICON_ARROW_UP = 'M5 12l7-7 7 7';
 const ICON_ARROW_DOWN = 'M5 12l7 7 7-7';
 
-/* ─── 暴露 scrollToPath / scrollToIndex / regenerateThumbnail 给父级 ─── */
+/* ─── 暴露 scrollToPath / scrollToIndex / regenerateBatch / retryBatch 给父级 ─── */
 const masonryRef = ref<InstanceType<typeof MasonryView> | null>(null);
-/** 强制重建指定图片缩略图（右键菜单），转发到 MasonryView.regenerate。 */
+/** 强制重建指定图片缩略图（单图，右键菜单兼容），转发到 MasonryView.regenerate。 */
 function regenerateThumbnail(path: string): void {
   masonryRef.value?.regenerate(path);
 }
-defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight, regenerateThumbnail });
+/** 批量重新生成（多选右键菜单）。masonry 视图转发到 MasonryView；details 视图逐个调 RPC
+ * （详情视图缩略图刷新是已知问题，单图 regenerate 也有，本次不解决）。 */
+function regenerateBatch(items: MediaEntry[]): void {
+  if (props.viewMode === 'masonry') {
+    masonryRef.value?.regenerateBatch(items.map((e) => e.path));
+  } else {
+    for (const e of items) {
+      masonryRef.value?.regenerate(e.path);
+    }
+  }
+}
+/** 批量重试。分发策略同 regenerateBatch。 */
+function retryBatch(items: MediaEntry[]): void {
+  if (props.viewMode === 'masonry') {
+    masonryRef.value?.retryBatch(items.map((e) => e.path));
+  } else {
+    for (const e of items) {
+      masonryRef.value?.retry(e.path);
+    }
+  }
+}
+defineExpose({ scrollToPath, scrollToIndex, scrollTop, viewportHeight, regenerateThumbnail, regenerateBatch, retryBatch });
 </script>
 
 <template>

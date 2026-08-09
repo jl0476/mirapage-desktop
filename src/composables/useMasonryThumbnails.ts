@@ -48,7 +48,9 @@ export interface UseMasonryThumbnailsParams {
 export interface UseMasonryThumbnailsReturn {
   stateMap: ComputedRef<Map<string, ThumbnailState>>;
   retry: (path: string) => void;
+  retryBatch: (paths: string[]) => void;
   regenerate: (path: string) => void;
+  regenerateBatch: (paths: string[]) => void;
   epoch: Ref<number>;
 }
 
@@ -271,6 +273,11 @@ export function useMasonryThumbnails(
     });
   };
 
+  /** 批量重试：循环复用 retry（不删缓存，重新排队）。scheduler 队列自然限流。 */
+  const retryBatch = (paths: string[]) => {
+    for (const p of paths) retry(p);
+  };
+
   const regenerate = (path: string) => {
     const found = findEntry(path);
     if (!found) return;
@@ -278,6 +285,11 @@ export function useMasonryThumbnails(
     void regenerateThumbnail(params.descriptor.value, found.item, epoch.value).then((r) => {
       applyResults([r], new Map([[path, found.entry]]));
     });
+  };
+
+  /** 批量重新生成：循环复用 regenerate（删旧缓存 + 重新生成）。 */
+  const regenerateBatch = (paths: string[]) => {
+    for (const p of paths) regenerate(p);
   };
 
   onBeforeUnmount(() => {
@@ -288,7 +300,9 @@ export function useMasonryThumbnails(
   return {
     stateMap: computed(() => state.value),
     retry,
+    retryBatch,
     regenerate,
+    regenerateBatch,
     epoch,
   };
 }

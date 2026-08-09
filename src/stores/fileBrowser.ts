@@ -295,6 +295,12 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     anchorPath.value = null;
   }
 
+  /** 右键未选中项时清空旧选中并单选该项（Windows 资源管理器风格）。 */
+  function selectSingle(entry: MediaEntry): void {
+    selectedPaths.value = new Set([entry.path]);
+    anchorPath.value = entry.path;
+  }
+
   function selectAll(): void {
     selectedPaths.value = new Set(sortedEntries.value.map((e) => e.path));
   }
@@ -384,6 +390,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     replaceSelection,
     selectRange,
     clearSelection,
+    selectSingle,
     selectAll,
     setSearchQuery,
     // v0.1.0-module3.0.4-virtuallist Phase 3: scrollToPath action (回调到 FileList 实例)

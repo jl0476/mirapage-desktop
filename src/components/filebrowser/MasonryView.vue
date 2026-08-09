@@ -78,7 +78,7 @@ import { useSettingsStore } from '@/stores/settings';
 const settingsStore = useSettingsStore();
 const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
 const thumbQuality = computed(() => settingsStore.thumbnailQuality);
-const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateThumbnail } = useMasonryThumbnails({
+const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateThumbnail, retryBatch: retryBatchFn, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
   currentPath: toRef(props, 'currentPath'),
   entries: entriesRef,
@@ -92,7 +92,7 @@ const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateTh
 });
 
 // 暴露 regenerate 给父级 FileBrowser（右键强制重建）
-defineExpose({ regenerate: regenerateThumbnail });
+defineExpose({ regenerate: regenerateThumbnail, regenerateBatch: regenerateBatchFn, retry: retryThumbnail, retryBatch: retryBatchFn });
 
 // 预读 header
 async function triggerPrefetch() {

@@ -74,7 +74,7 @@ const readerActions = useReaderActions({
 const showSaveDialog = ref(false);
 const saveLabel = ref('');
 // 右键菜单状态
-const ctxMenu = ref<{ entry: MediaEntry; x: number; y: number } | null>(null);
+const ctxMenu = ref<{ entry?: MediaEntry | null; entries?: MediaEntry[] | null; x: number; y: number } | null>(null);
 
 // v0.1.0-module3.0.4-virtuallist Task 3.4: FileList ref 绑定, 拿 scrollToPath expose.
 // onMounted 注册 setScrollToIndexCallback, 让 fb.scrollToPath(path) 能滚到 FileList 对应行.
@@ -373,16 +373,28 @@ function onEntrySelect(entry: MediaEntry, event: MouseEvent | KeyboardEvent) {
 }
 
 function onRowContextMenu(entry: MediaEntry, x: number, y: number) {
-  ctxMenu.value = { entry, x, y };
+  // Windows 风格：右键的图在选中集内且 size > 1 -> 多选；不在选中集 -> 清空 + 单选该 entry
+  if (fb.selectedPaths.has(entry.path) && fb.selectedPaths.size > 1) {
+    const entries = fb.sortedEntries.filter((e) => fb.selectedPaths.has(e.path));
+    ctxMenu.value = { entry: null, entries, x, y };
+  } else {
+    fb.selectSingle(entry);
+    ctxMenu.value = { entry, entries: null, x, y };
+  }
 }
 
 function onCtxClose() {
   ctxMenu.value = null;
 }
 
-/** 右键"重新生成缩略图"：转发到 FileList -> MasonryView.regenerate（删旧缓存后重新生成）。 */
-function onRegenerateThumbnail(entry: MediaEntry) {
-  fileListRef.value?.regenerateThumbnail(entry.path);
+/** 右键"重新生成缩略图"：多选时批量转发到 FileList.regenerateBatch，单图走 regenerateThumbnail。 */
+function onRegenerateThumbnail(entries: MediaEntry[]) {
+  fileListRef.value?.regenerateBatch(entries);
+}
+
+/** 右键"重试缩略图"：多选时批量转发到 FileList.retryBatch。 */
+function onRetryFromCtx(items: MediaEntry[]) {
+  fileListRef.value?.retryBatch(items);
 }
 
 async function onBreadcrumbNavigate(path: string) {
@@ -806,12 +818,14 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
     <RowContextMenu
       v-if="ctxMenu"
       :entry="ctxMenu.entry"
+      :entries="ctxMenu.entries"
       :x="ctxMenu.x"
       :y="ctxMenu.y"
       @close="onCtxClose"
       @read-now="onReadNowFromCtx"
       @add-to-library="onAddToLibraryFromCtx"
       @regenerate-thumbnail="onRegenerateThumbnail"
+      @retry="onRetryFromCtx"
     />
   </main>
 </template>
