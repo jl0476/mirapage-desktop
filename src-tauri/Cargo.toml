@@ -91,6 +91,8 @@ windows = { version = "0.58", features = ["Win32_System_Power"] }
 [dev-dependencies]
 # Phase 3 实装测试使用 tempfile 生成临时 CBZ/ZIP 文件
 tempfile = "3"
+# 仅 benchmark：对比 image crate resize vs fast-image-resize（SIMD）加速比
+fast_image_resize = "5"
 
 [features]
 # 此特性用于在生产环境构建时启用自定义协议
