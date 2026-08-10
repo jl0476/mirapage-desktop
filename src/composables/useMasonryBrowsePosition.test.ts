@@ -38,6 +38,7 @@ async function setup(overrides: Partial<{
   enabled: boolean;
   autoRestoreOnMount: boolean;
   scrollTopValue: number;
+  colWidthValue: number;
   renderEntries: MediaEntry[];
   layoutMap: Map<string, { top: number; height: number }>;
   canonicalImageNames: string[];
@@ -47,6 +48,7 @@ async function setup(overrides: Partial<{
   const renderEntries = ref<MediaEntry[]>(overrides.renderEntries ?? []);
   const canonicalImageNames = computed(() => overrides.canonicalImageNames ?? []);
   const scrollTop = ref(overrides.scrollTopValue ?? 0);
+  const colWidth = ref(overrides.colWidthValue ?? 280);
   const layoutMap = computed(() => overrides.layoutMap ?? new Map());
   const scrollToEntry = vi.fn(async () => true);
 
@@ -57,11 +59,12 @@ async function setup(overrides: Partial<{
     canonicalImageNames,
     layoutMap,
     scrollTop,
+    colWidth,
     scrollToEntry,
     enabled: computed(() => overrides.enabled ?? true),
     autoRestoreOnMount: computed(() => overrides.autoRestoreOnMount ?? true),
   });
-  return { ...composable, scrollTop, currentPath, renderEntries, descriptor, scrollToEntry };
+  return { ...composable, scrollTop, colWidth, currentPath, renderEntries, descriptor, scrollToEntry };
 }
 
 function img(n: string): MediaEntry {
@@ -283,5 +286,60 @@ describe('useMasonryBrowsePosition', () => {
     scrollTop.value = 80;
     await wait(350);
     expect(saveProgress).not.toHaveBeenCalled();
+  });
+
+  it('resize 后 500ms 内滚动不写 progress（窗口尺寸变化不污染阅读进度）', async () => {
+    // 模拟 a.jpg/b.jpg 都在 viewport 内，scrollTop=300 baseline 在 a.jpg (top=0,h=400)
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 400 }],
+      ['b.jpg', { top: 400, height: 400 }],
+    ]);
+    const { start, stop, scrollTop, colWidth } = await setup({
+      renderEntries: [img('a.jpg'), img('b.jpg')],
+      canonicalImageNames: ['a.jpg', 'b.jpg'],
+      layoutMap,
+      scrollTopValue: 300,
+      colWidthValue: 280,
+    });
+    await start();
+    // resize：colWidth 变化 → resize watcher fire → lastResizeAt = now, 杀 debounce
+    colWidth.value = 250;
+    // 立即触发 scroll 漂移（layout 重排后 scrollTop 跳）
+    scrollTop.value = 613;
+    // 等 cooldown 完整 (500ms) + debounce (300ms) 都过期
+    await wait(900);
+    // 整个 cooldown + debounce 窗口内 scheduleRecord 都被丢弃
+    expect(saveProgress).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('resize 冷却期结束后滚动才写 progress', async () => {
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 400 }],
+      ['b.jpg', { top: 400, height: 400 }],
+    ]);
+    const { start, stop, scrollTop, colWidth } = await setup({
+      renderEntries: [img('a.jpg'), img('b.jpg')],
+      canonicalImageNames: ['a.jpg', 'b.jpg'],
+      layoutMap,
+      scrollTopValue: 300,
+      colWidthValue: 280,
+    });
+    await start();
+    // resize：触发 cooldown
+    colWidth.value = 250;
+    // 等 cooldown 完整过期 (500ms + 余量)
+    await wait(550);
+    // 现在 scroll → scheduleRecord 正常工作 → debounce 300ms 后写
+    scrollTop.value = 500; // baseline 在 b.jpg (top=400, h=400)
+    await wait(100);
+    // 100ms < debounce 300ms → 还没写
+    expect(saveProgress).not.toHaveBeenCalled();
+    await wait(350);
+    expect(saveProgress).toHaveBeenCalled();
+    const calls = (saveProgress as Mock).mock.calls;
+    expect(calls[0]?.[4]).toBe('b.jpg'); // imageName 是新的顶部图
+    expect(calls[0]?.[1]).toBe(1); // page = indexOf('b.jpg') = 1
+    stop();
   });
 });

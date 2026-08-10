@@ -205,6 +205,8 @@ const browsePosition = useMasonryBrowsePosition({
   canonicalImageNames: computed(() => props.canonicalImageNames),
   layoutMap: computed(() => layout.value.map),
   scrollTop,
+  // v0.1.0-module3.0.8 fix19: resize 冷却依赖 colWidth 派生值（窗口尺寸变化 → 列宽重算）
+  colWidth,
   scrollToEntry,
   // v0.1.0-module3.0.8 (任务 14 闭环): 接入 settings 开关。
   // enabled=false → 不写 DB；autoRestoreOnMount=false → 进目录不自动跳（按钮仍可点）。

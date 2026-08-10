@@ -16,6 +16,8 @@
 //     顶栏立即阅读）永远能根据 progress 是否有记录来 enable
 //   - autoRestoreOnMount 只控制"自动跳"，不控制"读"
 //   - lastBrowseProgress 缓存：手动按钮 + 顶栏立即阅读都优先用
+//   - resize 冷却期（v0.1.0-module3.0.8 fix19）：colWidth 变化后 500ms 内任何
+//     scheduleRecord 都被丢弃，窗口尺寸变化不污染阅读进度
 
 import { computed, onBeforeUnmount, ref, watch, type ComputedRef, type Ref } from 'vue';
 import {
@@ -31,6 +33,7 @@ import { log } from '@/lib/logger';
 import { naturalCompare } from '@/lib/naturalSort';
 
 const DEBOUNCE_MS = 300;
+const RESIZE_COOLDOWN_MS = 500;
 const BOOKID_CACHE_TTL_MS = 30_000;
 
 /**
@@ -67,6 +70,7 @@ export interface UseMasonryBrowsePositionParams {
   canonicalImageNames: ComputedRef<string[]>;
   layoutMap: ComputedRef<Map<string, { top: number; height: number }>>;
   scrollTop: Ref<number>;
+  colWidth: Ref<number>;
   scrollToEntry: (imageName: string) => Promise<boolean>;
   autoRestoreOnMount: ComputedRef<boolean>;
   enabled: ComputedRef<boolean>;
@@ -96,6 +100,8 @@ export function useMasonryBrowsePosition(
 ): UseMasonryBrowsePositionReturn {
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let stopScrollWatch: (() => void) | null = null;
+  let stopResizeWatch: (() => void) | null = null;
+  let lastResizeAt = 0;
   let stopEnabledWatch: (() => void) | null = null;
   let activeStartSeq = 0;
   let activeWriteSeq = 0;
@@ -209,6 +215,12 @@ export function useMasonryBrowsePosition(
   }
 
   function scheduleRecord(): void {
+    // resize 后 RESIZE_COOLDOWN_MS 内任何 scheduleRecord（无论是 scroll 还是 layout
+    // 重排触发的 topmostImage 漂移）都丢弃：用户没主动滚动，UI 重排不该污染进度
+    if (Date.now() - lastResizeAt < RESIZE_COOLDOWN_MS) {
+      if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+      return;
+    }
     activeWriteSeq += 1;
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
@@ -218,15 +230,31 @@ export function useMasonryBrowsePosition(
   }
 
   function enableWatcher(): void {
-    if (stopScrollWatch) return;
-    stopScrollWatch = watch(
-      () => [params.scrollTop.value, params.renderEntries.value.length] as const,
-      () => scheduleRecord(),
-    );
+    if (!stopScrollWatch) {
+      stopScrollWatch = watch(
+        () => [params.scrollTop.value, params.renderEntries.value.length] as const,
+        () => scheduleRecord(),
+      );
+    }
+    // v0.1.0-module3.0.8 fix19: 窗口尺寸变化 → colWidth 派生值变化 → 标记冷却期。
+    // flush: 'post' 确保 layout 重排完成后再标记（避免滚动过程中多次 fire）。
+    if (!stopResizeWatch) {
+      stopResizeWatch = watch(
+        () => params.colWidth.value,
+        () => {
+          lastResizeAt = Date.now();
+          // 顺手清掉残留 timer，防止 resize 期间的 scroll 触发刚排上的 record 落地
+          if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+        },
+        { flush: 'post' },
+      );
+    }
   }
   function disableWatcher(): void {
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     if (stopScrollWatch) { stopScrollWatch(); stopScrollWatch = null; }
+    if (stopResizeWatch) { stopResizeWatch(); stopResizeWatch = null; }
+    lastResizeAt = 0;
   }
 
   async function restoreAndScroll(): Promise<void> {
@@ -276,6 +304,7 @@ export function useMasonryBrowsePosition(
     disableWatcher();
     if (stopEnabledWatch) { stopEnabledWatch(); stopEnabledWatch = null; }
     lastWrittenPath.value = null;
+    lastResizeAt = 0;
   }
 
   async function jumpToLast(): Promise<void> {
