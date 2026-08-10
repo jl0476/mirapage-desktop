@@ -150,21 +150,44 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
   // P1 修复：watch 目标图自身的 layout.top（不是 measuredMap 条目）。
   //   目标上方任意图片的尺寸到达都会改变目标的 layout.top，
   //   但目标本身的 measuredMap 不会变；watch measuredMap 抓不到。
+  //
+  // v0.1.0-module3.0.8 audit-fix：watch 清理 3 项
+  //   1) corrections / timeoutId 放 watch 闭包内（每次 scrollToEntry 调独立，
+  //      避免前一次调的 stop() 影响新调）
+  //   2) corrections >= SCROLL_CORRECTION_LIMIT 主动 stopWatch() + clearTimeout
+  //      （不再空跑 watcher）
+  //   3) timeout 改为"自上次校正起算"——每次校正 clearTimeout 重置，
+  //      3s 内持续有尺寸到达则一直守；校正静止 3s 才真正停
   const targetPath = target.path;
   let corrections = 0;
-  const stop = watch(
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+  const stopWatch = watch(
     () => layout.value.map.get(targetPath)?.top,
     (newTop) => {
       if (newTop === undefined) return;
-      if (corrections >= SCROLL_CORRECTION_LIMIT) return;
+      if (corrections >= SCROLL_CORRECTION_LIMIT) {
+        stopWatch();
+        if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+        return;
+      }
       if (containerRef.value) {
         containerRef.value.scrollTop = newTop;
         corrections += 1;
+        // 自上次校正起算 timeout——重置
+        if (timeoutId) clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          stopWatch();
+          timeoutId = null;
+        }, SCROLL_CORRECTION_TIMEOUT_MS);
       }
     },
     { flush: 'post' },
   );
-  setTimeout(() => stop(), SCROLL_CORRECTION_TIMEOUT_MS);
+  // 兜底 timeout：3s 内一次校正都没触发仍主动停
+  timeoutId = setTimeout(() => {
+    stopWatch();
+    timeoutId = null;
+  }, SCROLL_CORRECTION_TIMEOUT_MS);
   log('[MasonryView] scrollToEntry: jumped + started anchor correction', imageName);
   return true;
 }
