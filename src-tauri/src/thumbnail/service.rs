@@ -98,7 +98,36 @@ pub fn classify_item(
     });
 
     // 命中缓存（含文件一致性校验）
+    let mut cached_row: Option<index::ThumbnailCacheRow> = None;
     if let Some(row) = index::get_verified(conn, &cache_key, cache_root)? {
+        // P0 修复：显式再校验一次磁盘文件存在且非空。
+        // 背景：索引命中但磁盘 .webp 文件缺失的脏行会导致 IPC 返 cached → 前端
+        // stateMap 设 cached 但 asset:// 加载失败 → 后续重请求 scheduler DEDUP_INFLIGHT
+        // 命中 → 永远不再生成 → 该图永久 stuck。
+        // `get_verified` 内部已做 metadata+len 检查，这里再 inline 一道防线（防止
+        // 未来 get_verified 重构遗漏），并把 "降级到 GENERATE" 的路径集中到 classify_item
+        // 一处，更易审计。
+        let cache_path = cache_root.join(&row.cache_rel_path);
+        let file_ok = std::fs::metadata(&cache_path)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false);
+        if file_ok {
+            cached_row = Some(row);
+        } else {
+            log::write_log(
+                "WARN",
+                "thumbnail",
+                &format!(
+                    "classify path={} cache_key=STALE cachePath={} - file missing or empty, downgrade to GENERATE",
+                    item.path, cache_path.display()
+                ),
+            );
+            // 显式再删一次（get_verified 内部已删，幂等保护）
+            let _ = index::remove(conn, &cache_key);
+            // 走下方 GENERATE 路径：cache_key 相同，scheduler 会用同一 cache_path 重写
+        }
+    }
+    if let Some(row) = cached_row {
         log::write_log(
             "DEBUG",
             "thumbnail",
@@ -1236,6 +1265,143 @@ mod tests {
             _ => panic!("expected Generate"),
         };
         assert_ne!(task.cache_key, root_task.cache_key, "subdir vs root must differ");
+    }
+
+    /// P0 回归：索引命中但磁盘 .webp 文件缺失时，classify 必须降级到 GENERATE 路径
+    /// （清理孤儿索引，重新生成），不能返回 CACHED（否则前端 stateMap 设 cached，
+    /// 但 asset:// 加载失败 → 用户看不到图；后续重请求因 DEDUP_INFLIGHT 永远不再生成 → 永久 stuck）。
+    #[test]
+    fn classify_downgrades_to_generate_when_index_hit_but_file_missing() {
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        // 第一次分类（大图）→ 拿 cache_key
+        let cls = classify_item(
+            &conn,
+            dir.path(),
+            r#"{"type":"local","rootPath":"D:/x"}"#,
+            PathBuf::from("D:/x/big.jpg"),
+            &item("big.jpg", 4000, 3000, 5_000_000, 1024),
+            1,
+            Quality::High,
+        )
+        .unwrap();
+        let (cache_key, _cache_abs) = match cls {
+            ItemClass::Generate { task, cache_abs } => (task.cache_key, cache_abs),
+            _ => panic!("expected Generate on first call"),
+        };
+        // 只写索引行，**不创建文件**（模拟：缓存文件被外部删除/迁移中断/损坏）
+        let rel = key::cache_rel_path(&cache_key);
+        let row = ThumbnailCacheRow {
+            cache_key: cache_key.clone(),
+            source_key: "s".into(),
+            rel_path: "big.jpg".into(),
+            source_size: None,
+            source_modified_at: None,
+            source_width: None,
+            source_height: None,
+            orientation: None,
+            target_bucket: 1024,
+            quality: "high".into(),
+            cache_rel_path: rel,
+            output_width: 1024,
+            output_height: 768,
+            byte_size: 4,
+            created_at: 1,
+            last_accessed_at: 1,
+        };
+        index::upsert(&conn, &row).unwrap();
+
+        // 第二次分类：应返回 Generate（不是 Cached），并清理孤儿索引
+        let cls2 = classify_item(
+            &conn,
+            dir.path(),
+            r#"{"type":"local","rootPath":"D:/x"}"#,
+            PathBuf::from("D:/x/big.jpg"),
+            &item("big.jpg", 4000, 3000, 5_000_000, 1024),
+            1,
+            Quality::High,
+        )
+        .unwrap();
+        match cls2 {
+            ItemClass::Generate { task, .. } => {
+                assert_eq!(
+                    task.cache_key, cache_key,
+                    "downgrade must reuse same cache_key so scheduler re-queues the same path"
+                );
+            }
+            ItemClass::Cached { .. } => panic!(
+                "BUG: returned Cached when file missing - frontend would set cached state but see no image"
+            ),
+            other => panic!("expected Generate, got {other:?}"),
+        }
+        // 孤儿索引行必须被清理（避免下次又被命中）
+        assert!(
+            index::get(&conn, &cache_key).unwrap().is_none(),
+            "dirty index row must be removed after downgrade"
+        );
+    }
+
+    /// P0 回归：缓存文件存在但 0 字节也视为损坏 → 必须降级到 GENERATE。
+    #[test]
+    fn classify_downgrades_to_generate_when_file_empty() {
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        let cls = classify_item(
+            &conn,
+            dir.path(),
+            r#"{"type":"local","rootPath":"D:/x"}"#,
+            PathBuf::from("D:/x/big.jpg"),
+            &item("big.jpg", 4000, 3000, 5_000_000, 1024),
+            1,
+            Quality::High,
+        )
+        .unwrap();
+        let (cache_key, cache_abs) = match cls {
+            ItemClass::Generate { task, cache_abs } => (task.cache_key, cache_abs),
+            _ => panic!("expected Generate on first call"),
+        };
+        // 写 0 字节文件 + 索引（模拟写入中断/损坏）
+        std::fs::create_dir_all(cache_abs.parent().unwrap()).unwrap();
+        std::fs::write(&cache_abs, b"").unwrap();
+        let rel = key::cache_rel_path(&cache_key);
+        let row = ThumbnailCacheRow {
+            cache_key: cache_key.clone(),
+            source_key: "s".into(),
+            rel_path: "big.jpg".into(),
+            source_size: None,
+            source_modified_at: None,
+            source_width: None,
+            source_height: None,
+            orientation: None,
+            target_bucket: 1024,
+            quality: "high".into(),
+            cache_rel_path: rel,
+            output_width: 1024,
+            output_height: 768,
+            byte_size: 0,
+            created_at: 1,
+            last_accessed_at: 1,
+        };
+        index::upsert(&conn, &row).unwrap();
+
+        let cls2 = classify_item(
+            &conn,
+            dir.path(),
+            r#"{"type":"local","rootPath":"D:/x"}"#,
+            PathBuf::from("D:/x/big.jpg"),
+            &item("big.jpg", 4000, 3000, 5_000_000, 1024),
+            1,
+            Quality::High,
+        )
+        .unwrap();
+        assert!(
+            matches!(cls2, ItemClass::Generate { .. }),
+            "0-byte file must downgrade to Generate, got {cls2:?}"
+        );
+        assert!(
+            index::get(&conn, &cache_key).unwrap().is_none(),
+            "dirty index row must be removed"
+        );
     }
 
     /// P2-3 回归：Standard 清晰度 max_bucket=1536，高 DPR 下不应生成 2048。
