@@ -11,8 +11,8 @@
 //   - writeSeq 防晚返回覆盖较新滚动位置
 //   - activeStartSeq 防 stop()/start() 抢占时旧请求污染
 //   - 目录校验同时比 descriptor + path
-//   - enabled=false 不写但 lastBrowseProgress 仍查
-//   - autoRestoreOnMount=false 只查不跳
+//   - enabled=false → restoreAndScroll 完全 noop（不查 DB 不设缓存）
+//   - autoRestoreOnMount=false 只查不跳（jumpToLast 按钮仍可用）
 //   - lastBrowseProgress 缓存：手动按钮 + 顶栏立即阅读都优先用
 
 import { computed, onBeforeUnmount, ref, watch, type ComputedRef, type Ref } from 'vue';
@@ -228,6 +228,12 @@ export function useMasonryBrowsePosition(
   }
 
   async function restoreAndScroll(): Promise<void> {
+    // v0.1.0-module3.0.8 audit-fix：严格"不记录"边界
+    // enabled=false → restoreAndScroll 完全 noop（不查 DB 不设缓存），
+    // 即使用户后续切回 enabled=true 也不会"补查"。
+    // autoRestoreOnMount=false 仍查 progress 设缓存（jumpToLast 按钮可用），
+    // 由下方 `if (!params.autoRestoreOnMount.value) return;` 守住"不自动跳"。
+    if (!params.enabled.value) return;
     const seqAtEntry = activeStartSeq;
     const descAtEntry = JSON.parse(JSON.stringify(params.descriptor.value)) as SourceDescriptor;
     const pathAtEntry = params.currentPath.value;
