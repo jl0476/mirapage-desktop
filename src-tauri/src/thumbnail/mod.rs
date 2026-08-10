@@ -24,6 +24,8 @@
 //! Tauri 在 IPC 边界对结构体字段自动做 snake_case ↔ camelCase 转换，但枚举变体
 //! **不**自动转换，因此这里的 `rename_all` 必须与前端字符串精确对齐。
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 pub mod generator;
@@ -69,6 +71,15 @@ pub enum Priority {
     Ahead,
     Behind,
     Idle,
+}
+
+impl fmt::Display for Priority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // P1: Debug 格式派生（"Visible" 等）。若用 `{}` (Display) 而未 derive，
+        // 输出空字符串 —— 之前 scheduler.rs 中所有 `priority={}` 静默空，无法
+        // 排查卡在 queued 的任务。统一用 Display 让 `{}` 与 `{:?}` 同输出。
+        write!(f, "{:?}", self)
+    }
 }
 
 /// 一个资源预设的全部可调维度（§8.1）。Custom 模式无预设，由用户高级参数决定。
