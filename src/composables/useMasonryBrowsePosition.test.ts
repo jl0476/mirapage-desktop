@@ -10,7 +10,8 @@
  * - 文件夹混排 topmostImage 不取文件夹
  * - 异步目录切换：start() 中途切目录，旧结果丢弃
  * - autoRestoreOnMount=false → 不调 scrollToEntry 但 lastBrowseProgress 仍查
- * - enabled=false → restoreAndScroll 完全 noop（getProgress 不调, lastBrowseProgress=null）
+ * - enabled=false → restoreAndScroll 仍查（getProgress 调, lastBrowseProgress 有值），
+ *   但 recordCurrentTop 不写（saveProgress 不调，按钮可 enable）
  * - startSeq：stop() 抢占后旧 start() 完成后不写
  */
 import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
@@ -223,7 +224,7 @@ describe('useMasonryBrowsePosition', () => {
     stop();
   });
 
-  it('enabled=false → restoreAndScroll 完全 noop（getProgress 不调, lastBrowseProgress 仍 null）', async () => {
+  it('enabled=false → restoreAndScroll 仍查（getProgress 调, lastBrowseProgress 有值），但 recordCurrentTop 不写', async () => {
     const layoutMap = new Map([
       ['a.jpg', { top: 0, height: 100 }],
     ]);
@@ -242,9 +243,9 @@ describe('useMasonryBrowsePosition', () => {
       scrollTopValue: 50,
     });
     await start();
-    // enabled=false → restoreAndScroll 直接 return, 不查 DB 不设缓存
-    expect(getProgress).not.toHaveBeenCalled();
-    expect(lastBrowseProgress.value).toBeNull();
+    // enabled=false → restoreAndScroll 不在入口守，getProgress 仍调，lastBrowseProgress 设上（按钮 enable）
+    expect(getProgress).toHaveBeenCalled();
+    expect(lastBrowseProgress.value?.imageName).toBe('a.jpg');
     // 滚动不触发写入（enabled=false 时 watcher 不挂）
     scrollTop.value = 60;
     await wait(350);

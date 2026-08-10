@@ -5,14 +5,16 @@
 //   2. 进入目录查 progress 缓存 + 可选自动跳（autoRestoreOnMount 开关）
 //   3. 提供手动 jumpToLast() 给 toolbar「↶ 跳到上次」按钮
 //
-// 关键不变量（spec v4）：
+// 关键不变量（spec v4 + v0.1.0-module3.0.8 audit-fix）：
 //   - topmostImage 3 级优先级（相交 > 上方 > 下方），过滤文件夹
 //   - page = canonicalImageNames.indexOf(imageName)，不受 UI 过滤
 //   - writeSeq 防晚返回覆盖较新滚动位置
 //   - activeStartSeq 防 stop()/start() 抢占时旧请求污染
 //   - 目录校验同时比 descriptor + path
-//   - enabled=false → restoreAndScroll 完全 noop（不查 DB 不设缓存）
-//   - autoRestoreOnMount=false 只查不跳（jumpToLast 按钮仍可用）
+//   - enabled=false 只控制"写"（recordCurrentTop 入口 + enableWatcher/disableWatcher），
+//     不控制"读"（restoreAndScroll 仍查 progress 设缓存），保证按钮（jumpToLast +
+//     顶栏立即阅读）永远能根据 progress 是否有记录来 enable
+//   - autoRestoreOnMount 只控制"自动跳"，不控制"读"
 //   - lastBrowseProgress 缓存：手动按钮 + 顶栏立即阅读都优先用
 
 import { computed, onBeforeUnmount, ref, watch, type ComputedRef, type Ref } from 'vue';
@@ -228,12 +230,11 @@ export function useMasonryBrowsePosition(
   }
 
   async function restoreAndScroll(): Promise<void> {
-    // v0.1.0-module3.0.8 audit-fix：严格"不记录"边界
-    // enabled=false → restoreAndScroll 完全 noop（不查 DB 不设缓存），
-    // 即使用户后续切回 enabled=true 也不会"补查"。
-    // autoRestoreOnMount=false 仍查 progress 设缓存（jumpToLast 按钮可用），
-    // 由下方 `if (!params.autoRestoreOnMount.value) return;` 守住"不自动跳"。
-    if (!params.enabled.value) return;
+    // v0.1.0-module3.0.8 audit-fix P1 还原原意：
+    // enabled 只控制"写"路径（recordCurrentTop 入口 + enableWatcher/disableWatcher），
+    // 不控制"读"路径——restoreAndScroll 始终查 progress 设缓存，保证按钮（jumpToLast
+    // + 顶栏立即阅读）能根据 progress 是否有记录来 enable。
+    // autoRestoreOnMount 只控制"自动跳"，由下方 `if (!params.autoRestoreOnMount.value) return;` 守住。
     const seqAtEntry = activeStartSeq;
     const descAtEntry = JSON.parse(JSON.stringify(params.descriptor.value)) as SourceDescriptor;
     const pathAtEntry = params.currentPath.value;
