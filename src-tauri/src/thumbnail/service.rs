@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager};
@@ -18,6 +19,7 @@ use super::policy::{self, QualityPolicy, SourceDecision};
 use super::scheduler::{self, GenerateFn, GenerationJob, Outcome, QueuedTask, SchedulerConfig, SchedulerHandle};
 use super::{Priority, Quality, ThumbnailError, ThumbnailRequestItem, THUMBNAIL_ALGORITHM_VERSION};
 use crate::db::Db;
+use crate::log;
 use crate::source::descriptor::SourceDescriptor;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -97,6 +99,14 @@ pub fn classify_item(
 
     // 命中缓存（含文件一致性校验）
     if let Some(row) = index::get_verified(conn, &cache_key, cache_root)? {
+        log::write_log(
+            "DEBUG",
+            "thumbnail",
+            &format!(
+                "classify path={} priority={:?} sourceSize={} decision=CACHED cacheKey={} w={} h={}",
+                item.path, item.priority, item.file_size, cache_key, row.output_width, row.output_height
+            ),
+        );
         return Ok(ItemClass::Cached {
             cache_key: row.cache_key.clone(),
             cache_abs: cache_root.join(&row.cache_rel_path),
@@ -113,6 +123,14 @@ pub fn classify_item(
         target_bucket,
     );
     if matches!(decision, SourceDecision::UseOriginal) {
+        log::write_log(
+            "DEBUG",
+            "thumbnail",
+            &format!(
+                "classify path={} priority={:?} sourceSize={} decision=USE_ORIGINAL",
+                item.path, item.priority, item.file_size
+            ),
+        );
         return Ok(ItemClass::UseOriginal);
     }
 
@@ -150,6 +168,14 @@ pub fn classify_item(
         estimated_memory_mb: est_mem,
         job,
     };
+    log::write_log(
+        "INFO",
+        "thumbnail",
+        &format!(
+            "classify path={} priority={:?} sourceSize={} decision=GENERATE targetWidth={} estMemMb={} cacheKey={}",
+            item.path, item.priority, item.file_size, target_bucket, est_mem, cache_key
+        ),
+    );
     Ok(ItemClass::Generate { task, cache_abs })
 }
 
@@ -183,9 +209,38 @@ pub fn evict_to_limit(
 /// 生产用生成函数：读 Local 文件（blocking 线程内）-> generate_thumbnail。
 fn production_generate_fn() -> GenerateFn {
     Arc::new(|job: GenerationJob| {
+        let source_path_str = job.source_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        let t0 = Instant::now();
+        log::write_log(
+            "INFO",
+            "thumbnail",
+            &format!(
+                "generate enter cacheKey={} targetWidth={} quality={} cachePath={} src={}",
+                job.cache_path.file_stem().and_then(|s| s.to_str()).unwrap_or("?"),
+                job.target_width,
+                job.webp_quality,
+                job.cache_path.display(),
+                source_path_str
+            ),
+        );
         let bytes = match &job.source_path {
-            Some(p) => std::fs::read(p)?,
-            None => job.source_bytes.clone(),
+            Some(p) => std::fs::read(p),
+            None => Ok(job.source_bytes.clone()),
+        };
+        let bytes = match bytes {
+            Ok(b) => b,
+            Err(e) => {
+                let duration_ms = t0.elapsed().as_millis();
+                log::write_log(
+                    "ERROR",
+                    "thumbnail",
+                    &format!(
+                        "generate FAILED read source err={} cachePath={} durationMs={}",
+                        e, job.cache_path.display(), duration_ms
+                    ),
+                );
+                return Err(ThumbnailError::Io(e));
+            }
         };
         let req = GenerateRequest {
             source_bytes: &bytes,
@@ -195,7 +250,27 @@ fn production_generate_fn() -> GenerateFn {
             webp_quality: job.webp_quality,
             cache_path: &job.cache_path,
         };
-        generate_thumbnail(req)
+        let result = generate_thumbnail(req);
+        let duration_ms = t0.elapsed().as_millis();
+        match &result {
+            Ok(g) => log::write_log(
+                "INFO",
+                "thumbnail",
+                &format!(
+                    "generate done result=CACHED w={} h={} bytes={} cachePath={} durationMs={}",
+                    g.width, g.height, g.byte_size, job.cache_path.display(), duration_ms
+                ),
+            ),
+            Err(e) => log::write_log(
+                "ERROR",
+                "thumbnail",
+                &format!(
+                    "generate FAILED err={} cachePath={} durationMs={}",
+                    e, job.cache_path.display(), duration_ms
+                ),
+            ),
+        }
+        result
     })
 }
 
@@ -413,6 +488,23 @@ impl ThumbnailService {
         }
 
         // 提交生成任务 + 挂完成回调
+        if !to_submit.is_empty() {
+            log::write_log(
+                "INFO",
+                "thumbnail",
+                &format!(
+                    "request submit queue taskCount={} epoch={} pathSample={}",
+                    to_submit.len(),
+                    epoch,
+                    to_submit
+                        .iter()
+                        .take(8)
+                        .map(|(t, _, _)| t.job.cache_path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            );
+        }
         for (task, cache_abs, item) in to_submit {
             let cache_key = task.cache_key.clone();
             let target_bucket = task.job.target_width;
@@ -750,7 +842,14 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
     tokio::spawn(async move {
         let outcome = match rx.await {
             Ok(o) => o,
-            Err(_) => return, // 调度器关闭
+            Err(_) => {
+                log::write_log(
+                    "WARN",
+                    "thumbnail",
+                    &format!("spawn_completion channel closed cacheKey={}", meta.cache_key),
+                );
+                return; // 调度器关闭
+            }
         };
         // 稳定性：Db（rusqlite 同步）+ evict（文件 IO）+ std::sync::Mutex 放 spawn_blocking，
         // 不在 async worker 线程直接 lock/IO —— 否则多任务竞争 Db Mutex 时阻塞 worker，
@@ -775,6 +874,14 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
                     protected.insert(meta.cache_key.clone());
                     let _ = evict_to_limit(&conn, &meta.cache_root, meta.cache_limit, &protected);
                     // P1-2: 事件 path 用 ui_path（前端 entry.path），而非绝对磁盘路径
+                    log::write_log(
+                        "INFO",
+                        "thumbnail",
+                        &format!(
+                            "completion CACHED cacheKey={} w={} h={} bytes={} epoch={}",
+                            meta.cache_key, g.width, g.height, g.byte_size, meta.epoch
+                        ),
+                    );
                     Some(StateEvent {
                         epoch: meta.epoch,
                         cache_key: meta.cache_key,
@@ -786,18 +893,33 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
                         message: None,
                     })
                 }
-                Outcome::Failed(msg) => Some(StateEvent {
-                    epoch: meta.epoch,
-                    cache_key: meta.cache_key,
-                    path: meta.ui_path,
-                    state: "failed".into(),
-                    cache_path: None,
-                    output_width: None,
-                    output_height: None,
-                    message: Some(msg),
-                }),
+                Outcome::Failed(msg) => {
+                    log::write_log(
+                        "WARN",
+                        "thumbnail",
+                        &format!(
+                            "completion FAILED cacheKey={} msg={} epoch={}",
+                            meta.cache_key, msg, meta.epoch
+                        ),
+                    );
+                    Some(StateEvent {
+                        epoch: meta.epoch,
+                        cache_key: meta.cache_key,
+                        path: meta.ui_path,
+                        state: "failed".into(),
+                        cache_path: None,
+                        output_width: None,
+                        output_height: None,
+                        message: Some(msg),
+                    })
+                }
                 Outcome::Stale => {
                     // 旧 epoch：不发 UI 更新。
+                    log::write_log(
+                        "DEBUG",
+                        "thumbnail",
+                        &format!("completion STALE cacheKey={} epoch={}", meta.cache_key, meta.epoch),
+                    );
                     None
                 }
             }

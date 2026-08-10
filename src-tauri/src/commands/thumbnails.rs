@@ -2,8 +2,11 @@
 //!
 //! 所有命令走 `State<'_, ThumbnailService>`；图片字节不进前端，只传状态/路径/元数据。
 
+use std::time::Instant;
+
 use tauri::State;
 
+use crate::log;
 use crate::source::descriptor::SourceDescriptor;
 use crate::thumbnail::policy::normalize_worker_limit;
 use crate::thumbnail::service::{RequestResult, ThumbnailService};
@@ -18,7 +21,39 @@ pub async fn request_thumbnails(
     epoch: u64,
     visible_cache_keys: Vec<String>,
 ) -> Result<Vec<RequestResult>, String> {
-    Ok(service.request(&descriptor, &items, epoch, &visible_cache_keys))
+    let t0 = Instant::now();
+    let item_count = items.len();
+    let vis_count = visible_cache_keys.len();
+    log::write_log(
+        "INFO",
+        "thumbnail",
+        &format!(
+            "request_thumbnails enter type={} epoch={} items={} visibleKeys={}",
+            descriptor.type_str(),
+            epoch,
+            item_count,
+            vis_count,
+        ),
+    );
+    let results = service.request(&descriptor, &items, epoch, &visible_cache_keys);
+    // 分类统计 + duration
+    let mut stats = std::collections::HashMap::<&str, usize>::new();
+    for r in &results {
+        *stats.entry(r.status.as_str()).or_insert(0) += 1;
+    }
+    let duration_ms = t0.elapsed().as_millis();
+    log::write_log(
+        "INFO",
+        "thumbnail",
+        &format!(
+            "request_thumbnails done items={} results={} stats={:?} durationMs={}",
+            item_count,
+            results.len(),
+            stats,
+            duration_ms
+        ),
+    );
+    Ok(results)
 }
 
 /// 单张失败重试（visible 优先级，不删缓存索引）。
@@ -29,6 +64,11 @@ pub async fn retry_thumbnail(
     item: ThumbnailRequestItem,
     epoch: u64,
 ) -> Result<RequestResult, String> {
+    log::write_log(
+        "INFO",
+        "thumbnail",
+        &format!("retry_thumbnail path={} epoch={}", item.path, epoch),
+    );
     Ok(service.retry(&descriptor, &item, epoch))
 }
 
@@ -40,6 +80,11 @@ pub async fn regenerate_thumbnail(
     item: ThumbnailRequestItem,
     epoch: u64,
 ) -> Result<RequestResult, String> {
+    log::write_log(
+        "INFO",
+        "thumbnail",
+        &format!("regenerate_thumbnail path={} epoch={}", item.path, epoch),
+    );
     Ok(service.regenerate(&descriptor, &item, epoch))
 }
 
@@ -90,6 +135,7 @@ pub async fn notify_thumbnail_epoch(
     service: State<'_, ThumbnailService>,
     epoch: u64,
 ) -> Result<(), String> {
+    log::write_log("INFO", "thumbnail", &format!("notify_thumbnail_epoch epoch={}", epoch));
     service.new_epoch(epoch);
     Ok(())
 }
@@ -100,6 +146,11 @@ pub async fn notify_thumbnail_fast_scrolling(
     service: State<'_, ThumbnailService>,
     fast: bool,
 ) -> Result<(), String> {
+    log::write_log(
+        "DEBUG",
+        "thumbnail",
+        &format!("notify_thumbnail_fast_scrolling fast={}", fast),
+    );
     service.set_fast_scrolling(fast);
     Ok(())
 }

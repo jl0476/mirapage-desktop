@@ -27,6 +27,7 @@ use tokio::time::Instant;
 
 use super::generator::GeneratedThumbnail;
 use super::{Priority, ThumbnailError};
+use crate::log;
 
 /// 默认老化阈值（等待超过此值的任务优先级提升）。
 const DEFAULT_STARVATION_THRESHOLD: Duration = Duration::from_secs(5);
@@ -253,11 +254,33 @@ impl Actor {
     fn handle_submit(&mut self, task: QueuedTask, reply: oneshot::Sender<Outcome>) {
         // in-flight 去重：同 cache_key 已在跑 -> 订阅
         if let Some(inf) = self.inflight.get_mut(&task.cache_key) {
+            log::write_log(
+                "DEBUG",
+                "thumbnail",
+                &format!(
+                    "scheduler submit DEDUP_INFLIGHT cacheKey={} priority={:?} epoch={} inFlightSubs={}",
+                    task.cache_key,
+                    task.priority,
+                    task.epoch,
+                    inf.subscribers.len()
+                ),
+            );
             inf.subscribers.push(reply);
             return;
         }
         // pending 去重：同 cache_key 已排队 -> 订阅
         if let Some(p) = self.pending.iter_mut().find(|p| p.task.cache_key == task.cache_key) {
+            log::write_log(
+                "DEBUG",
+                "thumbnail",
+                &format!(
+                    "scheduler submit DEDUP_PENDING cacheKey={} priority={:?} epoch={} pendingSubs={}",
+                    task.cache_key,
+                    task.priority,
+                    task.epoch,
+                    p.subscribers.len()
+                ),
+            );
             p.subscribers.push(reply);
             return;
         }
@@ -266,20 +289,36 @@ impl Actor {
             self.max_task_epoch = task.epoch;
         }
         self.pending.push(Pending {
-            task,
+            task: task.clone(),
             subscribers: vec![reply],
             enqueued_at: Instant::now(),
             seq: self.seq,
         });
+        log::write_log(
+            "INFO",
+            "thumbnail",
+            &format!(
+                "scheduler submit ENQUEUE cacheKey={} priority={:?} epoch={} estMemMb={} queueDepth={} inflight={}",
+                task.cache_key,
+                task.priority,
+                task.epoch,
+                task.estimated_memory_mb,
+                self.pending.len(),
+                self.inflight.len()
+            ),
+        );
     }
 
     fn handle_new_epoch(&mut self, epoch: u64) {
+        let prev = self.current_epoch;
         self.current_epoch = epoch;
         // 旧 epoch 未开始任务标 stale，移除并通知订阅者
         let mut i = 0;
+        let mut stale_n = 0usize;
         while i < self.pending.len() {
             if self.pending[i].task.epoch < epoch {
                 let p = self.pending.remove(i);
+                stale_n += 1;
                 for s in p.subscribers {
                     let _ = s.send(Outcome::Stale);
                 }
@@ -287,6 +326,14 @@ impl Actor {
                 i += 1;
             }
         }
+        log::write_log(
+            "INFO",
+            "thumbnail",
+            &format!(
+                "scheduler new_epoch old={} new={} stalePending={} inflightSurvivors={}",
+                prev, epoch, stale_n, self.inflight.len()
+            ),
+        );
         // in-flight 保留（让其完成写缓存）；完成时按 epoch 决定是否发 Cached。
     }
 
@@ -295,13 +342,23 @@ impl Actor {
     /// （spawn_completion 的 Stale 分支不写索引，避免清空后被后台任务重新写回）。
     fn handle_cancel_all(&mut self) {
         // bump 到超过所有曾提交任务的 epoch，使 pending + in-flight 全部变 stale。
+        let prev = self.current_epoch;
         self.current_epoch = self.max_task_epoch.wrapping_add(1);
         let drained = std::mem::take(&mut self.pending);
+        let drained_n = drained.len();
         for p in drained {
             for s in p.subscribers {
                 let _ = s.send(Outcome::Stale);
             }
         }
+        log::write_log(
+            "INFO",
+            "thumbnail",
+            &format!(
+                "scheduler cancel_all prevEpoch={} newEpoch={} drainedPending={} inflightWillStale={}",
+                prev, self.current_epoch, drained_n, self.inflight.len()
+            ),
+        );
     }
 
     fn handle_completed(
@@ -324,6 +381,19 @@ impl Actor {
             } else {
                 Outcome::Stale
             };
+            log::write_log(
+                "DEBUG",
+                "thumbnail",
+                &format!(
+                    "scheduler completed cacheKey={} epoch={} effective={:?} subs={} runningNow={}/{}",
+                    cache_key,
+                    epoch,
+                    effective,
+                    inf.subscribers.len(),
+                    self.running_count,
+                    self.worker_limit
+                ),
+            );
             for s in inf.subscribers {
                 let _ = s.send(effective.clone());
             }
@@ -343,6 +413,7 @@ impl Actor {
             let est_mb = pending.task.estimated_memory_mb;
             let job = pending.task.job;
             let subscribers = pending.subscribers;
+            let worker_id = self.running_count;
 
             self.inflight.insert(
                 cache_key.clone(),
@@ -354,13 +425,65 @@ impl Actor {
             let tx = self.tx.clone();
             let gen = self.generate.clone();
             let ck = cache_key.clone();
+            log::write_log(
+                "INFO",
+                "thumbnail",
+                &format!(
+                    "scheduler start worker={} cacheKey={} epoch={} estMemMb={} running={}/{}",
+                    worker_id, cache_key, epoch, est_mb, self.running_count, self.worker_limit
+                ),
+            );
+            let t0 = std::time::Instant::now();
             tokio::spawn(async move {
-                let result = tokio::task::spawn_blocking(move || gen(job)).await;
-                let result = match result {
+                // P0 防御: spawn_blocking 在独立阻塞线程池跑生成（image/webp 阻塞 IO），
+                // 即使 image/webp 抛 panic 也不会杀掉 spawn 任务（tokio::spawn 任务 panic
+                // 默认让进程 abort）。JoinError::is_panic() 捕获后转 Failed outcome 让
+                // 前端能 retry。Async runtime 自身 panic 由外层 catch_unwind 兜底。
+                let join_result = tokio::task::spawn_blocking(move || gen(job)).await;
+                let elapsed_ms = t0.elapsed().as_millis();
+                let result = match join_result {
                     Ok(Ok(g)) => Ok(g),
                     Ok(Err(e)) => Err(e),
-                    Err(je) => Err(ThumbnailError::Invalid(format!("join error: {je}"))),
+                    Err(je) => {
+                        if je.is_panic() {
+                            // spawn_blocking 内部 panic
+                            let msg = format!("worker_panic: spawn_blocking join error");
+                            log::write_log(
+                                "ERROR",
+                                "thumbnail",
+                                &format!(
+                                    "scheduler worker PANIC worker={} cacheKey={} msg={} durationMs={}",
+                                    worker_id, ck, msg, elapsed_ms
+                                ),
+                            );
+                            eprintln!(
+                                "[scheduler] worker {} PANIC cacheKey={} msg={} durationMs={}",
+                                worker_id, ck, msg, elapsed_ms
+                            );
+                            Err(ThumbnailError::Invalid(msg))
+                        } else {
+                            Err(ThumbnailError::Invalid(format!("join error: {je}")))
+                        }
+                    }
                 };
+                match &result {
+                    Ok(_) => log::write_log(
+                        "INFO",
+                        "thumbnail",
+                        &format!(
+                            "scheduler worker DONE worker={} cacheKey={} result=cached durationMs={}",
+                            worker_id, ck, elapsed_ms
+                        ),
+                    ),
+                    Err(e) => log::write_log(
+                        "WARN",
+                        "thumbnail",
+                        &format!(
+                            "scheduler worker DONE worker={} cacheKey={} result=failed err={} durationMs={}",
+                            worker_id, ck, e, elapsed_ms
+                        ),
+                    ),
+                }
                 let _ = tx.send(Command::Completed {
                     cache_key: ck,
                     epoch,

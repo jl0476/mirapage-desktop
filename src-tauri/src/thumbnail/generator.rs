@@ -7,11 +7,13 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use image::{DynamicImage, ImageFormat};
 
 use super::orientation::{apply_orientation, read_orientation};
 use super::ThumbnailError;
+use crate::log;
 
 /// 一次缩略图生成请求。
 pub struct GenerateRequest<'a> {
@@ -39,12 +41,42 @@ pub struct GeneratedThumbnail {
 
 /// 生成缩略图并原子写入 `cache_path`。
 pub fn generate_thumbnail(req: GenerateRequest) -> Result<GeneratedThumbnail, ThumbnailError> {
+    let t0 = Instant::now();
+    log::write_log(
+        "INFO",
+        "thumbnail",
+        &format!(
+            "generator enter bytes={} targetW={} quality={} cachePath={}",
+            req.source_bytes.len(),
+            req.target_width,
+            req.webp_quality,
+            req.cache_path.display()
+        ),
+    );
+
     // 1. EXIF Orientation（缺失 / 不可解析视为 1）。
     let orientation = read_orientation(req.source_bytes);
 
     // 2. 解码第一帧（GIF / 动态 WebP 只取首帧）。
     let img = image::load_from_memory(req.source_bytes)
-        .map_err(|e| ThumbnailError::Decode(e.to_string()))?;
+        .map_err(|e| {
+            log::write_log(
+                "ERROR",
+                "thumbnail",
+                &format!("generator DECODE failed err={}", e),
+            );
+            ThumbnailError::Decode(e.to_string())
+        })?;
+    log::write_log(
+        "DEBUG",
+        "thumbnail",
+        &format!(
+            "generator DECODE done src={}x{} orientation={:?}",
+            img.width(),
+            img.height(),
+            orientation
+        ),
+    );
 
     // 3. 方向归一化（烘焙进像素，输出不再带 Orientation）。
     let img = apply_orientation(img, orientation);
@@ -70,12 +102,51 @@ pub fn generate_thumbnail(req: GenerateRequest) -> Result<GeneratedThumbnail, Th
     } else {
         DynamicImage::ImageRgba8(image::imageops::thumbnail(&img, out_w, out_h))
     };
+    log::write_log(
+        "DEBUG",
+        "thumbnail",
+        &format!(
+            "generator RESIZE done display={}x{} out={}x{}",
+            display_w, display_h, out_w, out_h
+        ),
+    );
 
     // 6. WebP 编码（按是否有 alpha 选 RGB / RGBA，保留 PNG 透明通道）。
-    let webp_bytes = encode_webp(&resized, req.webp_quality)?;
+    let webp_bytes = match encode_webp(&resized, req.webp_quality) {
+        Ok(b) => b,
+        Err(e) => {
+            log::write_log(
+                "ERROR",
+                "thumbnail",
+                &format!("generator ENCODE failed err={}", e),
+            );
+            return Err(e);
+        }
+    };
+    log::write_log(
+        "DEBUG",
+        "thumbnail",
+        &format!("generator ENCODE done bytes={}", webp_bytes.len()),
+    );
 
     // 7. 原子写入：.tmp -> flush(+best-effort fsync) -> rename。
-    write_atomic(req.cache_path, &webp_bytes)?;
+    if let Err(e) = write_atomic(req.cache_path, &webp_bytes) {
+        log::write_log(
+            "ERROR",
+            "thumbnail",
+            &format!("generator WRITE failed err={} path={}", e, req.cache_path.display()),
+        );
+        return Err(e);
+    }
+    log::write_log(
+        "INFO",
+        "thumbnail",
+        &format!(
+            "generator WRITE done path={} durationMs={}",
+            req.cache_path.display(),
+            t0.elapsed().as_millis()
+        ),
+    );
 
     Ok(GeneratedThumbnail {
         width: out_w,
@@ -155,8 +226,14 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ThumbnailError> {
         // best-effort fsync；缓存文件可接受忽略错误。
         let _ = f.sync_all();
     }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    match std::fs::rename(&tmp_path, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // 删除可能残留的 .tmp（不影响正式文件，因为 rename 没成功）
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(ThumbnailError::Io(e))
+        }
+    }
 }
 
 /// 按图片字节猜测格式（用于测试断言可解码格式集合）。
