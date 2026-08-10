@@ -25,6 +25,7 @@ import {
 } from '@/lib/thumbnail';
 import type { ThumbnailWindows } from './useMasonryLayout';
 import { toRootRelativePath } from './useMasonryLayout';
+import { log } from '@/lib/logger';
 
 const REQUEST_DEBOUNCE_MS = 80;
 /** 停止滚动后多久才允许提交 idle（§5.3）。 */
@@ -211,6 +212,9 @@ export function useMasonryThumbnails(
   };
 
   // 监听 Rust 状态事件
+  // v0.1.0-module3.0.8 audit-fix：happy-dom 等非 Tauri 环境 `__TAURI_INTERNALS__`
+  // 未挂载，listen() 抛 TypeError(transformCallback undefined)。生产端 Tauri runtime
+  // 保证存在；测试场景静默吞下避免 4× unhandled rejection。
   void listen<ThumbnailStateEvent>('thumbnail://state', (event) => {
     const payload = event.payload;
     if (payload.epoch !== epoch.value) return; // 旧 epoch 忽略
@@ -240,6 +244,8 @@ export function useMasonryThumbnails(
     }
   }).then((fn) => {
     unlisten = fn;
+  }).catch((err) => {
+    log('[useMasonryThumbnails] listen(thumbnail://state) failed (likely non-Tauri env)', err);
   });
 
   const findEntry = (path: string): { entry: MediaEntry; item: ThumbnailRequestItem } | null => {
