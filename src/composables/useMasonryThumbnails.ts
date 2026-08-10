@@ -31,6 +31,9 @@ const REQUEST_DEBOUNCE_MS = 80;
 /** 停止滚动后多久才允许提交 idle（§5.3）。 */
 const IDLE_SETTLE_MS = 250;
 
+/** 每次 batch log 上限（path 数量），防止 flood */
+const BATCH_LOG_PATH_LIMIT = 12;
+
 /** happy-dom / Storybook / 普通浏览器环境无 __TAURI_INTERNALS__，listen() 会抛；
  * 仅在真正的 Tauri runtime 才打 log，避免测试日志噪音。 */
 function isTauriEnv(): boolean {
@@ -95,8 +98,10 @@ export function useMasonryThumbnails(
 
   // epoch 递增：切目录/列宽/DPR/质量变化
   const bumpEpoch = () => {
+    const old = epoch.value;
     epoch.value += 1;
     void notifyThumbnailEpoch(epoch.value);
+    log('[thumbnail] epoch changed old=' + old + ' new=' + epoch.value);
   };
 
   watch(
@@ -161,16 +166,52 @@ export function useMasonryThumbnails(
     }
     if (items.length === 0) return;
 
+    // log 1: flushRequest 入口 — reqid 方便关联入口/出口日志
+    const reqid = Math.random().toString(36).slice(2, 10);
+    const t0 = performance.now();
+    const pathPreview = items
+      .slice(0, BATCH_LOG_PATH_LIMIT)
+      .map((i) => i.path)
+      .join(',');
+    log(
+      '[thumbnail] flushRequest enter reqid=' + reqid +
+        ' epoch=' + reqEpoch +
+        ' items=' + items.length +
+        ' visibleKeys=' + visibleKeys.length +
+        ' fastScrolling=' + fastScrolling +
+        ' paths[' + items.length + ']=' + pathPreview +
+        (items.length > BATCH_LOG_PATH_LIMIT ? '…(+' + (items.length - BATCH_LOG_PATH_LIMIT) + ' more)' : ''),
+    );
+
     void notifyThumbnailFastScrolling(fastScrolling);
 
     let results;
     try {
       results = await requestThumbnails(params.descriptor.value, items, reqEpoch, visibleKeys);
-    } catch {
+    } catch (err) {
+      log('[thumbnail] flushRequest reqid=' + reqid + ' IPC error: ' + String(err));
       return;
     }
     // 请求期间 epoch 已变（切目录/列宽）则丢弃响应，避免污染新目录状态
-    if (epoch.value !== reqEpoch) return;
+    if (epoch.value !== reqEpoch) {
+      log(
+        '[thumbnail] flushRequest reqid=' + reqid +
+          ' epoch changed (now=' + epoch.value + '), dropping ' + results.length + ' results',
+      );
+      return;
+    }
+    // log 2: IPC 完成 — 分类统计
+    const stats = { original: 0, cached: 0, queued: 0, failed: 0, unsupported: 0 };
+    for (const r of results) {
+      if (r.status in stats) (stats as Record<string, number>)[r.status] += 1;
+    }
+    const durationMs = (performance.now() - t0).toFixed(1);
+    log(
+      '[thumbnail] flushRequest done reqid=' + reqid +
+        ' results=' + results.length +
+        ' stats=' + JSON.stringify(stats) +
+        ' durationMs=' + durationMs,
+    );
     applyResults(results, entriesByPath);
   };
 
@@ -178,6 +219,31 @@ export function useMasonryThumbnails(
     results: Awaited<ReturnType<typeof requestThumbnails>>,
     entriesByPath: Map<string, MediaEntry>,
   ) => {
+    // log 3: applyResults — 分类转换明细（前 5 + 卡在 queued 的 path 重点）
+    const transitions: string[] = [];
+    const queuedPaths: string[] = [];
+    for (const r of results) {
+      const prior = state.value.get(r.path);
+      const priorKind = prior?.kind ?? 'none';
+      const nextKind = r.status;
+      if (nextKind === 'queued') queuedPaths.push(r.path);
+      // 只打印前 5 个 + 全部 queued 重点（57-68 案例相关）
+      if (transitions.length < BATCH_LOG_PATH_LIMIT) {
+        transitions.push(r.path + ':' + priorKind + '→' + nextKind);
+      }
+    }
+    if (queuedPaths.length > 0) {
+      log(
+        '[thumbnail] applyResults total=' + results.length +
+          ' queuedN=' + queuedPaths.length +
+          ' queuedPaths=' + queuedPaths.slice(0, BATCH_LOG_PATH_LIMIT).join(',') +
+          (queuedPaths.length > BATCH_LOG_PATH_LIMIT ? '…(+' + (queuedPaths.length - BATCH_LOG_PATH_LIMIT) + ')' : ''),
+      );
+    }
+    log(
+      '[thumbnail] applyResults transitions (first ' + Math.min(BATCH_LOG_PATH_LIMIT, results.length) + ') ' +
+        transitions.join(' '),
+    );
     for (const r of results) {
       const entry = entriesByPath.get(r.path);
       switch (r.status) {
@@ -222,9 +288,21 @@ export function useMasonryThumbnails(
   // __TAURI_INTERNALS__，listen() 抛 TypeError(transformCallback undefined)。
   // 仅 Tauri runtime 静默失败才 log（实际不期望失败）；其他环境静默吞下避免
   // 测试日志噪音与 4× unhandled rejection。
+  let stateEventCount = 0;
   void listen<ThumbnailStateEvent>('thumbnail://state', (event) => {
     const payload = event.payload;
-    if (payload.epoch !== epoch.value) return; // 旧 epoch 忽略
+    stateEventCount += 1;
+    if (payload.epoch !== epoch.value) {
+      // log 5: epoch mismatch 旧事件忽略（不应该发生，但方便排查）
+      if (stateEventCount <= 5 || stateEventCount % 50 === 0) {
+        log(
+          '[thumbnail] state event IGNORE path=' + payload.path +
+            ' state=' + payload.state +
+            ' eventEpoch=' + payload.epoch + ' currentEpoch=' + epoch.value,
+        );
+      }
+      return;
+    }
     switch (payload.state) {
       case 'cached':
         if (payload.cachePath) {
@@ -235,6 +313,13 @@ export function useMasonryThumbnails(
             width: payload.outputWidth ?? 0,
             height: payload.outputHeight ?? 0,
           });
+          if (stateEventCount <= 20 || stateEventCount % 50 === 0) {
+            log(
+              '[thumbnail] state event path=' + payload.path +
+                ' state=cached from=thumbnail://state' +
+                ' w=' + (payload.outputWidth ?? 0) + ' h=' + (payload.outputHeight ?? 0),
+            );
+          }
         }
         break;
       case 'failed':
@@ -244,6 +329,10 @@ export function useMasonryThumbnails(
           retryable: true,
           message: payload.message ?? 'failed',
         });
+        log(
+          '[thumbnail] state event path=' + payload.path +
+            ' state=failed msg=' + (payload.message ?? 'null'),
+        );
         break;
       case 'stale':
         // 旧目录事件忽略（已由 epoch 过滤）；不做 UI 更新
