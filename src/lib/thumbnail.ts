@@ -53,7 +53,7 @@ export const DEFAULT_THUMBNAIL_CACHE_LIMIT_MB = 512;
 
 /** 一个资源预设的全部可调维度。custom 模式无预设，由用户高级参数决定。 */
 export interface ThumbnailPreset {
-  /** 解码 worker 并发上限（第一阶段 Local 1–4）。 */
+  /** 解码 worker 并发上限（v0.1.0+ 1–16）。 */
   workerLimit: number;
   /** 预计解码内存总预算（MB）。 */
   decodeMemoryMb: number;
@@ -101,11 +101,11 @@ export function resolveThumbnailPreset(mode: ThumbnailResourceMode): ThumbnailPr
 // ─── 值域归一化（加载设置时兜底越界/脏值，§14）─────────────────────────
 
 const WORKER_LIMIT_MIN = 1;
-const WORKER_LIMIT_MAX = 4;
+const WORKER_LIMIT_MAX = 16;
 const DECODE_MEMORY_CHOICES = [64, 128, 256, 512];
 const CACHE_LIMIT_MIN_MB = 128;
 
-/** Worker 上限钳到第一阶段 Local 合法范围 [1, 4]。 */
+/** Worker 上限钳到合法范围 [1, 16]。 */
 export function normalizeWorkerLimit(value: number): number {
   if (!Number.isFinite(value) || value <= WORKER_LIMIT_MIN) return WORKER_LIMIT_MIN;
   if (value >= WORKER_LIMIT_MAX) return WORKER_LIMIT_MAX;

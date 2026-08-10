@@ -59,9 +59,9 @@ describe('thumbnail protocol', () => {
       expect(normalizeWorkerLimit(-3)).toBe(1);
     });
 
-    it('高于上界钳到 4（第一阶段 Local 不允许超过 4）', () => {
-      expect(normalizeWorkerLimit(9)).toBe(4);
-      expect(normalizeWorkerLimit(100)).toBe(4);
+    it('高于上界钳到 16', () => {
+      expect(normalizeWorkerLimit(17)).toBe(16);
+      expect(normalizeWorkerLimit(100)).toBe(16);
     });
 
     it('合法值原样返回', () => {
@@ -69,6 +69,10 @@ describe('thumbnail protocol', () => {
       expect(normalizeWorkerLimit(2)).toBe(2);
       expect(normalizeWorkerLimit(3)).toBe(3);
       expect(normalizeWorkerLimit(4)).toBe(4);
+      expect(normalizeWorkerLimit(6)).toBe(6);
+      expect(normalizeWorkerLimit(8)).toBe(8);
+      expect(normalizeWorkerLimit(12)).toBe(12);
+      expect(normalizeWorkerLimit(16)).toBe(16);
     });
   });
 

@@ -145,7 +145,7 @@ fn init_thumbnail_service(app: &tauri::AppHandle) -> anyhow::Result<()> {
     std::fs::create_dir_all(&cache_root)?;
     tracing::info!("thumbnail cache root at {}", cache_root.display());
 
-    let worker = setting_u32(&conn, "fb_thumbnail_worker_limit", 2);
+    let worker = read_thumbnail_worker_limit(&conn);
     let mem = setting_u32(&conn, "fb_thumbnail_decode_memory_mb", 128);
     let quality = match setting_str(&conn, "fb_thumbnail_quality", "high").as_str() {
         "standard" => thumbnail::Quality::Standard,
@@ -185,4 +185,74 @@ fn setting_u64(conn: &rusqlite::Connection, key: &str, default: u64) -> u64 {
     setting_str(conn, key, &default.to_string())
         .parse()
         .unwrap_or(default)
+}
+
+/// 启动时读 worker_limit 并钳到合法范围（防御脏 DB：旧版本可能写入了越界值）。
+/// 与 IPC 入口 `update_thumbnail_runtime_config` 的钳制保持一致。
+fn read_thumbnail_worker_limit(conn: &rusqlite::Connection) -> u32 {
+    let raw = setting_u32(conn, "fb_thumbnail_worker_limit", 2);
+    thumbnail::policy::normalize_worker_limit(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn open_settings_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn upsert(conn: &Connection, key: &str, value: &str) {
+        conn.execute(
+            "INSERT OR REPLACE INTO settings(key, value) VALUES(?1, ?2)",
+            rusqlite::params![key, value],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn read_thumbnail_worker_limit_clamps_out_of_range_db_value() {
+        let conn = open_settings_db();
+        // 脏 DB：上限越界 → 钳到 16
+        upsert(&conn, "fb_thumbnail_worker_limit", "100");
+        assert_eq!(read_thumbnail_worker_limit(&conn), 16);
+        // 上界
+        upsert(&conn, "fb_thumbnail_worker_limit", "17");
+        assert_eq!(read_thumbnail_worker_limit(&conn), 16);
+        // 合法值原原样返回
+        upsert(&conn, "fb_thumbnail_worker_limit", "8");
+        assert_eq!(read_thumbnail_worker_limit(&conn), 8);
+        upsert(&conn, "fb_thumbnail_worker_limit", "16");
+        assert_eq!(read_thumbnail_worker_limit(&conn), 16);
+    }
+
+    #[test]
+    fn read_thumbnail_worker_limit_clamps_below_min_db_value() {
+        let conn = open_settings_db();
+        // 脏 DB：下限越界 → 钳到 1
+        upsert(&conn, "fb_thumbnail_worker_limit", "0");
+        assert_eq!(read_thumbnail_worker_limit(&conn), 1);
+    }
+
+    #[test]
+    fn read_thumbnail_worker_limit_handles_unparseable_db_value() {
+        let conn = open_settings_db();
+        // 脏 DB：value 不可解析（parse 失败）→ fallback 到默认 2
+        upsert(&conn, "fb_thumbnail_worker_limit", "not_a_number");
+        assert_eq!(read_thumbnail_worker_limit(&conn), 2);
+    }
+
+    #[test]
+    fn read_thumbnail_worker_limit_uses_default_when_row_missing() {
+        let conn = open_settings_db();
+        // 干净 DB：该 key 不存在 → 默认 2
+        assert_eq!(read_thumbnail_worker_limit(&conn), 2);
+    }
 }

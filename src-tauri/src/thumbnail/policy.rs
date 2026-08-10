@@ -95,6 +95,17 @@ pub enum GenerationUrgency {
     Opportunistic,
 }
 
+/// Worker 并发上限常量（v0.1.0+ 1–16；与前端 `WORKER_LIMIT_MAX` 对齐）。
+pub const WORKER_LIMIT_MIN: u32 = 1;
+pub const WORKER_LIMIT_MAX: u32 = 16;
+
+/// Worker 数钳到合法范围 [WORKER_LIMIT_MIN, WORKER_LIMIT_MAX]。
+/// 输入非有限数或低于下界钳到 MIN；高于上界钳到 MAX。
+/// 与 `src/lib/thumbnail.ts::normalizeWorkerLimit` 语义对齐。
+pub fn normalize_worker_limit(value: u32) -> u32 {
+    value.clamp(WORKER_LIMIT_MIN, WORKER_LIMIT_MAX)
+}
+
 /// 对单张原图的处置决策（§6.2 §6.3）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceDecision {
@@ -265,6 +276,36 @@ mod tests {
         assert_eq!(select_bucket(u32::MAX), 2048);
         assert_eq!(select_bucket(0), 512);
         assert_eq!(select_bucket(1), 512);
+    }
+
+    // ── normalize_worker_limit ─────────────────────────────────────────
+
+    #[test]
+    fn normalize_worker_limit_legal_values_unchanged() {
+        assert_eq!(normalize_worker_limit(1), 1);
+        assert_eq!(normalize_worker_limit(2), 2);
+        assert_eq!(normalize_worker_limit(4), 4);
+        assert_eq!(normalize_worker_limit(8), 8);
+        assert_eq!(normalize_worker_limit(16), 16);
+    }
+
+    #[test]
+    fn normalize_worker_limit_clamps_above_max() {
+        assert_eq!(normalize_worker_limit(17), 16);
+        assert_eq!(normalize_worker_limit(100), 16);
+        assert_eq!(normalize_worker_limit(u32::MAX), 16);
+    }
+
+    #[test]
+    fn normalize_worker_limit_clamps_below_min() {
+        assert_eq!(normalize_worker_limit(0), 1);
+    }
+
+    #[test]
+    fn normalize_worker_limit_bounds_match_frontend_constant() {
+        // 与前端 src/lib/thumbnail.ts 的 WORKER_LIMIT_MIN/MAX 对齐；改动需同步。
+        assert_eq!(WORKER_LIMIT_MIN, 1);
+        assert_eq!(WORKER_LIMIT_MAX, 16);
     }
 
     // ── quality_policy ─────────────────────────────────────────────────

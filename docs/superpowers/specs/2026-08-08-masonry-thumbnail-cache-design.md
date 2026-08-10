@@ -369,17 +369,17 @@ card_css_width × device_pixel_ratio
 
 ### 8.2 Worker 上限
 
-第一阶段 Local 数据源：
+v0.1.0+ (第一阶段 Local 已扩到 1–16)：
 
 ```text
 默认最大并发 worker = 2
-可选范围 = 1 / 2 / 3 / 4
+可选范围 = 1 / 2 / 3 / 4 / 6 / 8 / 12 / 16
 ```
 
 - 修改后只影响后续任务，不强行终止正在执行的任务；
-- 4 worker 显示高 CPU/内存占用警告；
-- 不允许超过 4；
-- worker 是并发上限，不代表调度器必须占满。
+- 高 worker 数（≥ 8）显示高 CPU/内存占用警告（UI 暂未实现，后续补）；
+- 不允许超过 16（前端 `WORKER_LIMIT_MAX = 16` + Rust `policy::WORKER_LIMIT_MAX = 16` 双重钳制，见 `src/lib/thumbnail.ts:104` / `src-tauri/src/thumbnail/policy.rs:99-100`）；
+- worker 是并发上限，不代表调度器必须占满（实际并发还受 `memory_budget_mb` 与 `allowed_jobs` 内存准入约束，见 policy.rs §8.3）。
 
 ### 8.3 解码内存预算
 

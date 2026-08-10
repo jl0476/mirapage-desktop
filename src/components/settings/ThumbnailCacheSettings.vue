@@ -125,7 +125,7 @@ const qualityOptions = [
   { value: 'ultra', label: t('settings.masonry.thumbnail.qualityUltra') },
 ];
 const cacheLimitOptions = [256, 512, 1024, 2048].map((m) => ({ value: String(m), label: `${m} MB` }));
-const workerOptions = [1, 2, 3, 4].map((w) => ({ value: String(w), label: String(w) }));
+const workerOptions = [1, 2, 3, 4, 6, 8, 12, 16].map((w) => ({ value: String(w), label: String(w) }));
 const memoryOptions = [64, 128, 256, 512].map((m) => ({ value: String(m), label: `${m} MB` }));
 const prefetchOptions = [0, 0.5, 1, 1.5, 2, 3].map((p) => ({ value: String(p), label: String(p) }));
 const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String(i) }));
@@ -234,7 +234,7 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
 <style scoped>
 .thumb-settings { display: flex; flex-direction: column; gap: 10px; }
 .info { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.info-label { font-size: 12px; color: var(--color-text-muted); }
+.info-label { font-size: 12px; color: var(--color-text-secondary); }
 .link-btn { font-size: 12px; color: var(--color-accent); background: transparent; border: 0; cursor: pointer; }
 .advanced-toggle {
   align-self: flex-start; font-size: 12px; color: var(--color-accent);
@@ -242,10 +242,10 @@ const idleOptions = [0, 0.5, 1, 2].map((i) => ({ value: String(i), label: String
 }
 .advanced { display: flex; flex-direction: column; gap: 10px; padding-left: 12px; border-left: 2px solid var(--color-border-default); }
 .bool-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.bool-label { font-size: 13px; color: var(--color-text-secondary); }
+.bool-label { font-size: 14px; color: var(--color-text-secondary); }
 .location { align-items: flex-start; }
 .location-right { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
-.location-path { font-size: 11px; color: var(--color-text-muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: right; }
+.location-path { font-size: 12px; color: var(--color-text-secondary); max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: right; }
 .progress, .recovery { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 8px; border: 1px solid var(--color-border-default); border-radius: 4px; }
-.error { color: var(--color-error); font-size: 11px; }
+.error { color: var(--color-error); font-size: 12px; }
 </style>

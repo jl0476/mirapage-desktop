@@ -5,6 +5,7 @@
 use tauri::State;
 
 use crate::source::descriptor::SourceDescriptor;
+use crate::thumbnail::policy::normalize_worker_limit;
 use crate::thumbnail::service::{RequestResult, ThumbnailService};
 use crate::thumbnail::{Quality, ThumbnailRequestItem};
 
@@ -43,6 +44,8 @@ pub async fn regenerate_thumbnail(
 }
 
 /// 运行时配置（worker / 内存 / 清晰度），设置页改完即时推送。
+/// `worker_limit` 在 IPC 边界钳到合法范围 [1, 16]（policy::WORKER_LIMIT_MAX），
+/// 防御前端脏值/越界输入。
 #[tauri::command]
 pub async fn update_thumbnail_runtime_config(
     service: State<'_, ThumbnailService>,
@@ -50,6 +53,7 @@ pub async fn update_thumbnail_runtime_config(
     memory_budget_mb: u32,
     quality: Quality,
 ) -> Result<(), String> {
+    let worker_limit = normalize_worker_limit(worker_limit);
     service.set_runtime_config(worker_limit, memory_budget_mb, quality);
     Ok(())
 }
