@@ -31,6 +31,12 @@ const REQUEST_DEBOUNCE_MS = 80;
 /** 停止滚动后多久才允许提交 idle（§5.3）。 */
 const IDLE_SETTLE_MS = 250;
 
+/** happy-dom / Storybook / 普通浏览器环境无 __TAURI_INTERNALS__，listen() 会抛；
+ * 仅在真正的 Tauri runtime 才打 log，避免测试日志噪音。 */
+function isTauriEnv(): boolean {
+  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
 export interface UseMasonryThumbnailsParams {
   descriptor: Ref<SourceDescriptor>;
   /** 当前目录相对 source root 的路径（如 `normal`），拼 sourceRelPath 用。 */
@@ -212,9 +218,10 @@ export function useMasonryThumbnails(
   };
 
   // 监听 Rust 状态事件
-  // v0.1.0-module3.0.8 audit-fix：happy-dom 等非 Tauri 环境 `__TAURI_INTERNALS__`
-  // 未挂载，listen() 抛 TypeError(transformCallback undefined)。生产端 Tauri runtime
-  // 保证存在；测试场景静默吞下避免 4× unhandled rejection。
+  // v0.1.0-module3.0.8 audit-fix：happy-dom / Storybook / 普通浏览器环境无
+  // __TAURI_INTERNALS__，listen() 抛 TypeError(transformCallback undefined)。
+  // 仅 Tauri runtime 静默失败才 log（实际不期望失败）；其他环境静默吞下避免
+  // 测试日志噪音与 4× unhandled rejection。
   void listen<ThumbnailStateEvent>('thumbnail://state', (event) => {
     const payload = event.payload;
     if (payload.epoch !== epoch.value) return; // 旧 epoch 忽略
@@ -245,7 +252,9 @@ export function useMasonryThumbnails(
   }).then((fn) => {
     unlisten = fn;
   }).catch((err) => {
-    log('[useMasonryThumbnails] listen(thumbnail://state) failed (likely non-Tauri env)', err);
+    if (isTauriEnv()) {
+      log('[useMasonryThumbnails] listen(thumbnail://state) failed (unexpected in Tauri env)', err);
+    }
   });
 
   const findEntry = (path: string): { entry: MediaEntry; item: ThumbnailRequestItem } | null => {
