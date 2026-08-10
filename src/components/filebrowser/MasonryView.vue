@@ -6,7 +6,14 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick, toRef } from 'v
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
 import { useVirtualList } from '@/composables/useVirtualList';
-import { useMasonryLayout, toRootRelativePath, type MasonryItem } from '@/composables/useMasonryLayout';
+import {
+  useMasonryLayout,
+  toRootRelativePath,
+  captureMasonryViewportAnchor,
+  restoreMasonryViewportAnchor,
+  type MasonryItem,
+  type MasonryViewportAnchor,
+} from '@/composables/useMasonryLayout';
 import { useMasonryThumbnails } from '@/composables/useMasonryThumbnails';
 import { useMasonryBrowsePosition } from '@/composables/useMasonryBrowsePosition';
 import { listImageDimensions } from '@/lib/tauri';
@@ -54,13 +61,58 @@ const { containerRef, scrollTop, viewportHeight } = useVirtualList(entriesRef, {
 const containerWidth = ref(0);
 const measuredMap = ref<Map<string, { width: number; height: number }>>(new Map());
 
-// ResizeObserver 拿 containerWidth
+// v0.1.0-module3.0.8 task-21: resize 视觉焦点漂移修复（spec §resize-anchor）。
+// 思路：resize 期间捕获 viewport anchor（path + ratio），layout 稳定后用 anchor 恢复
+// scrollTop——不读 progress、不按宽度比例换算。DB progress 与视觉焦点解耦，
+// resize 期间 useMasonryBrowsePosition 500ms cooldown 已保证不写 progress。
+let resizeAnchor: MasonryViewportAnchor | null = null;
+let resizeEndTimer: ReturnType<typeof setTimeout> | null = null;
+let resizeSeq = 0;
+
+function beginResizeAnchor(): void {
+  if (resizeAnchor) return;
+  resizeAnchor = captureMasonryViewportAnchor(
+    layout.value.map,
+    props.entries,
+    containerRef.value?.scrollTop ?? scrollTop.value,
+  );
+}
+
+async function restoreResizeAnchor(seq: number): Promise<void> {
+  await nextTick();
+  if (seq !== resizeSeq || !resizeAnchor || !containerRef.value) return;
+  const target = restoreMasonryViewportAnchor(resizeAnchor, layout.value.map);
+  if (target == null) return;
+  const maxScrollTop = Math.max(0, layout.value.totalHeight - containerRef.value.clientHeight);
+  const nextScrollTop = Math.max(0, Math.min(target, maxScrollTop));
+  containerRef.value.scrollTop = nextScrollTop;
+  scrollTop.value = nextScrollTop;
+}
+
+function scheduleResizeAnchorRelease(): void {
+  if (resizeEndTimer) clearTimeout(resizeEndTimer);
+  // resize 结束 150ms 后释放 anchor（避免 layout 总高度还有微调时还在恢复）
+  resizeEndTimer = setTimeout(() => {
+    resizeAnchor = null;
+    resizeEndTimer = null;
+  }, 150);
+}
+
+// ResizeObserver 拿 containerWidth + 触发 viewport anchor 恢复
 let ro: ResizeObserver | null = null;
 onMounted(async () => {
   await nextTick();
   if (!containerRef.value) return;
   ro = new ResizeObserver(() => {
-    if (containerRef.value) containerWidth.value = containerRef.value.clientWidth;
+    const el = containerRef.value;
+    if (!el) return;
+    const nextWidth = el.clientWidth;
+    if (nextWidth === containerWidth.value) return;
+    beginResizeAnchor();
+    const seq = ++resizeSeq;
+    containerWidth.value = nextWidth;
+    void restoreResizeAnchor(seq);
+    scheduleResizeAnchorRelease();
   });
   ro.observe(containerRef.value);
   containerWidth.value = containerRef.value.clientWidth || 1;
@@ -69,7 +121,10 @@ onMounted(async () => {
   // v0.1.0-module3.0.8 (任务 8): 启动浏览位置监听 + 查 progress + 可选自动滚
   await browsePosition.start();
 });
-onUnmounted(() => ro?.disconnect());
+onUnmounted(() => {
+  ro?.disconnect();
+  if (resizeEndTimer) { clearTimeout(resizeEndTimer); resizeEndTimer = null; }
+});
 
 /** v0.1.0-module3.0.8 (任务 8): 目录切换时让 composable 重新初始化（spec §3.4 做法 A）。
  *  用 stop+start 模式：停止滚动监听 + 清理 lastWrittenPath，再 start 触发

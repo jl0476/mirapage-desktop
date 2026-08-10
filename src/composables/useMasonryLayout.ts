@@ -123,6 +123,59 @@ export function applyMeasuredBatch(params: AnchorParams): number {
   return compensation;
 }
 
+/**
+ * viewport anchor：resize 后保持视觉焦点不漂移（spec v0.1.0-module3.0.8 task-21）。
+ * - 捕获：旧 layout + scrollTop → 找出穿过顶线且 top 最大的图片，记录 (path, ratio)。
+ * - 恢复：新 layout + anchor → 把该图片的同一相对位置放到新顶线。
+ * 不读 DB、不按宽度比例换算——纯像素锚定。
+ */
+export interface MasonryViewportAnchor {
+  path: string;
+  /** 视口顶线在图片内的相对位置（0=顶边，1=底边） */
+  ratio: number;
+}
+
+/**
+ * 从旧 layout + scrollTop 捕获 anchor：找穿过顶线且 top 最大的图。
+ * 多张图跨顶线时选 top 最大的（即顶线下方紧邻的那张）。
+ * 返回 null = scrollTop 完全在图下方（视口下方无相交的图）。
+ */
+export function captureMasonryViewportAnchor(
+  layout: Map<string, MasonryItem>,
+  entries: readonly { path: string }[],
+  scrollTop: number,
+): MasonryViewportAnchor | null {
+  let intersecting: MasonryItem | null = null;
+  for (const entry of entries) {
+    const item = layout.get(entry.path);
+    if (!item) continue;
+    const intersectsTop =
+      item.top <= scrollTop && item.top + item.height > scrollTop;
+    if (intersectsTop && (!intersecting || item.top > intersecting.top)) {
+      intersecting = item;
+    }
+  }
+  if (!intersecting) return null;
+  const ratio = (scrollTop - intersecting.top) / intersecting.height;
+  return {
+    path: intersecting.path,
+    ratio: Math.max(0, Math.min(1, ratio)),
+  };
+}
+
+/**
+ * 用 anchor + 新 layout 算出新 scrollTop；锚点图不存在（被过滤/已离开）返 null。
+ * 算出值再交给调用方做 maxScrollTop 钳位。
+ */
+export function restoreMasonryViewportAnchor(
+  anchor: MasonryViewportAnchor,
+  layout: Map<string, MasonryItem>,
+): number | null {
+  const item = layout.get(anchor.path);
+  if (!item) return null;
+  return item.top + item.height * anchor.ratio;
+}
+
 // ─── 像素窗口（缩略图生成需求，§5.1）────────────────────────────────────
 
 export interface PixelWindowParams {

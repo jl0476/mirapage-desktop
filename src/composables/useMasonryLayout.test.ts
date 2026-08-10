@@ -2,10 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { ref } from 'vue';
 import {
   applyMeasuredBatch,
+  captureMasonryViewportAnchor,
   computeColWidth,
   DEFAULT_ASPECT_RATIO,
   estimateHeight,
   layoutMasonry,
+  restoreMasonryViewportAnchor,
   toRootRelativePath,
   useMasonryLayout,
   type MasonryInput,
@@ -172,6 +174,90 @@ describe('applyMeasuredBatch (滚动锚定补偿)', () => {
       newHeights: {},
     });
     expect(compensation).toBe(0);
+  });
+});
+
+describe('captureMasonryViewportAnchor / restoreMasonryViewportAnchor (resize 焦点漂移修复)', () => {
+  function mkItem(path: string, top: number, height: number): MasonryItem {
+    return { path, width: 100, height, top, left: 0, col: 0 };
+  }
+
+  it('重排后恢复同一图片及图片内相对位置', () => {
+    // 旧 layout: 605.jpg 在 top=1000, height=400
+    const oldLayout = new Map([
+      ['605.jpg', mkItem('605.jpg', 1000, 400)],
+    ]);
+    // scrollTop=1300 → 进入 605.jpg 300/400 = 75%
+    const anchor = captureMasonryViewportAnchor(
+      oldLayout,
+      [{ path: '605.jpg' }],
+      1300,
+    );
+    expect(anchor).not.toBeNull();
+    expect(anchor!.path).toBe('605.jpg');
+    expect(anchor!.ratio).toBeCloseTo(0.75);
+
+    // 新 layout: 605.jpg 移到 top=5000, height 变 800（resize 后宽度变）
+    const newLayout = new Map([
+      ['605.jpg', mkItem('605.jpg', 5000, 800)],
+    ]);
+    expect(restoreMasonryViewportAnchor(anchor!, newLayout)).toBe(5600); // 5000 + 800*0.75
+  });
+
+  it('多张图跨顶线时选 top 最大（顶线下方紧邻的那张）', () => {
+    // 模拟 3 列不同 top，scrollTop=150 同时穿过 a/b
+    const layout = new Map([
+      ['a.jpg', mkItem('a.jpg', 0, 200)],     // 跨顶线
+      ['b.jpg', mkItem('b.jpg', 100, 200)],   // 跨顶线且 top 最大
+      ['c.jpg', mkItem('c.jpg', 200, 200)],   // 不跨顶线（top == scrollTop）
+    ]);
+    const anchor = captureMasonryViewportAnchor(
+      layout,
+      [{ path: 'a.jpg' }, { path: 'b.jpg' }, { path: 'c.jpg' }],
+      150,
+    );
+    expect(anchor).not.toBeNull();
+    expect(anchor!.path).toBe('b.jpg');
+    expect(anchor!.ratio).toBeCloseTo(0.25); // (150-100)/200
+  });
+
+  it('锚点图不存在 → 返 null（让调用方走默认行为）', () => {
+    const anchor = { path: 'gone.jpg', ratio: 0.5 };
+    expect(restoreMasonryViewportAnchor(anchor, new Map())).toBeNull();
+  });
+
+  it('scrollTop 完全在图下方（视口下方无相交）→ 返 null', () => {
+    const layout = new Map([
+      ['a.jpg', mkItem('a.jpg', 0, 100)],
+    ]);
+    expect(captureMasonryViewportAnchor(layout, [{ path: 'a.jpg' }], 500)).toBeNull();
+  });
+
+  it('ratio 钳位到 [0, 1]（scrollTop 越界保护）', () => {
+    // scrollTop 恰好等于 item.top 时 ratio=0
+    const layout = new Map([
+      ['a.jpg', mkItem('a.jpg', 100, 100)],
+    ]);
+    const a0 = captureMasonryViewportAnchor(layout, [{ path: 'a.jpg' }], 100);
+    expect(a0!.ratio).toBe(0);
+    // scrollTop 接近 item.bottom 时 ratio 接近 1
+    const a1 = captureMasonryViewportAnchor(layout, [{ path: 'a.jpg' }], 199);
+    expect(a1!.ratio).toBeCloseTo(0.99);
+    // scrollTop 恰好等于 item.bottom 时（半开区间不包含），返 null（边界严格）
+    const a2 = captureMasonryViewportAnchor(layout, [{ path: 'a.jpg' }], 200);
+    expect(a2).toBeNull();
+  });
+
+  it('entry 在 layout 不存在 → 跳过（容错）', () => {
+    const layout = new Map([
+      ['a.jpg', mkItem('a.jpg', 0, 100)],
+    ]);
+    const anchor = captureMasonryViewportAnchor(
+      layout,
+      [{ path: 'b.jpg' }], // 不在 layout
+      50,
+    );
+    expect(anchor).toBeNull();
   });
 });
 
