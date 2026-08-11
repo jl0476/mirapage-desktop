@@ -1,14 +1,16 @@
-# 跨卷连续阅读 实现计划
+# 跨卷连续阅读 实现计划（v2）
 
-> **面向 AI 代理的工作者:** 必需子技能:使用 superpowers:subagent-driven-development(推荐)或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框(`- [ ]`)语法来跟踪进度。
+> **面向 AI 代理的工作者:** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）跟踪进度。
+>
+> **v2 变更**（vs v1）：吸收设计审查报告 P0/P1 + 三轮架构精化。前置 Loader 抽取任务；删 Archive 伪代码；删虚假 filter；Loader 返回 Snapshot；toast props/emits；瀑布流用 lastFetchedPath；删 tag/push 任务（收尾由分支收尾流程决定）。
 
-**目标:** 填实 `find_next_volume` stub,打通 reader(末页"再向下" / 9 宫格 / slideshow)与瀑布流(工具栏按钮)的跨卷连续阅读链路。
+**目标：** 填实 `find_next_volume` stub，打通 reader（末页"再向下" / 9 宫格 / slideshow）与瀑布流（工具栏按钮）的跨卷连续阅读链路。**范围收窄为仅 Local 目录卷**。
 
-**架构:** Rust `find_next_volume` command(async + factory + filter 参数)+ `NextVolumeResult` struct(descriptor+rel_path+title+is_archive)。前端 `useCrossVolume` composable 统一 `maybeContinue(force, dir)` 入口 + `loadCrossVolume`(智能恢复 via `initialSpreadIndex`)。reader 场景末页"再向下"(`nextPage` 检查 `isAtLastSpread`)与 slideshow tick 共用 `slideshow.pendingNextVolume` flag。瀑布流场景工具栏按钮直接 `fileBrowser.navigate`(同源不 setRoot)。
+**架构（三层 + route 唯一真值）：** 意图 → CrossVolumeController（决策+竞态）→ ReaderView 编排（navigateToVolume）→ route watch（唯一加载入口）→ useReaderBookLoader（返回不可变 Snapshot）。详见 [spec v2](../specs/2026-08-11-cross-volume-reading-design.md) §4。
 
-**技术栈:** Rust(Tauri 2.x async command + `algorithm::natural_compare` + `algorithm::path::PathUtils`)+ Vue 3(Pinia + composables + Vitest/happy-dom)
+**技术栈：** Rust（Tauri 2.x async command + `algorithm::natural_compare` + `algorithm::path::PathUtils`）+ Vue 3（Pinia + composables + Vitest/happy-dom）
 
-**spec:** [`docs/superpowers/specs/2026-08-11-cross-volume-reading-design.md`](../specs/2026-08-11-cross-volume-reading-design.md)
+**spec：** [`docs/superpowers/specs/2026-08-11-cross-volume-reading-design.md`](../specs/2026-08-11-cross-volume-reading-design.md)
 
 ---
 
@@ -17,592 +19,338 @@
 ### 创建
 | 文件 | 职责 |
 |---|---|
-| `src/composables/useCrossVolume.ts` | 跨卷统一入口(`maybeContinue` + `loadCrossVolume` + `armManualToast` + `bookSwapInFlight`) |
-| `src/composables/useCrossVolume.test.ts` | 单测(off/auto/manual × force 矩阵 + null + 智能恢复 + guard) |
-| `src/composables/useToast.ts` | 通用 toast 队列(`push` + 1500ms 自动隐藏,单例) |
+| `src/composables/useReaderBookLoader.ts` | 统一 Book Loader：`loadBookById`（读+算 Snapshot，不写 refs）+ `ensureBookId`（仅建立身份） |
+| `src/composables/useReaderBookLoader.test.ts` | 表征测试（抽取自现有 loadBook）+ 新用例 |
+| `src/composables/useCrossVolume.ts` | CrossVolumeController：状态机 + requestSeq + sameBookIdentity + trySave + clearPendingState/dismissManual |
+| `src/composables/useCrossVolume.test.ts` | 状态机 + 竞态 + 陈旧 + 保存失败 + 模式矩阵 |
+| `src/composables/useToast.ts` | 通用 toast 队列（单例，上限 1，1500ms 自动隐藏） |
 | `src/composables/useToast.test.ts` | 单测 |
 | `src/components/common/ToastHost.vue` | `<Teleport to="body">` 渲染 toast 队列 |
-| `src/components/reader/ContinueNextVolumeToast.vue` | manual 模式底部胶囊(跳转/关闭) |
-| `src/components/reader/ContinueNextVolumeToast.test.ts` | 单测 |
+| `src/components/reader/ContinueNextVolumeToast.vue` | manual 底部胶囊（纯 props/emits，不调 useCrossVolume） |
+| `src/components/reader/ContinueNextVolumeToast.test.ts` | props/emits 测试 |
 
 ### 修改
 | 文件 | 改动 |
 |---|---|
-| `src-tauri/src/commands/find_next_volume.rs` | stub → async 实现 + `pick_sibling` 纯函数 + `NextVolumeResult` |
-| `src/lib/tauri.ts:475` | `findNextVolume` 改返回 `NextVolumeResult\|null` + `filter` 参数 |
-| `src/lib/findNextDirectory.ts` | 加 `filter` 参数(校对) |
-| `src/lib/findNextDirectory.test.ts` | 加 filter 用例 |
-| `src/stores/reader.ts` | 加 `sourceDescriptor`/`currentRelPath` state + `flushProgress` + `nextPage` atLast 分支 |
-| `src/stores/reader.test.ts` | 扩用例 |
-| `src/composables/useMasonryBrowsePosition.ts` | 加 `flushNow()` 方法 |
+| `src-tauri/src/commands/find_next_volume.rs` | stub → async 实现 + `pick_sibling` 纯函数（返回 entry）+ `NextVolumeResult`（无 is_archive） |
+| `src/lib/tauri.ts` | `findNextVolume` 改返回 `NextVolumeResult \| null`（无 isArchive） |
+| `src/stores/reader.ts` | 加 `sourceDescriptor`/`currentRelPath` state + `saveCurrentProgressNow()`（await 构造快照）+ `nextPage` atLast 回调 + `setOnAtLastNextAttempt` + `OpenBookPayload` 扩展 |
+| `src/stores/reader.test.ts` | saveCurrentProgressNow / nextPage atLast / setOnAtLastNextAttempt 用例 |
+| `src/views/ReaderView.vue` | route watch immediate（删 onMounted）+ loadRouteBook + commitBookSnapshot + retryCurrentBook + navigateToVolume + Controller 实例化 + 触发接线 + 卸载清理 |
+| `src/views/ReaderView.test.ts` | loadRouteBook 去重/失败不保留旧卷/stale；commitBookSnapshot 原子 |
+| `src/composables/useMasonryBrowsePosition.ts` | 加 `flushNow()` |
 | `src/composables/useMasonryBrowsePosition.test.ts` | flushNow 用例 |
-| `src/views/ReaderView.vue` | 接 `useCrossVolume` + watch + 挂 toast |
-| `src/components/filebrowser/FileBrowser.vue` | 工具栏"下一卷"按钮(masonry 场景) |
-| `src/locales/zh-CN.ts` + `en-US.ts` | 6 key |
+| `src/components/filebrowser/MasonryView.vue` | defineExpose 加 `flushBrowsePosition`（P1-1 转发链） |
+| `src/components/filebrowser/FileList.vue` | 加 `masonryFlushNow` + defineExpose（P1-1 转发链） |
+| `src/components/filebrowser/FileBrowser.vue` | 工具栏"下一卷"按钮（不绑 viewMode）+ onCrossNextVolume（lastFetchedPath） |
+| `src/composables/useReaderHotkeys.ts` | 加 `ReaderHotkeyActions` 参数，folderNext 接 `actions.nextVolume`（P1-2） |
+| `src/composables/useReaderHotkeys.test.ts` | actions 参数回归 |
+| `src/locales/zh-CN.ts` + `en-US.ts` | 7 key |
+
+### 不改
+| 文件 | 原因 |
+|---|---|
+| `src/lib/findNextDirectory.ts` | **不加 filter 参数**（v2 删除虚假 filter，P1-5）。保持原签名。 |
+| `src/lib/findNextDirectory.test.ts` | 现有用例不动 |
 
 ---
 
-## 任务 1:Rust `pick_sibling` 纯函数 + 单测
+## 任务 0：抽取统一 useReaderBookLoader（前置，表征测试优先）
 
-**文件:**
-- 修改:`src-tauri/src/commands/find_next_volume.rs`(加纯函数 + `#[cfg(test)]` 模块)
+> **为什么前置**：P0-1 指出跨卷不能只调 `reader.openBook`（ReaderView 持有 pageUrls/imageNames/book/status 等 local ref）。必须先把现有 `ReaderView.loadBook()` 抽成可复用 Loader，返回不可变 Snapshot，首次开卷行为不变，跨卷才能安全复用。
 
-**说明:** 算法核心抽成纯函数(不依赖 IO),便于单测。复用 `algorithm::natural_compare`。
+**文件：**
+- 创建：`src/composables/useReaderBookLoader.ts`
+- 创建：`src/composables/useReaderBookLoader.test.ts`
+- 修改：`src/views/ReaderView.vue`（loadBook 改调 loader + commitBookSnapshot）
 
-- [ ] **步骤 1:编写失败的测试**
+**参考：** 现有 `ReaderView.loadBook`（`ReaderView.vue:181-313`）——这是要抽取的源逻辑。
 
-在 `find_next_volume.rs` 末尾加:
+- [ ] **步骤 1：写表征测试（先固定现有行为）**
 
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::source::MediaEntry;
+`src/composables/useReaderBookLoader.test.ts`：mock `getBook`/`listDirectory`/`getProgress`，验证 `loadBookById(bookId)` 返回 `ReaderBookSnapshot`（含 book/descriptor/relPath/imageNames/pageUrls/spreads/initialSpreadIndex），**不写任何 ref / 不调 reader.openBook**。覆盖：
+- 正常 Local 目录：返回 Snapshot，pageUrls 是 convertFileSrc URL（非文件名）。
+- 非 Local descriptor：throw（收窄，message 含"非本地"）。
+- filter 图片：排除 isDirectory / isArchive / 非图。
+- 排序：directorySort per-folder override 命中 vs fallback settings。
+- 智能恢复：explicitImageName 命中；progress.imageName 命中；progress.page fallback；progress.finished → 0；无 progress → 0。
+- ensureBookId：createBook UPSERT 返回 id（mock createBook）。
+- **`loadBookById(bookId, { explicitImageName })` 锁定起始图**（P1-3：任务 0 就要传 ?at，不能等任务 8）：传入 explicitImageName → initialSpreadIndex 对应该图所在 spread。
 
-    fn entry(name: &str, is_dir: bool, is_archive: bool) -> MediaEntry {
-        MediaEntry {
-            name: name.into(),
-            path: name.into(),
-            is_directory: is_dir,
-            is_archive,
-            size: 0,
-            modified_at: 0,
-        }
-    }
+- [ ] **步骤 2：运行测试验证失败**
 
-    #[test]
-    fn pick_next_among_dirs() {
-        let s = vec![entry("vol1", true, false), entry("vol2", true, false), entry("vol3", true, false)];
-        assert_eq!(pick_sibling(&s, "vol2", "next", "reader").map(|i| s[i].name.as_str()), Some("vol3"));
-    }
+```bash
+npx vitest run src/composables/useReaderBookLoader.test.ts
+```
+预期：FAIL（模块不存在）。
 
-    #[test]
-    fn pick_prev_among_dirs() {
-        let s = vec![entry("vol1", true, false), entry("vol2", true, false), entry("vol3", true, false)];
-        assert_eq!(pick_sibling(&s, "vol2", "prev", "reader").map(|i| s[i].name.as_str()), Some("vol1"));
-    }
+- [ ] **步骤 3：实现 useReaderBookLoader**
 
-    #[test]
-    fn next_at_last_returns_none() {
-        let s = vec![entry("vol1", true, false), entry("vol2", true, false)];
-        assert_eq!(pick_sibling(&s, "vol2", "next", "reader"), None);
-    }
+`src/composables/useReaderBookLoader.ts`：把 `ReaderView.loadBook` 的 IO+计算逻辑搬入，返回 `ReaderBookSnapshot`（spec §8）。关键：
+- `loadBookById(bookId, opts?)`：getBook → 解析 descriptor（非 Local throw）→ listDirectory → filter 图片 → directorySort.resolve 排序 → imageNames + convertFileSrc pageUrls → spreads → resolveStart（explicit→imageName→page→0；finished→0）→ return Snapshot。**全程不写 refs，不调 reader.openBook**。
+- `ensureBookId(target)`：`createBook(UPSERT)` 返回 id。**CreateBookArgs 最小映射见 spec §8**（sourceType='Local' / favorite=false / coverEntryPath/Name=null / pageCount=0；接受 createBook 对已存在行不更新封面/页数，不扩大范围）。
+- 导出类型 `ReaderBookSnapshot` / `LoadBookOptions` / `NextVolumeTarget`（spec §7）。
 
-    #[test]
-    fn current_not_in_siblings_returns_none() {
-        let s = vec![entry("vol1", true, false), entry("vol2", true, false)];
-        assert_eq!(pick_sibling(&s, "ghost", "next", "reader"), None);
-    }
+- [ ] **步骤 4：运行测试验证通过**
 
-    #[test]
-    fn natural_sort_order_page2_before_page10() {
-        let s = vec![entry("page10", true, false), entry("page2", true, false)];
-        // 排序后 page2 在前;从 page2 next → page10
-        assert_eq!(pick_sibling(&s, "page2", "next", "reader").map(|i| s[i].name.as_str()), Some("page10"));
-    }
+```bash
+npx vitest run src/composables/useReaderBookLoader.test.ts
+```
+预期：PASS。
 
-    #[test]
-    fn filter_reader_keeps_dir_and_archive() {
-        let s = vec![entry("vol1", true, false), entry("pack.cbz", false, true), entry("vol2", true, false)];
-        // reader filter: vol1 → pack.cbz (archive 也算卷)
-        assert_eq!(pick_sibling(&s, "vol1", "next", "reader").map(|i| s[i].name.as_str()), Some("pack.cbz"));
-    }
+- [ ] **步骤 5：ReaderView 接入 loader（首次开卷行为不变）**
 
-    #[test]
-    fn filter_masonry_skips_archive() {
-        let s = vec![entry("vol1", true, false), entry("pack.cbz", false, true), entry("vol2", true, false)];
-        // masonry filter: vol1 → vol2 (跳过 archive)
-        assert_eq!(pick_sibling(&s, "vol1", "next", "masonry").map(|i| s[i].name.as_str()), Some("vol2"));
-    }
+`src/views/ReaderView.vue`：
+- `loadBook()` 改为调 `loader.loadBookById(id, { explicitImageName: initialImageName.value ?? undefined })`（**P1-3：任务 0 就传 ?at，避免回归**；`initialImageName` 是现有 computed，读 `route.query.at`），结果经 `commitBookSnapshot(snapshot)` 提交（spec §11.1）。
+- 加 `commitBookSnapshot` 函数（原子写 book/pageUrls/imageNames refs + reader.openBook + reader.imageNames）。
+- **暂时保留 onMounted(loadBook)**（任务 8 才改 route watch immediate，避免本任务动太多）。
+- 现有 `ReaderView.test.ts` 应全绿（行为不变，含 ?at 入口用例）。
 
-    #[test]
-    fn empty_siblings_returns_none() {
-        let s: Vec<MediaEntry> = vec![];
-        assert_eq!(pick_sibling(&s, "vol1", "next", "reader"), None);
-    }
-}
+- [ ] **步骤 6：全测 + type-check**
+
+```bash
+npm run type-check && npx vitest run src/views/ReaderView.test.ts src/composables/useReaderBookLoader.test.ts
+```
+预期：PASS（首次开卷行为不变，Loader 抽取纯重构）。
+
+- [ ] **步骤 7：Commit**
+
+```bash
+git add src/composables/useReaderBookLoader.ts src/composables/useReaderBookLoader.test.ts src/views/ReaderView.vue
+git commit -m "refactor(reader): 抽取 useReaderBookLoader (loadBook → Snapshot，首次开卷行为不变)"
 ```
 
-- [ ] **步骤 2:运行测试验证失败**
+---
+
+## 任务 1：Rust `pick_sibling` 纯函数 + 单测
+
+**文件：**
+- 修改：`src-tauri/src/commands/find_next_volume.rs`（加纯函数 + `#[cfg(test)]` 模块）
+
+**说明：** 纯函数返回 `Option<MediaEntry>`（**不返回索引**，P1-5 修复）。只保留 `is_directory`（收窄 Local 目录卷）。
+
+- [ ] **步骤 1：编写失败的测试**
+
+`find_next_volume.rs` 末尾加 `#[cfg(test)] mod tests`，覆盖（spec §17.1）：
+- next/prev 取相邻；current 在首/末；current 不在 siblings（None）；空 siblings；natural sort（page2 在 page10 前）。
+
+测试用 `pick_sibling(&siblings, "vol2", VolumeDirection::Next).map(|e| e.name.as_str())` 断言（返回 entry 非索引；direction 是 enum 非 &str，见任务 2 步骤 1）。`MediaEntry` 字段名以 `descriptor.rs:147` 为准（`modified_at` / `is_directory` 等）。
+
+- [ ] **步骤 2：运行测试验证失败**
 
 ```bash
 cd src-tauri && cargo test -p mirapage-desktop-lib pick_sibling -- --nocapture
 ```
-预期:编译失败(`pick_sibling` 未定义 / `MediaEntry` 字段名 `modified_at` 若不准按 `descriptor.rs:147` 校对)。
+预期：编译失败（`pick_sibling` 未定义）。
 
-- [ ] **步骤 3:编写 `pick_sibling` 实现**
+- [ ] **步骤 3：实现 `pick_sibling`**（spec §5.2 纯函数版）
 
-在 `find_next_volume.rs` 顶部(结构体定义之前)加:
+只过滤 `is_directory`，按 natural_compare 排序，返回目标 entry 的克隆。direction 是 `VolumeDirection` enum（`Next` → pos+1，`Prev` → `checked_sub(1)?`；无 `_` fallback 分支，enum 已穷尽）。
 
-```rust
-use crate::algorithm::natural_compare;
-use crate::source::MediaEntry;
-
-/// 纯函数:在 siblings 里按 natural sort 找 current 的 next/prev。
-/// filter="reader" 保留 is_directory||is_archive;"masonry" 只保留 is_directory。
-/// 返回目标在原 siblings 数组的索引(未排序前的),None 表示越界/current 不在。
-pub fn pick_sibling(
-    siblings: &[MediaEntry],
-    current_basename: &str,
-    direction: &str,
-    filter: &str,
-) -> Option<usize> {
-    if siblings.is_empty() {
-        return None;
-    }
-    let mut filtered: Vec<usize> = siblings
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| match filter {
-            "masonry" => e.is_directory,
-            _ => e.is_directory || e.is_archive,
-        })
-        .map(|(i, _)| i)
-        .collect();
-    filtered.sort_by(|&a, &b| natural_compare(&siblings[a].name, &siblings[b].name));
-    let pos = filtered
-        .iter()
-        .position(|&i| siblings[i].name == current_basename)?;
-    let target_pos = match direction {
-        "prev" => pos.checked_sub(1)?,
-        _ => pos + 1,
-    };
-    filtered.get(target_pos).copied()
-}
-```
-
-- [ ] **步骤 4:运行测试验证通过**
+- [ ] **步骤 4：运行测试验证通过**
 
 ```bash
 cd src-tauri && cargo test -p mirapage-desktop-lib pick_sibling -- --nocapture
 ```
-预期:8 测试 PASS。
+预期：PASS。
 
-- [ ] **步骤 5:Commit**
+- [ ] **步骤 5：Commit**
 
 ```bash
 git add src-tauri/src/commands/find_next_volume.rs
-git commit -m "feat(cross-volume): pick_sibling 纯函数 + 8 单测 (algorithm)"
+git commit -m "feat(cross-volume): pick_sibling 纯函数 + 单测 (返回 entry，仅 is_directory)"
 ```
 
 ---
 
-## 任务 2:Rust `find_next_volume` command 实现
+## 任务 2：Rust `find_next_volume` command 实现
 
-**文件:**
-- 修改:`src-tauri/src/commands/find_next_volume.rs`(stub → async 实现 + `NextVolumeResult`)
-- 参考:`src-tauri/src/source/descriptor.rs`(确认 `SourceDescriptor::Archive` variant 字段)
+**文件：**
+- 修改：`src-tauri/src/commands/find_next_volume.rs`（stub → async 实现 + `NextVolumeResult`）
 
-**说明:** command 接 `MediaSourceFactory` State,async。解析 parent → listDirectory → `pick_sibling` → 构造 `NextVolumeResult`。
+**说明：** command 接 `MediaSourceFactory` State，async。**强类型 descriptor**（不操作 serde_json::Value，P1-5）。**仅 Local**（非 Local 返回明确错误，不静默 fallback）。`NextVolumeResult` **无 is_archive 字段**。**删除 filter 参数**（P1-3：reader/masonry 在仅 Local 目录卷下语义一致）。**direction 用强类型 enum**（P2：非法值反序列化边界报错，不静默当 next）。
 
-- [ ] **步骤 1:读取 `descriptor.rs` 确认类型**
-
-```bash
-# 确认 SourceDescriptor enum 的 4 个 variant 字段名 + Archive 的 format/entry_prefix 字段
-grep -n "pub enum SourceDescriptor" -A 30 src-tauri/src/source/descriptor.rs
-grep -n "pub enum ArchiveFormat" -A 10 src-tauri/src/source/descriptor.rs
-```
-记录:Archive variant 字段(如 `archive_path`/`format`/`entry_prefix`)+ ArchiveFormat 变体名。实现时按实际字段名,不臆造。
-
-- [ ] **步骤 2:加 `NextVolumeResult` + 改 `FindNextVolumeArgs`**
-
-在 `find_next_volume.rs` 替换现有 struct + 加新 struct:
+- [ ] **步骤 1：加 `NextVolumeResult` + `VolumeDirection` enum + 改 `FindNextVolumeArgs`**（spec §5.1）
 
 ```rust
-use serde::{Deserialize, Serialize};
-use tauri::State;
-
-use crate::algorithm::path::PathUtils;
-use crate::source::{MediaSourceFactory, SourceDescriptor};
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VolumeDirection { Next, Prev }   // P2：非法值反序列化报错
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FindNextVolumeArgs {
     pub descriptor: serde_json::Value,
-    /// 当前卷相对 rootPath 的完整路径(如 "comics/vol1");parent = PathUtils.parent(this)
     pub current_path: String,
-    pub direction: String,          // "next" | "prev"
-    #[serde(default = "default_filter")]
-    pub filter: String,             // "reader" | "masonry"
+    pub direction: VolumeDirection,
+    // 无 filter（P1-3 删除）
 }
-
-fn default_filter() -> String { "reader".into() }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NextVolumeResult {
-    /// 下一卷完整 SourceDescriptor(目录:同源改 path;archive:Archive variant)
     pub descriptor: serde_json::Value,
-    /// 下一卷相对 rootPath 的完整路径(前端可直接 listDirectory(descriptor, rel_path))
     pub rel_path: String,
-    /// 显示名(目录名 / 压缩包名)
     pub title: String,
-    pub is_archive: bool,
+    // 无 is_archive
 }
 ```
 
-- [ ] **步骤 3:实现 async command**
+- [ ] **步骤 2：实现 async command**（spec §5.2）
 
-替换现有 `pub fn find_next_volume(args: ...) -> Result<Option<String>, String>`:
+替换现有 stub。强类型解析 descriptor → match Local 取 root_path（非 Local 返回 `Err`）→ parent_path/segments → list_directory → `pick_sibling(&siblings, &current_basename, args.direction)`（direction 是 enum，非 &str）→ 构造 NextVolumeResult（同源 descriptor + rel_path）。
 
-```rust
-#[tauri::command]
-pub async fn find_next_volume(
-    args: FindNextVolumeArgs,
-    factory: State<'_, MediaSourceFactory>,
-) -> Result<Option<NextVolumeResult>, String> {
-    let descriptor: SourceDescriptor = serde_json::from_value(args.descriptor.clone())
-        .map_err(|e| format!("invalid descriptor: {e}"))?;
-    let parent_path = PathUtils::parent(&args.current_path);
-    let current_basename = PathUtils::segments(&args.current_path)
-        .last()
-        .cloned()
-        .unwrap_or_default();
+- [ ] **步骤 3：command 集成测试**（spec §17.1）
 
-    // parent descriptor:Local/WebDav 同源(parent 目录);Archive 归一化到包所在目录
-    let (parent_descriptor, parent_list_path, archive_origin_root) = match &descriptor {
-        SourceDescriptor::Local { .. } | SourceDescriptor::WebDav { .. } => {
-            (descriptor.clone(), parent_path.clone(), false)
-        }
-        SourceDescriptor::Archive { .. } => {
-            // Archive 当前卷:归一化到 origin 的包所在目录。
-            // 简化:取 archive_path 的 parent 作为 list 目录,descriptor 用 origin 同源。
-            // 完整 archiveKeyParts 见 DESIGN.md §13.1;本版用 archive_path 直接 parent。
-            let json = serde_json::to_value(&descriptor).map_err(|e| e.to_string())?;
-            let ap = json.get("archivePath").and_then(|v| v.as_str()).unwrap_or("");
-            let p = PathUtils::parent(ap);
-            (descriptor.clone(), p, true)
-        }
-        _ => return Ok(None),
-    };
+mock MediaSourceFactory 或 in-memory source，覆盖：Local 目录跨卷、越界 None、current 不存在、非 Local 返回明确错误。Windows/POSIX 分隔符各一例。
 
-    let source = factory.resolve(&parent_descriptor);
-    let siblings = source.list_directory(&parent_list_path).await
-        .map_err(|e| e.to_string())?;
-    let target_idx = match pick_sibling(&siblings, &current_basename, &args.direction, &args.filter) {
-        Some(i) => i,
-        None => return Ok(None),
-    };
-    let target = &siblings[target_idx];
-
-    // 构造下一卷 descriptor + rel_path
-    let (next_descriptor, next_rel_path) = if target.is_archive {
-        // Archive variant:archivePath = parent_path/name, format 从扩展名推断,entry_prefix = ""
-        let archive_full = if parent_list_path.is_empty() {
-            target.name.clone()
-        } else {
-            PathUtils::join(&parent_list_path, &target.name)
-        };
-        let fmt = crate::algorithm::mime::archive_format_from_name(&target.name);
-        let next_desc = SourceDescriptor::Archive {
-            archive_path: archive_full.clone(),
-            format: fmt,
-            entry_prefix: String::new(),
-        };
-        let desc_json = serde_json::to_value(&next_desc).map_err(|e| e.to_string())?;
-        (desc_json, archive_full)
-    } else {
-        // 目录:同源(改 path)— clone parent descriptor 的 JSON,前端 resolve 时 path 由 rel_path 提供
-        let desc_json = serde_json::to_value(&parent_descriptor).map_err(|e| e.to_string())?;
-        let rel = if parent_list_path.is_empty() {
-            target.name.clone()
-        } else {
-            PathUtils::join(&parent_list_path, &target.name)
-        };
-        (desc_json, rel)
-    };
-
-    let _ = archive_origin_root; // 静默未使用(Archive 归一化简化版)
-
-    Ok(Some(NextVolumeResult {
-        descriptor: next_descriptor,
-        rel_path: next_rel_path,
-        title: target.name.clone(),
-        is_archive: target.is_archive,
-    }))
-}
-```
-
-**注:** 若 `algorithm::mime` 无 `archive_format_from_name`,加一个纯函数(参考 `mime.rs` 现有 `is_archive` 的扩展名判断,映射 cbz/zip→Zip、cbr/rar→Rar、7z→SevenZ)。`SourceDescriptor::Archive` 字段名以步骤 1 grep 结果为准——若 variant 用 `archive_path`/`format`/`entry_prefix` 之外的名,按实际改。
-
-- [ ] **步骤 4:编译验证**
+- [ ] **步骤 4：编译 + 测试验证**
 
 ```bash
-cd src-tauri && cargo check --lib
+cd src-tauri && cargo check --lib && cargo test -p mirapage-desktop-lib find_next_volume -- --nocapture
 ```
-预期:编译通过(可能有 unused 警告,任务 3 接前端后消除)。
+预期：编译通过；集成测试 PASS。
 
-- [ ] **步骤 5:Commit**
+- [ ] **步骤 5：Commit**
 
 ```bash
-git add src-tauri/src/commands/find_next_volume.rs src-tauri/src/algorithm/mime.rs
-git commit -m "feat(cross-volume): find_next_volume 替换 stub (async + factory + NextVolumeResult)"
+git add src-tauri/src/commands/find_next_volume.rs
+git commit -m "feat(cross-volume): find_next_volume 替换 stub (async + factory + 仅 Local + NextVolumeResult)"
 ```
 
 ---
 
-## 任务 3:前端 `findNextVolume` IPC 改返回类型 + `NextVolumeResult` TS 类型
+## 任务 3：前端 `findNextVolume` IPC 改返回类型
 
-**文件:**
-- 修改:`src/lib/tauri.ts:475-483`
-- 修改:`src/lib/sourceDescriptor.ts`(若 Archive variant TS 类型缺字段,补齐)
+**文件：**
+- 修改：`src/lib/tauri.ts`（`findNextVolume`）
 
-- [ ] **步骤 1:加 `NextVolumeResult` TS 类型 + 改 `findNextVolume`**
-
-在 `src/lib/tauri.ts` 找到现有 `findNextVolume`(约 line 475),替换:
+- [ ] **步骤 1：改 `findNextVolume` + 加 `NextVolumeResult`**（spec §6.1）
 
 ```typescript
 export interface NextVolumeResult {
   descriptor: SourceDescriptor;
-  /** 下一卷相对 rootPath 的完整路径(可直接 listDirectory(descriptor, relPath)) */
   relPath: string;
   title: string;
-  isArchive: boolean;
+  // 无 isArchive
 }
-
+// P1-3：删除 filter 参数
 export async function findNextVolume(
-  descriptor: SourceDescriptor,
-  currentPath: string,
+  descriptor: SourceDescriptor, currentPath: string,
   direction: 'next' | 'prev',
-  filter: 'reader' | 'masonry' = 'reader',
-): Promise<NextVolumeResult | null> {
-  return invoke<NextVolumeResult | null>('find_next_volume', {
-    args: { descriptor, currentPath, direction, filter },
-  });
-}
+): Promise<NextVolumeResult | null> { ... }
 ```
 
-- [ ] **步骤 2:确认 `SourceDescriptor` 的 Archive variant TS 字段**
-
-```bash
-grep -n "Archive" src/lib/sourceDescriptor.ts
-```
-确认 Archive variant 有 `archivePath`/`format`/`entryPrefix`(camelCase,与 Rust serde camelCase 对齐)。缺则补。
-
-- [ ] **步骤 3:type-check 验证**
+- [ ] **步骤 2：type-check**
 
 ```bash
 npm run type-check
 ```
-预期:无新错误(若有"findNextVolume 调用处参数不匹配",后续任务 4/8 修正调用方)。
+预期：无新错误（调用方在任务 5/8 修正）。
 
-- [ ] **步骤 4:Commit**
+- [ ] **步骤 3：Commit**
 
 ```bash
-git add src/lib/tauri.ts src/lib/sourceDescriptor.ts
-git commit -m "feat(cross-volume): findNextVolume IPC 改 NextVolumeResult + filter 参数"
+git add src/lib/tauri.ts
+git commit -m "feat(cross-volume): findNextVolume IPC 改 NextVolumeResult (无 isArchive)"
 ```
 
 ---
 
-## 任务 4:`lib/findNextDirectory.ts` 加 filter 参数(校对)
+## 任务 4：reader store 扩展
 
-**文件:**
-- 修改:`src/lib/findNextDirectory.ts`
-- 修改:`src/lib/findNextDirectory.test.ts`
+**文件：**
+- 修改：`src/stores/reader.ts`
+- 修改：`src/stores/reader.test.ts`
 
-- [ ] **步骤 1:加 filter 测试用例**
+**说明：** `saveCurrentProgressNow`（P1-1：构造快照 await，不只 flush pending）；`nextPage` atLast 回调；`setOnAtLastNextAttempt`（卸载清理，不变量 11）；`sourceDescriptor`/`currentRelPath` state；`OpenBookPayload` 扩展。
 
-在 `findNextDirectory.test.ts` 加:
+- [ ] **步骤 1：加测试用例**（spec §17.2 reader store）
 
-```typescript
-describe('findNextDirectory filter', () => {
-  it('filter=masonry 时调用方应预先过滤掉 archive', () => {
-    // findNextDirectory 接 string[] (名字),filter 参数记录意图;
-    // 实际过滤在调用方(listDirectory 后按 isArchive 过滤再传入)。
-    const masonrySiblings = ['vol1', 'vol2', 'vol3']; // 调用方已过滤掉 pack.cbz
-    expect(findNextDirectory(masonrySiblings, 'vol1', 'next', 'masonry')).toBe('vol2');
-  });
+覆盖：saveCurrentProgressNow（有/无 pending debounce；首页未翻页；末页 finished=true；await saveProgress）；nextPage atLast 调 onAtLastNextAttempt 不翻页；非末页正常 ++；setOnAtLastNextAttempt(null) 清理。
 
-  it('默认 filter=reader', () => {
-    const s = ['vol1', 'vol2'];
-    expect(findNextDirectory(s, 'vol1', 'next')).toBe('vol2');
-    expect(findNextDirectory(s, 'vol1', 'next', 'reader')).toBe('vol2');
-  });
-});
-```
+- [ ] **步骤 2：运行测试验证失败** → `npx vitest run src/stores/reader.test.ts`
 
-- [ ] **步骤 2:运行测试验证失败**
+- [ ] **步骤 3：实现扩展**（spec §9）
+
+- state `sourceDescriptor`/`currentRelPath`；`OpenBookPayload` 加可选 `sourceDescriptor?`/`currentRelPath?`；openBook 写入。
+- `saveCurrentProgressNow()`：取消 debounce + 读 store 当前状态构造 PageChangeInfo + await saveProgress。
+- `nextPage`：`isAtLastSpread` 时调 `onAtLastNextAttempt?.()` 不翻页；else ++。
+- `setOnAtLastNextAttempt(fn|null)`。
+- return 加全部新成员。
+
+- [ ] **步骤 4：运行测试验证通过** → `npx vitest run src/stores/reader.test.ts`
+
+- [ ] **步骤 5：Commit**
 
 ```bash
-npx vitest run src/lib/findNextDirectory.test.ts
-```
-预期:FAIL(`findNextDirectory` 不接第 4 参数)。
-
-- [ ] **步骤 3:加 filter 参数**
-
-`src/lib/findNextDirectory.ts` 替换函数签名:
-
-```typescript
-export function findNextDirectory(
-  siblings: string[],
-  currentPath: string,
-  direction: Direction,
-  filter: 'reader' | 'masonry' = 'reader',
-): string | null {
-  // 注:filter 参数记录意图 + 文档对齐 Rust pick_sibling。
-  // 实际过滤(dir/archive)在调用方做——本函数接收已过滤的 string[]。
-  // 详见 spec §6。
-  const _ = filter; // 目前不影响纯字符串逻辑;留作语义标记
-  if (siblings.length === 0) return null;
-  const sorted = [...siblings].sort((a, b) => naturalCompare(a, b));
-  const idx = sorted.indexOf(currentPath);
-  if (idx === -1) return null;
-  const target = direction === 'next' ? idx + 1 : idx - 1;
-  if (target < 0 || target >= sorted.length) return null;
-  return sorted[target];
-}
-```
-
-- [ ] **步骤 4:运行测试验证通过**
-
-```bash
-npx vitest run src/lib/findNextDirectory.test.ts
-```
-预期:PASS。
-
-- [ ] **步骤 5:Commit**
-
-```bash
-git add src/lib/findNextDirectory.ts src/lib/findNextDirectory.test.ts
-git commit -m "feat(cross-volume): findNextDirectory 加 filter 参数 (TS 镜像校对)"
+git add src/stores/reader.ts src/stores/reader.test.ts
+git commit -m "feat(cross-volume): reader store 加 saveCurrentProgressNow + nextPage atLast 回调 + sourceDescriptor/currentRelPath"
 ```
 
 ---
 
-## 任务 5:`useToast` composable + `ToastHost` 组件
+## 任务 5：useCrossVolume — CrossVolumeController
 
-**文件:**
-- 创建:`src/composables/useToast.ts`
-- 创建:`src/composables/useToast.test.ts`
-- 创建:`src/components/common/ToastHost.vue`
+**文件：**
+- 创建：`src/composables/useCrossVolume.ts`
+- 创建：`src/composables/useCrossVolume.test.ts`
 
-**说明:** 单例 toast 队列,跨卷用它显示"无下一卷/已跳转/失败"。后续其他模块可复用。
+**说明：** 状态机 `idle/resolving/awaiting-confirm/navigating`；requestSeq + sameBookIdentity 结构化校验；trySave 包裹（保存失败不进 navigate 失败分支，不变量 10）；clearPendingState（仅清数据+slideshow flag）vs dismissManual（toast close 专用，只在 awaiting-confirm 生效 + 推 seq）。全部依赖经 opts 注入（可独立单测）。
 
-- [ ] **步骤 1:编写失败的测试**
+- [ ] **步骤 1：编写失败的测试**（spec §17.2 useCrossVolume）
 
-`src/composables/useToast.test.ts`:
+注入 opts（mock findNextVolume + identity + navigateToVolume + saveCurrentProgressNow + pushToast + getContinueMode + pauseSlideshow + consumePendingNextVolume + **canStart**）。覆盖：
+- maybeContinue(force=true) 直接 navigate（不看 mode）。
+- **force=false + off → return + consumePendingNextVolume 调用一次 + findNextVolume 不调用 + navigateToVolume 不调用**（P0-1：off 在 find 前处理）。
+- force=false + auto → navigateResolvedTarget。
+- force=false + manual → 填 pendingCrossVolume + identityAtArm，phase=awaiting-confirm，不 navigate。
+- **canStart()=false（加载期）→ maybeContinue 直接 return，findNextVolume 不调用**（P1-1：末页 flag / 9宫格 / Alt+→ 在 route Loader 未完成时都不发起跨卷）。**且 consumePendingNextVolume 调用一次**（边界：加载期 pendingNextVolume 已置位，消费它防止 flag 停留 true 导致后续跨卷意图丢失）。
+- confirmManual：identity 未变 → navigate；identity 已变 → 丢弃。
+- **confirmManual 双击守卫**（P1-2）：两次同步 confirmManual() → saveCurrentProgressNow/navigateToVolume 各只调用一次（第二次因 phase!=='awaiting-confirm' return）。
+- dismissManual：只在 awaiting-confirm 生效 + 推 requestSeq（失效旧请求）+ settleIdle。
+- **navigateResolvedTarget 失败路径 pending 清空**（P0-2 不变量）：identity 初校验失败 / 保存后二次校验失败 / navigateToVolume throw → 三种情况都 pendingCrossVolume===null + phase idle（用 settleIdle）。
+- 陈旧请求：A 发起 find，期间切到 B（identity 变），A 晚返回 → 丢弃（不 navigate）+ pending 清空。
+- 保存失败：trySaveCurrentProgress toast progressSaveFailed + **不进 navigate 失败分支**（navigateToVolume 仍调）。
+- 用 deferred promise，测试末尾 resolve/reject（无悬挂任务，P1-5）。
 
-```typescript
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { useToast } from './useToast';
+- [ ] **步骤 2：运行测试验证失败** → `npx vitest run src/composables/useCrossVolume.test.ts`
 
-describe('useToast', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-    const { dismiss } = useToast();
-    dismiss();
-    vi.clearAllTimers();
-  });
+- [ ] **步骤 3：实现 useCrossVolume**（spec §10）
 
-  it('push 后 toasts 出现一项', () => {
-    const { push, toasts } = useToast();
-    push('hello');
-    expect(toasts.value).toHaveLength(1);
-    expect(toasts.value[0]?.message).toBe('hello');
-  });
+签名 + 内部函数严格按 spec §10：maybeContinue（off 前置 + **canStart 入口守卫，P1-1**）/ confirmManual（**开头 phase 守卫防双击，P1-2**）/ navigateResolvedTarget（settleIdle 收口）/ trySaveCurrentProgress / clearPendingState / dismissManual / **settleIdle**（集中收口所有终止路径）。`sameBookIdentity` 从 spec §7 复制（结构化比较）。opts 含 canStart 注入。
 
-  it('1500ms 后自动移除', () => {
-    vi.useFakeTimers();
-    const { push, toasts } = useToast();
-    push('temp');
-    expect(toasts.value).toHaveLength(1);
-    vi.advanceTimersByTime(1500);
-    expect(toasts.value).toHaveLength(0);
-  });
+- [ ] **步骤 4：运行测试验证通过** → `npx vitest run src/composables/useCrossVolume.test.ts`
 
-  it('新 push 替换旧的(队列上限 1)', () => {
-    const { push, toasts } = useToast();
-    push('first');
-    push('second');
-    expect(toasts.value).toHaveLength(1);
-    expect(toasts.value[0]?.message).toBe('second');
-  });
-});
-```
-
-- [ ] **步骤 2:运行测试验证失败**
+- [ ] **步骤 5：Commit**
 
 ```bash
-npx vitest run src/composables/useToast.test.ts
-```
-预期:FAIL(模块不存在)。
-
-- [ ] **步骤 3:实现 `useToast`**
-
-`src/composables/useToast.ts`:
-
-```typescript
-import { ref } from 'vue';
-
-export interface ToastItem {
-  id: number;
-  message: string;
-}
-
-const DURATION_MS = 1500;
-const toasts = ref<ToastItem[]>([]);
-let nextId = 1;
-// setTimeout 在 Node/happy-dom 返回类型不一致 — 用 any
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let timerId: any = null;
-
-export function useToast() {
-  function push(message: string): void {
-    const id = nextId++;
-    toasts.value = [{ id, message }]; // 队列上限 1:后者替换
-    if (timerId !== null) clearTimeout(timerId);
-    timerId = setTimeout(() => {
-      toasts.value = [];
-      timerId = null;
-    }, DURATION_MS);
-  }
-
-  function dismiss(): void {
-    if (timerId !== null) { clearTimeout(timerId); timerId = null; }
-    toasts.value = [];
-  }
-
-  return { toasts, push, dismiss };
-}
+git add src/composables/useCrossVolume.ts src/composables/useCrossVolume.test.ts
+git commit -m "feat(cross-volume): useCrossVolume Controller (状态机 + 竞态 + trySave + clearPending/dismissManual)"
 ```
 
-- [ ] **步骤 4:运行测试验证通过**
+---
 
-```bash
-npx vitest run src/composables/useToast.test.ts
-```
-预期:PASS(3 测试)。注意 `1500ms 后自动移除` 用例需在 it 内 `vi.useFakeTimers()`(已加)。
+## 任务 6：useToast + ToastHost
 
-- [ ] **步骤 5:实现 `ToastHost` 组件**
+**文件：**
+- 创建：`src/composables/useToast.ts`
+- 创建：`src/composables/useToast.test.ts`
+- 创建：`src/components/common/ToastHost.vue`
 
-`src/components/common/ToastHost.vue`:
+- [ ] **步骤 1：编写失败的测试**（spec §17.2）
 
-```vue
-<script setup lang="ts">
-import { useToast } from '@/composables/useToast';
-const { toasts } = useToast();
-</script>
+useToast：push 显示 + 1500ms 自动隐藏；队列上限 1（后者替换）；dismiss 清空。
 
-<template>
-  <Teleport to="body">
-    <div
-      v-if="toasts.length > 0"
-      class="fixed bottom-12 left-1/2 -translate-x-1/2 z-[1100]
-             bg-surface/90 backdrop-blur-xl rounded-full
-             px-3 py-1.5 flex items-center gap-2 text-sm text-white shadow-xl
-             pointer-events-none"
-      role="status"
-      aria-live="polite"
-      data-test="toast-host"
-    >
-      <span>{{ toasts[0]?.message }}</span>
-    </div>
-  </Teleport>
-</template>
-```
+- [ ] **步骤 2：运行验证失败** → `npx vitest run src/composables/useToast.test.ts`
 
-- [ ] **步骤 6:Commit**
+- [ ] **步骤 3：实现 useToast**（单例 ref + setTimeout，`let timerId: any` 绕过 Node/happy-dom 类型差异）
+
+- [ ] **步骤 4：实现 ToastHost.vue**（`<Teleport to="body">`，`role="status" aria-live="polite"`，`data-test="toast-host"`）
+
+- [ ] **步骤 5：运行验证通过** → `npx vitest run src/composables/useToast.test.ts`
+
+- [ ] **步骤 6：Commit**
 
 ```bash
 git add src/composables/useToast.ts src/composables/useToast.test.ts src/components/common/ToastHost.vue
@@ -611,754 +359,241 @@ git commit -m "feat(toast): useToast composable + ToastHost 组件 (通用 toast
 
 ---
 
-## 任务 6:`reader` store 扩展
+## 任务 7：ContinueNextVolumeToast（纯 props/emits）
 
-**文件:**
-- 修改:`src/stores/reader.ts`(加 state + `flushProgress` + `nextPage` atLast 分支)
-- 修改:`src/stores/reader.test.ts`(扩用例)
+**文件：**
+- 创建：`src/components/reader/ContinueNextVolumeToast.vue`
+- 创建：`src/components/reader/ContinueNextVolumeToast.test.ts`
 
-**说明:** 跨卷需要 reader 持有 `sourceDescriptor`/`currentRelPath`(供 `findNextVolume` 调用);`nextPage` 在末页时不翻页而是 set `pendingNextVolume`(对齐 spec §7.2 序列语义);`flushProgress` 立即写不等 debounce。
+**说明：** **不调 `useCrossVolume()`**（P0-2 修复）。纯 props/emits。
 
-- [ ] **步骤 1:加 reader store 测试用例**
+- [ ] **步骤 1：编写失败的测试**（spec §17.2，P1-5：直接测 props/emits，不注入 composable）
 
-`src/stores/reader.test.ts` 顶部 mock + 加 describe:
+mount 时传 props，断言：target null → 不渲染；target 有值 → 显示标题；点 jump → emit jump；点 close → emit close；loading=true → jump button disabled。用 vue-i18n mock（`useI18n: () => ({ t: (k) => k })`）。
 
-```typescript
-describe('reader store — 跨卷扩展', () => {
-  it('sourceDescriptor / currentRelPath 初始为 null/空', () => {
-    const reader = useReaderStore();
-    expect(reader.sourceDescriptor.value).toBeNull();
-    expect(reader.currentRelPath.value).toBe('');
-  });
+- [ ] **步骤 2：运行验证失败** → `npx vitest run src/components/reader/ContinueNextVolumeToast.test.ts`
 
-  it('nextPage 在 isAtLastSpread 时 set pendingNextVolume(经 slideshow)而非翻页', async () => {
-    // 需 mock slideshow store 或注入。简化:spy reader.setCrossVolumeSignal 回调。
-    // 见步骤 3 的设计:reader.nextPage 在末页调 onAtLastNextAttempt 回调。
-    const reader = useReaderStore();
-    let signaled = false;
-    reader.setOnAtLastNextAttempt(() => { signaled = true; });
-    // 先 openBook 一个 1-spread book(末页即首页)
-    reader.openBook({ bookId: 1, title: 't', pages: ['p1'], spreads: [{ start: 0, end: 0 }], initialSpreadIndex: 0 });
-    reader.nextPage(); // 已末页 → 不翻页 → signal
-    expect(signaled).toBe(true);
-    expect(reader.currentSpreadIndex.value).toBe(0); // 未翻页
-  });
+- [ ] **步骤 3：实现组件**（spec §12，props target/loading，emits jump/close）
 
-  it('flushProgress 立即调用 saveProgress(不等 debounce)', async () => {
-    // mock saveProgress,验证 flushProgress 后被调用
-    // (具体 mock 模式参考 reader.test.ts 现有 emitChanged 测试)
-  });
-});
-```
+- [ ] **步骤 4：运行验证通过** → `npx vitest run src/components/reader/ContinueNextVolumeToast.test.ts`
 
-- [ ] **步骤 2:运行测试验证失败**
-
-```bash
-npx vitest run src/stores/reader.test.ts
-```
-预期:FAIL(`sourceDescriptor`/`setOnAtLastNextAttempt`/`flushProgress` 未定义)。
-
-- [ ] **步骤 3:扩展 reader store**
-
-`src/stores/reader.ts`:
-
-a. 顶部 import 加 `SourceDescriptor`:
-```typescript
-import type { SourceDescriptor } from '@/lib/sourceDescriptor';
-```
-
-b. 在 state 区(现有 `bookId`/`title`/`pages` 旁)加:
-```typescript
-const sourceDescriptor = ref<SourceDescriptor | null>(null);
-const currentRelPath = ref<string>('');
-// 末页再向下的跨卷信号回调(ReaderView 注入,避免 reader→slideshow 直接依赖)
-let onAtLastNextAttempt: (() => void) | null = null;
-function setOnAtLastNextAttempt(fn: (() => void) | null): void { onAtLastNextAttempt = fn; }
-```
-
-c. 改 `openBook`(line 108),在设 `bookId.value = payload.bookId` 后加(接收可选 descriptor/relPath,向后兼容):
-```typescript
-// 在 openBook 函数体内,设置 bookId/title/pages 之后:
-sourceDescriptor.value = payload.sourceDescriptor ?? null;
-currentRelPath.value = payload.currentRelPath ?? '';
-```
-并扩展 `OpenBookPayload` interface(line 24)加可选字段:
-```typescript
-export interface OpenBookPayload {
-  bookId: number;
-  title: string;
-  pages: string[];
-  spreads: Array<{ start: number; end: number }>;
-  initialSpreadIndex: number;
-  sourceDescriptor?: SourceDescriptor;  // 新增:跨卷/首次开卷都写入
-  currentRelPath?: string;               // 新增
-}
-```
-
-d. 改 `nextPage` —— 在现有 `currentSpreadIndex.value += 1` 之前加末页检查:
-```typescript
-function nextPage() {
-  if (isAtLastSpread.value) {
-    // 末页再向下:不翻页,触发跨卷信号(ReaderView 注入回调 → 写 slideshow.pendingNextVolume)
-    onAtLastNextAttempt?.();
-    return;
-  }
-  currentSpreadIndex.value += 1;
-}
-```
-(确认现有 `nextPage` 是否 `currentSpreadIndex.value += 1`;若是 `+= 1` 或 `Math.min(...)` 钳位,替换为上面逻辑。)
-
-e. 加 `flushProgress` —— 在 `emitChanged` 附近:
-```typescript
-function flushProgress(): void {
-  if (debounceTimer !== null) { clearTimeout(debounceTimer); debounceTimer = null; }
-  flushPendingEmit(); // 立即触发 emitChanged 的写入逻辑(抽出 pendingEmit 处理为独立函数)
-}
-```
-**注:** 现有 `emitChanged` 用 `debounceTimer` + `pendingEmit`。抽一个 `flushPendingEmit()` 内部函数(执行 pendingEmit 的 saveProgress 调用),`emitChanged`(debounce 后调)和 `flushProgress`(立即调)都调它。若现有结构不便抽,简化:`flushProgress` 直接调 `emitChanged` 的同步写入部分。
-
-f. return 加:
-```typescript
-return {
-  // ... 现有
-  sourceDescriptor,
-  currentRelPath,
-  setOnAtLastNextAttempt,
-  flushProgress,
-};
-```
-
-- [ ] **步骤 4:运行测试验证通过**
-
-```bash
-npx vitest run src/stores/reader.test.ts
-```
-预期:PASS(新用例 + 现有用例不回归)。
-
-- [ ] **步骤 5:Commit**
-
-```bash
-git add src/stores/reader.ts src/stores/reader.test.ts
-git commit -m "feat(cross-volume): reader store 加 sourceDescriptor/currentRelPath + nextPage atLast 信号 + flushProgress"
-```
-
----
-
-## 任务 7:`useCrossVolume` composable
-
-**文件:**
-- 创建:`src/composables/useCrossVolume.ts`
-- 创建:`src/composables/useCrossVolume.test.ts`
-
-**说明:** 统一跨卷入口。`maybeContinue(force, dir)`:force=true 直接跨;false 看 `settings.continueToNextVolume`(off/auto/manual)。manual 显示胶囊(填 `pendingCrossVolume`)。
-
-- [ ] **步骤 1:编写失败的测试**
-
-`src/composables/useCrossVolume.test.ts`:
-
-```typescript
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { setActivePinia, createPinia } from 'pinia';
-import { useCrossVolume } from './useCrossVolume';
-import { useReaderStore } from '@/stores/reader';
-import { useSettingsStore } from '@/stores/settings';
-
-vi.mock('@/lib/tauri', async () => {
-  const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
-  return {
-    ...actual,
-    findNextVolume: vi.fn(),
-    getProgress: vi.fn(),
-    listDirectory: vi.fn(),
-  };
-});
-
-import { findNextVolume, getProgress, listDirectory } from '@/lib/tauri';
-
-describe('useCrossVolume', () => {
-  beforeEach(() => {
-    setActivePinia(createPinia());
-    vi.clearAllMocks();
-  });
-
-  async function setupReader() {
-    const reader = useReaderStore();
-    reader.openBook({
-      bookId: 1, title: 'vol1', pages: ['p1'], spreads: [{ start: 0, end: 0 }],
-      initialSpreadIndex: 0,
-      sourceDescriptor: { type: 'local', rootPath: '/root' },
-      currentRelPath: 'comics/vol1',
-    });
-    return reader;
-  }
-
-  it('force=true 不看模式,直接 loadCrossVolume', async () => {
-    const reader = await setupReader();
-    (findNextVolume as any).mockResolvedValue(null); // 无下一卷
-    const cv = useCrossVolume();
-    await cv.maybeContinue(true, 'next');
-    expect(findNextVolume).toHaveBeenCalledWith(
-      reader.sourceDescriptor.value, 'comics/vol1', 'next', 'reader',
-    );
-  });
-
-  it('force=false + off 模式 → 不跨卷', async () => {
-    await setupReader();
-    const settings = useSettingsStore();
-    settings.continueToNextVolume = 'off';
-    const cv = useCrossVolume();
-    await cv.maybeContinue(false, 'next');
-    expect(findNextVolume).not.toHaveBeenCalled();
-  });
-
-  it('force=false + auto 模式 → loadCrossVolume', async () => {
-    await setupReader();
-    const settings = useSettingsStore();
-    settings.continueToNextVolume = 'auto';
-    (findNextVolume as any).mockResolvedValue(null);
-    const cv = useCrossVolume();
-    await cv.maybeContinue(false, 'next');
-    expect(findNextVolume).toHaveBeenCalled();
-  });
-
-  it('force=false + manual 模式 → armManualToast 填 pendingCrossVolume,不 openBook', async () => {
-    await setupReader();
-    const settings = useSettingsStore();
-    settings.continueToNextVolume = 'manual';
-    (findNextVolume as any).mockResolvedValue({
-      descriptor: { type: 'local', rootPath: '/root' },
-      relPath: 'comics/vol2', title: 'vol2', isArchive: false,
-    });
-    const cv = useCrossVolume();
-    await cv.maybeContinue(false, 'next');
-    expect(cv.pendingCrossVolume.value?.title).toBe('vol2');
-    // 未 openBook(listDirectory 未调)
-    expect(listDirectory).not.toHaveBeenCalled();
-  });
-
-  it('loadCrossVolume null → toast 无下一卷 + consumePending', async () => {
-    await setupReader();
-    (findNextVolume as any).mockResolvedValue(null);
-    const cv = useCrossVolume();
-    const { push } = useToastSpy();
-    await cv.loadCrossVolume('next');
-    expect(cv.pendingCrossVolume.value).toBeNull();
-  });
-
-  it('bookSwapInFlight guard:加载中再触发 return', async () => {
-    await setupReader();
-    (findNextVolume as any).mockImplementation(() => new Promise(() => {})); // 永不 resolve
-    const cv = useCrossVolume();
-    const p1 = cv.loadCrossVolume('next');
-    await cv.loadCrossVolume('next'); // 应被 guard 挡
-    expect(findNextVolume).toHaveBeenCalledTimes(1);
-    // 清理:不 await p1(测试结束即可)
-  });
-});
-
-function useToastSpy() {
-  // 辅助:不直接断言 toast(可能 Teleport),只验证副作用
-  return { push: vi.fn() };
-}
-```
-
-- [ ] **步骤 2:运行测试验证失败**
-
-```bash
-npx vitest run src/composables/useCrossVolume.test.ts
-```
-预期:FAIL(模块不存在)。
-
-- [ ] **步骤 3:实现 `useCrossVolume`**
-
-`src/composables/useCrossVolume.ts`:
-
-```typescript
-/**
- * useCrossVolume — 跨卷连续阅读统一入口。
- *
- * maybeContinue(force, dir):
- *   - force=true(9 宫格/Alt)→ 不看模式,直接 loadCrossVolume
- *   - force=false(末页/slideshow)→ 看 settings.continueToNextVolume
- *     off→return / auto→loadCrossVolume / manual→armManualToast(填 pendingCrossVolume)
- *
- * loadCrossVolume(dir, opts.result?):
- *   1. flushProgress  2. findNextVolume  3. null→toast  4. getProgress 智能恢复
- *   5. listDirectory 下一卷  6. SpreadPlanner.plan  7. 算 initialSpreadIndex  8. openBook
- *
- * bookSwapInFlight guard 防重复。
- */
-import { ref } from 'vue';
-import { useReaderStore } from '@/stores/reader';
-import { useSlideshowStore } from '@/stores/slideshow';
-import { useSettingsStore } from '@/stores/settings';
-import { useToast } from '@/composables/useToast';
-import { findNextVolume, getProgress, listDirectory, type NextVolumeResult } from '@/lib/tauri';
-import { sortEntries } from '@/lib/fileSort';
-import { planSpreads, spreadIndexForPage } from '@/lib/spreadPlanner';
-import { isImage } from '@/lib/mime';
-import { log } from '@/lib/logger';
-
-export function useCrossVolume() {
-  const reader = useReaderStore();
-  const slideshow = useSlideshowStore();
-  const settings = useSettingsStore();
-  const { push: pushToast } = useToast();
-
-  const bookSwapInFlight = ref(false);
-  const pendingCrossVolume = ref<NextVolumeResult | null>(null);
-
-  async function maybeContinue(force: boolean, dir: 'next' | 'prev'): Promise<void> {
-    if (bookSwapInFlight.value) return;
-    if (!force) {
-      const mode = settings.continueToNextVolume;
-      if (mode === 'off') { consumePending(); return; }
-      if (mode === 'manual') { await armManualToast(dir); return; }
-      // auto 落到 loadCrossVolume
-    }
-    await loadCrossVolume(dir);
-  }
-
-  async function armManualToast(dir: 'next' | 'prev'): Promise<void> {
-    if (!reader.sourceDescriptor.value) return;
-    const result = await findNextVolume(reader.sourceDescriptor.value, reader.currentRelPath.value, dir, 'reader');
-    if (!result) { pushToast(/* t */ '无下一卷'); consumePending(); return; }
-    pendingCrossVolume.value = result;
-  }
-
-  async function loadCrossVolume(
-    dir: 'next' | 'prev',
-    opts: { result?: NextVolumeResult | null } = {},
-  ): Promise<void> {
-    if (bookSwapInFlight.value) return;
-    if (!reader.sourceDescriptor.value) return;
-    bookSwapInFlight.value = true;
-    try {
-      await reader.flushProgress();
-      const result = opts.result ?? await findNextVolume(reader.sourceDescriptor.value, reader.currentRelPath.value, dir, 'reader');
-      if (!result) { pushToast('无下一卷'); consumePending(); return; }
-
-      // 加载下一卷内容
-      const entries = await listDirectory(result.descriptor, result.relPath);
-      const images = sortEntries(entries.filter((e) => !e.isDirectory && isImage(e.name)));
-      if (images.length === 0) { pushToast('跳转失败'); consumePending(); return; }
-      const pages = images.map((e) => e.name);
-      const spreads = planSpreads(images.length);
-      if (spreads.length === 0) { pushToast('跳转失败'); return; }
-
-      // 智能恢复起点
-      const progress = await getProgressOf(result);
-      const startPage = progress && !progress.finished ? progress.page : 0;
-      const initialSpreadIndex = Math.min(spreadIndexForPage(startPage, spreads), spreads.length - 1);
-
-      reader.openBook({
-        bookId: /* 合成下一卷 bookId,见 getProgressOf */ progress?.bookId ?? -1,
-        title: result.title,
-        pages,
-        spreads,
-        initialSpreadIndex,
-        sourceDescriptor: result.descriptor,
-        currentRelPath: result.relPath,
-      });
-      pushToast(`已跳转《${result.title}》`);
-      consumePending();
-    } catch (e) {
-      log('[useCrossVolume] loadCrossVolume failed', e);
-      pushToast('跳转失败');
-    } finally {
-      bookSwapInFlight.value = false;
-    }
-  }
-
-  /** 合成下一卷 bookId 查 progress(复用 useReaderActions.ensureBookId 模式:createBook if not exists) */
-  async function getProgressOf(result: NextVolumeResult) {
-    // 简化:createBook(orReplace)拿 bookId → getProgress
-    // 实际复用 useMasonryBrowsePosition.ensureBookIdForCurrentDir 模式或 useReaderActions
-    // 这里用 listDirectory 已有,bookId 经 createBook(参考 useReaderActions.readNow)
-    const { createBook } = await import('@/lib/tauri');
-    const bookId = await createBook({
-      title: result.title,
-      sourceDescriptor: result.descriptor,
-      absolutePath: result.relPath,
-      sourceType: result.descriptor.type === 'local' ? 'Local' : 'WebDav',
-      favorite: false,
-      coverEntryPath: null, coverEntryName: null, pageCount: 0,
-    }).catch(() => null);
-    if (bookId === null) return null;
-    const p = await getProgress(bookId);
-    return p ? { ...p, bookId } : null;
-  }
-
-  function consumePending(): void {
-    pendingCrossVolume.value = null;
-    slideshow.consumePendingNextVolume();
-  }
-
-  return { maybeContinue, loadCrossVolume, armManualToast, consumePending, pendingCrossVolume, bookSwapInFlight };
-}
-```
-
-**注:** `spreadIndexForPage` / `planSpreads` 导出名以 `src/lib/spreadPlanner.ts` 为准(`grep "export" src/lib/spreadPlanner.ts` 校对)。`sortEntries` 以 `src/lib/fileSort.ts` 为准。i18n key 在任务 12 加;此处临时硬编码字符串,任务 12 替换为 `t('reader.crossVolume.*')`(注入 `useI18n` 或经 toast 传 key)。
-
-- [ ] **步骤 4:运行测试验证通过**
-
-```bash
-npx vitest run src/composables/useCrossVolume.test.ts
-```
-预期:PASS(6 测试)。调整 mock 返回值匹配实际调用。
-
-- [ ] **步骤 5:Commit**
-
-```bash
-git add src/composables/useCrossVolume.ts src/composables/useCrossVolume.test.ts
-git commit -m "feat(cross-volume): useCrossVolume composable (maybeContinue + loadCrossVolume + 智能恢复)"
-```
-
----
-
-## 任务 8:`ContinueNextVolumeToast` 组件
-
-**文件:**
-- 创建:`src/components/reader/ContinueNextVolumeToast.vue`
-- 创建:`src/components/reader/ContinueNextVolumeToast.test.ts`
-
-**说明:** manual 模式底部胶囊。`pendingCrossVolume` 有值显示;跳转/关闭/往回翻隐藏。
-
-- [ ] **步骤 1:编写失败的测试**
-
-`src/components/reader/ContinueNextVolumeToast.test.ts`:
-
-```typescript
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mount, flushPromises } from '@vue/test-utils';
-import { setActivePinia, createPinia } from 'pinia';
-import ContinueNextVolumeToast from './ContinueNextVolumeToast.vue';
-import { useReaderStore } from '@/stores/reader';
-
-vi.mock('@/lib/tauri', () => ({
-  findNextVolume: vi.fn(),
-  getProgress: vi.fn(), listDirectory: vi.fn(), createBook: vi.fn(),
-}));
-vi.mock('vue-i18n', () => ({ useI18n: () => ({ t: (k: string) => k }) }));
-
-describe('ContinueNextVolumeToast', () => {
-  beforeEach(() => setActivePinia(createPinia()));
-
-  it('pendingCrossVolume 为空时不渲染', async () => {
-    const wrapper = mount(ContinueNextVolumeToast);
-    expect(wrapper.find('[data-test="cross-volume-toast"]').exists()).toBe(false);
-  });
-
-  it('pendingCrossVolume 有值时显示标题', async () => {
-    // 需注入 useCrossVolume 的 pendingCrossVolume(测试通过 mount props 或 provide)
-    // 简化:组件内部 useCrossVolume,测试先 armManualToast
-    // 参考 MasonryThumbnail.test.ts 的 mount 模式
-  });
-
-  it('点跳转按钮 → 触发 loadCrossVolume', async () => {
-    // 验证 emit 或 store 状态变化
-  });
-});
-```
-
-- [ ] **步骤 2:运行测试验证失败** → `npx vitest run src/components/reader/ContinueNextVolumeToast.test.ts`(组件不存在)。
-
-- [ ] **步骤 3:实现组件**
-
-`src/components/reader/ContinueNextVolumeToast.vue`:
-
-```vue
-<script setup lang="ts">
-import { useCrossVolume } from '@/composables/useCrossVolume';
-import { useI18n } from 'vue-i18n';
-
-const { t } = useI18n();
-const { pendingCrossVolume, loadCrossVolume, consumePending } = useCrossVolume();
-
-async function onJump(): Promise<void> {
-  const result = pendingCrossVolume.value;
-  if (!result) return;
-  await loadCrossVolume('next', { result });
-}
-function onClose(): void {
-  consumePending();
-}
-</script>
-
-<template>
-  <Teleport to="body">
-    <div
-      v-if="pendingCrossVolume"
-      class="fixed bottom-12 left-1/2 -translate-x-1/2 z-[1100]
-             bg-surface/90 backdrop-blur-xl rounded-full
-             px-3 py-1.5 flex items-center gap-3 text-sm text-white shadow-xl"
-      data-test="cross-volume-toast"
-      role="dialog"
-      aria-live="polite"
-    >
-      <span>{{ t('reader.crossVolume.continuePrompt', { title: pendingCrossVolume.title }) }}</span>
-      <button
-        class="text-accent hover:text-accent-light"
-        data-test="cross-volume-jump"
-        @click="onJump"
-      >{{ t('reader.crossVolume.jump') }}</button>
-      <button
-        class="text-text-muted hover:text-text-primary"
-        data-test="cross-volume-close"
-        @click="onClose"
-      >✕</button>
-    </div>
-  </Teleport>
-</template>
-```
-
-- [ ] **步骤 4:运行测试验证通过** → `npx vitest run src/components/reader/ContinueNextVolumeToast.test.ts`(补全 mount 用例的 provide/注入)。
-
-- [ ] **步骤 5:Commit**
+- [ ] **步骤 5：Commit**
 
 ```bash
 git add src/components/reader/ContinueNextVolumeToast.vue src/components/reader/ContinueNextVolumeToast.test.ts
-git commit -m "feat(cross-volume): ContinueNextVolumeToast 胶囊组件 (manual 模式)"
+git commit -m "feat(cross-volume): ContinueNextVolumeToast 胶囊 (纯 props/emits，不调 useCrossVolume)"
 ```
 
 ---
 
-## 任务 9:`useMasonryBrowsePosition.flushNow` + ReaderView 接线
+## 任务 8：ReaderView 编排层接线
 
-**文件:**
-- 修改:`src/composables/useMasonryBrowsePosition.ts`(加 `flushNow`)
-- 修改:`src/composables/useMasonryBrowsePosition.test.ts`
-- 修改:`src/views/ReaderView.vue`(接 `useCrossVolume` + watch + 回调)
+**文件：**
+- 修改：`src/views/ReaderView.vue`
+- 修改：`src/views/ReaderView.test.ts`
+- 修改：`src/composables/useReaderHotkeys.ts`（P1-2：加 `ReaderHotkeyActions` 参数，folderNext 接 actions.nextVolume）
+- 修改：`src/composables/useReaderHotkeys.test.ts`（actions 参数回归）
 
-- [ ] **步骤 1:加 `flushNow` 测试** → `useMasonryBrowsePosition.test.ts` 加:
-```typescript
-it('flushNow 立即触发 recordCurrentTop 不等 300ms debounce', async () => {
-  // 参考 recordCurrentTop 现有用例的 mock 模式
-  // 调 flushNow 后立即验证 saveProgress 被调(debounce timer 不应阻塞)
-});
-```
+**说明：** route watch immediate（删 onMounted，唯一入口，不变量 2）；loadRouteBook（去重看 phase=ready，不变量 3；失败不保留旧卷，不变量 1）；commitBookSnapshot（任务 0 已建，这里改 loadRouteBook 用它）；retryCurrentBook；navigateToVolume（ensureBookId+replace）；Controller 实例化（注入 8 个 opts：identity/navigateToVolume/saveCurrentProgressNow/pushToast/getContinueMode/pauseSlideshow/consumePendingNextVolume/canStart）；触发接线（末页 watch + 9宫格 zoneActions.nextVolume + Alt+→ 经扩展的 useReaderHotkeys）；卸载清理（setOnAtLastNextAttempt(null) + activeLoadSeq++ 使在途 Loader 失效）。
 
-- [ ] **步骤 2:运行验证失败** → `npx vitest run src/composables/useMasonryBrowsePosition.test.ts`。
+- [ ] **步骤 1：加 ReaderView 测试用例**（spec §17.2）
 
-- [ ] **步骤 3:实现 `flushNow`** → `useMasonryBrowsePosition.ts` 的 return 前加:
-```typescript
-async function flushNow(): Promise<void> {
-  if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
-  await recordCurrentTop();
-}
-```
-return 加 `flushNow`。
+mock loader + router + route，覆盖：loadRouteBook 去重（同 bookId+ready 跳过）；失败不保留旧卷（closeBook+清 refs+error UI）；stale 丢弃（activeLoadSeq）；commitBookSnapshot 原子提交；retryCurrentBook 重置 lastLoadedBookId。
 
-- [ ] **步骤 4:ReaderView 接线**
+- [ ] **步骤 2：运行测试验证失败** → `npx vitest run src/views/ReaderView.test.ts`
 
-`src/views/ReaderView.vue`:
-- import `useCrossVolume` + `ContinueNextVolumeToast` + `ToastHost`
-- 在 setup(现有 `useReaderHotkeys`/`useReaderWheel` 附近)加:
-```typescript
-const crossVolume = useCrossVolume();
-// 末页跨卷信号:reader.nextPage atLast 时写 slideshow.pendingNextVolume
-reader.setOnAtLastNextAttempt(() => { slideshow.pendingNextVolume = true; });
-// watch 末页跨卷意图(slideshow 写 + 手动 nextPage atLast 写,统一)
-watch(() => slideshow.pendingNextVolume, (v) => {
-  if (v) crossVolume.maybeContinue(false, 'next');
-});
-// 9 宫格 folder-next / Alt+→ 回调改为 crossVolume.maybeContinue(true, 'next')
-// (在 useReaderTouchZones 的 folder-next action + useReaderHotkeys 的 Alt+→ 回调处接)
-```
-- template 加(与 SlideshowToast 同级):
-```vue
-<ToastHost />
-<ContinueNextVolumeToast />
-```
-- `loadBook` 内 `reader.openBook(...)` 调用处加 `sourceDescriptor` + `currentRelPath` payload 字段(用 ReaderView 已有的 descriptor + relPath 变量)。
+- [ ] **步骤 3：实现编排层**（spec §11）
 
-**9 宫格接线点**:`grep -n "folder-next\|folderNext" src/composables/useReaderTouchZones.ts` 找到现有 action 回调,改为调 `crossVolume.maybeContinue(true, 'next')`(ReaderView 把 crossVolume 暴露给 touchZones composable,或经回调注入)。`Alt+→` 同理在 `useReaderHotkeys`。
+- 删 `onMounted(loadBook)` + `onNextVolume` 旧逻辑。
+- 加 `lastLoadedBookId`/`bookLoadPhase`/`visibleReader`；**`let activeLoadSeq = 0`（非 const，非 ref，模板不消费；P0-3）**。
+- `watch(() => Number(route.params.bookId), loadRouteBook, { immediate: true })`。
+- `loadRouteBook`：去重（bookId===lastLoadedBookId && phase==='ready'）→ `seq = ++activeLoadSeq` → phase=loading/visibleReader=false → loader.loadBookById → `seq !== activeLoadSeq` 则 return（stale）→ commitBookSnapshot + ready 或 catch（closeBook+清 refs+error）。
+- `navigateToVolume`：loader.ensureBookId → router.replace({params:{bookId}, query:{}})。
+- Controller 实例化（注入 identity/navigateToVolume/saveCurrentProgressNow/pushToast/getContinueMode/pauseSlideshow/consumePendingNextVolume/**canStart**）。**currentIdentity（P1-1）：bookLoadPhase!=='ready' 或 reader.bookId!==Number(route.params.bookId) 时返回 null**（加载期/分裂期拒绝）。**canStart: () => bookLoadPhase.value === 'ready'**。
+- `reader.setOnAtLastNextAttempt(() => { slideshow.pendingNextVolume = true; })`。
+- `watch(() => slideshow.pendingNextVolume, v => v && crossVolume.maybeContinue(false,'next'))`。
+- **9 宫格**：`zoneActions.nextVolume = () => void crossVolume.maybeContinue(true,'next')`（替换现有调 onNextVolume 的实现，ReaderView.vue:526）。
+- **Alt+→（P1-2）**：`useReaderHotkeys({ nextVolume: () => void crossVolume.maybeContinue(true,'next') })`（useReaderHotkeys 扩展接受 actions，folderNext dispatch 调 actions.nextVolume，见 useReaderHotkeys.ts 修改）。
+- 模板挂 `<ToastHost/>` + `<ContinueNextVolumeToast :target="crossVolume.pendingCrossVolume.value" :loading="crossVolume.phase.value==='navigating'" @jump="crossVolume.confirmManual()" @close="crossVolume.dismissManual()"/>`。
+- onUnmounted：`reader.setOnAtLastNextAttempt(null)` + **`activeLoadSeq += 1`（P0-3：使在途 Loader 失效，卸载后不执行提交）** + `reader.saveCurrentProgressNow()` 兜底 + slideshow.pause + reader.closeBook。
 
-- [ ] **步骤 5:运行 + Commit**
+- [ ] **步骤 4：运行 + type-check**
+
 ```bash
-npx vitest run src/composables/useMasonryBrowsePosition.test.ts src/views/ReaderView.test.ts
-git add src/composables/useMasonryBrowsePosition.ts src/composables/useMasonryBrowsePosition.test.ts src/views/ReaderView.vue
-git commit -m "feat(cross-volume): flushNow + ReaderView 接线 (watch pendingNextVolume + 9宫格/Alt 回调 + 挂 toast)"
+npm run type-check && npx vitest run src/views/ReaderView.test.ts
+```
+预期：PASS。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add src/views/ReaderView.vue src/views/ReaderView.test.ts src/composables/useReaderHotkeys.ts src/composables/useReaderHotkeys.test.ts
+git commit -m "feat(cross-volume): ReaderView 编排层 + useReaderHotkeys actions (route watch immediate + loadRouteBook + 9宫格/Alt 接线 + 卸载清理)"
 ```
 
 ---
 
-## 任务 10:瀑布流工具栏"下一卷"按钮
+## 任务 9：瀑布流跨卷（useMasonryBrowsePosition.flushNow + 工具栏按钮）
 
-**文件:**
-- 修改:`src/components/filebrowser/FileBrowser.vue`(工具栏加按钮,仅 masonry 场景显示)
-- 修改:`src/components/filebrowser/MasonryView.vue`(暴露 `crossNextVolume` 或在 FileBrowser 调)
+**文件：**
+- 修改：`src/composables/useMasonryBrowsePosition.ts`（加 flushNow）
+- 修改：`src/composables/useMasonryBrowsePosition.test.ts`
+- 修改：`src/components/filebrowser/FileBrowser.vue`（按钮 + onCrossNextVolume）
 
-**说明:** 瀑布流跨卷纯手动,`filter='masonry'`。复用 `useCrossVolume` 的 `loadCrossVolume` 不合适(那是 reader openBook);瀑布流走 `fileBrowser.navigate`。新建一个轻量 `crossNextVolumeMasonry` 函数(MasonryView 内或 useCrossVolume 加分支)。
+**文件：**
+- 修改：`src/composables/useMasonryBrowsePosition.ts`（加 flushNow）
+- 修改：`src/composables/useMasonryBrowsePosition.test.ts`
+- 修改：`src/components/filebrowser/MasonryView.vue`（P1-1：defineExpose 加 flushBrowsePosition）
+- 修改：`src/components/filebrowser/FileList.vue`（P1-1：加 masonryFlushNow + defineExpose）
+- 修改：`src/components/filebrowser/FileBrowser.vue`（按钮 + onCrossNextVolume 经 fileListRef.masonryFlushNow）
 
-- [ ] **步骤 1:加按钮** → `FileBrowser.vue` 工具栏(masonry 场景,与"↶ 跳到上次"同区):
-```vue
-<button
-  v-if="viewMode === 'masonry'"
-  class="tb-btn"
-  :disabled="!hasImages || swapping"
-  :title="t('fileBrowser.nextVolume')"
-  @click="onCrossNextVolume"
->
-  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <path d="M4 12h16M14 6l6 6-6 6" />
-  </svg>
-</button>
-```
+**说明：** 按钮**不绑 viewMode**（P1-3：details 回落后仍可达）；**disabled 不含 !hasImages**（P0-4：无图目录仍可点跳过，改为 `swapping || !fb.rootPath || !fb.lastFetchedPath`）；用 `lastFetchedPath`（P1-4，不用 currentPath）；结果落地前校验 lastFetchedPath === pathAtRequestStart。**flushNow 转发链**（P1-1）：FileBrowser 无法直接拿 MasonryView 内的 browsePosition，经现有 defineExpose 模式转发（FileBrowser → FileList → MasonryView）。
 
-- [ ] **步骤 2:实现 `onCrossNextVolume`** → FileBrowser setup 加(复用 fb store + descriptor):
-```typescript
-const swapping = ref(false);
-async function onCrossNextVolume(): Promise<void> {
-  if (swapping.value) return;
-  swapping.value = true;
-  try {
-    await masonryBrowsePosition.flushNow();
-    const result = await findNextVolume(descriptor.value, fb.currentPath.value, 'next', 'masonry');
-    if (!result) { pushToast(t('reader.crossVolume.none')); return; }
-    await fb.navigate(result.relPath);
-    pushToast(t('reader.crossVolume.jumped', { title: result.title }));
-  } catch (e) {
-    pushToast(t('reader.crossVolume.failed'));
-  } finally {
-    swapping.value = false;
-  }
-}
-```
-import `findNextVolume` + `useToast`。`masonryBrowsePosition` 从 MasonryView 暴露(defineExpose)或提到 FileBrowser。
+- [ ] **步骤 1：加 flushNow 测试** → useMasonryBrowsePosition.test.ts：flushNow 立即触发 recordCurrentTop 不等 300ms debounce。
 
-- [ ] **步骤 3:type-check + 单测补** →
-```bash
-npm run type-check
-npx vitest run src/components/filebrowser/FileBrowser.test.ts
-```
-FileBrowser.test.ts 若因新按钮/函数失败,补 mock 或 stub。
+- [ ] **步骤 2：运行验证失败** → `npx vitest run src/composables/useMasonryBrowsePosition.test.ts`
 
-- [ ] **步骤 4:Commit**
+- [ ] **步骤 3：实现 flushNow**（spec §14.3：清 debounce + await recordCurrentTop）
+
+- [ ] **步骤 3b：转发链（P1-1，spec §14.4）**
+  - `MasonryView.vue`：defineExpose 加 `flushBrowsePosition: () => browsePosition.flushNow()`（现有 defineExpose 已暴露 browsePosition/jumpToLast 等，本次扩展）。
+  - `FileList.vue`：加 `async function masonryFlushNow() { await masonryRef.value?.flushBrowsePosition(); }` + defineExpose 加 masonryFlushNow（现有已有 masonryRef + defineExpose 模式）。
+  - `FileBrowser.vue`：onCrossNextVolume 内 `await fileListRef.value?.masonryFlushNow()`。
+
+- [ ] **步骤 4：FileBrowser 工具栏加按钮**（spec §14.1，**不绑 viewMode**，`:disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"`，与"↶ 跳到上次"同区）+ `onCrossNextVolume`（spec §14.2：fileListRef.masonryFlushNow → findNextVolume(descriptor, lastFetchedPath, 'next')（**无 filter 参数**，P1-3）→ 落地前校验 lastFetchedPath === pathAtRequestStart → fb.navigate）
+
+- [ ] **步骤 5：type-check + 单测**
 
 ```bash
-git add src/components/filebrowser/FileBrowser.vue src/components/filebrowser/MasonryView.vue
-git commit -m "feat(cross-volume): 瀑布流工具栏'下一卷'按钮 (masonry 场景 + flushNow + navigate)"
+npm run type-check && npx vitest run src/composables/useMasonryBrowsePosition.test.ts src/components/filebrowser/FileBrowser.test.ts
+```
+FileBrowser.test.ts 若因新按钮失败，补 mock。
+
+- [ ] **步骤 6：Commit**
+
+```bash
+git add src/composables/useMasonryBrowsePosition.ts src/composables/useMasonryBrowsePosition.test.ts src/components/filebrowser/MasonryView.vue src/components/filebrowser/FileList.vue src/components/filebrowser/FileBrowser.vue
+git commit -m "feat(cross-volume): 瀑布流工具栏下一卷按钮 (不绑 viewMode + lastFetchedPath + flushNow 转发链)"
 ```
 
 ---
 
-## 任务 11:i18n 6 key × 2 locale
+## 任务 10：i18n 7 key × 2 locale
 
-**文件:**
-- 修改:`src/locales/zh-CN.ts` + `src/locales/en-US.ts`
+**文件：**
+- 修改：`src/locales/zh-CN.ts` + `en-US.ts`
 
-- [ ] **步骤 1:加 key**
+- [ ] **步骤 1：加 key**（spec §16）
 
-`zh-CN.ts` 的 `reader` namespace 加:
-```typescript
-crossVolume: {
-  none: '无下一卷',
-  jumped: '已跳转《{title}》',
-  failed: '跳转失败',
-  continuePrompt: '继续读下一本《{title}》?',
-  jump: '跳转',
-},
-```
-`fileBrowser` namespace 加:`nextVolume: '下一卷',`
+`reader.crossVolume.{none,jumped,failed,progressSaveFailed,continuePrompt,jump}` + `fileBrowser.nextVolume`。zh/en 对齐。
 
-`en-US.ts` 对应:
-```typescript
-crossVolume: {
-  none: 'No next volume',
-  jumped: 'Jumped to 《{title}》',
-  failed: 'Failed to jump',
-  continuePrompt: 'Continue to next volume 《{title}》?',
-  jump: 'Jump',
-},
-// fileBrowser
-nextVolume: 'Next volume',
-```
+- [ ] **步骤 2：i18n 对齐测试**
 
-- [ ] **步骤 2:替换 useCrossVolume 临时硬编码** → `useCrossVolume.ts` 注入 `useI18n`,`pushToast(t('reader.crossVolume.*'))` 替换 `'无下一卷'` 等硬编码。
-
-- [ ] **步骤 3:运行 i18n 对齐测试**
 ```bash
 npx vitest run src/locales/i18n-keys.test.ts src/locales/locales.test.ts
 ```
-预期:PASS(zh/en key 对齐)。
+预期：PASS。
 
-- [ ] **步骤 4:Commit**
+- [ ] **步骤 3：Commit**
 
 ```bash
-git add src/locales/zh-CN.ts src/locales/en-US.ts src/composables/useCrossVolume.ts
-git commit -m "feat(cross-volume): i18n 6 key × 2 locale (reader.crossVolume.* + fileBrowser.nextVolume)"
+git add src/locales/zh-CN.ts src/locales/en-US.ts
+git commit -m "feat(cross-volume): i18n 7 key × 2 locale"
 ```
 
 ---
 
-## 任务 12:全测 + type-check + 本地 build
+## 任务 11：全测 + type-check + 本地 build + E2E
 
-- [ ] **步骤 1:前端全测**
+> **注：** tag/push 不在本任务。全部验证通过后，由分支收尾流程（finishing-a-development-branch skill）决定 commit/tag/push。
+
+- [ ] **步骤 1：前端全测 + type-check**
+
 ```bash
 npm run type-check && npm test -- --run
 ```
-预期:type-check 无错;717 → ~750+ 测试全绿(新增 useCrossVolume 6 + useToast 3 + ContinueNextVolumeToast ~3 + reader store 扩展 ~3 + pick_sibling 8 + findNextDirectory filter 2)。
+预期：type-check 无错；全测绿（新增 useReaderBookLoader + useCrossVolume + useToast + ContinueNextVolumeToast + reader store 扩展 + pick_sibling + find_next_volume 集成 + flushNow）。
 
-- [ ] **步骤 2:Rust 测试**
+- [ ] **步骤 2：Rust 测试**
+
 ```bash
 cd src-tauri && cargo test --lib --no-fail-fast
 ```
-预期:含 `pick_sibling` 8 测试全绿;现有 177 pass / 2 fail(path/webdav,与跨卷无关,记录不修)。
+预期：`pick_sibling` + `find_next_volume` 集成测试全绿。
+**基线说明：** 现有 `algorithm/path::test_crumbs` + `source/webdav_impl::parse_propfind` 2 个已知失败与本功能无关（见 feature-matrix.md）。若本次改动导致**其他**测试失败，必须修复；上述 2 个允许保持现状，但需在 PR/commit 说明里记录精确测试名 + 失败原因 + 与本功能无关的证据。
 
-- [ ] **步骤 3:本地 build portable(可选,验证打包)**
+- [ ] **步骤 3：本地 build portable（验证打包）**
+
 ```bash
 cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\tauri-build-portable.bat"
 ```
-预期:成功生成 portable exe。
+预期：成功生成 portable exe。
 
-- [ ] **步骤 4:E2E 手测清单**(spec §12.3)
-- [ ] Local 目录跨卷:auto 末页→自动跳下一目录
-- [ ] manual 末页→胶囊→点跳转→跳下一卷
-- [ ] off 末页→不跳
-- [ ] 9 宫格 folder-next / Alt+→→即时跨
-- [ ] **末页触发时机**:倒数第二页 nextPage 翻到末页不触发;末页再向下才触发
-- [ ] 智能恢复:读过一半的卷→恢复 page;已读完→第 1 页
-- [ ] 无下一卷→toast"无下一卷"
-- [ ] 瀑布流"下一卷"按钮→跳下一目录瀑布流 + 恢复 scroll
-- [ ] 幻灯片末页→跨卷(对齐模式)
-- [ ] 跨卷中再触发→不重复
+- [ ] **步骤 4：E2E 手测清单**（spec §17.3，全部勾选）
 
-- [ ] **步骤 5:Commit + tag + push**
+- [ ] Local 目录跨卷：auto 末页再向下 → 自动跳下一目录
+- [ ] manual 末页再向下 → 胶囊 → 点跳转 → 跳下一卷
+- [ ] off 末页再向下 → 不跳
+- [ ] 9 宫格 folder-next / Alt+→ → 即时跨
+- [ ] 末页触发时机：倒数第二页 nextPage 翻到末页不触发；末页再向下才触发
+- [ ] 跨卷后画面/标题/总页数/imageName/bookId/URL 全属新卷
+- [ ] 跨卷后刷新仍打开新卷
+- [ ] 跨卷后收藏/喜欢/书签作用于新卷
+- [ ] manual 胶囊显示，关闭后不因旧请求重新出现
+- [ ] 连续快速触发只加载一次
+- [ ] 从 A 发起 find、切到 B、A 晚返回 → 结果丢弃
+- [ ] 瀑布流从有图目录跳到无图目录后仍可继续下一卷
+- [ ] 首页未翻页直接强制下一卷 → 当前进度仍保存
+- [ ] 加载失败 → 显示新卷错误页，不停留旧卷
+- [ ] 智能恢复：读过一半的卷 → 恢复 page；已读完 → 第 1 页
+
+- [ ] **步骤 5：收尾 commit（不含 tag/push）**
+
 ```bash
 git add -A
-git commit -m "test(cross-volume): 全测通过 + E2E 手测验证"
-git tag v0.1.0-module3.0.9-cross-volume
-git push github main
-git push github v0.1.0-module3.0.9-cross-volume
-git push origin main --tags
+git commit -m "test(cross-volume): 全测 + type-check + 本地 build + E2E 手测通过"
 ```
+
+后续 tag/push 由 finishing-a-development-branch skill 引导决定。
 
 ---
 
 ## 自检结果
 
-**规格覆盖度:** spec 各节 → 任务映射:
-- §5 Rust find_next_volume → 任务 1(pick_sibling)+ 任务 2(command)
-- §6 TS 镜像校对 → 任务 4
-- §7.1 useCrossVolume → 任务 7
-- §7.2 reader store 扩展 → 任务 6
-- §7.3 触发接线 → 任务 9
-- §7.4 manual 胶囊 → 任务 8
-- §8 瀑布流跨卷 → 任务 10
-- §9 UI(ToastHost + ContinueNextVolumeToast)→ 任务 5 + 任务 8
-- §11 i18n → 任务 11
-- §12 测试 → 各任务 TDD + 任务 12 集成
-- §1.2 末页触发时机(序列语义)→ 任务 6 `nextPage` atLast 分支
+**spec 覆盖度**（spec v2 各节 → 任务映射）：
+- §5 Rust find_next_volume → 任务 1（pick_sibling）+ 任务 2（command）
+- §6 IPC → 任务 3
+- §8 useReaderBookLoader → 任务 0
+- §9 reader store → 任务 4
+- §10 useCrossVolume → 任务 5
+- §11 ReaderView 编排 → 任务 8
+- §12 ContinueNextVolumeToast → 任务 7
+- §13 useToast/ToastHost → 任务 6
+- §14 瀑布流 → 任务 9
+- §16 i18n → 任务 10
+- §17 测试 → 各任务 TDD + 任务 11 集成
 
-**遗漏:** spec §3 方案对比(选定 A,已反映在架构)、§2 背景(参考)、§10 边界(分散在各任务的 null/failed/guard 处理)、§13 有意差异(记录性)——均非待实现任务。
+**审查报告 §5 修改清单对照**：
+- ✅ 任务 0 前置"抽取统一 Loader"（§5 实施计划第 1 条）
+- ✅ 任务 2 删 Archive 伪代码（§5 第 2 条）
+- ✅ 删 TS 虚假 filter（§5 第 3 条，文件结构"不改"栏明确）
+- ✅ 任务 4 saveNow 返回 Promise + 构造快照（§5 第 4 条）
+- ✅ 任务 5 不复制 list/sort/URL，改调 loader（§5 第 5 条）
+- ✅ 任务 7 toast props/emits 不调 useCrossVolume（§5 第 6 条）
+- ✅ 任务 8 route watch + 回调清理测试（§5 第 7 条）
+- ✅ 任务 9 lastFetchedPath + details 回落按钮可达（§5 第 8 条）
+- ✅ 任务 11 不预先接受 Rust 2 失败（§5 第 9 条，基线说明）
+- ✅ tag/push 不进默认任务（§5 第 10 条，任务 11 注释 + 收尾 commit）
 
-**占位符扫描:** 任务 2 步骤 1 引导读 `descriptor.rs` 确认字段(非占位,是必要的前置确认);任务 6 步骤 3e `flushPendingEmit` 标注"若现有结构不便抽,简化为直接调"(给执行者明确 fallback,非占位);任务 7 `spreadIndexForPage`/`planSpreads`/`sortEntries` 导出名标注"以 grep 为准"(引导校对,非臆造)。无"TODO/待定/补充细节"。
+**v2 架构关键不变量落地检查**：
+- route 唯一真值：任务 8 watch immediate + loadRouteBook
+- 失败不保留旧卷：任务 8 loadRouteBook catch 分支
+- 原子提交：任务 0 commitBookSnapshot
+- Controller loading 覆盖 loader：任务 8 busy = phase!=='idle' || bookLoadPhase==='loading'
+- pendingCrossVolume 只在 awaiting-confirm：任务 5 dismissManual/clearPendingState
+- trySave 不进 navigate 失败分支：任务 5 trySaveCurrentProgress
+- 卸载清理 setOnAtLastNextAttempt(null)：任务 8 onUnmounted
 
-**类型一致性:** `NextVolumeResult`(Rust + TS 字节级 camelCase);`FindNextVolumeArgs.filter` 默认 `'reader'`(Rust `default_filter` + TS 默认参数);`pendingCrossVolume: Ref<NextVolumeResult|null>`(任务 7 定义,任务 8 消费,一致);`setOnAtLastNextAttempt`(任务 6 定义,任务 9 接线,一致)。
+**占位符扫描**：无 TODO/待定。任务 0/8 的"grep 找接线点"是引导校对（现有代码字段名/回调点），非臆造。任务 2 集成测试 mock MediaSourceFactory 模式需参考现有 commands 测试，但 spec §17.1 已列覆盖点。
 
-**已知风险**(执行时关注):
-1. `reader.ts` 的 `emitChanged` debounce 结构 — `flushProgress` 抽取可能需要读现有实现调整(任务 6 步骤 3e)
-2. `useReaderTouchZones` 的 `folder-next` action 接线点 — 需 grep 现有回调结构(任务 9 步骤 4)
-3. Archive variant 字段名 — 任务 2 步骤 1 grep 确认,若与计划伪代码不符按实际改
-4. `spreadPlanner` 导出名 — 任务 7 步骤 3 标注 grep 校对
+**类型一致性**：`ReaderBookSnapshot`/`NextVolumeTarget`/`LoadBookOptions`/`BookIdentity` 在 spec §7 定义，任务 0/5 实现，任务 8 消费，一致。`NextVolumeResult` Rust（无 is_archive）+ TS（无 isArchive）字节级一致。
