@@ -2,6 +2,8 @@
 
 > 桌面端漫画阅读器。基于 Tauri 2.x（Rust 后端）+ Vue 3（前端）+ OpenSeadragon（图像渲染）。
 > 新独立仓库，与 MiraPage Android 工程完全独立，不引用其代码。
+>
+> ⚡ **实测状态快照（2026-08-11）**：本文档是设计意图,实际落地状态可能滞后。完整实测功能矩阵见 [`docs/superpowers/reports/2026-08-11-feature-matrix.md`](./superpowers/reports/2026-08-11-feature-matrix.md)（基于实际代码扫描 + `npm test` + `cargo test` 实测）。**当前 HEAD = `83a0c52`**,3 个 v0.1.0-module3.0.x tag 已发布（masonry / thumbnail-cache / thumbnail-polish + browse-position）。
 
 ---
 
@@ -57,7 +59,7 @@
 - **主题配色**（4 套色板 `color_theme`）：已存值，未接 Tailwind（v0.1.0-module3.0-settings 仅落地 `themeMode`）
 - 缩略图网格
 - 远程图加载进度条
-- 缩略图网格（瀑布流 masonry 视图 v0.1.0-module3.0.6 已覆盖"图片目录可视化浏览"需求；真正的预生成缩略图缓存网格仍未做）
+- 缩略图网格（瀑布流 masonry 视图 v0.1.0-module3.0.6 已覆盖"图片目录可视化浏览"需求；预生成缩略图缓存网格 v0.1.0-module3.0.7 + 3.0.8 已落地——见下文 ✅）
 - i18n：本期仅中 / 英两种语言，其他语言为未来工作
 
 > ✅ **已落地**（v0.1.0-module3.0-settings）：
@@ -108,6 +110,13 @@
 > - **滚动锚定**：`applyMeasuredBatch`（上方 item 尺寸到达补偿 scrollTop）已实现于 C2；E1 MasonryView 简化为 visibleRange 重算（实测无跳动，大目录/慢速 I/O 若发现跳动再接入像素级补偿）。
 > - **E2E 实测**（`D:\Wallpaper\normal` 224 entry）：虚拟化 224 → 10-28 DOM；列数 4→6 实时重排（width 254→169px）；⚙ popup 3 slider；滚动预读正常；双击图片进 reader 兼容。单测 539→582。
 > - **待打磨**：像素级 scrollTop 锚定补偿接入、resolve in-flight cancel、hasImages 搜索态副作用。
+
+> ✅ **已落地**（v0.1.0-module3.0.7 + 3.0.8，spec：`./superpowers/specs/2026-08-08-masonry-thumbnail-cache-design.md` + `./superpowers/specs/2026-08-10-masonry-browse-position-design.md`）：
+> - **缩略图缓存全栈**（v3.0.7）—— 4K 图 paint/decode 卡顿根因（基线 max 313ms / 5 次 >100ms 掉帧），Rust 按列宽生成 WebP 缩略图（EXIF Orientation 1-8 像素归一化 + 像素预算 + 原子写）。`thumbnail/` 子系统 9 文件 4529 行（policy / orientation / generator / key / index / scheduler / service / migration / mod），零 `todo!()`。migration 009。前端 `useMasonryThumbnails`（去重 batch+80ms debounce+epoch+事件+retry）+ `MasonryThumbnail` 6 状态卡片 + Settings 9 key。
+> - **缩略图 polish**（v3.0.8 thumbnail-polish）—— ThumbnailCacheSettings.vue 完整化（EnumRow 串联 mode/quality/cacheLimit + cacheUsed/clear + 缓存位置迁移 validate/migrate/resume/cancel/rollback/recovery + advanced toggle 4 key）。P0/P1 修复一波。benchmark `2026-08-09-thumbnail-generation-bench.md` + 代码审查 + policy hit-rate 4 套报告。
+> - **浏览位置 = 阅读进度**（v3.0.8 masonry-browse-position）—— migration 010 `progress.image_name` 列（瀑布流滚动锚点，NULL 走 page fallback）。`useMasonryBrowsePosition` composable（滚动监听 + 竞态保护 + 缓存）+ `scrollToEntry` 渐进校正。FileBrowser 工具栏「↶ 跳到上次」按钮 + canonicalImageNames + canReadNow 扩展。Settings masonry section + `recordBrowsePosition` / `restoreBrowsePositionOnEnter` 2 BooleanRow + fileBrowser section。
+> - **完整日志** — Rust `thumbnail/{service,scheduler,generator}` + worker panic `catch_unwind` 写到 `main.log`；前端 `useMasonryThumbnails` 加 5 个关键日志点 + `listen()` catch `isTauriEnv` 判断。
+> - **实测**：单测 582→**717** 前端 / Rust thumbnail 100 单测 + 12 集成 + 3 bench。Rust lib 179 测试 177 pass / **2 fail**（详见 `2026-08-11-feature-matrix.md` §1.5；CI 不跑 cargo test，2 个失败用例永远抓不到）。
 
 ---
 
