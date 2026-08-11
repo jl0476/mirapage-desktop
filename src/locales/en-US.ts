@@ -166,6 +166,8 @@ export default {
     viewDetails: 'Details',
     masonrySettings: 'Masonry settings',
     noImagesForMasonry: 'No images in this folder; masonry view unavailable',
+    // v0.1.0-module3.0.8 (Task 9): toolbar next-volume button (cross-volume spec §14.1)
+    nextVolume: 'Next volume',
     // v0.1.0-module3.0.8 (Task 10): masonry browse position toolbar jump
     jumpToLast: 'Jump to last',
     noRecordedProgress: 'No recorded progress in this folder',

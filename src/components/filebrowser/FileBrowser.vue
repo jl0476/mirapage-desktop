@@ -24,8 +24,10 @@ import { useReadStatusStore } from '@/stores/readStatus';
 import { useSettingsStore } from '@/stores/settings';
 import { useReaderActions } from '@/composables/useReaderActions';
 import { useMasonrySettings } from '@/composables/useMasonrySettings';
+import { useToast } from '@/composables/useToast';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
+import { findNextVolume } from '@/lib/tauri';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
 import RowContextMenu from './RowContextMenu.vue';
@@ -428,6 +430,8 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
 // v0.1.0-module3.0.3-hotfix11: 加入书库 + 下载全部 移到 toolbar (一处可见, 跨视图复用).
 const ICON_LIBRARY_PLUS = 'M12 6v6M12 12H6M12 12h6M12 12v6M4 6h16v14H4zM16 6L9 6L7.5 4h-3A2 2 0 0 0 2.5 5.5v12A2.5 2.5 0 0 0 5 20h14a2 2 0 0 0 2-2v-3';
 const ICON_DOWNLOAD = 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3';
+// v0.1.0-module3.0.8 (任务 9): 下一卷按钮图标 (chevron-right + 加号, lucide skip-forward 风格)
+const ICON_NEXT_VOLUME = 'M5 4l10 8-10 8V4zM19 5v14';
 
 // v0.1.0-module2.0: emit 'open' 已废弃 (双击只进目录, 触发阅读走 useReaderActions)
 //  保留 emit 类型仅出于向后兼容 — 不再 emit
@@ -476,6 +480,44 @@ function onJumpToLastClick() {
   log('[FileBrowser] onJumpToLastClick fired');
   void fileListRef.value?.masonryJumpToLast();
 }
+
+/** v0.1.0-module3.0.8 (任务 9): 工具栏「下一卷」按钮 (跨卷连续阅读 spec §14.2)
+ *  流程:
+ *    1. 早捕获 lastFetchedPath + rootPath (双重陈旧校验 — P1-4 修复)
+ *    2. fileListRef.masonryFlushNow() → 立即 recordCurrentTop 保存当前浏览位置
+ *    3. findNextVolume(descriptor, lastFetchedPath, 'next') (无 filter 参数 — P1-3 修复)
+ *    4. 结果落地前校验 lastFetchedPath + rootPath 都没变 (用户可能切到另一根但有相同 relPath)
+ *    5. 成功 → fb.navigate(result.relPath) → MasonryView 重载 → 自动 restoreAndScroll
+ *  错误: toast 提示 + swapping 重置 (finally)
+ *  disabled: swapping || !rootPath || !lastFetchedPath (根目录自身不能作"卷"起点,
+ *    不绑 viewMode — P1-3 修复: 跳到无图目录自动回落 details 后仍可点)
+ *  Pinia store refs 自动解包, 不写 .value; descriptor 用 masonryDescriptor 而非 descriptor. */
+const { push: pushToast } = useToast();
+const swapping = ref(false);
+async function onCrossNextVolume() {
+  if (swapping.value) return;
+  const pathAtRequestStart = fb.lastFetchedPath;
+  const rootAtRequestStart = masonryDescriptor.value.rootPath;
+  if (!pathAtRequestStart || !rootAtRequestStart) return;
+  swapping.value = true;
+  try {
+    await fileListRef.value?.masonryFlushNow();
+    const result = await findNextVolume(masonryDescriptor.value, pathAtRequestStart, 'next');
+    if (fb.lastFetchedPath !== pathAtRequestStart || masonryDescriptor.value.rootPath !== rootAtRequestStart) return;
+    if (!result) {
+      pushToast(t('reader.crossVolume.none'));
+      return;
+    }
+    await fb.navigate(result.relPath);
+    pushToast(t('reader.crossVolume.jumped', { title: result.title }));
+  } catch (e) {
+    log('[FileBrowser] onCrossNextVolume failed', e);
+    pushToast(t('reader.crossVolume.failed'));
+  } finally {
+    swapping.value = false;
+  }
+}
+
 function onAddToLibraryClick() {
   log('[FileBrowser] onAddToLibraryClick fired', selectedEntry.value?.name);
   if (selectedEntry.value) {
@@ -614,6 +656,27 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
             <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
           </svg>
           {{ t('fileBrowser.jumpToLast') }}
+        </button>
+        <!-- v0.1.0-module3.0.8 (任务 9): 工具栏「下一卷」按钮 (跨卷连续阅读 spec §14.1)
+             P1-3 修复: 不绑 viewMode,details 回落后仍可点; disabled 不含 !hasImages,
+             无图目录仍可点跳过. 仅在 swapping / 无 rootPath / 无 lastFetchedPath 时禁用
+             (根目录自身不能作"卷"起点). -->
+        <button
+          data-test="btn-next-volume"
+          type="button"
+          class="tb-btn"
+          :disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"
+          :title="t('fileBrowser.nextVolume')"
+          @click="onCrossNextVolume"
+        >
+          <svg
+            width="12" height="12" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path :d="ICON_NEXT_VOLUME" />
+          </svg>
+          {{ t('fileBrowser.nextVolume') }}
         </button>
         <!-- v0.1.0-module3.0.3-hotfix11: 加入书库 / 下载全部 提到顶栏, 跨视图复用.
              详情 (details) 视图已把属性显示在列上, attribute panel 隐藏; 但这两个

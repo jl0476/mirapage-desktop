@@ -315,6 +315,74 @@ describe('useMasonryBrowsePosition', () => {
     stop();
   });
 
+  it('flushNow 立即写入顶部图不等 debounce（跨卷前 flush 用）', async () => {
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 100 }],
+      ['b.jpg', { top: 100, height: 100 }],
+    ]);
+    const { start, stop, scrollTop, flushNow } = await setup({
+      renderEntries: [img('a.jpg'), img('b.jpg')],
+      canonicalImageNames: ['a.jpg', 'b.jpg'],
+      layoutMap,
+      scrollTopValue: 50, // baseline 落在 a.jpg 内
+    });
+    await start();
+    // 触发滚动 — watcher fire → scheduleRecord → debounce 300ms 计时中
+    scrollTop.value = 51;
+    // 100ms 后还没到 300ms debounce → saveProgress 不应被调
+    await wait(100);
+    expect(saveProgress).not.toHaveBeenCalled();
+    // flushNow 应立即清 debounce + recordCurrentTop,不需等剩余 200ms
+    await flushNow();
+    expect(saveProgress).toHaveBeenCalled();
+    const calls = (saveProgress as Mock).mock.calls;
+    expect(calls[0]?.[1]).toBe(0); // pageAtEntry
+    expect(calls[0]?.[4]).toBe('a.jpg'); // imageName
+    stop();
+  });
+
+  it('flushNow 重复调: 同图去重,不重复写', async () => {
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 100 }],
+    ]);
+    const { start, stop, scrollTop, flushNow } = await setup({
+      renderEntries: [img('a.jpg')],
+      canonicalImageNames: ['a.jpg'],
+      layoutMap,
+      scrollTopValue: 50,
+    });
+    await start();
+    scrollTop.value = 51;
+    // 让 scroll watcher 触发 scheduleRecord 把 activeWriteSeq 推到 1 + 设 debounce.
+    // 现实场景: 用户滚一下 → 过一会儿点"下一卷"按钮 → flushNow. 直接 sync 调会让
+    // watcher microtask 在 recordCurrentTop 内 await 期间 fire,把 writeSeqAtEntry=0
+    // 跟 activeWriteSeq=1 对不齐, writeSeq guard 误判.
+    await wait(50);
+    // 第一次 flushNow: 清 debounce + 写 a.jpg
+    await flushNow();
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+    // 第二次 flushNow（同一图,lastWrittenPath 已设）→ recordCurrentTop 入口同图去重,不写
+    await flushNow();
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('flushNow 无顶部图时: 清 debounce,不写 progress（空目录 / 测量未到）', async () => {
+    // renderEntries 空 → topmostImage=null → recordCurrentTop 直接 return
+    const { start, stop, scrollTop, flushNow } = await setup({
+      renderEntries: [], // 空
+      canonicalImageNames: [],
+      layoutMap: new Map(),
+      scrollTopValue: 0,
+    });
+    await start();
+    scrollTop.value = 10; // scheduleRecord → debounce
+    await wait(50);
+    await flushNow();
+    expect(saveProgress).not.toHaveBeenCalled();
+    stop();
+  });
+
   it('resize 冷却期结束后滚动才写 progress', async () => {
     const layoutMap = new Map([
       ['a.jpg', { top: 0, height: 400 }],

@@ -168,6 +168,8 @@ export default {
     viewDetails: '详情',
     masonrySettings: '瀑布流设置',
     noImagesForMasonry: '该目录无图片，无法使用瀑布流视图',
+    // v0.1.0-module3.0.8 (任务 9): 工具栏下一卷按钮 (跨卷连续阅读 spec §14.1)
+    nextVolume: '下一卷',
     // v0.1.0-module3.0.8 (任务 10): masonry 浏览位置 toolbar 跳转
     jumpToLast: '跳到上次',
     noRecordedProgress: '此目录暂无浏览记录',

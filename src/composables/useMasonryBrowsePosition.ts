@@ -80,6 +80,9 @@ export interface UseMasonryBrowsePositionReturn {
   start: () => Promise<void>;
   stop: () => void;
   jumpToLast: () => Promise<void>;
+  /** v0.1.0-module3.0.8 (任务 9): 跨卷前 flush — 立即清 debounce + 写入顶部图,
+   *  不等剩余的 300ms. spec §14.3. 失败/空目录 silent (与 scheduleRecord → recordCurrentTop 一致) */
+  flushNow: () => Promise<void>;
   lastBrowseProgress: ComputedRef<ProgressItem | null>;
   hasRecordedProgress: ComputedRef<boolean>;
 }
@@ -308,6 +311,13 @@ export function useMasonryBrowsePosition(
     lastResizeAt = 0;
   }
 
+  /** v0.1.0-module3.0.8 (任务 9): 立即清 debounce + 写入顶部图 (spec §14.3).
+   *  跨卷前 flush 用: 不等剩余 300ms. 失败/空目录 silent (依赖 recordCurrentTop 自带 try/catch + 同图去重). */
+  async function flushNow(): Promise<void> {
+    if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
+    await recordCurrentTop();
+  }
+
   async function jumpToLast(): Promise<void> {
     const seqAtEntry = activeStartSeq;
     let progress = lastBrowseProgress.value;
@@ -338,6 +348,7 @@ export function useMasonryBrowsePosition(
     start,
     stop,
     jumpToLast,
+    flushNow,
     lastBrowseProgress: computed(() => lastBrowseProgress.value),
     hasRecordedProgress: computed(() => !!lastBrowseProgress.value?.imageName),
   };

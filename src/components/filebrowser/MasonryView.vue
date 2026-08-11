@@ -273,6 +273,7 @@ const browsePosition = useMasonryBrowsePosition({
 // 暴露给父级 FileBrowser：
 //  - 缩略图操作（右键菜单重建/重试）
 //  - 任务 8：scrollToEntry / jumpToLast / browsePosition（masonry 浏览位置）
+//  - 任务 9：flushBrowsePosition（跨卷前 flush 用，转发 browsePosition.flushNow）
 defineExpose({
   regenerate: regenerateThumbnail,
   regenerateBatch: regenerateBatchFn,
@@ -281,6 +282,9 @@ defineExpose({
   scrollToEntry,
   jumpToLast: () => browsePosition.jumpToLast(),
   browsePosition,
+  // v0.1.0-module3.0.8 (任务 9): 跨卷前 flush — 立即清 debounce + 写入顶部图,
+  // 不等剩余 300ms. spec §14.3 + §14.4. FileList.masonryFlushNow 转发到此.
+  flushBrowsePosition: () => browsePosition.flushNow(),
 });
 
 // 预读 header（v0.1.0-module3.0.8 fix: 接收明确 paths，不再读 needPrefetch/nextBatchPaths）
