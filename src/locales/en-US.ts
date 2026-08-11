@@ -89,6 +89,16 @@ export default {
       slideshowPause: 'Pause',
       close: 'Close',
     },
+    // 2026-08-12 跨卷任务 8 (spec §16): reader cross-volume toasts + manual capsule.
+    crossVolume: {
+      none: 'No next volume',
+      jumped: 'Jumped to 《{title}》',
+      failed: 'Jump failed',
+      progressSaveFailed: 'Progress save failed, continued anyway',
+      continuePrompt: 'Continue to next volume 《{title}》?',
+      jump: 'Jump',
+      close: 'Close',
+    },
   },
   slideshow: {
     interval: 'Auto-advance interval (seconds)',

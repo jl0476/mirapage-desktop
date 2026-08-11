@@ -90,6 +90,17 @@ export default {
       slideshowPause: '暂停',
       close: '关闭',
     },
+    // 2026-08-12 跨卷任务 8 (spec §16): reader 跨卷提示 toast + manual 胶囊。
+    // pushToast(key) 在 ReaderView 注入层 t(k) 翻译后调 useToast().push(message).
+    crossVolume: {
+      none: '无下一卷',
+      jumped: '已跳转《{title}》',
+      failed: '跳转失败',
+      progressSaveFailed: '进度保存失败，已继续跨卷',
+      continuePrompt: '继续读下一本《{title}》？',
+      jump: '跳转',
+      close: '关闭',
+    },
   },
   slideshow: {
     interval: '自动推进间隔（秒）',

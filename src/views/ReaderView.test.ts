@@ -813,4 +813,169 @@ describe('ReaderView.vue', () => {
     expect(urls[1]).toContain('c.jpg');
     expect(urls[2]).toContain('a.jpg');
   });
+
+  // ─── 2026-08-12 跨卷任务 8: route watch immediate + loadRouteBook + commitBookSnapshot ───
+  // spec §11.1-§11.2 + §17.2. 不变量 2/3/5. 复用真实 loader (走 mocked tauri).
+
+  it('commitBookSnapshot 原子提交: loadBookById 成功后 reader.sourceDescriptor + currentRelPath 写入 (Controller.identity 依赖)', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockResolvedValue({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: 'subdir',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 0,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(reader.status).toBe('ready');
+    // 跨卷 currentIdentity() 依赖这两个字段 (spec §11.2 P1-1)
+    expect(reader.sourceDescriptor).toEqual({ type: 'local', rootPath: '/test/manga' });
+    expect(reader.currentRelPath).toBe('subdir');
+  });
+
+  it('loadBookById 失败: status=error + reader.closeBook 调 (bookId/sourceDescriptor/currentRelPath 清) + 旧 refs 清空', async () => {
+    // 第一次 loadBookById 成功（给 reader store 写入数据以便验证失败时清空）
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 0,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(reader.status).toBe('ready');
+    expect(reader.bookId).toBe(7);
+
+    // 第二次跨到 /reader/99 时 getBook 拒绝 → loadBookById 抛 → 不保留旧卷
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockRejectedValue(new Error('找不到 bookId 99'));
+    // 加一条 /reader/99 路由（避免 push 报 No match）
+    router.addRoute({ path: '/reader/:bookId', name: 'reader', component: ReaderView });
+    await router.push('/reader/99');
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    // 不变量 3：失败不保留旧卷（route 已是新 bookId → reader.closeBook + 清 refs + error UI）
+    expect(reader.status).toBe('idle');   // reader store 已被 closeBook 重置为 idle
+    expect(reader.bookId).toBeNull();        // closeBook 调
+    expect(reader.sourceDescriptor).toBeNull();  // closeBook 调
+    expect(reader.currentRelPath).toBe('');  // closeBook 调
+    // 模板显示 error UI (ReaderView 自身 status=error, pageUrls/book/imageNames 清)
+    expect(w.find('[data-test="reader-error"]').exists()).toBe(true);
+  });
+
+  it('stale 丢弃: 第一次 loadRouteBook 晚于第二次返回 → 第一次结果不 commit, 最终状态是第二次', async () => {
+    // book 7 用 deferred promise（晚返回）, book 99 立即返回
+    let resolveBook7: (v: unknown) => void = () => undefined;
+    const deferredBook7 = new Promise<unknown>((resolve) => { resolveBook7 = resolve; });
+
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockImplementation(((id: number) => {
+      if (id === 7) return deferredBook7 as Promise<ReturnType<typeof getBook>>;
+      if (id === 99) return Promise.resolve({
+        id: 99,
+        title: 'Manga 99',
+        sourceDescriptor: { type: 'local', rootPath: '/test/manga99' },
+        sourceType: 'Local',
+        absolutePath: '',
+        coverEntryPath: null,
+        coverEntryName: null,
+        pageCount: 0,
+        lastReadAt: null,
+        addedAt: 0,
+        isFavorite: false,
+      } as never);
+      return Promise.resolve(null as never);
+    }) as never);
+    vi.mocked(getProgress).mockReset();
+    vi.mocked(getProgress).mockResolvedValue(null);
+
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();  // initial push /reader/7 → deferred
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();  // 让 loadRouteBook(7) 启动并停在 await loader
+
+    // 立即跨到 /reader/99 → loadRouteBook(99) 启动并快速完成
+    await router.push('/reader/99');
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 此时 book 99 应已 commit（activeLoadSeq=2, seq=2）
+    expect(reader.bookId).toBe(99);
+
+    // 现在让 book 7 的 deferred resolve（应被 activeLoadSeq 守卫丢弃, seq=1 != 2）
+    resolveBook7({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 0,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    // 最终状态应是 99, 不是 7 (activeLoadSeq guard 丢弃旧卷晚返回)
+    expect(reader.bookId).toBe(99);
+    expect(reader.title).toBe('Manga 99');
+    expect(reader.sourceDescriptor).toEqual({ type: 'local', rootPath: '/test/manga99' });
+  });
 });

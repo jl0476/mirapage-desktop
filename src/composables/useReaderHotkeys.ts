@@ -25,6 +25,11 @@
  *   之前从 library/bookmarks 进 reader 时, Escape 会回到 library 不符合预期.
  *   useFileBrowserStore 的 savedNavigationContext 由 FileBrowser.onMounted 消费,
  *   恢复嵌套目录 (output/260715) 正确.
+ *
+ * 2026-08-12 跨卷任务 8 (P1-2 修复): 加 ReaderHotkeyActions 可选参数。
+ *  - folderNext / folderPrev 之前是 // TODO no-op，本任务派发到 actions.nextVolume / prevVolume。
+ *  - 保持向后兼容：actions 默认 {}，现有调用方（不传 actions）不受影响。
+ *  - 9 宫格 / Alt+→ 跨卷由 ReaderView 注入 crossVolume.maybeContinue(true, 'next')。
  */
 import { onBeforeUnmount, onMounted } from 'vue';
 import { useRouter, type Router } from 'vue-router';
@@ -32,7 +37,23 @@ import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { resolveHotkey, defaultKeyBindings, type ReaderCommand } from '@/lib/inputBindings';
 
-function dispatch(store: ReturnType<typeof useReaderStore>, router: Router, cmd: ReaderCommand): void {
+/**
+ * 2026-08-12 跨卷任务 8: 跨卷相关 hotkey 命令的回调注入。
+ * - nextVolume: Alt+→ (folderNext) 触发
+ * - prevVolume: Alt+← (folderPrev) 触发（本版 UI 不接 prev，但保留 API 对齐 Android）
+ * 字段可选；不传则该 hotkey 静默 no-op。
+ */
+export interface ReaderHotkeyActions {
+  nextVolume?: () => void;
+  prevVolume?: () => void;
+}
+
+function dispatch(
+  store: ReturnType<typeof useReaderStore>,
+  router: Router,
+  cmd: ReaderCommand,
+  actions: ReaderHotkeyActions,
+): void {
   const slideshow = useSlideshowStore();
   switch (cmd) {
     case 'nextPage':
@@ -72,14 +93,20 @@ function dispatch(store: ReturnType<typeof useReaderStore>, router: Router, cmd:
       break;
     case 'fitWidth':
     case 'openFileBrowser':
-    case 'folderNext':
-    case 'folderPrev':
       // TODO(Phase 5/Phase 2 扩展): 接到对应实现
+      break;
+    case 'folderNext':
+      // 2026-08-12 跨卷任务 8 (P1-2): 派发到 actions.nextVolume（force=true，不看模式）。
+      actions.nextVolume?.();
+      break;
+    case 'folderPrev':
+      // 2026-08-12 跨卷任务 8: prevVolume 暂未在 UI 触发（spec §1.2），保留 API 对齐 Android
+      actions.prevVolume?.();
       break;
   }
 }
 
-export function useReaderHotkeys(): void {
+export function useReaderHotkeys(actions: ReaderHotkeyActions = {}): void {
   const store = useReaderStore();
   // v0.1.0-module3.0.3-hotfix6: 在 setup 阶段捕获 router (有 Vue inject 上下文),
   // 传入 dispatch. 之前在 dispatch 内调 useRouter() 在 window listener 上下文执行,
@@ -88,7 +115,7 @@ export function useReaderHotkeys(): void {
 
   function onKeydown(e: KeyboardEvent): void {
     const cmd = resolveHotkey(e, defaultKeyBindings);
-    if (cmd) dispatch(store, router, cmd);
+    if (cmd) dispatch(store, router, cmd, actions);
   }
 
   onMounted(() => {
