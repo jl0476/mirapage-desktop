@@ -25,6 +25,7 @@
 | 完整度 | **完整实现**:reader 三模式(off/auto/manual)+ 瀑布流手动按钮 |
 | 跳转起点 | **智能恢复**:查 progress,未读完→恢复 page/scroll;已读完或无记录→第 1 页/顶部 |
 | manual UI | **底部胶囊**:"继续读下一本《XXX》?"+ 跳转 + 关闭 |
+| 末页触发时机 | **末页 + 再向下操作**(滚轮下/下键/Space/触控 MR),**非**翻到末页立即触发。序列语义:从倒数第二页 `nextPage` 翻到末页那次不跨卷;在末页再 `nextPage` 才触发跨卷意图。对齐 Android `atLastPageToggledToTrue`,避免"翻到末页看结尾"立即弹胶囊。不引入 ms 计时(序列边沿即可区分) |
 | prev 方向 | **先不触发**:Rust 算法对称实现(direction 参数),UI 只接 next(prev 留接口) |
 | 无下一卷 | toast 提示 + 停(manual 不显示胶囊,因为无目标) |
 | 循环 | **不做**,末卷无下一卷就停 |
@@ -71,10 +72,16 @@
 ## 4. 架构总览
 
 ```
-reader 场景(三触发源 → maybeContinue → 三模式):
-  手动末页 atLastSpread watch  ─┐
-  slideshow pendingNextVolume  ┼→ maybeContinue(force=false, next) → 看模式
-  9 宫格 folder-next / Alt+→   ─→ maybeContinue(force=true,  next) → 直接跨
+reader 场景(两路径 → maybeContinue):
+  路径 A 末页跨卷意图(统一 pendingNextVolume flag):
+    - 手动末页再向下(滚轮下/下键/Space/触控 MR):reader.nextPage() 检查
+      isAtLastSpread → 已末页则 set pendingNextVolume(而非翻页)
+      序列:从倒数第二页 nextPage(atLast=false)→ 翻到末页,不跨卷
+            在末页 nextPage(atLast=true)→ 不翻页,触发跨卷意图
+    - slideshow tick 到末页:tick 设 pendingNextVolume(已有机制)
+    → maybeContinue(force=false, next) → 看 off/auto/manual
+  路径 B 显式跨卷(9 宫格 br=folder-next / Alt+→,不看模式)
+    → maybeContinue(force=true, next) → 直接跨
                                       ↓
                                  loadCrossVolume('next'):
                                    1. flush 当前 page progress
@@ -259,29 +266,33 @@ export function useCrossVolume() {
 
 `stores/reader.ts` 新增:
 - state `sourceDescriptor: Ref<SourceDescriptor | null>`(openBook 时写入)
-- state `currentRelPath: Ref<string>`(当前卷在 parent 的相对路径)
+- state `currentRelPath: Ref<string>`(当前卷相对 rootPath 的完整路径,如 "comics/vol1")
 - action `flushProgress()`(force 立即写,不等 500ms debounce)
+- `nextPage()` 扩展末页跨卷意图:**执行前**检查 `isAtLastSpread`——若已末页,不翻页,改为 set `slideshow.pendingNextVolume=true`(复用 §0.6 既有 flag 通路,手动/slideshow 统一);否则正常 `currentSpreadIndex++`。序列边沿自动区分"翻到末页"与"末页再向下",无需计时。**循环依赖处理**:reader → slideshow 单向(reader.ts import slideshow.ts 写 flag;slideshow 不反向 import reader,§0.5 tick 已是回调式)。若 plan 阶段发现循环,改经 ReaderView 注入回调写 flag。
 - `openBook(payload: OpenBookPayload)` 扩展 payload 加可选字段 `startPage?: number` + `startImageName?: string`。**关键**:跨卷是 reader 内部切换(reader 已挂载在 `/reader/:bookId`),**不走路由**,所以不能用 `?at=` query(那是 ReaderView 首次挂载解析的)。openBook 内部落 currentSpreadIndex 时优先用 imageName 定位所在 spread,找不到 fallback startPage,再 fallback 0。
 
-### 7.3 三触发源接线(ReaderView.vue)
+### 7.3 触发源接线(ReaderView.vue)
+
+**两条触发路径**,合并到 `maybeContinue`:
 
 ```ts
 // ReaderView.vue
 const crossVolume = useCrossVolume();
 
-// 触发源 1: slideshow pendingNextVolume(已有 watch,改调 maybeContinue)
+// 路径 A: 末页跨卷意图(统一 pendingNextVolume flag)
+//   两个写入源,都 set 同一个 flag:
+//   - 手动末页再向下(滚轮下/下键/Space/触控 MR):reader.nextPage() 内部检查
+//     isAtLastSpread → 已末页则 set pendingNextVolume(而非翻页)。
+//     序列语义:从倒数第二页 nextPage 翻到末页那次不写 flag;在末页再 nextPage 才写。
+//   - slideshow tick 到末页:tick 设 flag(§0.5 既有机制)。
+//   → 单一 watch 消费:
 watch(() => slideshow.pendingNextVolume, (v) => {
-  if (v) crossVolume.maybeContinue(false, 'next');
+  if (v) crossVolume.maybeContinue(false, 'next');  // 看模式(off/auto/manual)
 });
 
-// 触发源 2: 手动末页 atLastSpread 翻转(新增 watch)
-watch(() => reader.isAtLastSpread, (last, prev) => {
-  if (last && !prev) crossVolume.maybeContinue(false, 'next');
-});
-
-// 触发源 3: 9 宫格 folder-next / Alt+→(inputBindings 已映射,回调改调)
-// useReaderTouchZones 的 folder-next action + hotkey 的 Alt+→
-//   → crossVolume.maybeContinue(true, 'next')
+// 路径 B: 显式跨卷(不看模式,force=true)
+//   9 宫格 br=folder-next / hotkey Alt+→ → crossVolume.maybeContinue(true, 'next')
+//   (useReaderTouchZones 的 folder-next action + useReaderHotkeys 的 Alt+→ 回调改调)
 ```
 
 ### 7.4 manual 胶囊确认
@@ -461,6 +472,7 @@ auto 模式跨卷后显示"已跳转《XXX》"——复用现有 toast 机制,`c
 - [ ] manual 模式末页 → 胶囊显示 → 点跳转 → 跳下一卷
 - [ ] off 模式末页 → 不跳
 - [ ] 9 宫格 folder-next / Alt+→ → 即时跨(不看模式)
+- [ ] **末页触发时机**:从倒数第二页 nextPage 翻到末页 → 不立即触发;在末页再向下(滚轮下/下键/Space)→ 才触发跨卷意图(序列语义验证)
 - [ ] 智能恢复:跳到读过一半的卷 → 恢复 page
 - [ ] 智能恢复:跳到已读完的卷 → 从第 1 页
 - [ ] 无下一卷 → toast"无下一卷"
@@ -490,7 +502,7 @@ auto 模式跨卷后显示"已跳转《XXX》"——复用现有 toast 机制,`c
 4. `useToast` + `ToastHost` 通用 toast(跨卷用)
 5. reader store 扩展(sourceDescriptor/currentRelPath/flushProgress/openBook startPage)
 6. `useCrossVolume` composable + 单测
-7. 三触发源接线(ReaderView watch atLastSpread + 改 slideshow watch + 9 宫格回调)
+7. 触发接线:reader.nextPage() atLast 分支(写 pendingNextVolume)+ ReaderView watch pendingNextVolume → maybeContinue(false) + 9 宫格/Alt+→ 回调 → maybeContinue(true)
 8. `ContinueNextVolumeToast` 组件 + 单测
 9. 瀑布流工具栏按钮 + crossNextVolume + useMasonryBrowsePosition.flushNow
 10. i18n 6 key × 2 locale
