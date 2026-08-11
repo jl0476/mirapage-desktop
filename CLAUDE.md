@@ -487,6 +487,10 @@ git push github v0.1.0-module1.NN
 - **瀑布流布局参数双层**（v0.1.0-module3.0.6-masonry）：列数 / 列间距 / 行间距三个参数，per-folder override（工具栏 ⚙ popup，仅 masonry 出现）> 全局默认（Settings 页 masonry section）。复用 `directory_sort` 的 locationKey 模式（`directory_masonry` 表，三列可 NULL + COALESCE 部分更新，只写用户改过的维度）。默认列数 4（范围 2-8），默认间距 8px（范围 0-24）。
 - **图片尺寸 Rust 读 header**（v0.1.0-module3.0.6-masonry）：新增 `list_image_dimensions` command 读图片 header（手写 JPEG/PNG/GIF/BMP 字节解析，纯 std 无 image crate）返回宽高。**这是对 §6 "Rust 不调 IPC 拿 metadata" 约定的合理边界外推**——该约束本意是"不为详情面板装饰字段加 IPC"，图片宽高是瀑布流布局骨架必需数据（无它虚拟滚动无法工作），与 `list_directory` 返回 size/modifiedAt 同性质。仅 masonry viewMode 触发，不进 MediaEntry 主字段。
 - **瀑布流尺寸预读不全量**（v0.1.0-module3.0.6-masonry）：header 当懒加载资源，首屏可见 + 3 屏预读（动态，不硬编码 120 张），未测量用估算宽高比（3:4）占位，渐进式 totalHeight。适配本地挂载远程存储的慢速 I/O——不滚动不查。
+- **瀑布流浏览位置 = progress**（v0.1.0-module3.0.8-masonry-browse-position）：复用 `progress` 表加 `image_name` 列（不新建表，不存 scrollTop 像素值），存"顶部可见图"文件名作持久锚点；page 列保留做 reader fallback。masonry 滚动主导写（300ms debounce + 同图去重）+ reader 翻页双写 image_name。`save_progress` 固定参数化 SQL + `COALESCE`/`CASE WHEN` 保 4 组合语义（无 `format!`）。
+- **浏览位置 enabled 只控制写不控制读**（v0.1.0-module3.0.8）：关闭"记录进度"仍能手动跳（toolbar「↶ 跳到上次」+ 顶栏立即阅读根据 progress 记录 enable）。`6d9b1b9` 加控制 -> `d98695c` 取消，反复后最终结论（audit-fix P1 还原原意）。
+- **mark_finished 不清 image_name**（v0.1.0-module3.0.8）：reset 后仍跳原位置（设计取舍，等用户反馈）；`mark_finished_inner` ON CONFLICT 只 SET finished + updated_at，不动 image_name。
+- **resize 视觉焦点双层解耦**（v0.1.0-module3.0.8）：视觉层 `captureMasonryViewportAnchor`/`restoreMasonryViewportAnchor`（path+ratio 锚定，不按宽度比例换算）+ 数据层 500ms cooldown（colWidth 变化后丢弃 scheduleRecord），窗口尺寸变化不污染阅读进度。DB progress 与视觉焦点解耦。
 
 ---
 

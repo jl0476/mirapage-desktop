@@ -103,8 +103,7 @@ vi.mock('@/composables/useMasonryLayout', async () => {
     useMasonryLayout: () => ({
       layout: computed(() => ({ map: fakeLayoutMap.current, totalHeight: 1000 })),
       visibleRange: computed(() => ({ start: 0, end: 2 })),
-      needPrefetch: computed(() => false),
-      nextBatchPaths: computed(() => []),
+      dimensionPrefetchPaths: computed(() => []),
       colWidth: computed(() => 200),
       thumbnailWindows: computed(() => ({ visible: [], ahead: [], behind: [], idle: [] })),
     }),

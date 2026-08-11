@@ -13,7 +13,6 @@ import {
   type MasonryInput,
   type MasonryItem,
 } from './useMasonryLayout';
-
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 describe('computeColWidth', () => {
@@ -526,5 +525,108 @@ describe('selectPathsInPixelWindow', () => {
     // 关闭 idle -> idle 为空
     const noIdle = mk(1, false);
     expect(noIdle.idle).toEqual([]);
+  });
+});
+
+describe('dimensionPrefetchPaths (像素窗口中心预读 — 修返回深处大片空白 bug)', () => {
+  // v0.1.0-module3.0.8 fix: 旧 nextBatchPaths 用 measuredMap.size 当连续前缀起点，
+  // reader 返回瀑布流深处时 measuredMap 清空 → 仍从 p0 读 → 视口附近的图永远拿不到
+  // 真实尺寸 → 用偏纵向的 avgRatio 估算 → 横向图被估算成纵向高度 → 大片空白。
+  // 新 dimensionPrefetchPaths 以 thumbnailWindows（visible+ahead+behind）为中心，
+  // 过滤已测量，不依赖 measuredCount 连续前缀。
+  function mkEntry(path: string): MediaEntry {
+    return { name: path, path, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 };
+  }
+
+  it('scrollTop 在深处 + measuredMap 空 → 返回视口附近 paths（不是开头 p0）', () => {
+    // 100 张图单列，measuredMap 空（模拟 reader 返回后 MasonryView 重建）
+    const entries = ref<readonly MediaEntry[]>(
+      Array.from({ length: 100 }, (_, i) => mkEntry(`p${i}`)),
+    );
+    const { dimensionPrefetchPaths, thumbnailWindows } = useMasonryLayout({
+      entries,
+      containerWidth: ref(100),
+      containerHeight: ref(200),
+      colCount: ref(1),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(5000), // 深处（单列估算高度 ~133px/张 → 约第 37 张附近）
+      measuredMap: ref(new Map()),
+    });
+    const paths = dimensionPrefetchPaths.value;
+    expect(paths.length).toBeGreaterThan(0);
+    // 核心断言：旧 bug 从 measuredCount(=0) slice 返回 p0-pN；新行为返回视口附近
+    expect(paths).not.toContain('p0');
+    expect(paths).not.toContain('p1');
+    // 交叉验证：应与 thumbnailWindows 的 visible/ahead/behind 有交集
+    const nearby = [
+      ...thumbnailWindows.value.visible,
+      ...thumbnailWindows.value.ahead,
+      ...thumbnailWindows.value.behind,
+    ];
+    expect(paths.some((p) => nearby.includes(p))).toBe(true);
+  });
+
+  it('已测量的 path 被过滤掉（不重复请求）', () => {
+    const entries = ref<readonly MediaEntry[]>(
+      Array.from({ length: 20 }, (_, i) => mkEntry(`p${i}`)),
+    );
+    // p0-p9 已测量（视口在顶部，这些在窗口内但不该再请求）
+    const measured = ref(
+      new Map<string, { width: number; height: number }>(
+        Array.from({ length: 10 }, (_, i) => [`p${i}`, { width: 100, height: 100 }]),
+      ),
+    );
+    const { dimensionPrefetchPaths } = useMasonryLayout({
+      entries,
+      containerWidth: ref(100),
+      containerHeight: ref(200),
+      colCount: ref(1),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(0),
+      measuredMap: measured,
+    });
+    const paths = dimensionPrefetchPaths.value;
+    for (let i = 0; i < 10; i++) {
+      expect(paths).not.toContain(`p${i}`);
+    }
+  });
+
+  it('视口在顶部 + 全未测量 → 返回开头 paths（正常情况不回归）', () => {
+    const entries = ref<readonly MediaEntry[]>(
+      Array.from({ length: 50 }, (_, i) => mkEntry(`p${i}`)),
+    );
+    const { dimensionPrefetchPaths } = useMasonryLayout({
+      entries,
+      containerWidth: ref(100),
+      containerHeight: ref(200),
+      colCount: ref(1),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(0),
+      measuredMap: ref(new Map()),
+    });
+    const paths = dimensionPrefetchPaths.value;
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths[0]).toBe('p0');
+  });
+
+  it('截断到 batch 上限（防止一次请求过多尺寸）', () => {
+    const entries = ref<readonly MediaEntry[]>(
+      Array.from({ length: 500 }, (_, i) => mkEntry(`p${i}`)),
+    );
+    const { dimensionPrefetchPaths } = useMasonryLayout({
+      entries,
+      containerWidth: ref(100),
+      containerHeight: ref(200),
+      colCount: ref(1),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(0),
+      measuredMap: ref(new Map()),
+    });
+    // batch 上限存在（具体值由实现定，测试只验有上限，不超过 120）
+    expect(dimensionPrefetchPaths.value.length).toBeLessThanOrEqual(120);
   });
 });
