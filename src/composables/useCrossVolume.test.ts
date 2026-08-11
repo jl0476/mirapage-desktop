@@ -414,6 +414,66 @@ describe('useCrossVolume', () => {
     expect(cv.pendingCrossVolume.value).toBeNull();
   });
 
+  it('navigateResolvedTarget ④: save await 期间 identity 变化 → 二次校验失败 → 不 navigate + 清 pending + idle', async () => {
+    // P0-2 修复: 保存后二次校验失败路径回归.
+    // 主线测试 (上面那条) 覆盖 ④ 通过; 此处覆盖 ④ 失败 (identity 在 save await 期间变化).
+    // ④ seq mismatch 分支在当前公开状态机下不可达: phase='navigating' 期间, 三个公开入口
+    //   (maybeContinue/confirmManual/dismissManual) 都受 phase 守卫锁住, requestSeq 无法外部递增.
+    //   由本测试的 identity 分支间接覆盖同一 settleIdle 收口逻辑 (clearPendingState + phase='idle').
+    let currentId: BookIdentity | null = identity(1, 'vol1');
+    const navigateToVolume = vi.fn(async () => undefined);
+    const pushToast = vi.fn();
+    const pauseSlideshow = vi.fn();
+    const consumePendingNextVolume = vi.fn();
+    // save 用 deferred promise, 期间手动改 identity 触发 ④ 失败
+    let resolveSave!: (v: undefined) => void;
+    const saveCurrentProgressNow = vi.fn(() => new Promise<undefined>((r) => { resolveSave = r; }));
+
+    const cv = useCrossVolume({
+      identity: () => currentId,
+      navigateToVolume,
+      saveCurrentProgressNow,
+      pushToast,
+      getContinueMode: () => 'manual' as const,
+      pauseSlideshow,
+      consumePendingNextVolume,
+      canStart: () => true,
+    });
+
+    let resolveFind!: (v: NextVolumeTarget | null) => void;
+    vi.mocked(findNextVolume).mockReturnValue(new Promise<NextVolumeTarget | null>((r) => { resolveFind = r; }));
+
+    // 1. manual 模式 arm 一个 pending (pendingCrossVolume 有值, phase=awaiting-confirm)
+    const armP = cv.maybeContinue(false, 'next');
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveFind(target('vol2', 'vol2'));
+    await armP;
+    expect(cv.phase.value).toBe('awaiting-confirm');
+
+    // 2. 调 confirmManual —— 进 navigating, ① 通过, ② await trySave (save deferred pending)
+    const confirmP = cv.confirmManual();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cv.phase.value).toBe('navigating');
+    expect(saveCurrentProgressNow).toHaveBeenCalledTimes(1);
+
+    // 3. save 期间改变 identity (用户切到另一卷)
+    currentId = identity(2, 'vol-other');
+
+    // 4. resolve save —— ③ pauseSlideshow 调, ④ 二次校验: seq 通过, identity 失败 → settleIdle return
+    resolveSave(undefined);
+    await confirmP;
+
+    // 5. 断言: navigate 未调 (⑤⑥ 跳过) + phase idle + pending 清 + consumePending 调一次 (settleIdle → clearPendingState)
+    expect(navigateToVolume).not.toHaveBeenCalled();
+    expect(cv.phase.value).toBe('idle');
+    expect(cv.pendingCrossVolume.value).toBeNull();
+    expect(consumePendingNextVolume).toHaveBeenCalledTimes(1);
+    // ④ 失败不走 navigateToVolume throw 分支, 不出 'failed' toast; save 也成功, 不出 'progressSaveFailed'
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
   it('navigateResolvedTarget: navigateToVolume throw → settleIdle + toast failed', async () => {
     const id = identity(1, 'vol1');
     const { cv, navigateToVolume, pushToast, consumePendingNextVolume } = setup({ currentIdentity: id, continueMode: 'auto' });
