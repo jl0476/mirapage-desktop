@@ -473,7 +473,7 @@ describe('useReaderActions', () => {
   it('readFromCurrentPath: cachedProgress 命中 → 走 router.push, 不调 IPC (ensureBookId/getProgress)', async () => {
     const cached: ProgressItem = {
       bookId: 42, page: 5, imageName: 'p5.jpg',
-      readerMode: 'single', updatedAt: 0,
+      readerMode: 'single', updatedAt: 0, finished: false,
     };
     const router = { push: vi.fn() };
     const actions = useReaderActions({
@@ -501,7 +501,7 @@ describe('useReaderActions', () => {
     vi.mocked(createBook).mockResolvedValue(77);
     vi.mocked(getProgress).mockResolvedValue({
       bookId: 77, page: 3, imageName: 'x.jpg',
-      readerMode: 'single', updatedAt: 1,
+      readerMode: 'single', updatedAt: 1, finished: false,
     });
     const router = { push: vi.fn() };
     const actions = useReaderActions({
@@ -534,7 +534,7 @@ describe('useReaderActions', () => {
     vi.mocked(createBook).mockResolvedValue(77);
     vi.mocked(getProgress).mockResolvedValue({
       bookId: 77, page: 3, imageName: null,  // 没浏览过, imageName=null
-      readerMode: 'single', updatedAt: 0,
+      readerMode: 'single', updatedAt: 0, finished: false,
     });
     const router = { push: vi.fn() };
     const actions = useReaderActions({
@@ -552,7 +552,7 @@ describe('useReaderActions', () => {
   it('readFromCurrentPath: router null (useRouter 返 null + opts 未传) → 不抛', async () => {
     const cached: ProgressItem = {
       bookId: 42, page: 5, imageName: 'p5.jpg',
-      readerMode: 'single', updatedAt: 0,
+      readerMode: 'single', updatedAt: 0, finished: false,
     };
     // 不传 router → useRouter() mock 返 null, opts.router 也无, router 最终为 null
     const actions = useReaderActions({
@@ -572,7 +572,7 @@ describe('useReaderActions', () => {
     vi.mocked(createBook).mockResolvedValue(5);
     vi.mocked(getProgress).mockResolvedValue({
       bookId: 5, page: 1, imageName: 'r.jpg',
-      readerMode: 'single', updatedAt: 0,
+      readerMode: 'single', updatedAt: 0, finished: false,
     });
     const router = { push: vi.fn() };
     const actions = useReaderActions({

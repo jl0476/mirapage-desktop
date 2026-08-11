@@ -71,7 +71,7 @@ function joinPath(...parts: string[]): string {
 }
 
 function resolveInitialSpreadIndex(
-  progress: (Awaited<ReturnType<typeof getProgress>> & { finished?: boolean }) | null,
+  progress: Awaited<ReturnType<typeof getProgress>>,
   explicitImageName: string | undefined,
   imageNames: string[],
   spreads: PageRange[],
@@ -82,7 +82,7 @@ function resolveInitialSpreadIndex(
       Math.max(0, spreads.length - 1),
     ));
   }
-  if (!progress || progress.finished === true || spreads.length === 0) return 0;
+  if (!progress || progress.finished || spreads.length === 0) return 0;
   if (progress.imageName) {
     const idx = imageNames.indexOf(progress.imageName);
     if (idx >= 0) {

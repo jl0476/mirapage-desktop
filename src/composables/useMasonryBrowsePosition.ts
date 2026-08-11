@@ -208,6 +208,7 @@ export function useMasonryBrowsePosition(
         imageName: e.name,
         readerMode: 'single',
         updatedAt: Date.now(),
+        finished: false,
       };
     } catch (err) {
       log('[useMasonryBrowsePosition] recordCurrentTop failed', err);

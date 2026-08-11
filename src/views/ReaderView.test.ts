@@ -227,6 +227,7 @@ describe('ReaderView.vue', () => {
       imageName: null,
       readerMode: 'single',
       updatedAt: 100,
+      finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -416,7 +417,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // saved progress = page 0
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 0, imageName: null, readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 0, imageName: null, readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -614,7 +615,7 @@ describe('ReaderView.vue', () => {
     // imageName='b.jpg' (index=1) 应胜出; page=0 → spread=0 (与 imageName 不同,
     // 旧实现走 page 会得到 0; 新实现命中 imageName 应得到 1 — 这是 RED 测试)
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 0, imageName: 'b.jpg', readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 0, imageName: 'b.jpg', readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -657,7 +658,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // imageName='deleted.jpg' 不在 imageNames (a/b/c) 中 → 走 page=1
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 1, imageName: 'deleted.jpg', readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 1, imageName: 'deleted.jpg', readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -700,7 +701,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // imageName=null（旧行 image_name=NULL, migration 010 之前）
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 1, imageName: null, readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 1, imageName: null, readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -743,7 +744,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // progress.imageName='a.jpg' (index=0), 但 ?at='c.jpg' 应胜出
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 0, imageName: 'a.jpg', readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 0, imageName: 'a.jpg', readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [

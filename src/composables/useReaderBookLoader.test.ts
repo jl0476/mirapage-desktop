@@ -39,7 +39,7 @@ const entries: MediaEntry[] = [
 ];
 
 function progress(overrides: Partial<ProgressItem> = {}): ProgressItem {
-  return { bookId: 7, page: 0, imageName: null, readerMode: 'single', updatedAt: 0, ...overrides };
+  return { bookId: 7, page: 0, imageName: null, readerMode: 'single', updatedAt: 0, finished: false, ...overrides };
 }
 
 beforeEach(() => {
@@ -85,7 +85,7 @@ describe('useReaderBookLoader', () => {
     ['explicit image', { opts: { explicitImageName: 'page10.jpg' }, p: progress({ page: 0, imageName: 'page2.jpg' }) }, 1],
     ['progress image', { opts: {}, p: progress({ page: 1, imageName: 'page10.jpg' }) }, 0],
     ['progress page', { opts: {}, p: progress({ page: 1 }) }, 0],
-    ['finished', { opts: {}, p: { ...progress({ page: 1, imageName: 'page10.jpg' }), finished: true } as ProgressItem & { finished: boolean } }, 0],
+    ['finished', { opts: {}, p: progress({ page: 1, imageName: 'page10.jpg', finished: true }) }, 0],
     ['no progress', { opts: {}, p: null }, 0],
   ])('%s 恢复起始 spread', async (_name, input, expected) => {
     mocks.getProgress.mockResolvedValue(input.p);

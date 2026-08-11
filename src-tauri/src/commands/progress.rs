@@ -16,8 +16,10 @@ use std::collections::HashMap;
 /// v0.1.0-module3.0.2 (H5): 取单本书最近阅读进度.
 ///
 /// v0.1.0-module3.0.8: 加 `image_name`（masonry 滚动写入，瀑布流浏览位置锚点）。
-/// 注：`finished` 不在此 struct——仍走 `list_progress_finished` 独立接口
-/// （readStatus store 需要全量 finished map）。
+///
+/// 2026-08-12 跨卷任务 4: 加 `finished`（任务 0 Loader 的 `resolveInitialSpreadIndex`
+/// 检查 `progress.finished === true → 0`，DB 列已存在（migration 003）但 Rust/TS
+/// 类型未对齐，Loader 那行 dead code。补齐后 Loader 已读端可正确判定"已读完→首页"）。
 #[derive(Debug, serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ProgressItem {
@@ -26,6 +28,7 @@ pub struct ProgressItem {
     pub image_name: Option<String>,
     pub reader_mode: String,
     pub updated_at: i64,
+    pub finished: bool,
 }
 
 /// 内部 SQL helper：`save_progress` 调它，测试也调它。
@@ -71,7 +74,7 @@ pub(crate) fn get_progress_inner(
 ) -> rusqlite::Result<Option<ProgressItem>> {
     use rusqlite::OptionalExtension;
     conn.query_row(
-        "SELECT book_id, page, image_name, reader_mode, updated_at
+        "SELECT book_id, page, image_name, reader_mode, updated_at, finished
          FROM progress WHERE book_id = ?1",
         rusqlite::params![book_id],
         |row| {
@@ -81,6 +84,7 @@ pub(crate) fn get_progress_inner(
                 image_name: row.get(2)?,
                 reader_mode: row.get::<_, String>(3)?,
                 updated_at: row.get::<_, i64>(4)?,
+                finished: row.get::<_, i64>(5)? != 0,
             })
         },
     )
@@ -329,14 +333,39 @@ mod tests {
             image_name: Some("page05.jpg".to_string()),
             reader_mode: "single".to_string(),
             updated_at: 1000,
+            finished: false,
         };
         let json = serde_json::to_string(&item).expect("serialize");
         assert!(json.contains("\"imageName\""), "应是 imageName: {json}");
         assert!(json.contains("\"bookId\""), "应是 bookId: {json}");
         assert!(json.contains("\"readerMode\""), "应是 readerMode: {json}");
         assert!(json.contains("\"updatedAt\""), "应是 updatedAt: {json}");
+        assert!(json.contains("\"finished\":false"), "应含 finished: {json}");
         assert!(!json.contains("\"image_name\""), "不应有 image_name: {json}");
         assert!(!json.contains("\"book_id\""), "不应有 book_id: {json}");
+    }
+
+    /// 7) get_progress 返回 finished 字段（2026-08-12 跨卷任务 4 — 修 ProgressItem gap）
+    #[test]
+    fn get_progress_returns_finished_field() {
+        let db = setup_db();
+        let book_id = 1i64;
+        // 写一条 finished=true 的行
+        save_with_db(&db, book_id, 5, "single", Some(true), Some("p.jpg"));
+        let item = get_with_db(&db, book_id).expect("行应存在");
+        assert_eq!(item.finished, true, "finished=true 应回传");
+
+        // 再写一条 finished=false
+        let book_id2 = 2i64;
+        save_with_db(&db, book_id2, 0, "single", Some(false), None);
+        let item2 = get_with_db(&db, book_id2).expect("行应存在");
+        assert_eq!(item2.finished, false, "finished=false 应回传");
+
+        // INSERT 默认 0（finished=None image_name=None）应回传 false
+        let book_id3 = 3i64;
+        save_with_db(&db, book_id3, 1, "single", None, None);
+        let item3 = get_with_db(&db, book_id3).expect("行应存在");
+        assert_eq!(item3.finished, false, "默认 finished 应回传 false");
     }
 
     /// 6) mark_finished 不动 image_name（spec §2.2.4 P0 不变量）

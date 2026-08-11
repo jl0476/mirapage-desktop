@@ -363,6 +363,9 @@ export interface ProgressItem {
   imageName: string | null;
   readerMode: 'single' | 'double';
   updatedAt: number;
+  /** 2026-08-12 跨卷任务 4: 补齐 ProgressItem gap（DB 列已存在，Rust/TS 对齐）。
+   *  Loader `resolveInitialSpreadIndex` 用此判定"已读完 → 第 1 页"。 */
+  finished: boolean;
 }
 /**
  * 保存阅读进度。

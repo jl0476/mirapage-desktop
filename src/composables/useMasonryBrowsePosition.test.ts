@@ -212,6 +212,7 @@ describe('useMasonryBrowsePosition', () => {
       imageName: 'a.jpg',
       readerMode: 'single',
       updatedAt: 0,
+      finished: false,
     });
     const { start, stop, lastBrowseProgress, scrollToEntry } = await setup({
       renderEntries: [img('a.jpg')],
@@ -237,6 +238,7 @@ describe('useMasonryBrowsePosition', () => {
       imageName: 'a.jpg',
       readerMode: 'single',
       updatedAt: 0,
+      finished: false,
     });
     const { start, stop, scrollTop, lastBrowseProgress } = await setup({
       renderEntries: [img('a.jpg')],
