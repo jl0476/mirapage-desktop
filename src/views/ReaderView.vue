@@ -19,13 +19,10 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { getBook, saveProgress, getProgress, listDirectory, toggleLike, addBookmark, setFavorite } from '@/lib/tauri';
+import { saveProgress, type BookItem, toggleLike, addBookmark, setFavorite } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
-import { useFileBrowserStore } from '@/stores/fileBrowser';
-import { useDirectorySortStore } from '@/stores/directorySort';
-import { sortEntries, type SortField } from '@/lib/fileSort';
+import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
@@ -35,15 +32,13 @@ import {
   useReaderTouchZones,
   dispatchZoneAction,
 } from '@/composables/useReaderTouchZones';
-import { SpreadPlanner } from '@/lib/spreadPlanner';
-import { isImage } from '@/lib/mime';
+import { useReaderBookLoader, type ReaderBookSnapshot } from '@/composables/useReaderBookLoader';
 import { log } from '@/lib/logger';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
 import ReaderContextMenu from '@/components/reader/ReaderContextMenu.vue';
 import SlideshowToast from '@/components/reader/SlideshowToast.vue';
 import type { ScaleMode } from '@/lib/readerSettings';
-import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 const route = useRoute();
 const router = useRouter();
@@ -51,6 +46,8 @@ const reader = useReaderStore();
 const slideshow = useSlideshowStore();
 const settings = useSettingsStore();
 const { t } = useI18n();
+const loader = useReaderBookLoader();
+
 
 const status = ref('loading' as 'loading' | 'ready' | 'error');
 const errorMessage = ref('');
@@ -62,7 +59,7 @@ const imageNames = ref([] as string[]);
 const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
 // 需求4-C: 模板访问 book.isFavorite / book.id, loadBook 写入此 ref
-const book = ref<Awaited<ReturnType<typeof getBook>> | null>(null);
+const book = ref<BookItem | null>(null);
 // 需求4-A: 右键轻量上下文菜单
 const ctxMenu = ref({ visible: false, x: 0, y: 0 });
 // v0.1.0-module3.0.3-hotfix3 (Bug 4): back btn 视觉反馈, 防止双击 & 让用户知道在跳转
@@ -189,120 +186,10 @@ async function loadBook() {
     return;
   }
   try {
-    log('[ReaderView/loadBook] IPC[getBook] →', id);
-    book.value = await getBook(id);
-    const b = book.value;
-    log('[ReaderView/loadBook] IPC[getBook] ←', b ? {
-      id: b.id,
-      title: b.title,
-      absolutePath: b.absolutePath,
-      coverEntryPath: b.coverEntryPath,
-      coverEntryName: b.coverEntryName,
-      pageCount: b.pageCount,
-      lastReadAt: b.lastReadAt,
-      isFavorite: b.isFavorite,
-      sourceDescriptor: b.sourceDescriptor,
-      sourceType: b.sourceType,
-    } : 'null');
-    if (!b) {
-      status.value = 'error';
-      errorMessage.value = `找不到 bookId ${id}`;
-      log('[ReaderView/loadBook] ERROR: book is null for id', id);
-      return;
-    }
-    // v0.1.0-module3.0.2: H1 修复后 Rust 端 fields 是 serde_json::Value,
-    // IPC 边界自动拆成对象。Defensive parse 仍保留, 兼容老 DB 行 / 跨进程备份.
-    // SourceDescriptor 是判别联合, 只 Local 变体有 rootPath.
-    log('[ReaderView/loadBook] parseSourceDescriptor input type:', typeof b.sourceDescriptor);
-    const sd = parseSourceDescriptor(b.sourceDescriptor);
-    log('[ReaderView/loadBook] parseSourceDescriptor result:', sd);
-    if (!sd || sd.type !== 'local' || !sd.rootPath) {
-      status.value = 'error';
-      errorMessage.value = 'source descriptor 解析失败或非本地资源';
-      log('[ReaderView/loadBook] ERROR: sourceDescriptor invalid', { sd, rootPath: (sd as { rootPath?: string })?.rootPath });
-      return;
-    }
-    const path = sd.rootPath;
-    log('[ReaderView/loadBook] resolved rootPath=', path);
-    // v0.1.0-module3.0.2-hotfix5 (H10): b.absolutePath 是相对 rootPath 的子目录路径
-    // (useReaderActions 传 entry.path = 裸子目录名), 不是绝对路径. convertFileSrc
-    // 内部期望绝对路径 (Rust fs::read), 必须拼 rootPath 前缀.
-    // 兼容历史数据: 如果 absolutePath 已包含盘符 ('Q:\xxx'), 视为已绝对.
-    const rootPath = path.replace(/[\\/]+$/, '');
-    const isAlreadyAbs = b.absolutePath && /^[A-Za-z]:[\\/]/.test(b.absolutePath);
-    const absDir = b.absolutePath && b.absolutePath.length > 0
-      ? (isAlreadyAbs ? b.absolutePath : joinPath(rootPath, b.absolutePath))
-      : rootPath;
-    log('[ReaderView/loadBook] absDir computed:', {
-      rootPath,
-      absolutePath: b.absolutePath,
-      isAlreadyAbs,
-      absDir,
+    const snapshot = await loader.loadBookById(id, {
+      explicitImageName: initialImageName.value ?? undefined,
     });
-    // v0.1.0-module3.0.2-hotfix6 (H11): 删 setRoot (省 1 IPC)
-    // ReaderView 不需要 fileBrowser.entries (rootPath 根目录 entries 没用),
-    // 只列 absDir 子目录. setRoot 内部已经调 fetch('')=listDirectory(rootPath),
-    // 是冗余 IPC (~500ms round-trip + 458 entry 处理), 直接 listDirectory(absDir)
-    // 一次完成.
-    log('[ReaderView/loadBook] IPC[listDirectory] →', { descriptor: sd, path: absDir });
-    const targetEntries: MediaEntry[] = await listDirectory(sd, absDir);
-    log('[ReaderView/loadBook] IPC[listDirectory] ←', targetEntries.length, 'entries; first 3:', targetEntries.slice(0, 3).map((e) => `${e.name}(dir=${e.isDirectory},arc=${e.isArchive})`));
-    // v0.1.0-module3.0.2-reader-polish (issue: reader 排序应与 file browser 一致):
-    // 之前用 naturalSort(name) 硬编码字母序, 忽略用户在 file browser 改的排序 (modifiedAt / size, asc/desc).
-    // v0.1.0-module3.0.3-hotfix4: 不能用 fb.effectiveSortField —— 那是 fileBrowser
-    //   最后 fetch 的目录排序 (例如 output/ DESC), 不是 book 自身目录 (例如
-    //   output/260715 ASC). 用户反馈: 进入 260715 设 ASC 后立即阅读, reader 用
-    //   父目录 DESC, 错位. 修复: 直接用 directorySort.resolve(sd, b.absolutePath)
-    //   查 book 目录的 per-folder override; fallback 到 settings (sortField / sortAscending).
-    const fb = useFileBrowserStore();
-    const dsStore = useDirectorySortStore();
-    let bookSortField: SortField = fb.sortField;
-    let bookSortAscending: boolean = fb.sortAscending;
-    try {
-      const override = await dsStore.resolve(sd, b.absolutePath);
-      if (override) {
-        bookSortField = override.sortField as SortField;
-        bookSortAscending = override.ascending;
-      }
-    } catch {
-      // 容错: 用 settings 默认
-    }
-    const imageEntries: MediaEntry[] = targetEntries
-      .filter((e) => !e.isDirectory && !e.isArchive && isImage(e.name));
-    const sortedEntries = sortEntries(imageEntries, bookSortField, bookSortAscending);
-    const sortedNames = sortedEntries.map((e) => e.name);
-    log('[ReaderView/loadBook] imageEntries', sortedNames.length, sortedNames.slice(0, 5), '(sort=', bookSortField, bookSortAscending, ', path=', b.absolutePath, ')');
-    // v0.1.0-module3.0.8: 同步注入 reader store imageNames + 局部 imageNames ref,
-    // 供 emitChanged (store) + currentReadImageName / resolveInitialSpreadIndex (本组件) 使用.
-    imageNames.value = sortedNames;
-    if (sortedNames.length === 0) {
-      status.value = 'error';
-      errorMessage.value = `${absDir} 下找不到图片`;
-      log('[ReaderView/loadBook] ERROR: no images at', absDir);
-      return;
-    }
-    // v0.1.0-module3.0.2-hotfix4 (H9): convertFileSrc 内部已经 encode, 不 pre-encode
-    // v0.1.0-module3.0.2-hotfix7 (H13): singlePage mode 参数
-    // 单页模式 spread 大小 = 1 (除 cover), 滚轮一次跳 1 张图.
-    // 双页模式 spread 大小 = 2 (除 cover + 末张), 跳 2 张.
-    const isSinglePage = settings.readerDefaultMode === 'single';
-    log('[ReaderView/loadBook] spread mode=', isSinglePage ? 'single' : 'double');
-    pageUrls.value = sortedNames.map((name) => convertFileSrc(joinPath(absDir, name)));
-    log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
-    log('[ReaderView/loadBook] IPC[getProgress] →', id);
-    const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length, isSinglePage, sortedNames);
-    log('[ReaderView/loadBook] initialSpreadIndex=', initialSpreadIndex, '(pageCount=', sortedNames.length, ')');
-    log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: b.title, pages: pageUrls.value.length, initialSpreadIndex, isSinglePage });
-    reader.openBook({
-      bookId: id,
-      title: b.title || '无标题',
-      pages: pageUrls.value,
-      spreads: SpreadPlanner.plan(pageUrls.value.length, true, isSinglePage),
-      initialSpreadIndex,
-    });
-    // v0.1.0-module3.0.8: openBook payload 未带 imageNames (spec §3.2 OpenBookPayload 保持稳定),
-    // 改在 openBook 后注入 store. closeBook 时 store 已重置 imageNames=[].
-    reader.imageNames = sortedNames;
+    commitBookSnapshot(snapshot);
     log('[ReaderView/loadBook] reader.openBook done, status=ready');
     status.value = 'ready';
   } catch (e) {
@@ -312,124 +199,18 @@ async function loadBook() {
   }
 }
 
-/**
- * v0.1.0-module3.0.2: 防御性解析 sourceDescriptor
- *  - 新数据 (Rust serde_json::Value): 直接是 SourceDescriptor 对象
- *  - 老数据 (Rust String raw blob): JSON.parse 拆
- *  - 都坏了: 返回 null (上层走 error 路径)
- */
-function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
-  if (raw == null) return null;
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' && 'rootPath' in parsed
-        ? (parsed as SourceDescriptor)
-        : null;
-    } catch {
-      return null;
-    }
-  }
-  if (typeof raw === 'object' && 'rootPath' in raw && typeof (raw as { rootPath: unknown }).rootPath === 'string') {
-    return raw as SourceDescriptor;
-  }
-  return null;
-}
-
-/**
- * v0.1.0-module3.0.2-hotfix5: 跨平台 path join (Windows '\\' / POSIX '/')
- *  - 用于 rootPath + absolutePath 或 absolutePath + filename 拼接
- *  - 保留 Windows '\\' 分隔符, 让 convertFileSrc encode 后 Rust fs::read 正确处理
- *  - 不 trim 各 segment 内部分隔符 (例如 absolutePath 'root/漫画' 中的 '/' 不动),
- *    只在 segment 边界加 1 个 '\\'
- */
-function joinPath(...parts: string[]): string {
-  const cleaned = parts
-    .filter((s) => s && s.length > 0)
-    .map((s) => s.replace(/[\\/]+$/, ''));  // 只去尾部分隔符
-  return cleaned.join('\\');
-}
-
-/**
- * v0.1.0-module3.0.2-hotfix3 (H8): percent-encode path segments
- *  - 老 pageUrls = convertFileSrc('Q:\\dir\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg')
- *    生成 'http://asset.localhost/Q:\\...\\(林星阑) - ...\\c (1).jpg'
- *  - 括号 / 空格 / 中文未 encode, WebView2 fetch asset:// 路径解析失败
- *    OSD tile-load-failed, 翻页后图片不显示
- *  - 修: encodeURIComponent 每段, 保留分隔符 (Windows '\\' / POSIX '/')
- *  - 注意: drive letter 'Q:' 必须保留, 所以 split '\\' / '/' 后只 encode
- *    非 drive-letter 段
- */
-// v0.1.0-module3.0.2-hotfix3 撤回 — encodePathForUrl 不需要 (H9)
-// Tauri 2 的 convertFileSrc 内部已经 percent-encode path (调用了
-// encodeURI). 前端再 encode 会双重编码: '%2528' 解码一次是 '%28',
-// 不是 '(' — Tauri Rust 端拿 '%28...' 当字面字符串找不到文件.
-// 直接传 raw path 即可, 让 convertFileSrc 内部统一处理.
-
-/**
- * v0.1.0-module3.0.2 (H5): 恢复上次阅读位置
- *  - 调 getProgress(bookId) 拿 last read page
- *  - page→spread 映射 (SpreadPlanner.spreadIndexForPage)
- *  - 无 progress / 失败: 默认 0
- *
- * v0.1.0-module3.0.2-hotfix1 (N3): 末页钳位
- *  - 还原到末页会让 slideshow.tick() atLast() 立刻 pause + setPendingNextVolume,
- *    用户感知"刚开就跨卷".
- *  - 修法: 把 initialSpreadIndex 钳到 last - 1 (倒数第二页),
- *    让用户先正常翻页, 而不是看到跨卷 flag 触发.
- *  - 多 spread 的漫画钳到 last - 1; 单 spread 的极端情况不动 (无 last - 1).
- *
- * v0.1.0-module3.0.2-reader-polish (Cluster A): 优先 ?at=imageName
- *  - 双击图片 / 选中图片立即阅读时, 用 imageEntry.name 在 sortedNames 找 index
- *  - page→spread 映射同 saved progress 路径
- *  - 末页钳位仍生效
- */
-async function resolveInitialSpreadIndex(
-  bookId: number,
-  pageCount: number,
-  singlePage: boolean = false,
-  imageNames: string[] = [],
-): Promise<number> {
-  // 1. 优先: Cluster A 入口 (双击/选中图片) — 用户显式选择, 不做末页钳位
-  const atName = initialImageName.value;
-  if (atName && imageNames.includes(atName)) {
-    const idx = imageNames.indexOf(atName);
-    const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
-    const last = spreads.length - 1;
-    if (last < 0) return 0;
-    const target = SpreadPlanner.spreadIndexForPage(idx, spreads);
-    const clamped = Math.max(0, Math.min(target, last));
-    log('[ReaderView/resolveInitialSpreadIndex] from ?at=', atName, '→ idx=', idx, '→ spread=', clamped, '(last=', last, ') [no last-clamp for explicit choice]');
-    return clamped;
-  }
-  // 2. 缺省: 读 saved progress (H5)
-  try {
-    const progress = await getProgress(bookId);
-    if (!progress) return 0;
-    const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
-    const last = spreads.length - 1;
-    if (last < 0) return 0;
-    // v0.1.0-module3.0.8: imageName 优先（masonry 写入的 anchor）.
-    // 命中走 imageNames.indexOf，末页钳位保留（spec §4.1）.
-    if (progress.imageName) {
-      const nameIdx = imageNames.indexOf(progress.imageName);
-      if (nameIdx >= 0) {
-        const target = SpreadPlanner.spreadIndexForPage(nameIdx, spreads);
-        const clamped = Math.max(0, Math.min(target, last));
-        log('[ReaderView/resolveInitialSpreadIndex] from saved progress imageName=', progress.imageName, '→ idx=', nameIdx, '→ spread=', clamped, '(last=', last, ')');
-        return clamped >= last ? Math.max(0, last - 1) : clamped;
-      }
-      log('[ReaderView/resolveInitialSpreadIndex] imageName not found', progress.imageName, 'fallback to page');
-    }
-    // 3. fallback page（旧行 / 改名 / 换源）
-    const idx = SpreadPlanner.spreadIndexForPage(progress.page, spreads);
-    const clamped = Math.max(0, Math.min(idx, last));
-    log('[ReaderView/resolveInitialSpreadIndex] from saved progress page=', progress.page, '→ spread=', clamped, '(last=', last, ')');
-    return clamped >= last ? Math.max(0, last - 1) : clamped;
-  } catch (e) {
-    log('[ReaderView/resolveInitialSpreadIndex] fallback 0:', e);
-    return 0;
-  }
+function commitBookSnapshot(snapshot: ReaderBookSnapshot): void {
+  book.value = snapshot.book;
+  pageUrls.value = snapshot.pageUrls;
+  imageNames.value = snapshot.imageNames;
+  reader.openBook({
+    bookId: snapshot.book.id,
+    title: snapshot.book.title || '无标题',
+    pages: snapshot.pageUrls,
+    spreads: snapshot.spreads,
+    initialSpreadIndex: snapshot.initialSpreadIndex,
+  });
+  reader.imageNames = snapshot.imageNames;
 }
 
 /**
