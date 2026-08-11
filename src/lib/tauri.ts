@@ -472,12 +472,20 @@ export async function testConnection(id: number): Promise<boolean> {
 // ─── Continue Volume (Phase 5) ──────────────────────────────────────────
 // v0.1.0-module3.0.2 (H4): Rust 端 fn find_next_volume(args: FindNextVolumeArgs) 单结构体,
 // 走 v0.1.0-module2.1 的 `{ args: { ... } }` 包装契约 + camelCase.
+// v0.1.0-module3.0.x-cross-volume (spec §6.1): 返回类型由 string|null 升级为 NextVolumeResult|null
+// (descriptor + relPath + title;无 isArchive —— 仅 Local 目录卷).filter 参数从未存在,v2 显式确认无 filter.
+export interface NextVolumeResult {
+  descriptor: SourceDescriptor;   // 同源 Local,rootPath 不变
+  relPath: string;                // 下一卷相对 rootPath 完整路径
+  title: string;                  // 目录名
+  // 注:无 isArchive 字段(本版仅 Local 目录卷)
+}
 export async function findNextVolume(
   descriptor: SourceDescriptor,
   currentPath: string,
   direction: 'next' | 'prev',
-): Promise<string | null> {
-  return invoke<string | null>('find_next_volume', {
+): Promise<NextVolumeResult | null> {
+  return invoke<NextVolumeResult | null>('find_next_volume', {
     args: { descriptor, currentPath, direction },
   });
 }
