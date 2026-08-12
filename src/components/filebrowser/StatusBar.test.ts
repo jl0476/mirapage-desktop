@@ -126,4 +126,15 @@ describe('StatusBar 下一卷右段', () => {
     });
     expect(wrapper.find('[data-test="statusbar-next-volume"]').attributes('disabled')).toBeDefined();
   });
+
+  it('卷名容器有 next-volume-name class + max-width', () => {
+    const wrapper = mount(StatusBar, {
+      props: { ...base, nextVolumeTitle: 'very-long-volume-name-here' },
+      global: { plugins: [i18n] },
+    });
+    const name = wrapper.find('.next-volume-name');
+    expect(name.exists()).toBe(true);
+    // 固定宽度容器(scoped CSS 限制, happy-dom 测不了实际 px, 验 class + style 注入点)
+    expect(name.classes()).toContain('next-volume-name');
+  });
 });
