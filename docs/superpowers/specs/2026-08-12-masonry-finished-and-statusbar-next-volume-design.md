@@ -1,8 +1,8 @@
 # 瀑布流滚到底算读完 + 底栏下一卷 + StatusBar 布局优化
 
-**日期**: 2026-08-12
+**日期**: 2026-08-12（2026-08-13 修订：纳入代码审查 P0×2 + P1×3 + P2×2）
 **前置模块**: v0.1.0-module3.1.0-path-identity
-**状态**: 设计阶段（待用户审查）
+**状态**: 设计阶段（待用户审查 v2）
 
 ---
 
@@ -61,32 +61,66 @@ const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - BOTTOM_THRE
 
 1. **`atBottom`**：`scrollTop + clientHeight >= scrollHeight - viewportHeight`
 2. **停留确认**：`atBottom` 状态持续 ≥ `STABLE_MS`（默认 **1200ms**），防惯性滑过末尾误触发
-3. **当前未 finished**：幂等跳过（避免重复 IPC；`lastBrowseProgress.finished` 已 true 时不写）
-4. **`enabled` 为 true**：复用现有 `settings.recordBrowsePosition` 开关（与浏览位置写入同开关——关了记录进度就不该标 finished）
+3. **当前未 finished**：幂等跳过（避免重复 IPC；见 §2.7 缓存单调性，不能依赖会被覆盖的本地缓存——改用 `recordCurrentTop` 入口读 DB 真值或单调保留的缓存）
+4. **`enabled` 为 true**：`recordCurrentTop` **入口**守卫 `if (!params.enabled.value) return;`（不仅是 watcher 层）。复用现有 `settings.recordBrowsePosition` 开关——关了记录进度就不该标 finished。`flushNow`（跨卷前 flush）也走同一入口，故 enabled=false 时 flush 也不写。
 5. **`canonicalImageNames.length > 0`**：无图目录不触发（虽然无图目录不会进瀑布流，但防御）
 
-### 2.3 停留确认机制
+> **审查 P1-2 修复**：`recordCurrentTop` 入口必须显式检查 `params.enabled.value`。现有实现只在 watcher 层（`enableWatcher/disableWatcher`）控制 `scheduleRecord`，但 `flushNow` 绕过 watcher 直接调 `recordCurrentTop`，导致 enabled=false 时跨卷前 flush 仍写普通进度。入口守卫是唯一可靠保证，watcher 层保留为优化（减少不必要的 schedule）。
 
-不是「连续 N 次落在同一图」（那是单列思维），而是**时间阈值**（滚到底是状态，不是事件）：
+### 2.3 停留确认机制（状态机）
+
+**不是「连续 N 次落在同一图」**（那是单列思维，且现有 scroll watcher 在用户停下后不再触发，计数永远卡住），而是**定时器 + 时间窗口**。
+
+#### 问题：scroll watcher 不持续触发
+
+现有 `enableWatcher`（`useMasonryBrowsePosition.ts:247`）监听 `[scrollTop, entries.length]` 变化。用户滚到底后**完全不动**，watcher 不再 fire，`recordCurrentTop` 不再被调。若只在 watcher 回调里记 `bottomSince`，`stableMs` 永远停在 ~0，A-T1 物理上无法成立。
+
+#### 解法：进入底部时调度 stableTimer
 
 ```
-recordCurrentTop 入口逻辑（新增）:
-  if atBottom:
-    if bottomSince === null: bottomSince = Date.now()   // 首次进入底部
-    stableMs = Date.now() - bottomSince
-    finishedNow = stableMs >= STABLE_MS
+recordCurrentTop 入口逻辑（新增,在现有去重判定之前）:
+  const atBottom = params.atBottom.value
+
+  if (atBottom):
+    if (bottomSince === null):
+      bottomSince = Date.now()
+      stableTimer = setTimeout(() => void recordCurrentTop(), STABLE_MS)
+      // 本次先写普通进度(finished=undefined),STABLE_MS 后 timer 再触发一次升级判定
+    else:
+      stableMs = Date.now() - bottomSince
+      finishedNow = stableMs >= STABLE_MS
   else:
-    bottomSince = null                                   // 离开底部,重置
+    clearStableTimer()
+    bottomSince = null
     finishedNow = false
 
-  // finished 单调: 只传 true, 不传 false
+  // finished 单调: 只传 true, 不传 false(详见 §2.7)
   const finishedParam = finishedNow ? true : undefined
   await saveProgress(bookId, page, 'single', finishedParam, imageName)
 ```
 
-- `undefined` → Rust `CASE WHEN ?5 IS NULL THEN progress.finished`，保留旧值（普通滚动不碰 finished）
-- `true` → 升级为已读（不会误降级）
-- **永不传 `false`** → 单调「只升不降」，与 reader 末页语义一致
+**关键时序**：
+1. 用户滚到底 → scroll watcher fire → `scheduleRecord`(300ms debounce) → `recordCurrentTop` 第 1 次：`atBottom=true`、`bottomSince=null` → 记 `bottomSince`、调度 `stableTimer(STABLE_MS)`、本次写 `finished=undefined`（普通进度，Rust 保留旧 finished）
+2. 用户保持不动 STABLE_MS → `stableTimer` 触发 `recordCurrentTop` 第 2 次：`atBottom=true`、`bottomSince≠null`、`stableMs≥STABLE_MS` → `finishedNow=true` → 写 `finished=true`（升级，单调）
+3. 用户离开底部 → scroll watcher fire → `scheduleRecord` → `recordCurrentTop`：`atBottom=false` → `clearStableTimer()`、`bottomSince=null`、`finishedNow=false` → 写 `finished=undefined`（保留，不降级）
+
+#### stableTimer 的清理出口（必须全覆盖）
+
+`stableTimer` 在以下 **5 个出口**都要 `clearTimeout`，漏一处则漏写或写陈旧：
+
+| 出口 | 位置 | 原因 |
+|---|---|---|
+| 离开底部（atBottom false） | `recordCurrentTop` else 分支 | 用户滚走了，停留中断 |
+| `start()` 重置 | `start()` 开头 | 目录切换，旧 timer 失效 |
+| `stop()` | `stop()` 开头 | 卸载/切目录 |
+| `disableWatcher()` | `disableWatcher()` 内 | enabled=false，停止记录 |
+| resize 冷却触发 | `scheduleRecord` resize 分支 / colWidth watcher | scrollHeight 变了，旧底部判定失效 |
+
+封装 `clearStableTimer()` helper 统一清理（同时清 timer + 置 `bottomSince=null`），所有出口调它。
+
+#### 与现有 writeSeq / seqAtEntry 防覆盖的关系
+
+`stableTimer` 触发的第 2 次 `recordCurrentTop` 与 scroll watcher 触发的并发时，复用现有 `seqAtEntry !== activeStartSeq` / `writeSeqAtEntry !== activeWriteSeq` 防覆盖。`start()`/`stop()` 自增 `activeStartSeq` 会让在途的 stableTimer 回调进入即 return（`seqAtEntry !== activeStartSeq`）。无需额外防护。
 
 ### 2.4 数据流
 
@@ -125,12 +159,15 @@ useMasonryBrowsePosition({
 
 ### 2.6 重置时机
 
-`bottomSince` 在以下情况清 null（避免陈旧状态误触发）：
-- `start()` / `stop()`（目录切换、组件卸载）
-- `atBottom` 从 true 变 false（用户滚离底部）
-- resize 冷却期内（`lastResizeAt` 生效期间）—— resize 会改变 scrollHeight，旧 bottomSince 失效
+`bottomSince` 和 `stableTimer` 在以下情况清理（避免陈旧状态误触发）：
+- `start()` / `stop()`（目录切换、组件卸载）—— 调 `clearStableTimer()`
+- `atBottom` 从 true 变 false（用户滚离底部）—— `recordCurrentTop` else 分支调 `clearStableTimer()`
+- `disableWatcher()`（enabled=false）—— 调 `clearStableTimer()`
+- resize 冷却期内（`lastResizeAt` 生效期间）—— resize 会改变 scrollHeight，旧 `bottomSince` 失效，`scheduleRecord` 的 resize 分支调 `clearStableTimer()`
 
-### 2.7 与 reader 的协调（不变量）
+### 2.7 与 reader 的协调 + 缓存单调性（不变量）
+
+#### finished 字段协调
 
 两条路径都写 `finished=true`，Rust UPSERT 保证幂等：
 - reader 末页 → `true`
@@ -139,18 +176,59 @@ useMasonryBrowsePosition({
 - `image_name` 各自更新自己的（瀑布流写顶部图，reader 写当前 spread 起始图），互不覆盖（都走 `COALESCE(excluded.image_name, progress.image_name)` 保留逻辑）
 - **重置**：只有右键菜单 `markFinished(false)` 能降级，瀑布流/reader 都不能降级
 
+#### 前端缓存 `lastBrowseProgress.finished` 必须单调（审查 P1-1 修复）
+
+**问题**：现有 `recordCurrentTop`（`useMasonryBrowsePosition.ts:217-224`）写入分支硬编码 `finished: false`：
+```ts
+lastBrowseProgress.value = { ..., finished: false };  // ← 无论 DB 真值
+```
+若 reader 已写 `finished=true`，瀑布流滚动到另一张图写普通进度（`finished=undefined`，DB 正确保留 true），但前端缓存被覆盖成 `false` → A7 幂等跳过失效，可能重复 IPC、错误判断状态。
+
+**修复**：写入分支的缓存 finished 必须镜像 DB 的单调语义：
+```ts
+lastBrowseProgress.value = {
+  ...,
+  // 单调或保留：本次升级为 true 则 true；否则保留上次的 finished（DB 那边 COALESCE 也保留了）
+  finished: finishedNow || lastBrowseProgress.value?.finished || false,
+};
+```
+这样缓存与 DB 一致：只升不降，reader 写的 true 不会被瀑布流普通滚动覆盖回 false。
+
+> **幂等跳过依据（A7）**：`recordCurrentTop` 入口判断「当前已 finished 则跳过」必须读这个**单调保留后的缓存**（或入口先查一次 `getProgress`），不能读会被 `false` 覆盖的旧缓存。
+
 ### 2.8 不变量清单
 
 | # | 不变量 | 保证机制 |
 |---|---|---|
 | A1 | 瀑布流只写 `finished=true`，永不写 `false` | `finishedParam = finishedNow ? true : undefined` |
-| A2 | 滚到底 + 停留 STABLE_MS 才写 | `bottomSince` 时间窗口 |
-| A3 | 离开底部重置窗口 | `atBottom=false → bottomSince=null` |
-| A4 | 目录切换/卸载重置窗口 | `start()`/`stop()` 清 `bottomSince` |
-| A5 | resize 冷却期不写 finished | resize 期间 `scheduleRecord` 整体被丢弃（现有机制），finished 同样不写 |
-| A6 | `recordBrowsePosition=false` 不写 finished | enabled watcher 控制 recordCurrentTop 入口（现有机制） |
-| A7 | finished 已 true 不重复 IPC | 入口检查 `lastBrowseProgress.finished` 跳过 |
+| A2 | 滚到底 + 停留 STABLE_MS 才写 | `bottomSince` 时间窗口 + `stableTimer` 调度第 2 次 recordCurrentTop |
+| A3 | 离开底部重置窗口 + 取消 timer | `atBottom=false → clearStableTimer() + bottomSince=null` |
+| A4 | 目录切换/卸载重置窗口 + 取消 timer | `start()`/`stop()` 调 `clearStableTimer()` |
+| A5 | resize 冷却期不写 finished | resize 期间 `scheduleRecord` 整体被丢弃（现有机制）+ 调 `clearStableTimer()`，finished 同样不写 |
+| A6 | `recordBrowsePosition=false` 不写任何进度（含 finished） | `recordCurrentTop` **入口** `if (!params.enabled.value) return;`（审查 P1-2），watcher 层为优化 |
+| A7 | finished 已 true 不重复 IPC | 入口检查单调保留后的 `lastBrowseProgress.finished`（§2.7），跳过 |
 | A8 | atBottom 用 scrollHeight 不用 topmostImage | 绕过多列底部不齐的结构缺陷 |
+| A9 | **复合去重：(path, finishedParam) 同时相同才跳过**（审查 P0-1） | 现有 `if (e.path === lastWrittenPath) return` 扩展为 `if (e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value) return` |
+
+#### A9 详解：复合去重（审查 P0-1 核心修复）
+
+**问题**：现有 `recordCurrentTop:196` `if (e.path === lastWrittenPath.value) return;` 只按 path 去重。滚到底流程里两次 recordCurrentTop 的 `e.path`（顶部图）相同：
+- 第 1 次（刚到底）：`finishedParam=undefined` → 写普通进度 → 记 `lastWrittenPath=e.path`
+- 第 2 次（stableTimer 触发，停留达标）：`e.path === lastWrittenPath` → **直接 return，finished=true 永远写不进去**
+
+**修复**：去重维度扩展为 `(path, finishedParam)`：
+```ts
+// recordCurrentTop 入口,在 atBottom/finishedNow 计算之后,saveProgress 之前
+if (e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value) {
+  return;
+}
+// ... saveProgress ...
+lastWrittenPath.value = e.path;
+lastWrittenFinishedParam.value = finishedParam;  // 新增 ref,记录上次写入的 finishedParam
+```
+`finishedParam` 只可能 `undefined` 或 `true`（A1），所以同一张图最多写 2 次：第 1 次 `undefined`、第 2 次升级为 `true`，之后 `(path, true)` 重复才跳过（A7 幂等）。
+
+`lastWrittenFinishedParam` 在 `start()`/`stop()` 随 `lastWrittenPath` 一起重置为 `null`。
 
 ---
 
@@ -184,11 +262,32 @@ emit('next-volume');  // 点击「下一卷」
 ### 3.3 右段渲染逻辑
 
 ```
-nextVolumeTitle === undefined     → 不渲染右段（兼容：FileBrowser 外的其他调用点）
+nextVolumeTitle === undefined     → 右段渲染空 div（保持三段对称，路径仍居中；兼容旧调用点）
 nextVolumeLoading === true        → 右段「…」（灰，不可点）—— 防抖期/IPC 在途
 nextVolumeTitle === null          → 「已是最后一卷」（灰，disabled=true）
 nextVolumeTitle (非空 string)     → 「下一卷: vol.02 ▶」（accent hover，disabled=nextVolumeDisabled）
 ```
+
+> **切目录不闪烁**（视觉时序）：切目录时 `nextVolumeLoading` 立即置 true（debounce 排上时就置），`nextVolumeTitle` **不**清成 undefined（否则右段消失）。即切目录期间右段始终显示「…」（loading），查完更新为 title 或 null。这样右段从「上一卷名」→「…」→「新卷名」平滑过渡，不会闪空。
+> `undefined` 只用于「StatusBar 调用方完全没传该 prop」的兼容场景（其他调用点），FileBrowser 内部不主动设 undefined。
+
+### 3.3.1 nextVolumeDisabled 绑定（审查 P2-1）
+
+FileBrowser 把以下状态绑定到 StatusBar，避免「显示可点击但上层守卫忽略」：
+
+```vue
+<StatusBar
+  ...
+  :next-volume-title="nextVolumeTitle"
+  :next-volume-loading="nextVolumeLoading"
+  :next-volume-disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"
+  @next-volume="onCrossNextVolume"
+/>
+```
+
+- `swapping`：onCrossNextVolume 跳转中（复用现有 ref）
+- `!fb.rootPath || !fb.lastFetchedPath`：根目录/未加载不能作「卷」起点（与 toolbar 按钮 `:718` 同条件）
+- `nextVolumeLoading` 不并入 disabled（loading 时 StatusBar 自身按 §3.3 渲染「…」灰，不靠 disabled）
 
 ### 3.4 视觉（延续 §1.2 工具栏 token）
 
@@ -197,44 +296,57 @@ nextVolumeTitle (非空 string)     → 「下一卷: vol.02 ▶」（accent hov
 - `cursor-pointer`，`px-2`，无 disabled 时 `tb-btn` 同款 transition
 - 固定宽度容器（见功能 D 跑马灯）：右段整体 `max-w-[200px]`，卷名内层 truncate + hover 滚动
 
-### 3.5 预查时机 + 防抖（FileBrowser.vue 负责）
+### 3.5 预查时机 + 防抖 + 请求序号（FileBrowser.vue 负责）
 
 `findNextVolume` 是 async IPC（`src/lib/tauri.ts:486`，返回 `NextVolumeResult | null`，含 `title`）。不能每次滚动/渲染都查。触发点：
 
-- **`fb.lastFetchedPath` 变化**（进目录/切卷）→ debounce 300ms → `findNextVolume(descriptor, lastFetchedPath, 'next')` → `result?.title ?? null` 存到 `nextVolumeTitle`
+- **`fb.lastFetchedPath` 变化**（进目录/切卷）→ debounce 300ms → `findNextVolume` → `result?.title ?? null` 存到 `nextVolumeTitle`
 - **`onCrossNextVolume` 成功跳转后** → 重新预查（换了卷，下一卷候选变了）
 - **根目录 / 无 lastFetchedPath** → 不查，`nextVolumeDisabled=true`（与 toolbar 按钮同条件）
+
+#### 请求序号防陈旧（审查 P1-3 核心）
+
+**问题**：初版预查代码的陈旧校验只在 `try` 成功路径做（`if (path !== ...) return`），`catch` 无条件 `nextVolumeTitle.value = null`、`finally` 无条件 `nextVolumeLoading.value = false`。旧目录的请求晚返回并失败时，会把新目录的 loading 提前关掉、title 覆盖成「最后一卷」。
+
+**修复**：模块级请求序号 `nextVolumeRequestSeq`，成功/失败/finally **三分支都校验**：
 
 ```ts
 // FileBrowser.vue 新增
 const nextVolumeTitle = ref<string | null | undefined>(undefined);
 const nextVolumeLoading = ref(false);
 let nextVolumeDebounce: ReturnType<typeof setTimeout> | null = null;
+let nextVolumeRequestSeq = 0;
 
 async function prefetchNextVolume() {
   const path = fb.lastFetchedPath;
   const root = masonryDescriptor.value.rootPath;
-  if (!path || !root) { nextVolumeTitle.value = undefined; return; }
+  if (!path || !root) { nextVolumeTitle.value = null; return; }
+  const seq = ++nextVolumeRequestSeq;   // ← 本次请求的唯一序号
   nextVolumeLoading.value = true;
   try {
     const result = await findNextVolume(masonryDescriptor.value, path, 'next');
-    // 陈旧校验：路径没变才采纳
-    if (fb.lastFetchedPath !== path || masonryDescriptor.value.rootPath !== root) return;
+    if (seq !== nextVolumeRequestSeq) return;   // 成功路径:陈旧则丢弃
     nextVolumeTitle.value = result?.title ?? null;
   } catch (e) {
+    if (seq !== nextVolumeRequestSeq) return;   // 失败路径:陈旧则丢弃(不覆盖新目录)
     log('[FileBrowser] prefetchNextVolume failed', e);
-    nextVolumeTitle.value = null;  // 出错当无下一卷处理（灰显示）
+    nextVolumeTitle.value = null;
   } finally {
-    nextVolumeLoading.value = false;
+    if (seq === nextVolumeRequestSeq) {         // finally:仅当仍是最新请求才关 loading
+      nextVolumeLoading.value = false;
+    }
   }
 }
 
 watch(() => fb.lastFetchedPath, () => {
   if (nextVolumeDebounce) clearTimeout(nextVolumeDebounce);
-  nextVolumeTitle.value = undefined;  // 切目录先清，防显示旧卷名
+  // 切目录立即置 loading(不设 undefined,右段显示「…」不闪空,见 §3.3)
+  nextVolumeLoading.value = true;
   nextVolumeDebounce = setTimeout(() => void prefetchNextVolume(), 300);
 });
 ```
+
+**关键**：每次进入 `prefetchNextVolume` `++nextVolumeRequestSeq`，新请求自然作废旧请求（旧请求的 `seq !== nextVolumeRequestSeq` 永真）。三分支任何一处先返回，只要不是最新序号就静默 return，不碰 `nextVolumeTitle` / `nextVolumeLoading`。
 
 ### 3.6 点击 → 复用 onCrossNextVolume
 
@@ -361,20 +473,27 @@ StatusBar emit `next-volume` → FileBrowser `@next-volume="onCrossNextVolume"`�
 
 ## 7. 测试矩阵
 
-### 7.1 功能 A（useMasonryBrowsePosition.test.ts 新增）
+### 7.1 功能 A（useMasonryBrowsePosition.test.ts 新增，**用 fake timers 验证时序**）
 
 | # | 场景 | 预期 |
 |---|---|---|
-| A-T1 | atBottom + 停留 ≥ STABLE_MS + 未 finished | saveProgress 传 `finished=true` |
-| A-T2 | atBottom 但停留 < STABLE_MS | saveProgress 传 `finished=undefined`（不升级） |
-| A-T3 | 滚离底部（atBottom false） | `bottomSince` 重置；saveProgress 传 `undefined` |
-| A-T4 | 已 finished=true 再滚到底 | 不调 saveProgress（幂等跳过） |
-| A-T5 | `enabled=false`（recordBrowsePosition 关） | 不写 finished（recordCurrentTop 入口被拦） |
-| A-T6 | 目录切换（start 重置） | `bottomSince` 清 null |
-| A-T7 | resize 冷却期内 atBottom | 不写 finished（scheduleRecord 整体丢弃） |
-| A-T8 | 多列底部不齐（末图在某列底） | 用 atBottom(scrollHeight) 判定，不依赖末图位置 |
+| A-T1 | 滚到底（atBottom=true）→ 停留 < STABLE_MS | 第 1 次 recordCurrentTop 写 `finished=undefined`；stableTimer 已调度但未到时不升级 |
+| A-T2 | 滚到底 → 停留 ≥ STABLE_MS（推进 fake timer） | stableTimer 触发第 2 次 recordCurrentTop 写 `finished=true`（A9 复合去重放行：同 path 但 finishedParam 从 undefined→true） |
+| A-T3 | 已 finished=true 再滚到底 | 入口 A7 检查单调缓存跳过，**不调 saveProgress** |
+| A-T4 | 滚到底后离开（atBottom false） | clearStableTimer 取消在途 timer；saveProgress 传 `undefined`（不降级） |
+| A-T5 | 滚到底→调度 stableTimer→中途离开→再回来 | 第 1 次离开清 timer；第 2 次到底重新记 bottomSince + 重调 stableTimer（重新计 STABLE_MS） |
+| A-T6 | 目录切换（start 重置） | `bottomSince`/`stableTimer`/`lastWrittenPath`/`lastWrittenFinishedParam` 全清 |
+| A-T7 | resize 冷却期内 atBottom | scheduleRecord 整体被丢弃 + clearStableTimer；不写 finished |
+| A-T8 | resize 冷却期触发时已有 stableTimer 在途 | stableTimer 被取消（不漏写也不写陈旧） |
+| A-T9 | `enabled=false`（recordBrowsePosition 关） | recordCurrentTop 入口 return（A6）；**flushNow 也走入口，enabled=false 时不写**（审查 P1-2） |
+| A-T10 | reader 已写 finished=true，瀑布流滚到另一张普通图 | saveProgress 传 undefined（DB 保留 true）；**前端缓存 finished 仍为 true**（审查 P1-1，A7 基础） |
+| A-T11 | 多列底部不齐（末图在某列底） | atBottom 用 scrollHeight 判定成立（A8），不依赖末图位置 |
 
-实现要点：`atBottom` 作为可注入的 `Ref<boolean>` 参数（测试传 mock ref），不直接依赖 DOM，保证 composable 可单测。
+**测试实现要点**：
+- `atBottom` 作为可注入的 `Ref<boolean>` 参数（测试用 `ref(false)` 手动翻转），不直接依赖 DOM
+- 用 `vi.useFakeTimers()` + `vi.advanceTimersByTime(STABLE_MS + 1)` 推进 stableTimer，验证第 2 次升级写入
+- `saveProgress` mock 成 `vi.fn()`，断言第 N 次调用的第 4 参数（finished）为 `undefined` 或 `true`
+- A-T3/A-T10 验证「不调 saveProgress」用 `expect(saveProgress).not.toHaveBeenCalled()` 或调用次数不变
 
 ### 7.2 功能 B（FileBrowser.test.ts + StatusBar 单测新增）
 
@@ -382,12 +501,14 @@ StatusBar emit `next-volume` → FileBrowser `@next-volume="onCrossNextVolume"`�
 |---|---|---|
 | B-T1 | lastFetchedPath 变化 → debounce → findNextVolume 返回 title | nextVolumeTitle=该 title，StatusBar 右段显示 |
 | B-T2 | findNextVolume 返回 null | nextVolumeTitle=null，右段「已是最后一卷」灰 |
-| B-T3 | 切目录在途时又切（陈旧） | 旧 IPC 结果丢弃（路径校验），不显示旧卷名 |
-| B-T4 | 点击右段 → emit next-volume → onCrossNextVolume | 复用现有测试（flushNow+findNextVolume+navigate） |
-| B-T5 | 跳转成功 → prefetchNextVolume 刷新 | 新卷的下一卷名更新到右段 |
-| B-T6 | 根目录 / 无 lastFetchedPath | nextVolumeDisabled=true，右段灰 |
-| B-T7 | StatusBar 不传 nextVolumeTitle（undefined） | 右段不渲染（兼容旧调用点） |
-| B-T8 | nextVolumeLoading=true | 右段「…」灰 |
+| B-T3 | 切目录在途时又切（请求序号陈旧） | 旧 IPC 结果（成功/失败/finally 任一）丢弃，不覆盖新目录的 title/loading（审查 P1-3） |
+| B-T4 | **旧请求晚返回且失败** | 不把新目录 title 覆盖成 null、不提前关 loading（审查 P1-3 核心用例） |
+| B-T5 | 点击右段 → emit next-volume → onCrossNextVolume | 复用现有测试（flushNow+findNextVolume+navigate） |
+| B-T6 | 跳转成功 → prefetchNextVolume 刷新 | 新卷的下一卷名更新到右段 |
+| B-T7 | 根目录 / 无 lastFetchedPath | nextVolumeDisabled=true，右段灰（审查 P2-1 绑定） |
+| B-T8 | StatusBar 不传 nextVolumeTitle（undefined） | 右段渲染空 div 保持三段对称（兼容旧调用点） |
+| B-T9 | nextVolumeLoading=true | 右段「…」灰 |
+| B-T10 | 切目录瞬间 | 右段不闪空：从旧卷名 → 「…」(loading) → 新卷名（§3.3 时序） |
 
 ### 7.3 功能 C/D（StatusBar 视觉，happy-dom 难测动画，主要验 DOM 结构）
 
@@ -436,6 +557,11 @@ nextVolumeLoading: '…' / '…'                       // 或用图标 spinner
 |---|---|
 | scrollHeight 在尺寸渐进收敛时跳动，atBottom 抖动 | BOTTOM_THRESHOLD = 一屏高（viewportHeight），留余量；停留确认 STABLE_MS 进一步过滤抖动 |
 | finished 误标（用户只是滚到底看了一眼没真读） | STABLE_MS=1200ms 停留阈值；可调；右键菜单仍可重置 |
+| **stableTimer 漏清理 → 漏写或写陈旧 finished**（审查 P0-2 衍生） | §2.3 列全 5 个清理出口（离开底部/start/stop/disableWatcher/resize），封装 `clearStableTimer()` 统一调；A-T5/A-T8 验证 |
+| **同图去重阻止 finished 升级**（审查 P0-1） | A9 复合去重 `(path, finishedParam)`，A-T2 验证同图第 2 次升级写入 |
+| **前端缓存 finished 被普通滚动覆盖回 false**（审查 P1-1） | §2.7 缓存单调保留 `finishedNow \|\| lastBrowseProgress.finished \|\| false`，A-T10 验证 |
+| **enabled=false 时 flushNow 仍写**（审查 P1-2） | recordCurrentTop 入口 `if (!enabled) return`，A-T9 验证 flushNow 也走入口 |
+| **预取陈旧污染新目录**（审查 P1-3） | §3.5 请求序号三分支校验，B-T3/B-T4 验证 |
 | 路径段缩到 1/3 太窄 | truncate + title hover 提示；常见路径长度够用；用户可调窗口宽度 |
 | 预查 IPC 增加请求 | debounce 300ms + 仅 lastFetchedPath 变化触发；成本可控 |
 | 跑马灯 JS 测量 scrollWidth 在 happy-dom 测不准 | 视觉测试仅验 class 存在，像素动画靠本地真机验证 |
