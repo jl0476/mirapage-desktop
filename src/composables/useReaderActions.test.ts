@@ -488,11 +488,47 @@ describe('useReaderActions', () => {
     expect(getProgress).not.toHaveBeenCalled();
     expect(createBook).not.toHaveBeenCalled();
     expect(listDirectory).not.toHaveBeenCalled();
+    // v0.1.0-... 修复: 走 recordHistory 写 history, 否则退回 FileBrowser 时
+    // readStatus.refresh 拿不到 history 行, marks 空, "阅读中" / "已读完" 徽章不显示.
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/manga' },
+      'VOL.01',  // absPath = currentPath
+      'VOL.01',  // displayName = currentPath 末段
+      42,
+    );
     // router.push 用 { name, params, query } 形态
     expect(router.push).toHaveBeenCalledWith(expect.objectContaining({
       name: 'reader',
       params: { bookId: '42' },
       query: { at: 'p5.jpg' },
+    }));
+  });
+
+  it('readFromCurrentPath: cachedProgress 命中 (finished=true) → 仍调 recordHistory (与 reading 同链路)', async () => {
+    // 已读完目录: cachedProgress.finished=true, 走"有上次记录"分支也要写 history
+    // 否则 readStatus.refresh 拿不到 history 行, marks 空, "已读完" 徽章不显示.
+    const cached: ProgressItem = {
+      bookId: 50, page: 10, imageName: 'p10.jpg',
+      readerMode: 'single', updatedAt: 0, finished: true,
+    };
+    const router = { push: vi.fn() };
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'VOL.02',
+      router: router as never,
+    });
+    await actions.readFromCurrentPath({ cachedProgress: cached });
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/manga' },
+      'VOL.02',
+      'VOL.02',
+      50,
+    );
+    expect(router.push).toHaveBeenCalledWith(expect.objectContaining({
+      params: { bookId: '50' },
+      query: { at: 'p10.jpg' },
     }));
   });
 

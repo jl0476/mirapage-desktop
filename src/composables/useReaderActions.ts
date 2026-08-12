@@ -282,11 +282,14 @@ export function useReaderActions(opts: ReaderActionsOptions) {
    * 1) readProgress 拿当前目录的阅读进度:
    *    - cachedProgress 命中 (有 imageName) → 短路返回.
    *    - 否则 → ensureBookId + getProgress 查后端.
-   * 2) progress 有 imageName → 从上次阅读的那张图进入 (router.push 带 ?at=).
-   * 3) progress 为 null (从未阅读) → 从第一张图开始 (走 readNow 同款链路,
-   *    合成 dirEntry + ensureBookId + recordHistory, push 不带 ?at=).
-   * 4) bookId null → abort (测试场景或后端异常).
-   * 5) router 不存在 → 仅 log, 不抛 (测试场景友好).
+   * 2) 共享前置 (两条路径都要做): 写 history + 触发 readStatus.refresh.
+   *    - recordHistory 是 INSERT OR UPDATE, 幂等.
+   *    - 缺这一步会导致 readStatus.refresh 拿不到 history 行, 详情/瀑布流
+   *      不显示"阅读中" / "已读完" 徽章 (典型症状: '水淼 Aqua summer II').
+   * 3) progress 有 imageName → 从上次阅读的那张图进入 (router.push 带 ?at=).
+   * 4) progress 为 null (从未阅读) → 从第一张图开始 (走 readNow 同款链路).
+   * 5) bookId null → abort (测试场景或后端异常).
+   * 6) router 不存在 → 仅 log, 不抛 (测试场景友好).
    *
    * opts.getCurrentPath 缺省或根目录 currentPath='' 时, 用 localRoot (resolveRootPath)
    * 最后一段做 dirName fallback, 保证不 abort.
@@ -307,43 +310,42 @@ export function useReaderActions(opts: ReaderActionsOptions) {
       }
     }
 
-    if (progress?.imageName) {
-      // 有上次阅读 → 从该图进入
-      if (!router) {
-        log('[useReaderActions] readFromCurrentPath: router unavailable, cannot navigate');
-        return;
-      }
-      log('[useReaderActions] readFromCurrentPath: push with ?at=', progress.imageName);
-      await router.push({
-        name: 'reader',
-        params: { bookId: String(progress.bookId) },
-        query: { at: encodeURIComponent(progress.imageName) },
-      });
-      return;
-    }
-
-    // 没记录 → 从第一张开始（与 readNow 同链路）
-    log('[useReaderActions] readFromCurrentPath: no progress, fall through to first page');
+    // ─── 共享前置: 解析 bookId / absPath / displayName + 写 history + refresh ───
     const rootPath = opts.resolveRootPath();
     const currentPath = opts.getCurrentPath?.() ?? '';
     const descriptor = opts.buildSourceDescriptor(rootPath);
     const localRoot = descriptor.type === 'local'
       ? (descriptor as { rootPath: string }).rootPath : '';
-    const dirName =
-      currentPath.split(/[\\/]/).filter(Boolean).pop() ||
-      localRoot.split(/[\\/]/).filter(Boolean).pop() ||
-      'root';
-    const dirEntry: MediaEntry = {
-      name: dirName, path: '', isDirectory: true,
-      isArchive: false, size: 0, modifiedAt: 0,
-    };
-    const { bookId, absPath } = await ensureBookId(dirEntry, /*favorite=*/false);
+
+    let bookId: number | null;
+    let absPath: string;
+    let displayName: string;
+    if (progress?.imageName) {
+      // 有上次记录: 复用 progress.bookId, absPath 用当前目录
+      bookId = progress.bookId;
+      absPath = currentPath;
+      displayName = currentPath.split(/[\\/]/).filter(Boolean).pop() || localRoot.split(/[\\/]/).filter(Boolean).pop() || 'root';
+    } else {
+      // 没记录: 走 ensureBookId 创建/获取 bookId
+      const dirName =
+        currentPath.split(/[\\/]/).filter(Boolean).pop() ||
+        localRoot.split(/[\\/]/).filter(Boolean).pop() ||
+        'root';
+      const dirEntry: MediaEntry = {
+        name: dirName, path: '', isDirectory: true,
+        isArchive: false, size: 0, modifiedAt: 0,
+      };
+      const result = await ensureBookId(dirEntry, /*favorite=*/false);
+      bookId = result.bookId;
+      absPath = result.absPath;
+      displayName = dirName;
+    }
     if (bookId === null) {
-      log('[useReaderActions] readFromCurrentPath: ensureBookId 返 null, abort');
+      log('[useReaderActions] readFromCurrentPath: bookId null, abort');
       return;
     }
     try {
-      await recordHistory(descriptor, absPath, dirName, bookId);
+      await recordHistory(descriptor, absPath, displayName, bookId);
     } catch (e) {
       log('[useReaderActions] readFromCurrentPath: recordHistory failed (容错)', e);
     }
@@ -354,10 +356,23 @@ export function useReaderActions(opts: ReaderActionsOptions) {
         log('[useReaderActions] readFromCurrentPath: onLibraryChanged failed', e);
       }
     }
+
+    // ─── 跳路由 ───
     if (!router) {
       log('[useReaderActions] readFromCurrentPath: router unavailable, cannot navigate');
       return;
     }
+    if (progress?.imageName) {
+      // 有上次阅读 → 从该图进入
+      log('[useReaderActions] readFromCurrentPath: push with ?at=', progress.imageName);
+      await router.push({
+        name: 'reader',
+        params: { bookId: String(bookId) },
+        query: { at: encodeURIComponent(progress.imageName) },
+      });
+      return;
+    }
+    // 没记录 → 从第一张开始
     log('[useReaderActions] readFromCurrentPath: push to first page /reader/' + bookId);
     await router.push(`/reader/${bookId}`);
   }
