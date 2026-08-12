@@ -279,6 +279,7 @@ export default {
     ioError: 'File system error',
     unknown: 'Unknown error',
     pathTooLong: 'Path too long (Windows MAX_PATH limit; try moving root closer to C:\\ or enable long path support)',
+    pathEscapesRoot: 'Path escapes source root',
   },
   lang: {
     system: 'System',

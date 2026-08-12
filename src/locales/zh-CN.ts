@@ -281,6 +281,7 @@ export default {
     ioError: '文件系统错误',
     unknown: '未知错误',
     pathTooLong: '路径过长（Windows MAX_PATH 限制，可尝试将根目录移近 C:\\ 或开启长路径支持）',
+    pathEscapesRoot: '路径越出数据源根',
   },
   lang: {
     system: '跟随系统',

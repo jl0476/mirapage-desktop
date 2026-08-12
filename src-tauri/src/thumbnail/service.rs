@@ -44,14 +44,19 @@ pub fn is_local_descriptor(descriptor: &SourceDescriptor) -> bool {
     matches!(descriptor, SourceDescriptor::Local { .. })
 }
 
-/// Local 绝对路径 = root_path join rel_path。
-pub fn local_abs_path(root_path: &str, rel_path: &str) -> PathBuf {
+/// Local 绝对路径 = root_path join rel_path（路径身份修复 2026-08-12: join 前校验）。
+///
+/// rel_path 必须 source-relative；校验失败返回 `ThumbnailError::Invalid`，
+/// 避免 Windows `Path::join(root, absolute_child)` 丢弃 root 导致缩略图原图
+/// 逃逸 source root（与 `LocalMediaSource::resolve_path` 同款 bug 的第二处）。
+pub fn local_abs_path(root_path: &str, rel_path: &str) -> std::result::Result<PathBuf, ThumbnailError> {
     let base = Path::new(root_path);
     if rel_path.is_empty() {
-        base.to_path_buf()
-    } else {
-        base.join(rel_path)
+        return Ok(base.to_path_buf());
     }
+    let norm = crate::algorithm::validate_source_relative(rel_path)
+        .map_err(|e| ThumbnailError::Invalid(format!("路径越出数据源根 {:?}: {}", e, rel_path)))?;
+    Ok(base.join(&norm))
 }
 
 /// 单张请求分类结果。
@@ -459,7 +464,14 @@ impl ThumbnailService {
                     continue;
                 }
                 // P1-1: 用 source_rel_path（含 currentPath 前缀）定位文件，而非 UI path
-                let abs = local_abs_path(&root_path, &item.source_rel_path);
+                // 路径身份修复: local_abs_path 校验 source_rel_path, 非法则短路成 failed。
+                let abs = match local_abs_path(&root_path, &item.source_rel_path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        results.push(err_result(&item.path, &e.to_string()));
+                        continue;
+                    }
+                };
                 match classify_item(
                     &conn,
                     &cache_root,
@@ -604,7 +616,11 @@ impl ThumbnailService {
         };
         let quality = *self.quality.read().unwrap();
         let cache_root = self.cache_root();
-        let abs = local_abs_path(&root_path, &item.source_rel_path);
+        // 路径身份修复: local_abs_path 校验 source_rel_path, 非法则短路成 failed。
+        let abs = match local_abs_path(&root_path, &item.source_rel_path) {
+            Ok(p) => p,
+            Err(e) => return err_result(&item.path, &e.to_string()),
+        };
 
         // 强制重建：删除旧缓存
         if delete_cache {
@@ -1217,8 +1233,24 @@ mod tests {
 
     #[test]
     fn local_abs_path_joins_root_and_rel() {
-        let p = local_abs_path("D:/imgs", "sub/a.jpg");
+        let p = local_abs_path("D:/imgs", "sub/a.jpg").unwrap();
         assert!(p.to_string_lossy().ends_with("sub/a.jpg"));
+        assert!(p.to_string_lossy().contains("imgs"));
+    }
+
+    #[test]
+    fn local_abs_path_rejects_absolute_escape() {
+        // 路径身份修复: 绝对 rel_path 不能逃逸 root (Windows join 会丢弃 root)
+        assert!(local_abs_path("D:/imgs", "F:/secret").is_err());
+        assert!(local_abs_path("D:/imgs", "/etc/passwd").is_err());
+        assert!(local_abs_path("D:/imgs", "../escape").is_err());
+        assert!(local_abs_path("D:/imgs", "\\\\server\\share").is_err());
+    }
+
+    #[test]
+    fn local_abs_path_accepts_root_empty() {
+        // 根目录空串合法
+        let p = local_abs_path("D:/imgs", "").unwrap();
         assert!(p.to_string_lossy().contains("imgs"));
     }
 
@@ -1232,7 +1264,7 @@ mod tests {
         // 子目录：UI path=a.jpg，source_rel_path=normal/a.jpg
         let mut it = item("a.jpg", 4000, 3000, 5_000_000, 1024);
         it.source_rel_path = "normal/a.jpg".to_string();
-        let abs = local_abs_path("D:/root", "normal/a.jpg");
+        let abs = local_abs_path("D:/root", "normal/a.jpg").unwrap();
         let cls = classify_item(&conn, dir.path(), sd, abs, &it, 1, Quality::High).unwrap();
         let task = match cls {
             ItemClass::Generate { task, .. } => task,
@@ -1256,7 +1288,7 @@ mod tests {
         // 根目录同名文件 key 不同 -> 子目录隔离
         let root_cls = classify_item(
             &conn, dir.path(), sd,
-            local_abs_path("D:/root", "a.jpg"),
+            local_abs_path("D:/root", "a.jpg").unwrap(),
             &item("a.jpg", 4000, 3000, 5_000_000, 1024),
             1, Quality::High,
         ).unwrap();
@@ -1413,7 +1445,7 @@ mod tests {
         // required_width 2048 -> select_bucket(2048)=2048，但 Standard max=1536 -> 截到 1536
         let cls = classify_item(
             &conn, dir.path(), sd,
-            local_abs_path("D:/root", "big.jpg"),
+            local_abs_path("D:/root", "big.jpg").unwrap(),
             &item("big.jpg", 4000, 3000, 5_000_000, 2048),
             1, Quality::Standard,
         ).unwrap();

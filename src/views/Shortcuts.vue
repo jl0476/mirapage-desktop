@@ -11,7 +11,6 @@ import { onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import { useShortcutsStore } from '@/stores/shortcuts';
-import { useFileBrowserStore } from '@/stores/fileBrowser';
 import {
   decodeLocalDescriptor,
   shortcutFullPath,
@@ -21,7 +20,6 @@ import {
 const { t } = useI18n();
 const router = useRouter();
 const shortcuts = useShortcutsStore();
-const fb = useFileBrowserStore();
 
 onMounted(async () => {
   await shortcuts.refresh();
@@ -32,12 +30,10 @@ async function onOpen(id: number) {
   if (!sc) return;
   const d = decodeLocalDescriptor(sc);
   if (!d) return; // 非 Local 暂不支持
+  // 路径身份修复 (2026-08-12, spec §6.4): 本视图只 setActive + 跳首页;
+  // 实际 setRoot + navigate 由 FileBrowser.vue 的 openShortcut 统一执行（唯一执行点）。
+  // 收敛后避免两处重复 setRoot+navigate 导致的状态竞争。
   shortcuts.setActive(id);
-  // v0.1.0-module3.0.5: 两步打开 (复用 History.vue openEntry 模式), 支持子目录 relPath
-  await fb.setRoot(d.rootPath);
-  if (sc.relPath) {
-    await fb.navigate(sc.relPath);
-  }
   await router.push('/');
 }
 

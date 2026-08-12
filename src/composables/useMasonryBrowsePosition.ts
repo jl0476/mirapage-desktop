@@ -31,6 +31,7 @@ import {
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
+import { validateSourceRelativePath } from '@/lib/relativePath';
 import { naturalCompare } from '@/lib/naturalSort';
 
 const DEBOUNCE_MS = 300;
@@ -145,7 +146,14 @@ export function useMasonryBrowsePosition(
     descAtEntry: SourceDescriptor,
     pathAtEntry: string,
   ): Promise<number | null> {
-    const absPath = pathAtEntry;
+    // 路径身份修复 (2026-08-12): createBook 前校验 pathAtEntry 必须 source-relative。
+    // 非法则返 null（不创建 book、不写 progress），避免污染 library 表。
+    const pathCheck = validateSourceRelativePath(pathAtEntry);
+    if (!pathCheck.ok) {
+      log('[useMasonryBrowsePosition] pathAtEntry 越出数据源根, 拒绝 createBook', { pathAtEntry, reason: pathCheck.reason });
+      return null;
+    }
+    const absPath = pathCheck.normalized;
     const descriptor = descAtEntry;
     const cacheKey = `${JSON.stringify(descriptor)}|${absPath}`;
     const cached = bookIdCache.get(cacheKey);

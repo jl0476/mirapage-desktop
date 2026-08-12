@@ -24,6 +24,7 @@ vi.mock('@/stores/directorySort', () => ({
 vi.mock('@/stores/settings', () => ({
   useSettingsStore: () => ({ readerDefaultMode: 'single' }),
 }));
+vi.mock('@/lib/logger', () => ({ log: vi.fn() }));
 
 const descriptor: SourceDescriptor = { type: 'local', rootPath: 'C:\\comics' };
 const book: BookItem = {
@@ -62,9 +63,42 @@ describe('useReaderBookLoader', () => {
     expect(snapshot.spreads.length).toBeGreaterThan(0);
   });
 
+  it('路径身份修复回归: listDirectory 收到 source-relative 路径, 不是 join 后的绝对路径', async () => {
+    // bug 现场 (2026-08-12): loadBookById 曾把 joinPath(rootPath, relPath) 的绝对结果
+    // 传给 listDirectory, 触发 Rust PathEscape 校验报错 "Drive: F:\..."。
+    // listDirectory 的 path 参数必须 source-relative (Rust resolve_path = root.join(path))。
+    await useReaderBookLoader().loadBookById(7);
+    // book.absolutePath='vol1' (相对 rootPath='C:\comics'), listDirectory 应收到 'vol1'
+    expect(mocks.listDirectory).toHaveBeenCalledWith(descriptor, 'vol1');
+    // 绝对路径 'C:\comics\vol1' 不应被传入
+    expect(mocks.listDirectory).not.toHaveBeenCalledWith(descriptor, 'C:\\comics\\vol1');
+  });
+
   it('非 Local descriptor 抛出明确错误', async () => {
     mocks.getBook.mockResolvedValue({ ...book, sourceDescriptor: { type: 'webdav', accountId: 1, baseUrl: 'x', path: '/' } });
     await expect(useReaderBookLoader().loadBookById(7)).rejects.toThrow(/非本地/);
+  });
+
+  it('路径身份修复: absolute_path 为污染的绝对路径 → 抛错, 不走兼容分支', async () => {
+    // 旧实现 isAlreadyAbs 会把绝对路径当逃生通道静默使用（spec §4.3 兼容掩盖）。
+    // 修复后必须显式拒绝, 不调 listDirectory。
+    mocks.getBook.mockResolvedValue({ ...book, absolutePath: 'F:/WallPaper/raw/竖版' });
+    await expect(useReaderBookLoader().loadBookById(7)).rejects.toThrow(/路径异常/);
+    expect(mocks.listDirectory).not.toHaveBeenCalled();
+  });
+
+  it('路径身份修复: absolute_path 含 .. → 抛错', async () => {
+    mocks.getBook.mockResolvedValue({ ...book, absolutePath: 'vol1/../../../etc' });
+    await expect(useReaderBookLoader().loadBookById(7)).rejects.toThrow(/路径异常/);
+    expect(mocks.listDirectory).not.toHaveBeenCalled();
+  });
+
+  it('路径身份修复: 根目录 absolute_path="" → 正常加载 (空串合法)', async () => {
+    mocks.getBook.mockResolvedValue({ ...book, absolutePath: '' });
+    const snapshot = await useReaderBookLoader().loadBookById(7);
+    expect(snapshot.relPath).toBe('');
+    // absDir 走 rootPath fallback (空串), listDirectory 仍被调用
+    expect(mocks.listDirectory).toHaveBeenCalled();
   });
 
   it('过滤目录、压缩包和非图片文件', async () => {

@@ -310,12 +310,14 @@ describe('ReaderView.vue', () => {
   // 测法: 给含特殊字符的 path, pageUrls 应是单层 encode (Tauri 自己处理),
   // 不应看到 '%25' (那意味着双重 encode).
   it('pageUrls 文件名/目录含特殊字符时, URL 应单层 encode (Tauri convertFileSrc 内部处理)', async () => {
+    // 路径身份修复 (2026-08-12): absolutePath 用 source-relative (相对 rootPath),
+    // 不再用绝对盘符路径 (那是污染数据格式, 会被新校验拒绝)。
     vi.mocked(getBook).mockResolvedValueOnce({
       id: 99,
       title: '(林星阑) - 秀人网模特 红衣黑丝',
       sourceDescriptor: { type: 'local', rootPath: 'Q:\\00down\\2603' },
       sourceType: 'Local',
-      absolutePath: 'Q:\\00down\\2603\\(林星阑) - 秀人网模特 红衣黑丝',
+      absolutePath: '(林星阑) - 秀人网模特 红衣黑丝',
       coverEntryPath: null,
       coverEntryName: null,
       pageCount: 85,
@@ -324,11 +326,12 @@ describe('ReaderView.vue', () => {
       isFavorite: true,
     } as never);
     vi.mocked(listDirectory).mockImplementation(async (_sd, p) => {
+      // loadBookById 用 joinPath(rootPath, 'manga名') 调 listDirectory
       if (p === '' || p === 'Q:\\00down\\2603') {
         return [] as never;
       }
       return [
-        { name: 'c (1).jpg', path: 'Q:\\00down\\2603\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'c (1).jpg', path: 'c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
       ] as never;
     });
     const fb = useFileBrowserStore();
@@ -768,31 +771,32 @@ describe('ReaderView.vue', () => {
 
   // v0.1.0-module3.0.3-hotfix4: book 目录排序独立于 fileBrowser 上次 fetch.
   // 之前用 effectiveSortField (fileBrowser 上次 fetch 的目录排序), 错把父目录排序
-  // 应用到子目录 book. 现在直接用 directorySort.resolve(book 目录的绝对路径).
+  // 应用到子目录 book. 现在直接用 directorySort.resolve(book 目录的 relPath).
+  // 路径身份修复 (2026-08-12): mock 数据用 source-relative (rootPath=/test, absolutePath=manga).
   it('reader 排序使用 book 目录的 per-folder override (与 fileBrowser 上次 fetch 无关)', async () => {
     vi.mocked(listDirectory).mockReset();
     vi.mocked(listDirectory).mockResolvedValue([
-      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
-      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
-      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
+      { name: 'a.jpg', path: 'manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
+      { name: 'b.jpg', path: 'manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
+      { name: 'c.jpg', path: 'manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
     ] as never);
     vi.mocked(getBook).mockReset();
     vi.mocked(getBook).mockResolvedValue({
       id: 7,
       title: 'manga',
-      absolutePath: '/test/manga',  // book 目录是 /test/manga
+      absolutePath: 'manga',  // book 目录相对 rootPath=/test
       coverEntryPath: null,
       coverEntryName: null,
       pageCount: 3,
       lastReadAt: null,
       isFavorite: false,
-      sourceDescriptor: { type: 'local', rootPath: 'C:/root' },
+      sourceDescriptor: { type: 'local', rootPath: '/test' },
       sourceType: 'Local',
     } as never);
     const { useDirectorySortStore } = await import('@/stores/directorySort');
     const ds = useDirectorySortStore();
-    // 给 book 目录 /test/manga 设 ASC (覆盖默认)
-    await ds.set({ type: 'local', rootPath: 'C:/root' }, '/test/manga', { sortField: 'modifiedAt', ascending: true });
+    // 给 book 目录 manga 设 ASC (覆盖默认)
+    await ds.set({ type: 'local', rootPath: '/test' }, 'manga', { sortField: 'modifiedAt', ascending: true });
     // fb 默认 sortField 是 modifiedAt 倒序 — 模拟父目录的设置
     const fb = useFileBrowserStore();
     fb.sortField = 'modifiedAt';

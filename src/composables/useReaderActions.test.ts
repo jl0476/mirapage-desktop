@@ -218,13 +218,52 @@ describe('useReaderActions', () => {
     });
   });
 
-  it('readFromImage: getLastFetchedPath 为空 → 容错, 不 router.push', async () => {
+  it('readFromImage: 根目录 getLastFetchedPath="" → 继续阅读, createBook/history 写 ""', async () => {
+    // 路径身份修复 (2026-08-12): 根目录 '' 是合法值, 不再 abort.
+    // 旧实现 `getLastFetchedPath: () => fb.lastFetchedPath || fb.rootPath` 把 ''
+    // 当 falsy 回退成绝对 rootPath, 污染 library/history. 现在写 '' 才正确.
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(1);
+    const actions = useReaderActions({
+      resolveRootPath: () => 'F:/WallPaper/normal',  // 根目录, fallback dirName='normal'
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',  // 根目录已加载
+      router: fakeRouter as never,
+    });
+    await actions.readFromImage({
+      name: 'a.jpg',
+      path: 'a.jpg',
+      isDirectory: false,
+      isArchive: false,
+      size: 0,
+      modifiedAt: 0,
+    });
+    // 继续走 createBook, absolutePath='' (根目录相对路径)
+    expect(createBook).toHaveBeenCalledWith(expect.objectContaining({
+      absolutePath: '',
+      favorite: false,
+    }));
+    // recordHistory 写 relPath=''
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'F:/WallPaper/normal' },
+      '',
+      'normal',  // parentName fallback 到 rootPath 最后一段
+      1,
+    );
+    expect(fakeRouter.push).toHaveBeenCalledWith({
+      path: '/reader/1',
+      query: { at: 'a.jpg' },
+    });
+  });
+
+  it('readFromImage: getLastFetchedPath=null (未加载) → 安全 abort, 不调 IPC', async () => {
+    // 路径身份修复: null 表示"未加载"(rootPath 未设或未 fetch), 区别于根目录 ''.
     vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(1);
     const actions = useReaderActions({
       resolveRootPath: () => '/manga',
       buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
-      getLastFetchedPath: () => '',
+      getLastFetchedPath: () => null,  // 未加载
       router: fakeRouter as never,
     });
     await actions.readFromImage({

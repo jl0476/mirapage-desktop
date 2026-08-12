@@ -63,22 +63,41 @@ pub fn create_shortcut(
 ) -> Result<i64, String> {
     let conn = db.conn();
     let now = chrono_now();
-    let icon_hint = icon_hint_for(&source_descriptor_json);
+    // 路径身份修复 (2026-08-12, spec §6.3): descriptor 反序列化校验 + 重新序列化规范化;
+    // rel_path 校验 source-relative。防止坏 shortcut 把绝对路径灌进库持续重放污染。
+    let (descriptor_json_norm, rel_path_norm) =
+        normalize_shortcut_input(&source_descriptor_json, &rel_path)?;
+    let icon_hint = icon_hint_for(&descriptor_json_norm);
     // INSERT OR IGNORE: 重复 (descriptor, rel_path) 时不报错 (保留旧 alias)
     conn.execute(
         "INSERT OR IGNORE INTO shortcut (source_descriptor_json, rel_path, alias, icon_hint, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![source_descriptor_json, rel_path, alias, icon_hint, now],
+        rusqlite::params![descriptor_json_norm, rel_path_norm, alias, icon_hint, now],
     )
     .map_err(|e| e.to_string())?;
     // 读出 id（无论是新插入还是已存在）
     let id: i64 = conn
         .query_row(
             "SELECT id FROM shortcut WHERE source_descriptor_json = ?1 AND rel_path = ?2",
-            rusqlite::params![source_descriptor_json, rel_path],
+            rusqlite::params![descriptor_json_norm, rel_path_norm],
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
     Ok(id)
+}
+
+/// 路径身份修复: 校验 + 规范化 shortcut 入参（descriptor 反序列化 + rel_path source-relative）。
+/// 抽成纯函数便于单测。返回 (规范化 descriptor_json, 规范化 rel_path)。
+fn normalize_shortcut_input(
+    source_descriptor_json: &str,
+    rel_path: &str,
+) -> Result<(String, String), String> {
+    let descriptor: crate::source::descriptor::SourceDescriptor =
+        serde_json::from_str(source_descriptor_json)
+            .map_err(|e| format!("source descriptor 非法: {}", e))?;
+    let descriptor_json_norm = serde_json::to_string(&descriptor).map_err(|e| e.to_string())?;
+    let rel_path_norm = crate::algorithm::validate_source_relative(rel_path)
+        .map_err(|_| format!("rel_path 越出数据源根: {}", rel_path))?;
+    Ok((descriptor_json_norm, rel_path_norm))
 }
 
 #[tauri::command]
@@ -281,5 +300,39 @@ mod tests {
         );
         // 非法 JSON fallback → "local"
         assert_eq!(icon_hint_for("not json"), "local");
+    }
+
+    // ─── 路径身份修复 (2026-08-12, spec §6.3): create_shortcut 入参校验 ───
+
+    #[test]
+    fn normalize_shortcut_input_accepts_root_empty() {
+        let json = r#"{"type":"local","rootPath":"C:/comics"}"#;
+        let (nj, rp) = normalize_shortcut_input(json, "").unwrap();
+        assert_eq!(rp, "");
+        assert!(nj.contains("comics"));
+    }
+
+    #[test]
+    fn normalize_shortcut_input_accepts_relative_subdir() {
+        let json = r#"{"type":"local","rootPath":"C:/comics"}"#;
+        let (_, rp) = normalize_shortcut_input(json, "sub/vol01").unwrap();
+        assert_eq!(rp, "sub/vol01");
+    }
+
+    #[test]
+    fn normalize_shortcut_input_rejects_absolute_relpath() {
+        let json = r#"{"type":"local","rootPath":"C:/normal"}"#;
+        // 绝对 relPath (模拟 id=8 类坏 shortcut) 必须拒绝, 不能进库
+        assert!(normalize_shortcut_input(json, "F:/WallPaper").is_err());
+        assert!(normalize_shortcut_input(json, "/etc").is_err());
+        assert!(normalize_shortcut_input(json, "../escape").is_err());
+    }
+
+    #[test]
+    fn normalize_shortcut_input_rejects_bad_descriptor() {
+        // 非法 JSON descriptor 拒绝
+        assert!(normalize_shortcut_input("not json", "").is_err());
+        // 未知 variant 拒绝
+        assert!(normalize_shortcut_input(r#"{"type":"unknown"}"#, "").is_err());
     }
 }

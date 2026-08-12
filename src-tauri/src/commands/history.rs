@@ -55,7 +55,13 @@ pub struct RecordHistoryArgs {
 #[tauri::command]
 pub fn record_history(args: RecordHistoryArgs, db: tauri::State<crate::db::Db>) -> Result<(), String> {
     let conn = db.conn();
-    let descriptor_str = serde_json::to_string(&args.source_descriptor).map_err(|e| e.to_string())?;
+    // 路径身份修复 (2026-08-12, spec §6.3): descriptor 反序列化校验 + rel_path 校验 source-relative。
+    let descriptor: crate::source::descriptor::SourceDescriptor =
+        serde_json::from_value(args.source_descriptor.clone())
+            .map_err(|e| format!("source descriptor 非法: {}", e))?;
+    let descriptor_str = serde_json::to_string(&descriptor).map_err(|e| e.to_string())?;
+    let rel_path = crate::algorithm::validate_source_relative(&args.rel_path)
+        .map_err(|_| format!("rel_path 越出数据源根: {}", args.rel_path))?;
     let now = chrono_now();
     conn.execute(
         "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id)
@@ -64,7 +70,7 @@ pub fn record_history(args: RecordHistoryArgs, db: tauri::State<crate::db::Db>) 
            display_name = excluded.display_name,
            last_visited_at = excluded.last_visited_at,
            book_id = excluded.book_id",
-        rusqlite::params![descriptor_str, args.rel_path, args.display_name, now, args.book_id],
+        rusqlite::params![descriptor_str, rel_path, args.display_name, now, args.book_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

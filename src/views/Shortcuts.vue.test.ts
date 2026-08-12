@@ -103,7 +103,9 @@ describe('Shortcuts.vue', () => {
     expect(row.text()).toContain('D:/manga/jujutsu/vol05');
   });
 
-  it('点击「打开」 → router.push("/") + shortcuts.setActive(id) + fb.setRoot(rootPath)', async () => {
+  it('点击「打开」 → router.push("/") + shortcuts.setActive(id) (执行收敛到 FileBrowser)', async () => {
+    // 路径身份修复 (2026-08-12, spec §6.4): Shortcuts.vue 只 setActive + push('/');
+    // setRoot + navigate 由 FileBrowser.vue openShortcut 统一执行, 本视图不再碰 fb。
     mockedList.mockResolvedValue([mkItem(7, 'C:/a', 'A')]);
     const wrapper = await mountShortcuts();
     const router = wrapper.vm.$.appContext.config.globalProperties.$router;
@@ -116,13 +118,13 @@ describe('Shortcuts.vue', () => {
     expect(pushSpy).toHaveBeenCalledWith('/');
     const store = useShortcutsStore();
     expect(store.activeId).toBe(7);
-    // #2 修复: 同时调 fb.setRoot(7 的 rootPath)
+    // 收敛后: Shortcuts.vue 不再调 fb.setRoot (执行点在 FileBrowser)
     const { useFileBrowserStore } = await import('@/stores/fileBrowser');
     const fb = useFileBrowserStore();
-    expect(fb.rootPath).toBe('C:/a');
+    expect(fb.rootPath).toBeNull();
   });
 
-  it('点击「打开」子目录 shortcut → setRoot + navigate(relPath) 两步', async () => {
+  it('点击「打开」子目录 shortcut → setActive + push (relPath 由 FileBrowser 校验+执行)', async () => {
     mockedList.mockResolvedValue([mkItem(9, 'D:/manga', '咒术', 'jujutsu/vol05')]);
     const wrapper = await mountShortcuts();
     await flushPromises();
@@ -130,10 +132,13 @@ describe('Shortcuts.vue', () => {
     await wrapper.find('[data-test="row"] [data-test="btn-open"]').trigger('click');
     await flushPromises();
 
+    const store = useShortcutsStore();
+    expect(store.activeId).toBe(9);
+    // 收敛后: Shortcuts.vue 不再调 fb.setRoot/navigate
     const { useFileBrowserStore } = await import('@/stores/fileBrowser');
     const fb = useFileBrowserStore();
-    expect(fb.rootPath).toBe('D:/manga');
-    expect(fb.currentPath).toBe('jujutsu/vol05');
+    expect(fb.rootPath).toBeNull();
+    expect(fb.currentPath).toBe('');
   });
 
   it('点击「删除」+ dialog 确认 → store.remove(id) (经 IPC)', async () => {

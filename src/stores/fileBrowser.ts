@@ -19,6 +19,7 @@ import { log } from '@/lib/logger';
 import { sortEntries, type SortField } from '@/lib/fileSort';
 import { getSetting, setSetting } from '@/lib/tauri';
 import { useDirectorySortStore } from '@/stores/directorySort';
+import { validateSourceRelativePath } from '@/lib/relativePath';
 import type { MediaEntry, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 export type FileBrowserError =
@@ -45,6 +46,13 @@ export function setScrollToIndexCallback(
 ): void {
   scrollToIndexCallback = cb;
 }
+
+// ─── 路径身份修复 (2026-08-12): 异步导航身份防护 (spec §6.5) ───
+// fetch 是异步的, 跨 root/跨目录的多个并发请求可能乱序返回.
+// 仅最新请求（id 最大）可提交 entries/lastFetchedPath/error/loading；
+// 过期请求（setRoot 切换、新 navigate 触发）的回写被丢弃，避免不同 root/path 的
+// entries 与路径状态混合。setRoot(null) 也要失效在途请求。
+let fetchRequestId = 0;
 
 export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
@@ -74,37 +82,75 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     return { type: 'local', rootPath: root };
   }
 
+  /**
+   * 校验 source-relative path（路径身份修复 2026-08-12）。
+   * 合法返回 normalized 串；非法返回 null 并记 log + 设 error。
+   * 调用方拿到 null 应中止导航（不改 currentPath、不发 IPC）。
+   *
+   * 绝对路径只允许出现在 rootPath；navigate/up/fetch 接收的 path 必须相对 root。
+   * 根目录 '' 合法。拒绝盘符 / 绝对 / UNC / .. 遍历 / NUL。
+   */
+  function assertRelPath(input: string): string | null {
+    const r = validateSourceRelativePath(input);
+    if (r.ok) return r.normalized;
+    log('[fileBrowser] 路径越出数据源根, 拒绝导航', { input, reason: r.reason });
+    error.value = { kind: 'io', message: '路径越出数据源根' };
+    return null;
+  }
+
   async function fetch(path: string): Promise<void> {
     if (rootPath.value === null) return;
+    // 路径身份修复: IPC 前最后一道校验。非法路径不发 listDirectory。
+    const normPath = assertRelPath(path);
+    if (normPath === null) return;
+    // 异步身份防护: 捕获本次请求 id, await 后校验是否仍为最新。
+    const myId = ++fetchRequestId;
     loading.value = true;
     error.value = null;
-    log('[fileBrowser] fetch', { rootPath: rootPath.value, path });
+    log('[fileBrowser] fetch', { rootPath: rootPath.value, path: normPath });
     try {
       const descriptor = toDescriptor(rootPath.value);
-      const result = await listDirectory(descriptor, path);
+      const result = await listDirectory(descriptor, normPath);
+      // 过期请求（setRoot/navigate 触发了更新的请求）→ 丢弃回写，不动 entries/state。
+      if (myId !== fetchRequestId) {
+        log('[fileBrowser] fetch stale, discard', { myId, latest: fetchRequestId });
+        return;
+      }
       log('[fileBrowser] listDirectory returned', result.length, 'entries');
 
       // v0.1.0-module3.0: per-folder 排序覆盖 → fallback 到 settings 默认
       const dsStore = useDirectorySortStore();
-      const override = await dsStore.resolve(descriptor, path).catch(() => null);
+      const override = await dsStore.resolve(descriptor, normPath).catch(() => null);
+      // 第二次 await 后再次校验（resolve 期间也可能有新请求插入）。
+      if (myId !== fetchRequestId) {
+        log('[fileBrowser] fetch stale (after resolve), discard', { myId, latest: fetchRequestId });
+        return;
+      }
       effectiveSortField.value = (override?.sortField as SortField) ?? sortField.value;
       effectiveSortAscending.value = override?.ascending ?? sortAscending.value;
 
       entries.value = result;
-      lastFetchedPath.value = path;
+      lastFetchedPath.value = normPath;
       // browse_history 仅在 reader 真正打开时记录（useReaderActions.readNow），
       // 单纯文件夹浏览不写——避免根目录被默认加进去。
     } catch (e) {
+      if (myId !== fetchRequestId) return; // 过期请求的错误也不回写
       const msg = e instanceof Error ? e.message : String(e);
       log('[fileBrowser] fetch error', msg);
       error.value = { kind: 'io', message: msg };
     } finally {
-      loading.value = false;
+      // 仅最新请求负责清 loading（过期请求不清，避免清掉新请求的 loading）。
+      if (myId === fetchRequestId) {
+        loading.value = false;
+      }
     }
   }
 
 
   async function setRoot(root: string | null): Promise<void> {
+    // 异步身份防护: 切 root 必失效所有在途请求（spec §6.5）。
+    // setRoot(null) 不调 fetch, 必须显式 ++ 让旧请求 await 后判 stale 丢弃。
+    ++fetchRequestId;
     rootPath.value = root;
     currentPath.value = '';
     lastFetchedPath.value = '';
@@ -118,9 +164,12 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   async function navigate(path: string): Promise<void> {
-    currentPath.value = path;
+    // 路径身份修复: 校验失败不改 currentPath、不发 IPC。
+    const normPath = assertRelPath(path);
+    if (normPath === null) return;
+    currentPath.value = normPath;
     searchQuery.value = ''; // v0.1.0-module3.0.3: 换目录清空搜索 (对齐 PV)
-    await fetch(path);
+    await fetch(normPath);
   }
 
   async function refresh(): Promise<void> {
@@ -131,8 +180,12 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     if (currentPath.value === '') return;
     const parts = currentPath.value.split(/[\\/]/).filter(Boolean);
     parts.pop();
-    currentPath.value = parts.join('/');
-    await fetch(currentPath.value);
+    const parent = parts.join('/');
+    // 路径身份修复: 防御性校验（up 结果理论上必合法，但 currentPath 可能被历史污染）。
+    const normParent = assertRelPath(parent);
+    if (normParent === null) return;
+    currentPath.value = normParent;
+    await fetch(normParent);
   }
 
   // ─── v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复 ───
@@ -154,11 +207,14 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     if (!ctx) return false;
     savedNavigationContext.value = null;
     log('[fileBrowser] restoreNavigationContext', ctx);
+    // 路径身份修复: 恢复的 currentPath 校验；非法（被污染的绝对路径）则停在 root。
     if (rootPath.value !== ctx.rootPath) {
       await setRoot(ctx.rootPath);
     }
-    if (ctx.currentPath) {
-      await navigate(ctx.currentPath);
+    const normPath = assertRelPath(ctx.currentPath);
+    if (normPath === null) return true; // root 已恢复，currentPath 非法则留在根目录
+    if (normPath) {
+      await navigate(normPath);
     }
     return true;
   }

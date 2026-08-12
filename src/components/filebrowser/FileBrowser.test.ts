@@ -1691,3 +1691,67 @@ describe('FileBrowser — 详情视图「立即阅读」按目录含图启用', 
     expect((btn.element as HTMLButtonElement).disabled).toBe(false);
   });
 });
+
+// ─── 路径身份修复 (2026-08-12, spec §6.4): shortcut 单一执行点 + relPath 校验 ───
+describe('FileBrowser — openShortcut 唯一执行点 + 路径校验', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('合法 shortcut: setActive 后 setRoot + navigate 正常执行', async () => {
+    mockedList.mockResolvedValue([]);
+    const sc = mkShortcut(5, 'C:/comics', '漫画A', 'sub/vol01');
+    mockedShortcuts.mockResolvedValue([sc]);
+    const wrapper = await mountFileBrowser();
+    expect(wrapper.exists()).toBe(true);
+    const fb = useFileBrowserStore();
+    const shortcuts = useShortcutsStore();
+    await flushPromises();
+    expect(shortcuts.items.length).toBe(1);
+
+    shortcuts.setActive(5);
+    await flushPromises();
+    await flushPromises();
+
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentPath).toBe('sub/vol01');
+  });
+
+  it('坏 shortcut (绝对 relPath): setActive 后拒绝导航, currentPath 不被污染', async () => {
+    mockedList.mockResolvedValue([]);
+    const sc = mkShortcut(8, 'C:/normal', '坏快捷方式', 'F:/WallPaper');
+    mockedShortcuts.mockResolvedValue([sc]);
+    const wrapper = await mountFileBrowser();
+    expect(wrapper.exists()).toBe(true);
+    const fb = useFileBrowserStore();
+    const shortcuts = useShortcutsStore();
+    await flushPromises();
+
+    shortcuts.setActive(8);
+    await flushPromises();
+    await flushPromises();
+
+    // 拒绝: currentPath 不会被设成绝对路径
+    expect(fb.currentPath).toBe('');
+    // listDirectory 不应收到绝对路径
+    expect(mockedList).not.toHaveBeenCalledWith(expect.anything(), 'F:/WallPaper');
+  });
+
+  it('根目录 shortcut (relPath=""): setActive 后 setRoot, 不 navigate', async () => {
+    mockedList.mockResolvedValue([]);
+    const sc = mkShortcut(1, 'C:/root', '根', '');
+    mockedShortcuts.mockResolvedValue([sc]);
+    const wrapper = await mountFileBrowser();
+    expect(wrapper.exists()).toBe(true);
+    const fb = useFileBrowserStore();
+    const shortcuts = useShortcutsStore();
+    await flushPromises();
+
+    shortcuts.setActive(1);
+    await flushPromises();
+    await flushPromises();
+
+    expect(fb.rootPath).toBe('C:/root');
+    expect(fb.currentPath).toBe(''); // 根目录, 不 navigate
+  });
+});

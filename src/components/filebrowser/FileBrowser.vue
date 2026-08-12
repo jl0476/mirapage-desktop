@@ -27,6 +27,7 @@ import { useMasonrySettings } from '@/composables/useMasonrySettings';
 import { useToast } from '@/composables/useToast';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
+import { validateSourceRelativePath } from '@/lib/relativePath';
 import { findNextVolume } from '@/lib/tauri';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
@@ -60,7 +61,15 @@ const readerActions = useReaderActions({
   // 立即变 output/260715, 但 fetch 9613 文件期间 entries 仍是 output/; 用户在 1.7s
   // 内点立即阅读, entry.path='260715' (相对 output/) 拼上 currentPath='output/260715'
   // → absPath='output/260715/260715' 错位). 用 lastFetchedPath 避免此竞争.
-  getLastFetchedPath: () => fb.lastFetchedPath || fb.rootPath || '',
+  //
+  // 路径身份修复 (2026-08-12): 删除 `|| fb.rootPath || ''` fallback.
+  //   旧实现把根目录合法的 '' 当 falsy 回退成绝对 rootPath, 经 readFromImage →
+  //   createBook.absolutePath / recordHistory.relPath 污染 library/history 表.
+  //   现在用 `fb.rootPath === null ? null : fb.lastFetchedPath` 区分:
+  //     - null  = 未加载 (readFromImage abort)
+  //     - ''    = 根目录已加载 (合法, createBook/history 写 '')
+  //     - 'a/b' = 子目录已加载
+  getLastFetchedPath: () => (fb.rootPath === null ? null : fb.lastFetchedPath),
   // ensureBookId 用 lastFetchedPath (entry.path 的基准) + entry.path 拼出 absPath
   getCurrentPath: () => fb.lastFetchedPath,
   // v0.1.0-module3.0.3-hotfix (Bug 2): reader 退出时恢复 currentPath.
@@ -247,6 +256,11 @@ onMounted(async () => {
       // 静默回退: 显示 empty state
     }
   }
+  // 路径身份修复 (2026-08-12): shortcut 收敛后, Shortcuts.vue onOpen 只 setActive + push('/').
+  // FileBrowser 首次挂载时 watch 不触发 (activeId 在挂载前已设), 这里主动检查并执行打开。
+  if (shortcuts.activeId !== null) {
+    await openShortcut(shortcuts.activeId);
+  }
 });
 
 // v0.1.0-module3.0.4-virtuallist Task 3.4: 卸载清空 callback,
@@ -269,29 +283,55 @@ watch(
   },
 );
 
-// v0.1.0-module3.0.5: shortcut 切换 → 解码 descriptor + 两步打开 (setRoot + navigate relPath)
-// 复用 History.vue openEntry 模式. Phase 1 只 Local; SMB/WebDAV 实装后扩展 TODO.
-// 注意: setRoot 无条件调 (不做 rootPath 相等守卫) — 否则同根不同 relPath 的 shortcut
-// 切换时 setRoot 被跳过, currentPath 残留旧路径, 列表不切到正确目录.
+// v0.1.0-module3.0.5: shortcut 打开的【唯一执行点】(spec §6.4 收敛).
+// Shortcuts.vue onOpen 只 setActive + router.push('/'); 实际 setRoot + navigate 在这里做.
+// Phase 1 只 Local; SMB/WebDAV 实装后扩展 TODO.
+//
+// 路径身份修复 (2026-08-12): 打开前校验 descriptor + relPath, 非法则清 activeId + log,
+// 不导航（防止坏 shortcut 把绝对路径灌进 navigate 持续污染）。
+// 去重守卫 lastOpenedShortcutId: 同 id 不重复执行（watch 在 setActive 同值时不触发,
+// 但 onMounted 主动检查会重复执行, 守卫避免）。
+let lastOpenedShortcutId: number | null = null;
+
+async function openShortcut(id: number): Promise<void> {
+  if (id === lastOpenedShortcutId) return; // 去重
+  const sc = shortcuts.items.find((s) => s.id === id);
+  if (!sc) return;
+  let desc: SourceDescriptor;
+  try {
+    desc = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;
+  } catch {
+    shortcuts.clearActive();
+    return;
+  }
+  if (desc.type !== 'local') {
+    // TODO Phase 7-8: SMB/WebDAV descriptor 打开
+    return;
+  }
+  // 校验 relPath（空串=根目录 合法；绝对/.. 非法拒绝）。
+  const relCheck = validateSourceRelativePath(sc.relPath);
+  if (!relCheck.ok) {
+    log('[FileBrowser] shortcut relPath 越界, 拒绝打开', { id, relPath: sc.relPath, reason: relCheck.reason });
+    shortcuts.clearActive();
+    return;
+  }
+  lastOpenedShortcutId = id;
+  // 注意: setRoot 无条件调 (不做 rootPath 相等守卫) — 否则同根不同 relPath 的 shortcut
+  // 切换时 setRoot 被跳过, currentPath 残留旧路径, 列表不切到正确目录.
+  await fb.setRoot(desc.rootPath);
+  if (relCheck.normalized) {
+    await fb.navigate(relCheck.normalized);
+  }
+}
+
 watch(
   () => shortcuts.activeId,
   async (id) => {
-    if (id === null) return;
-    const sc = shortcuts.items.find((s) => s.id === id);
-    if (!sc) return;
-    let desc: SourceDescriptor;
-    try {
-      desc = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;
-    } catch {
+    if (id === null) {
+      lastOpenedShortcutId = null; // 重置守卫，允许同 id 下次再开
       return;
     }
-    if (desc.type === 'local') {
-      await fb.setRoot(desc.rootPath);
-      if (sc.relPath) {
-        await fb.navigate(sc.relPath);
-      }
-    }
-    // TODO Phase 7-8: SMB/WebDAV descriptor 打开
+    await openShortcut(id);
   },
 );
 
@@ -333,10 +373,18 @@ function onSaveCancel() {
 
 async function onSaveSubmit() {
   if (!fb.rootPath) return;
+  // 路径身份修复 (2026-08-12): 保存快捷方式前校验 currentPath 必须 source-relative。
+  // 防御性（currentPath 已在 navigate 时校验），非法则不写坏 shortcut。
+  const relCheck = validateSourceRelativePath(fb.currentPath);
+  if (!relCheck.ok) {
+    log('[FileBrowser] onSaveSubmit currentPath 越界, 拒绝保存快捷方式', { currentPath: fb.currentPath, reason: relCheck.reason });
+    showSaveDialog.value = false;
+    return;
+  }
   const label = saveLabel.value.trim() || null;
   // v0.1.0-module3.0.5: 存当前所在目录 (descriptor + currentPath 作 relPath), 支持子目录快捷方式
   const descriptor: SourceDescriptorLocal = { type: 'local', rootPath: fb.rootPath };
-  await shortcuts.add(descriptor, fb.currentPath, label);
+  await shortcuts.add(descriptor, relCheck.normalized, label);
   showSaveDialog.value = false;
   saveLabel.value = '';
 }
