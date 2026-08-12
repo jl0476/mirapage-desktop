@@ -128,7 +128,8 @@ describe('useCrossVolume', () => {
     expect(consumePendingNextVolume).toHaveBeenCalledTimes(1); // settleIdle 内的 clearPendingState
     expect(cv.phase.value).toBe('idle');
     expect(cv.pendingCrossVolume.value).toBeNull();
-    expect(pushToast).not.toHaveBeenCalled();
+    // A7 补丁: force=true 跨卷成功 → pushToast("jumped") 被调（manual confirmManual 路径不调）
+    expect(pushToast.mock.calls.filter(([k]) => k === 'reader.crossVolume.jumped')).toHaveLength(1);
   });
 
   // ── force=false + off ────────────────────────────────────────────────
@@ -762,6 +763,36 @@ describe('useCrossVolume', () => {
 
     expect(isSlideshowPlaying).toHaveBeenCalled();
     expect(resumeSlideshow).toHaveBeenCalledTimes(1);
+  });
+
+  it('A7 补丁: auto 模式跨卷成功 → pushToast("reader.crossVolume.jumped", {title}) 调一次', async () => {
+    const id = identity(1, 'vol1');
+    const { cv, pushToast } = setup({ currentIdentity: id, continueMode: 'auto', canStart: true, isSlideshowPlaying: true });
+    let resolveFind!: (v: NextVolumeTarget | null) => void;
+    vi.mocked(findNextVolume).mockReturnValue(new Promise<NextVolumeTarget | null>((r) => { resolveFind = r; }));
+    const p = cv.maybeContinue(false, 'next');
+    resolveFind(target('vol2', 'vol2'));
+    await p;
+    const jumpedCalls = pushToast.mock.calls.filter(([k]) => k === 'reader.crossVolume.jumped');
+    expect(jumpedCalls).toHaveLength(1);
+    expect(jumpedCalls[0]?.[1]).toEqual({ title: 'vol2' });
+  });
+
+  it('A7 补丁: manual 模式跨卷 → pushToast("jumped") 不调 (manual 用 confirmManual 自己的 capsule)', async () => {
+    const id = identity(1, 'vol1');
+    const { cv, pushToast } = setup({ currentIdentity: id, continueMode: 'manual', canStart: true, isSlideshowPlaying: false });
+    let resolveFind!: (v: NextVolumeTarget | null) => void;
+    vi.mocked(findNextVolume).mockReturnValue(new Promise<NextVolumeTarget | null>((r) => { resolveFind = r; }));
+    // 触发 arm
+    const armP = cv.maybeContinue(false, 'next');
+    resolveFind(target('vol2', 'vol2'));
+    await armP;
+    const jumpedCallsBefore = pushToast.mock.calls.filter(([k]) => k === 'reader.crossVolume.jumped').length;
+    // 点跳转
+    const navP = cv.confirmManual();
+    await navP;
+    const jumpedCallsAfter = pushToast.mock.calls.filter(([k]) => k === 'reader.crossVolume.jumped').length;
+    expect(jumpedCallsAfter).toBe(jumpedCallsBefore);   // manual confirmManual 路径不加 jumped toast
   });
 
   });

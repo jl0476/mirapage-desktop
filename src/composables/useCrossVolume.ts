@@ -92,8 +92,8 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
       return;
     }
     const seq = ++requestSeq;
-    // manual 模式：传 false（用户主动确认，不续播）
-    await navigateResolvedTarget(target, expected, seq, false);
+    // manual 模式：传 false（用户主动确认，不续播；不推 jumped toast，用 confirmManual 自己的 capsule）
+    await navigateResolvedTarget(target, expected, seq, false, false /* manual */);
   }
 
   /**
@@ -105,6 +105,8 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
     expected: BookIdentity,
     seq: number,
     wasSlideshowPlaying: boolean,
+    // auto/force=true 路径调 jumped toast; manual=confirmManual 路径不调 (用自己 capsule).
+    autoOrForce: boolean,
   ): Promise<void> {
     phase.value = 'navigating';
     // ① 初校验 identity（navigateToVolume 前确认当前卷未变）
@@ -124,10 +126,16 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
     try {
       // ⑤⑥ 由 opts.navigateToVolume 做（ensureBookId + router.replace）
       await opts.navigateToVolume(target);
-      // A7 修复: 跨卷成功 + 调用前 isPlaying=true → resume slideshow (auto/force 路径).
+      // A7 修复: auto/force 跨卷成功 + 调用前 isPlaying=true → resume slideshow.
       // 失败路径 (catch) 不续播 —— 让用户主动重试/暂停 (避免半截 state).
       if (wasSlideshowPlaying) {
         opts.resumeSlideshow?.();
+      }
+      // A7 补丁: auto/force 跨卷成功 → 短暂 toast "已跳转《XXX》" (spec §13/§7.2).
+      // 任务5实现漏调, A7 E2E 发现. manual 模式由 confirmManual 自己的胶囊提示,
+      // 这里只在 auto/force 路径触发, 避免重复提示.
+      if (autoOrForce) {
+        opts.pushToast?.('reader.crossVolume.jumped', { title: target.title });
       }
     } catch (e) {
       opts.pushToast('reader.crossVolume.failed');
@@ -212,7 +220,7 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
         phase.value = 'awaiting-confirm';
         return;
       }
-      await navigateResolvedTarget(t, startIdentity, seq, wasSlideshowPlaying);
+      await navigateResolvedTarget(t, startIdentity, seq, wasSlideshowPlaying, true /* auto/force */);
     } catch (e) {
       opts.pushToast('reader.crossVolume.failed');
       log('[crossVolume] resolve failed', e);
