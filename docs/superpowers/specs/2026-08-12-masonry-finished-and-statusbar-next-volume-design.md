@@ -1,8 +1,8 @@
 # 瀑布流滚到底算读完 + 底栏下一卷 + StatusBar 布局优化
 
-**日期**: 2026-08-12（2026-08-13 修订 v2/v3/v4；v5：审查 P1 终项——写入后竞态）
+**日期**: 2026-08-12（2026-08-13 修订 v2~v5；v6：审查 P1——陈旧成功不污染 UI）
 **前置模块**: v0.1.0-module3.1.0-path-identity
-**状态**: 设计阶段（待用户审查 v5）
+**状态**: 设计阶段（待用户审查 v6）
 
 ---
 
@@ -197,33 +197,42 @@ try {
   return;
 }
 
-// ── 阶段 2：写入后竞态检查（DB 已成功，必须提交本地状态）──
-if (seqAtEntry !== activeStartSeq || writeSeqAtEntry !== activeWriteSeq || !sameDir(...)) {
-  // DB 已写入真值，但当前身份已变（用户切目录/快速滚动）。
-  // 仍要记录「这次写入成功了」，否则 A9 去重和重试逻辑误判未成功。
-  // 用写入时的身份（descAtEntry/pathAtEntry）提交，不用当前身份：
-  if (sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) {
-    // 仍在同目录：本地状态按写入结果提交
-    lastWrittenPath.value = e.path;
-    lastWrittenFinishedParam.value = finishedParam;
-    lastBrowseProgress.value = { ..., finished: finishedNow || lastBrowseProgress.value?.finished || false };
-  }
-  // 切目录了：start() 已清 lastWritten*，本次写入归属旧目录，无需提交到当前状态
-  return;                                           // 不重试（DB 已成功）
-}
+// ── 阶段 2：写入后处理（DB 已成功，writeSucceeded=true）──
+//
+// 关键区分（审查 P1 v6）：「DB 已成功记录」vs「当前 UI 去重状态」必须分开。
+// 陈旧请求（writeSeq 已变）的 DB 成功不能覆盖当前最新请求的 UI 缓存。
+const identity = `${descKey}|${pathAtEntry}|${e.path}|${finishedParam}`;
+successfulWrites.add(identity);   // ① 始终记录 DB 成功（A9 跨请求去重查这个 Set）
 
-// ── 正常提交（无竞态）──
-lastWrittenPath.value = e.path;
-lastWrittenFinishedParam.value = finishedParam;
-lastBrowseProgress.value = { ..., finished: finishedNow || lastBrowseProgress.value?.finished || false };
+if (writeSeqAtEntry === activeWriteSeq && sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) {
+  // ② 仍是最新滚动请求 + 同目录：更新当前 UI 缓存（lastWritten*/lastBrowseProgress）
+  lastWrittenPath.value = e.path;
+  lastWrittenFinishedParam.value = finishedParam;
+  lastBrowseProgress.value = { ..., finished: finishedNow || lastBrowseProgress.value?.finished || false };
+  // 正常完成，不重试
+} else {
+  // ③ 陈旧成功（writeSeq 已变，用户已滚到 B 或切目录）：
+  //   - DB 真值已落（A 的 finished=true 在库里），不丢（successfulWrites 已记）
+  //   - 但不碰当前 UI 缓存（B 才是当前最新请求，A 覆盖会让「跳到上次」指向陈旧 A）
+  //   - 不重试（DB 已成功）
+}
+return;
 ```
 
-**关键规则**（写入后竞态）：
-1. **DB 已成功 = 本地必须标记成功**：`writeSucceeded=true` 后，绝不走 `scheduleRetryIfStillAtBottom`（重试是「未成功」才需要的）
-2. **本地提交用写入时身份**：`lastWrittenFinishedParam` 记录的是「`(descAtEntry, pathAtEntry, e.path)` 这次写了 finishedParam」，与当前身份解耦
-3. **切目录时本地状态由 `start()` 清理**：阶段 2 的 `!sameDir` 分支若已切目录，本次写入归属旧目录书，`start()` 已清 `lastWritten*`，无需再提交
+**为什么不能「sameDir 就提交」**（审查 P1 v6 修正）：`sameDir` 只判目录，不判「是否仍是最新滚动请求」。场景：
+1. A（finished=true）写入在途
+2. 用户滚到 B，`activeWriteSeq++`
+3. A 的 IPC 晚返回成功 → 若阶段 2「sameDir 就提交」→ 把 `lastBrowseProgress` 覆盖回 `{ imageName: A }`
+4. 后果：`FileBrowser.vue` 的「跳到上次」按钮（`:696` 读 `masonryLastBrowseProgress.imageName`）指向陈旧 A，用户点跳转跳错位置；B 的在途写入若也成功，两者互相覆盖，缓存不确定
 
-> **`scheduleRetryIfStillAtBottom` 的调用边界**（最终汇总）：只在「**DB 未成功**」时调用——阶段 1 的瞬时失败（seq/writeSeq 丢弃）、saveProgress catch。**不**在：阶段 1 持久失败（bookId==null）、阶段 2 写入后竞态（DB 已成功）、已 finished 幂等跳过、离开底部。
+**`successfulWrites: Set<string>` 语义**：
+- **key**：`${descKey}|${pathAtEntry}|${e.path}|${finishedParam}`（写入时身份 + 图 + finished 参数）
+- **作用**：A9 复合去重的跨请求真值源。`recordCurrentTop` 入口去重不只查 `lastWrittenFinishedParam`（单一最新值），还查 `successfulWrites.has(identity)`——若某 (path, finishedParam) 已成功写入过（哪怕来自陈旧请求），跳过重复 IPC
+- **清理**：`start()`/`stop()` 清空（切目录/卸载，与 `lastWrittenPath` 同生命周期）。同一目录内滚动量大时 Set 会增长，MVP 不限大小（可视区图片有限，单目录去重量级可控）；若实测膨胀加 LRU 或「保留最近 N 条」
+
+> **A9 去重的最终实现**（v6 修正）：入口去重条件 = `(e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value)` **||** `successfulWrites.has(identity)`。前者覆盖「最新请求连续同图」快路径，后者覆盖「陈旧请求已成功、最新请求又滚回该图」慢路径。
+
+> **`scheduleRetryIfStillAtBottom` 调用边界**（最终汇总）：只在「**DB 未成功**」时调用——阶段 1 的瞬时失败（seq/writeSeq 丢弃）、saveProgress catch。**不**在：阶段 1 持久失败（bookId==null）、阶段 2 写入后（DB 已成功，无论最新 or 陈旧）、已 finished 幂等跳过、离开底部。
 
 #### scheduleStableTimer / clearStableTimer（封装 + 置空语义）
 
@@ -390,7 +399,7 @@ lastBrowseProgress.value = {
 | A6 | `recordBrowsePosition=false` 不写任何进度（含 finished） | `recordCurrentTop` **入口** `if (!params.enabled.value) return;`（审查 P1-2），watcher 层为优化 |
 | A7 | finished 已 true 不重复 IPC | 入口检查单调保留后的 `lastBrowseProgress.finished`（§2.7），跳过 |
 | A8 | atBottom 用 scrollHeight 不用 topmostImage | 绕过多列底部不齐的结构缺陷 |
-| A9 | **复合去重：(path, finishedParam) 同时相同才跳过**（审查 P0-1） | 现有 `if (e.path === lastWrittenPath) return` 扩展为 `if (e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value) return` |
+| A9 | **复合去重：(path, finishedParam) 已成功写入则跳过**（审查 P0-1 + P1 v6） | 入口 `(path, finishedParam) === lastWritten*` **||** `successfulWrites.has(identity)`，A-T2/A-T21 验证 |
 
 #### A9 详解：复合去重（审查 P0-1 核心修复）
 
@@ -398,19 +407,24 @@ lastBrowseProgress.value = {
 - 第 1 次（刚到底）：`finishedParam=undefined` → 写普通进度 → 记 `lastWrittenPath=e.path`
 - 第 2 次（stableTimer 触发，停留达标）：`e.path === lastWrittenPath` → **直接 return，finished=true 永远写不进去**
 
-**修复**：去重维度扩展为 `(path, finishedParam)`：
+**修复**：去重维度扩展为 `(path, finishedParam)`，且分**快路径**（最新请求）与**慢路径**（跨请求，陈旧成功）：
 ```ts
 // recordCurrentTop 入口,在 atBottom/finishedNow 计算之后,saveProgress 之前
-if (e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value) {
-  return;
-}
-// ... saveProgress ...
-lastWrittenPath.value = e.path;
-lastWrittenFinishedParam.value = finishedParam;  // 新增 ref,记录上次写入的 finishedParam
+const identity = `${descKey}|${pathAtEntry}|${e.path}|${finishedParam}`;
+const alreadyWritten =
+  (e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value)  // 快路径:最新请求连续同图
+  || successfulWrites.has(identity);                                                        // 慢路径:跨请求已成功
+if (alreadyWritten) return;
+// ... saveProgress 成功后 ...
+successfulWrites.add(identity);                  // 记录 DB 成功(阶段 2,见写入后竞态节)
+lastWrittenPath.value = e.path;                  // 仅最新请求更新(阶段 2 条件)
+lastWrittenFinishedParam.value = finishedParam;
 ```
 `finishedParam` 只可能 `undefined` 或 `true`（A1），所以同一张图最多写 2 次：第 1 次 `undefined`、第 2 次升级为 `true`，之后 `(path, true)` 重复才跳过（A7 幂等）。
 
-`lastWrittenFinishedParam` 在 `start()`/`stop()` 随 `lastWrittenPath` 一起重置为 `null`。
+**为什么需要 `successfulWrites` 慢路径**（审查 P1 v6）：若 A（finished=true）写入成功但 writeSeq 已变（用户滚到 B），阶段 2 不更新 `lastWritten*`（避免覆盖 B 的 UI 缓存）。此时 `lastWrittenPath` 可能是 B 的 path。若用户又滚回 A，快路径 `e.path === lastWrittenPath.value`（B）为 false，但 A 的 `(path, true)` 已在 `successfulWrites` → 慢路径命中 → 跳过重复 IPC。
+
+`lastWrittenFinishedParam` 与 `successfulWrites` 在 `start()`/`stop()` 随 `lastWrittenPath` 一起重置（清空 Set + 置 null）。
 
 ---
 
@@ -664,7 +678,7 @@ StatusBar emit `next-volume` → FileBrowser `@next-volume="onCrossNextVolume"`�
 | A-T3 | 已 finished=true 再滚到底 | 入口 A7 检查单调缓存跳过，**不调 saveProgress** |
 | A-T4 | 滚到底后离开（atBottom false） | clearStableTimer 取消在途 timer；saveProgress 传 `undefined`（不降级） |
 | A-T5 | 滚到底→调度 stableTimer→中途离开→再回来 | 第 1 次离开清 timer；第 2 次到底重新记 bottomSince + 重调 stableTimer（重新计 STABLE_MS） |
-| A-T6 | 目录切换（start 重置） | `bottomSince`/`stableTimer`/`lastWrittenPath`/`lastWrittenFinishedParam` 全清 |
+| A-T6 | 目录切换（start 重置） | `bottomSince`/`stableTimer`/`lastWrittenPath`/`lastWrittenFinishedParam`/`successfulWrites` 全清 |
 | A-T7 | resize 冷却期内 atBottom | scheduleRecord 整体被丢弃 + clearStableTimer；不写 finished |
 | A-T8 | resize 冷却期触发时已有 stableTimer 在途 | stableTimer 被取消（不漏写也不写陈旧） |
 | A-T9 | `enabled=false`（recordBrowsePosition 关） | recordCurrentTop 入口 return（A6）；**flushNow 也走入口，enabled=false 时不写**（审查 P1-2） |
@@ -678,7 +692,8 @@ StatusBar emit `next-volume` → FileBrowser `@next-volume="onCrossNextVolume"`�
 | A-T17 | **布局高度变化触发**（审查 P1 响应式）：scrollTop 不变，缩略图尺寸收敛使 scrollHeight 变化，atBottom 从 false→true | composable 内 watch(atBottom) 捕获翻转 → 调 scheduleRecord → 进入停留确认流程 |
 | A-T18 | **不足一屏（档1）可完成**（审查 P2）：`sh <= ch`，scrollTop 恒 0 | atBottom=true（档1），停留 STABLE_MS → finished（不会因 scrollTop=0 永远卡住） |
 | A-T19 | **长目录（档3）正常**：`sh >= 2ch`，贴底 | atBottom = nearBottom，正常停留确认 → finished |
-| A-T20 | **写入后竞态**（审查 P1 终项）：saveProgress resolve 成功后，writeSeq/seq 因滚动/切目录变化 | DB 只写一次；本地 `lastWrittenFinishedParam=true`、`lastBrowseProgress.finished=true` 正确提交；**不重复重试**；同图再来不重复 IPC（A9 去重按已提交的 true 跳过） |
+| A-T20 | **写入后竞态（最新请求）**（审查 P1 终项）：saveProgress resolve 成功后，writeSeq/seq **未变** | DB 只写一次；本地 `lastWrittenFinishedParam=true`、`lastBrowseProgress.finished=true` 正确提交；**不重复重试** |
+| A-T21 | **陈旧成功不污染当前 UI**（审查 P1 v6）：A(finished=true)写入在途时用户滚到 B(`activeWriteSeq++`)，A 的 IPC 晚返回成功 | A 的 DB 写入保留(`successfulWrites` 记 A 的 identity)；**不覆盖** B 的 `lastBrowseProgress`(仍指向 B)；B 的在途写入正常提交；用户滚回 A 时慢路径去重命中不重复 IPC |
 
 **测试实现要点**：
 - `atBottom` 作为可注入的 `Ref<boolean>` 参数（测试用 `ref(false)` 手动翻转），不直接依赖 DOM。**A-T12/A-T13/A-T18/A-T19 的三档规则在 MasonryView 的 atBottom computed 内**——composable 单测直接翻转 atBottom ref（三档逻辑由 MasonryView 单测覆盖，验 computed 输出）
@@ -752,7 +767,8 @@ nextVolumeLoading: '…' / '…'                       // 或用图标 spinner
 | **§2.5 残留旧公式与 §2.1 矛盾**（审查 P0） | v4 统一：§2.5 改用三档规则代码，消除「一屏阈值」残留 |
 | **短目录顶部误判 finished**（审查 P1-b） | §2.1 三档规则：档2（1~2屏）须 `scrollTop>0`，A-T12/A-T13 验证 |
 | **不足一屏目录永远无法完成**（审查 P2） | §2.1 三档规则：档1（`sh<=ch`）停留即可，A-T18 验证（不因 scrollTop 恒 0 卡住） |
-| **DB 写成功但本地提交被竞态丢弃**（审查 P1 终项） | §2.3 两阶段拆分：写入前竞态可取消，写入后竞态（writeSucceeded=true）必须用写入时身份提交本地状态、不重试，A-T20 验证 |
+| **DB 写成功但本地提交被竞态丢弃**（审查 P1 v5） | §2.3 两阶段拆分：写入前竞态可取消，写入后(writeSucceeded)记录到 successfulWrites + 仅最新请求更新 UI 缓存，A-T20 验证 |
+| **陈旧成功覆盖当前 UI 缓存**（审查 P1 v6） | §2.3 阶段 2 区分：DB 成功 always 记 `successfulWrites`；当前 UI 缓存(`lastWritten*`/`lastBrowseProgress`)仅 `writeSeq===activeWriteSeq && sameDir` 时更新；A9 慢路径去重查 successfulWrites，A-T21 验证 |
 | **升级早退路径不重试 → 永久卡住**（审查 P1） | §2.3 统一失败出口 `scheduleRetryIfStillAtBottom`，覆盖早退 + catch；持久失败（bookId==null）不重试防死循环，A-T14/A-T16 验证 |
 | **scrollHeight 变化不触发 atBottom 重算**（审查 P1 响应式盲点） | §2.5 atBottom computed 依赖 `layoutHeight`（触发信号）+ §2.3 composable 内 watch(atBottom) 捕获翻转，A-T17 验证 |
 | finished 误标（用户只是滚到底看了一眼没真读） | STABLE_MS=1200ms 停留阈值；可调；右键菜单仍可重置 |
