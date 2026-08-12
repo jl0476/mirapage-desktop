@@ -179,6 +179,9 @@ function onMasonryPopupClose() {
 const showDetail = ref(false);
 watch(() => fb.viewMode, () => { showDetail.value = false; });
 watch(() => fb.currentPath, () => { showDetail.value = false; });
+// v0.1.0-...: 切视图时刷 readStatus — 瀑布流滚动写了 progress 但 marks 没刷新,
+// 切到详情视图时 readStatus 还是旧数据. 调 refresh 让 marks 立即反映当前状态.
+watch(() => fb.viewMode, () => { void readStatus.refresh(); });
 function toggleDetail() {
   showDetail.value = !showDetail.value;
 }

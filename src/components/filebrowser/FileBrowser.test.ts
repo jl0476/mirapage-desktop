@@ -1325,6 +1325,43 @@ describe('FileBrowser — masonry 浏览位置接入 toolbar (Task 10)', () => {
   });
 });
 
+// ─── v0.1.0-...: viewMode 变化刷 readStatus (瀑布流读后退详情能看到徽章) ───
+describe('FileBrowser — viewMode 变化刷 readStatus', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    routerPushSpy.mockClear();
+  });
+
+  it('切到 masonry → 切回 details → 详情视图的 marks 是新数据', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // mock readStatus.refresh 调用计数
+    const readStatusStore = useReadStatusStore();
+    const refreshSpy = vi.spyOn(readStatusStore, 'refresh');
+
+    // 切到 masonry 触发 refresh
+    fb.setViewMode('masonry');
+    await flushPromises();
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+    // 切回 details 也触发 refresh
+    fb.setViewMode('details');
+    await flushPromises();
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+
+    wrapper.unmount();
+  });
+});
+
 describe('FileBrowser — canonicalImageNames 传给 FileList (Task 10)', () => {
   // canonicalImageNames: fb.sortedEntries 过滤图片 → name[] (computed 派生)
   // 传给 FileList prop, 内部转发到 MasonryView (任务 8 已接 prop)
