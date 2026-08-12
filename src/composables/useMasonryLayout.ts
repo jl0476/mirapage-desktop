@@ -27,6 +27,23 @@ export function computeColWidth(containerWidth: number, cols: number, hGap: numb
   return Math.floor((containerWidth - (cols - 1) * hGap) / cols);
 }
 
+/** atBottom 三档规则常量(spec §2.1) */
+export const BOTTOM_THRESHOLD_PX = 64;
+
+/**
+ * 计算「是否滚到底」三档规则(spec §2.1, 审查 P1-b + P2)。
+ * - 档1 不足一屏(sh<=ch): true(停留即可,滚不动)
+ * - 档2 短目录(ch<sh<2ch): nearBottom && st>0(须实际滚过防顶部误判)
+ * - 档3 长目录(sh>=2ch): nearBottom
+ * 纯函数, 可独立单测(MasonryView atBottom computed 调它)。
+ */
+export function computeAtBottom(sh: number, ch: number, st: number): boolean {
+  const nearBottom = st + ch >= sh - BOTTOM_THRESHOLD_PX;
+  if (sh <= ch) return true;
+  if (sh < 2 * ch) return nearBottom && st > 0;
+  return nearBottom;
+}
+
 /**
  * entry.path 相对 currentPath（= lastFetchedPath），但 Rust list_image_dimensions → read_file
  * 期望相对 rootPath 的完整路径。拼接 currentPath 前缀（'/' 分隔，LocalMediaSource 接受 '/'）。
