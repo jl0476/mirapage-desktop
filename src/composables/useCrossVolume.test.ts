@@ -55,18 +55,23 @@ interface SetupOpts {
   currentIdentity?: BookIdentity | null;
   continueMode?: 'off' | 'auto' | 'manual';
   canStart?: boolean;
+  isSlideshowPlaying?: boolean;
 }
 
 function setup(opts: SetupOpts = {}) {
   const currentIdentity = opts.currentIdentity ?? null;
   const continueMode = opts.continueMode ?? 'manual';
   const canStart = opts.canStart ?? true;
+  const isSlideshowPlaying = opts.isSlideshowPlaying ?? false;
 
   const navigateToVolume = vi.fn(async (_t: NextVolumeTarget) => undefined);
   const saveCurrentProgressNow = vi.fn(async () => undefined);
   const pushToast = vi.fn();
   const pauseSlideshow = vi.fn();
   const consumePendingNextVolume = vi.fn();
+  // A7 修复: slideshow resume opts (可选注入, 不传则 useCrossVolume 兼容老调用)
+  const resumeSlideshow = vi.fn();
+  const isSlideshowPlayingFn = vi.fn(() => isSlideshowPlaying);
 
   const cv = useCrossVolume({
     identity: () => currentIdentity,
@@ -77,9 +82,20 @@ function setup(opts: SetupOpts = {}) {
     pauseSlideshow,
     consumePendingNextVolume,
     canStart: () => canStart,
+    isSlideshowPlaying: isSlideshowPlayingFn,
+    resumeSlideshow,
   });
 
-  return { cv, navigateToVolume, saveCurrentProgressNow, pushToast, pauseSlideshow, consumePendingNextVolume };
+  return {
+    cv,
+    navigateToVolume,
+    saveCurrentProgressNow,
+    pushToast,
+    pauseSlideshow,
+    consumePendingNextVolume,
+    resumeSlideshow,
+    isSlideshowPlaying: isSlideshowPlayingFn,
+  };
 }
 
 describe('useCrossVolume', () => {
@@ -656,6 +672,96 @@ describe('useCrossVolume', () => {
     expect(navigateToVolume).not.toHaveBeenCalled();
     expect(saveCurrentProgressNow).not.toHaveBeenCalled();
     expect(cv.phase.value).toBe('idle');
+  });
+
+  // ── A7 修复: auto/force 跨卷成功后 slideshow resume ────────────────
+
+  it('A7: auto 模式跨卷 + 调用前 isSlideshowPlaying=true → resumeSlideshow 调一次', async () => {
+    const id = identity(1, 'vol1');
+    const { cv, resumeSlideshow, isSlideshowPlaying } = setup({
+      currentIdentity: id,
+      continueMode: 'auto',
+      isSlideshowPlaying: true,
+    });
+
+    let resolveFind!: (v: NextVolumeTarget | null) => void;
+    vi.mocked(findNextVolume).mockReturnValue(new Promise<NextVolumeTarget | null>((r) => { resolveFind = r; }));
+
+    const p = cv.maybeContinue(false, 'next');
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveFind(target('vol2', 'vol2'));
+    await p;
+
+    expect(isSlideshowPlaying).toHaveBeenCalled();
+    expect(resumeSlideshow).toHaveBeenCalledTimes(1);
+  });
+
+  it('A7: auto 模式跨卷 + 调用前 isSlideshowPlaying=false → resumeSlideshow 不调', async () => {
+    const id = identity(1, 'vol1');
+    const { cv, resumeSlideshow, isSlideshowPlaying } = setup({
+      currentIdentity: id,
+      continueMode: 'auto',
+      isSlideshowPlaying: false,
+    });
+
+    let resolveFind!: (v: NextVolumeTarget | null) => void;
+    vi.mocked(findNextVolume).mockReturnValue(new Promise<NextVolumeTarget | null>((r) => { resolveFind = r; }));
+
+    const p = cv.maybeContinue(false, 'next');
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveFind(target('vol2', 'vol2'));
+    await p;
+
+    expect(isSlideshowPlaying).toHaveBeenCalled();
+    expect(resumeSlideshow).not.toHaveBeenCalled();
+  });
+
+  it('A7: manual 模式跨卷 → resumeSlideshow 不调 (manual 不续播)', async () => {
+    const id = identity(1, 'vol1');
+    const { cv, resumeSlideshow, isSlideshowPlaying } = setup({
+      currentIdentity: id,
+      continueMode: 'manual',
+      isSlideshowPlaying: true,
+    });
+
+    let resolveFind!: (v: NextVolumeTarget | null) => void;
+    vi.mocked(findNextVolume).mockReturnValue(new Promise<NextVolumeTarget | null>((r) => { resolveFind = r; }));
+
+    const p = cv.maybeContinue(false, 'next');
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveFind(target('vol2', 'vol2'));
+    await p;
+    expect(cv.phase.value).toBe('awaiting-confirm');
+
+    await cv.confirmManual();
+
+    // manual 是用户主动确认, 跨卷后让用户决定是否播放
+    expect(isSlideshowPlaying).not.toHaveBeenCalled();
+    expect(resumeSlideshow).not.toHaveBeenCalled();
+  });
+
+  it('A7: force=true 跨卷 + 调用前 isSlideshowPlaying=true → resumeSlideshow 调一次', async () => {
+    const id = identity(1, 'vol1');
+    const { cv, resumeSlideshow, isSlideshowPlaying } = setup({
+      currentIdentity: id,
+      continueMode: 'manual',  // 即使 manual 模式, force=true 强制续播
+      isSlideshowPlaying: true,
+    });
+
+    let resolveFind!: (v: NextVolumeTarget | null) => void;
+    vi.mocked(findNextVolume).mockReturnValue(new Promise<NextVolumeTarget | null>((r) => { resolveFind = r; }));
+
+    const p = cv.maybeContinue(true, 'next');
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveFind(target('vol2', 'vol2'));
+    await p;
+
+    expect(isSlideshowPlaying).toHaveBeenCalled();
+    expect(resumeSlideshow).toHaveBeenCalledTimes(1);
   });
 
   });

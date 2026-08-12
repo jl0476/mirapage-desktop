@@ -315,8 +315,12 @@ function currentIdentity(): BookIdentity | null {
 
 /**
  * 2026-08-12 跨卷任务 8 (spec §11.3): CrossVolumeController 实例化.
- * 8 个 opts 全注入（identity / navigateToVolume / saveCurrentProgressNow / pushToast /
- * getContinueMode / pauseSlideshow / consumePendingNextVolume / canStart）.
+ * 10 个 opts 全注入（identity / navigateToVolume / saveCurrentProgressNow / pushToast /
+ * getContinueMode / pauseSlideshow / consumePendingNextVolume / canStart /
+ * isSlideshowPlaying / resumeSlideshow）.
+ * A7 修复: isSlideshowPlaying 在 maybeContinue 入口捕获 isPlaying 状态;
+ *          resumeSlideshow 是 slideshow.start() —— Controller 内部已用 wasSlideshowPlaying guard,
+ *          所以 ReaderView 这边直接调 start 即可.
  * ReaderView 单实例所有权（Toast 不调 useCrossVolume, P0-2 修复）.
  */
 const crossVolume = useCrossVolume({
@@ -328,6 +332,8 @@ const crossVolume = useCrossVolume({
   pauseSlideshow: () => slideshow.pause(),
   consumePendingNextVolume: () => slideshow.consumePendingNextVolume(),
   canStart: () => bookLoadPhase.value === 'ready',
+  isSlideshowPlaying: () => slideshow.isPlaying,
+  resumeSlideshow: () => slideshow.start(),
 });
 
 // 末页跨卷意图 (spec §9 reader.nextPage atLast → onAtLastNextAttempt 回调):

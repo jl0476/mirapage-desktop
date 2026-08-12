@@ -38,6 +38,10 @@ export interface UseCrossVolumeOpts {
   consumePendingNextVolume: () => void;
   /** 注入 bookLoadPhase === 'ready' 守卫 —— 加载期拒绝新跨卷 */
   canStart: () => boolean;
+  /** A7 修复: 调用前捕获 slideshow.isPlaying 状态 —— 仅 auto/force 路径续播 (manual 是用户主动确认不续播) */
+  isSlideshowPlaying?: () => boolean;
+  /** A7 修复: 跨卷成功后 resume slideshow 播放（ReaderView 注入 slideshow.start） */
+  resumeSlideshow?: () => void;
 }
 
 export interface UseCrossVolumeReturn {
@@ -77,6 +81,7 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
   /**
    * manual 点跳转。P1-2 修复：开头 phase 守卫防双击（第二次直接 return）。
    * identity 校验推迟到 navigateResolvedTarget ①（统一处理）。
+   * A7 修复：manual 模式不续播 slideshow —— 传 wasSlideshowPlaying=false (force 走 maybeContinue 已捕获).
    */
   async function confirmManual(): Promise<void> {
     if (phase.value !== 'awaiting-confirm') return;
@@ -87,17 +92,19 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
       return;
     }
     const seq = ++requestSeq;
-    await navigateResolvedTarget(target, expected, seq);
+    // manual 模式：传 false（用户主动确认，不续播）
+    await navigateResolvedTarget(target, expected, seq, false);
   }
 
   /**
    * 实际导航：① identity 初校验 → ② trySave（失败 toast 不阻断） → ③ pauseSlideshow
-   *   → ④ requestSeq+identity 再校验 → ⑤⑥ navigateToVolume → ⑦⑧ settleIdle (finally)
+   *   → ④ requestSeq+identity 再校验 → ⑤⑥ navigateToVolume → A7 跨卷成功 resume slideshow (auto/force only) → ⑦⑧ settleIdle (finally)
    */
   async function navigateResolvedTarget(
     target: NextVolumeTarget,
     expected: BookIdentity,
     seq: number,
+    wasSlideshowPlaying: boolean,
   ): Promise<void> {
     phase.value = 'navigating';
     // ① 初校验 identity（navigateToVolume 前确认当前卷未变）
@@ -117,6 +124,11 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
     try {
       // ⑤⑥ 由 opts.navigateToVolume 做（ensureBookId + router.replace）
       await opts.navigateToVolume(target);
+      // A7 修复: 跨卷成功 + 调用前 isPlaying=true → resume slideshow (auto/force 路径).
+      // 失败路径 (catch) 不续播 —— 让用户主动重试/暂停 (避免半截 state).
+      if (wasSlideshowPlaying) {
+        opts.resumeSlideshow?.();
+      }
     } catch (e) {
       opts.pushToast('reader.crossVolume.failed');
       log('[crossVolume] navigate failed', e);
@@ -172,6 +184,10 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
 
     const seq = ++requestSeq;
     phase.value = 'resolving';
+    // A7 修复: 进入 maybeContinue 入口立即捕获 isSlideshowPlaying, 避免 race 期间手动 toggle 后误判.
+    // 仅 auto/force 路径续播 — manual 模式走 confirmManual 显式 confirm, 传 false.
+    // 入口早捕获: 即使 phase='resolving' 期间用户切换 slideshow 也不影响本判断.
+    const wasSlideshowPlaying = mode !== 'manual' ? (opts.isSlideshowPlaying?.() ?? false) : false;
     try {
       const result = await findNextVolume(startIdentity.descriptor, startIdentity.relPath, dir);
       // 陈旧校验：seq / canStart / identity 任一变化即丢弃
@@ -196,7 +212,7 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
         phase.value = 'awaiting-confirm';
         return;
       }
-      await navigateResolvedTarget(t, startIdentity, seq);
+      await navigateResolvedTarget(t, startIdentity, seq, wasSlideshowPlaying);
     } catch (e) {
       opts.pushToast('reader.crossVolume.failed');
       log('[crossVolume] resolve failed', e);
