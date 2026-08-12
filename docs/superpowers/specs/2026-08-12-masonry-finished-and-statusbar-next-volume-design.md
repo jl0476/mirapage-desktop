@@ -1,8 +1,8 @@
 # 瀑布流滚到底算读完 + 底栏下一卷 + StatusBar 布局优化
 
-**日期**: 2026-08-12（2026-08-13 修订：纳入代码审查 P0×2 + P1×3 + P2×2）
+**日期**: 2026-08-12（2026-08-13 修订 v2：代码审查 P0×2 + P1×3 + P2×2；v3：审查 P1×2 + P2×1）
 **前置模块**: v0.1.0-module3.1.0-path-identity
-**状态**: 设计阶段（待用户审查 v2）
+**状态**: 设计阶段（待用户审查 v3）
 
 ---
 
@@ -48,18 +48,28 @@
 
 原因：瀑布流多列布局，各列底部不齐。按 `canonicalImageNames` 排序的末图落在某一列底部，但滚到底时视口顶线（`topmostImage` 基准）压在倒数第 2~3 行，`topmostImage === 末图` 几乎永不成立。详见 brainstorming 对话验证（layoutMap 虽全量，但 topmostImage 是视口顶部图，非末图）。
 
-**正确基准**：容器是否滚到内容底部（DOM 原生信号，与列数无关）：
+**正确基准**：容器是否滚到内容底部（DOM 原生信号，与列数无关），但**必须防短目录误判**（审查 P1-b）：
 ```ts
 const el = containerRef;
-const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - BOTTOM_THRESHOLD;
+const sh = el.scrollHeight, ch = el.clientHeight, st = el.scrollTop;
+const BOTTOM_THRESHOLD_PX = 64;   // 固定小阈值:接近真实底部
+// 长目录:贴底(64px 余量);短目录(<2 屏):必须用户实际滚动过(st>0)且贴底
+const nearBottom = st + ch >= sh - BOTTOM_THRESHOLD_PX;
+const shortDir = sh < 2 * ch;
+const atBottom = nearBottom && (!shortDir || st > 0);
 ```
-`BOTTOM_THRESHOLD` = 一屏高（`viewportHeight`），允许用户「接近底部」即触发，不必精确到 1px（scrollHeight 在瀑布流尺寸渐进收敛时会跳动，留一屏余量更稳）。
+
+**为什么不用「一屏阈值」**：审查指出 `scrollTop + clientHeight >= scrollHeight - viewportHeight` 在短目录（如 8 张图、总高 1 屏多）下，用户**在顶部**（`scrollTop=0`）就满足 `0 + 800 >= 1400 - 800 → 800 >= 600 → true`，进目录停留即误标 finished。短目录约束 `!shortDir || st > 0` 保证：内容 <2 屏时必须用户**实际向下滚过**（`scrollTop > 0`）才算——在顶部不动不触发。
+
+**64px 固定阈值的理由**：scrollHeight 在尺寸渐进收敛时跳动的余量，由 STABLE_MS 停留确认时间窗兜底（跳动会在 1200ms 内稳定），不需要一屏那么大的 px 余量。64px ≈ 半行卡片高，语义是「最后一行已基本可见」。
+
+> **atBottom 作为可注入 Ref**：MasonryView 计算 `atBottom` computed（含短目录约束）传入 composable。测试用 `ref(false)` 手动翻转，不依赖 DOM（§7.1 A-T11）。
 
 ### 2.2 触发条件
 
 满足以下**全部**条件 → `saveProgress` 传 `finished=true`：
 
-1. **`atBottom`**：`scrollTop + clientHeight >= scrollHeight - viewportHeight`
+1. **`atBottom`**：§2.1 定义（贴底 64px + 短目录须 `scrollTop>0`）
 2. **停留确认**：`atBottom` 状态持续 ≥ `STABLE_MS`（默认 **1200ms**），防惯性滑过末尾误触发
 3. **当前未 finished**：幂等跳过（避免重复 IPC；见 §2.7 缓存单调性，不能依赖会被覆盖的本地缓存——改用 `recordCurrentTop` 入口读 DB 真值或单调保留的缓存）
 4. **`enabled` 为 true**：`recordCurrentTop` **入口**守卫 `if (!params.enabled.value) return;`（不仅是 watcher 层）。复用现有 `settings.recordBrowsePosition` 开关——关了记录进度就不该标 finished。`flushNow`（跨卷前 flush）也走同一入口，故 enabled=false 时 flush 也不写。
@@ -84,8 +94,8 @@ recordCurrentTop 入口逻辑（新增,在现有去重判定之前）:
   if (atBottom):
     if (bottomSince === null):
       bottomSince = Date.now()
-      stableTimer = setTimeout(() => void recordCurrentTop(), STABLE_MS)
-      // 本次先写普通进度(finished=undefined),STABLE_MS 后 timer 再触发一次升级判定
+      scheduleStableTimer()           // 调度 STABLE_MS 后的升级判定
+      finishedNow = false             // 首次到底,先写普通进度
     else:
       stableMs = Date.now() - bottomSince
       finishedNow = stableMs >= STABLE_MS
@@ -96,13 +106,48 @@ recordCurrentTop 入口逻辑（新增,在现有去重判定之前）:
 
   // finished 单调: 只传 true, 不传 false(详见 §2.7)
   const finishedParam = finishedNow ? true : undefined
-  await saveProgress(bookId, page, 'single', finishedParam, imageName)
+  // ... saveProgress(bookId, page, 'single', finishedParam, imageName) ...
+
+  // 升级写入失败/被拒(writeSeq 丢弃、ensureBookId 失败、bookId==null)的兜底:
+  // 若仍在底部且尚未成功 finished,必须能再次调度确认,否则永久卡住。
+  // 由 scheduleStableTimer 内部 "timer 引用为 null 才调度" 守护(见下方不变量)。
 ```
 
-**关键时序**：
-1. 用户滚到底 → scroll watcher fire → `scheduleRecord`(300ms debounce) → `recordCurrentTop` 第 1 次：`atBottom=true`、`bottomSince=null` → 记 `bottomSince`、调度 `stableTimer(STABLE_MS)`、本次写 `finished=undefined`（普通进度，Rust 保留旧 finished）
-2. 用户保持不动 STABLE_MS → `stableTimer` 触发 `recordCurrentTop` 第 2 次：`atBottom=true`、`bottomSince≠null`、`stableMs≥STABLE_MS` → `finishedNow=true` → 写 `finished=true`（升级，单调）
-3. 用户离开底部 → scroll watcher fire → `scheduleRecord` → `recordCurrentTop`：`atBottom=false` → `clearStableTimer()`、`bottomSince=null`、`finishedNow=false` → 写 `finished=undefined`（保留，不降级）
+#### scheduleStableTimer / clearStableTimer（封装 + 置空语义）
+
+```ts
+function scheduleStableTimer(): void {
+  if (stableTimer !== null) return;        // 已有在途 timer,不重复调度(不变量守护)
+  stableTimer = setTimeout(() => {
+    stableTimer = null;                     // ← 审查 P1-a:回调开始立即置空
+    void recordCurrentTop();                // 重读 atBottom(bottomSince 非空分支)
+  }, STABLE_MS);
+}
+
+function clearStableTimer(): void {
+  if (stableTimer !== null) { clearTimeout(stableTimer); stableTimer = null; }
+  bottomSince = null;                       // 连带清 bottomSince(不变量:timer≠null ⇒ bottomSince≠null)
+}
+```
+
+**timer 回调置空的必要性（审查 P1-a）**：若回调不置空，升级写入因竞态被拒（`writeSeqAtEntry !== activeWriteSeq`）或失败（ensureBookId/bookId==null）后，`stableTimer` 引用仍在 → `scheduleStableTimer` 的 `if (stableTimer !== null) return` 守护使其不再调度 → 永久卡在「已到底、未 finished、无 timer」状态。
+
+回调置空后，`recordCurrentTop` 在 `atBottom && bottomSince !== null` 分支重算 `finishedNow`；若本次仍因竞态/失败未成功 finished，需重新调度确认。**关键**：`recordCurrentTop` 的 saveProgress 之后（成功或失败），若 `atBottom && !已finished`，应再调 `scheduleStableTimer()`——但 `bottomSince` 已非 null，timer 已置空，`scheduleStableTimer` 会重新排上。这条「失败重试」由 `scheduleStableTimer` 的置空守护自然支撑。
+
+#### stableTimer 生命周期不变量（审查 P2）
+
+```
+stableTimer !== null  ⇒  bottomSince !== null  ⇒  当前 atBottom = true
+```
+
+三段蕴含保证不会出现「timer 已执行但引用仍在」或「bottomSince 已清但 timer 还在」的半状态。所有改变 `atBottom` / `bottomSince` 的出口必须经 `clearStableTimer()`（它会连带清 bottomSince）。
+
+#### 关键时序
+
+1. 用户滚到底 → scroll watcher fire → `scheduleRecord`(300ms debounce) → `recordCurrentTop` 第 1 次：`atBottom=true`、`bottomSince=null` → 记 `bottomSince`、`scheduleStableTimer()`、本次写 `finished=undefined`（普通进度，Rust 保留旧 finished）
+2. 用户保持不动 STABLE_MS → stableTimer 回调（置空 timer）触发 `recordCurrentTop` 第 2 次：`atBottom=true`、`bottomSince≠null`、`stableMs≥STABLE_MS` → `finishedNow=true` → 写 `finished=true`（升级，单调）
+3. 用户离开底部 → scroll watcher fire → `scheduleRecord` → `recordCurrentTop`：`atBottom=false` → `clearStableTimer()`（清 timer + bottomSince）、`finishedNow=false` → 写 `finished=undefined`（保留，不降级）
+4. **升级失败**（竞态/IPC 错误）→ saveProgress 后仍在底部且未 finished → `scheduleStableTimer()`（timer 已置空）重排 → STABLE_MS 后再试（审查 P1-a 失败重试用例）
 
 #### stableTimer 的清理出口（必须全覆盖）
 
@@ -488,12 +533,17 @@ StatusBar emit `next-volume` → FileBrowser `@next-volume="onCrossNextVolume"`�
 | A-T9 | `enabled=false`（recordBrowsePosition 关） | recordCurrentTop 入口 return（A6）；**flushNow 也走入口，enabled=false 时不写**（审查 P1-2） |
 | A-T10 | reader 已写 finished=true，瀑布流滚到另一张普通图 | saveProgress 传 undefined（DB 保留 true）；**前端缓存 finished 仍为 true**（审查 P1-1，A7 基础） |
 | A-T11 | 多列底部不齐（末图在某列底） | atBottom 用 scrollHeight 判定成立（A8），不依赖末图位置 |
+| A-T12 | **短目录顶部不误判**（审查 P1-b）：`scrollTop=0` 且 `scrollHeight < 2*clientHeight` | atBottom=false（短目录须 `scrollTop>0`）；不调度 stableTimer、不写 finished |
+| A-T13 | **短目录滚到底**：短目录用户向下滚（`scrollTop>0`）并贴底 | atBottom=true，正常走停留确认 → finished |
+| A-T14 | **升级失败后能重试**（审查 P1-a）：第 2 次 recordCurrentTop 因 writeSeq 丢弃/IPC 失败未写成 finished | stableTimer 已置空 → 仍在底部时重新调度 → STABLE_MS 后再试，最终写成 finished |
+| A-T15 | stableTimer 生命周期不变量（审查 P2）：`stableTimer≠null ⇒ bottomSince≠null ⇒ atBottom=true` | 任一上游状态变化（离开底部/start/stop/disableWatcher/resize）都经 clearStableTimer，无半状态 |
 
 **测试实现要点**：
-- `atBottom` 作为可注入的 `Ref<boolean>` 参数（测试用 `ref(false)` 手动翻转），不直接依赖 DOM
+- `atBottom` 作为可注入的 `Ref<boolean>` 参数（测试用 `ref(false)` 手动翻转），不直接依赖 DOM。**A-T12/A-T13 的短目录约束在 MasonryView 的 atBottom computed 内**——composable 单测直接翻转 atBottom ref 即可（短目录逻辑由 MasonryView 单测覆盖，验 computed 输出）
 - 用 `vi.useFakeTimers()` + `vi.advanceTimersByTime(STABLE_MS + 1)` 推进 stableTimer，验证第 2 次升级写入
 - `saveProgress` mock 成 `vi.fn()`，断言第 N 次调用的第 4 参数（finished）为 `undefined` 或 `true`
 - A-T3/A-T10 验证「不调 saveProgress」用 `expect(saveProgress).not.toHaveBeenCalled()` 或调用次数不变
+- A-T14 验证 timer 置空 + 重调：mock saveProgress 第 2 次抛错，断言第 3 次仍被调（重试）
 
 ### 7.2 功能 B（FileBrowser.test.ts + StatusBar 单测新增）
 
@@ -555,9 +605,11 @@ nextVolumeLoading: '…' / '…'                       // 或用图标 spinner
 
 | 风险 | 缓解 |
 |---|---|
-| scrollHeight 在尺寸渐进收敛时跳动，atBottom 抖动 | BOTTOM_THRESHOLD = 一屏高（viewportHeight），留余量；停留确认 STABLE_MS 进一步过滤抖动 |
+| scrollHeight 在尺寸渐进收敛时跳动，atBottom 抖动 | 固定 64px 阈值；停留确认 STABLE_MS 时间窗过滤抖动（跳动 1200ms 内稳定） |
+| **短目录顶部误判 finished**（审查 P1-b） | §2.1 短目录约束 `!shortDir \|\| scrollTop>0`，A-T12/A-T13 验证 |
 | finished 误标（用户只是滚到底看了一眼没真读） | STABLE_MS=1200ms 停留阈值；可调；右键菜单仍可重置 |
-| **stableTimer 漏清理 → 漏写或写陈旧 finished**（审查 P0-2 衍生） | §2.3 列全 5 个清理出口（离开底部/start/stop/disableWatcher/resize），封装 `clearStableTimer()` 统一调；A-T5/A-T8 验证 |
+| **stableTimer 回调不置空 → 升级失败后永久卡住**（审查 P1-a） | §2.3 回调首行 `stableTimer=null` + scheduleStableTimer 置空守护 + 失败重试，A-T14 验证 |
+| **stableTimer 漏清理 → 漏写或写陈旧 finished**（审查 P0-2 衍生） | §2.3 列全 5 个清理出口（离开底部/start/stop/disableWatcher/resize），封装 `clearStableTimer()` 统一调；A-T5/A-T8/A-T15 验证 |
 | **同图去重阻止 finished 升级**（审查 P0-1） | A9 复合去重 `(path, finishedParam)`，A-T2 验证同图第 2 次升级写入 |
 | **前端缓存 finished 被普通滚动覆盖回 false**（审查 P1-1） | §2.7 缓存单调保留 `finishedNow \|\| lastBrowseProgress.finished \|\| false`，A-T10 验证 |
 | **enabled=false 时 flushNow 仍写**（审查 P1-2） | recordCurrentTop 入口 `if (!enabled) return`，A-T9 验证 flushNow 也走入口 |
@@ -571,6 +623,7 @@ nextVolumeLoading: '…' / '…'                       // 或用图标 spinner
 ## 11. 开放问题（实现时再定，不阻塞设计）
 
 - `STABLE_MS` 最终值（1200ms 是建议，实现后本地实测可调 800~2000ms）
-- `BOTTOM_THRESHOLD` 用 `viewportHeight` 还是固定 px（建议 viewportHeight，跨分辨率自适应）
+- `BOTTOM_THRESHOLD_PX` 固定 64px（v3 定案，取代 v2 的「一屏阈值」——短目录会误判）。实现后若发现 64px 在某些 DPI/卡片高度下太严或太松可微调，但**不可回到 viewportHeight 阈值**（短目录顶部误判 bug）
+- 短目录阈值 `2 * clientHeight`（<2 屏视为短目录）是否合适——可实测调整，但必须有此约束防顶部误判
 - 跑马灯滚动时长（建议按文本长度线性，4s 是默认）
 - 是否给底栏下一卷加键盘快捷键（toolbar 的 Alt+→ 已覆盖 reader，底栏是否需要独立快捷键——YAGNI 暂不加）
