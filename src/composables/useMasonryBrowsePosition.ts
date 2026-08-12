@@ -37,6 +37,8 @@ import { naturalCompare } from '@/lib/naturalSort';
 const DEBOUNCE_MS = 300;
 const RESIZE_COOLDOWN_MS = 500;
 const BOOKID_CACHE_TTL_MS = 30_000;
+/** 任务 9: 滚到底停留确认窗口(防惯性滑过末尾误触发 finished, spec §2.3) */
+const STABLE_MS = 1200;
 
 /**
  * 枚举 entry 下的图片页（供 create_book 写入封面 + 页数）。
@@ -73,6 +75,8 @@ export interface UseMasonryBrowsePositionParams {
   layoutMap: ComputedRef<Map<string, { top: number; height: number }>>;
   scrollTop: Ref<number>;
   colWidth: Ref<number>;
+  /** 任务 8: 容器是否滚到底(MasonryView 三档 computed 注入, spec §2.1/§2.5) */
+  atBottom: Ref<boolean>;
   scrollToEntry: (imageName: string) => Promise<boolean>;
   autoRestoreOnMount: ComputedRef<boolean>;
   enabled: ComputedRef<boolean>;
@@ -108,12 +112,62 @@ export function useMasonryBrowsePosition(
   let stopResizeWatch: (() => void) | null = null;
   let lastResizeAt = 0;
   let stopEnabledWatch: (() => void) | null = null;
+  let stopAtBottomWatch: (() => void) | null = null;
   let activeStartSeq = 0;
   let activeWriteSeq = 0;
+  /** 任务 9: 底部停留起点(毫秒时间戳);null=未在底部(spec §2.3 不变量) */
+  let bottomSince: number | null = null;
+  /** 任务 9: STABLE_MS 后升级判定的在途 timer(spec §2.3) */
+  let stableTimer: ReturnType<typeof setTimeout> | null = null;
   const bookIdCache = new Map<string, Promise<number | null>>();
 
   const lastWrittenPath = ref<string | null>(null);
   const lastBrowseProgress = ref<ProgressItem | null>(null);
+
+  /**
+   * 任务 9: 调度 STABLE_MS 后的升级判定(spec §2.3 scheduleStableTimer)。
+   * 置空守护:已有在途 timer 不重复调度(不变量)。
+   * 回调首行置空 stableTimer(审查 P1-a):否则失败重试会因引用仍在而不再重排。
+   * 注:本任务只搭骨架,回调内调 recordCurrentTop 不带 finishedNow 判定,
+   * 任务 10 才接入。
+   */
+  function scheduleStableTimer(): void {
+    if (stableTimer !== null) return;
+    stableTimer = setTimeout(() => {
+      stableTimer = null;
+      void recordCurrentTop();
+    }, STABLE_MS);
+  }
+
+  /**
+   * 任务 9: 清 stableTimer + 置 bottomSince=null(5 出口统一调, spec §2.3 不变量)。
+   * 不变量:stableTimer!==null ⇒ bottomSince!==null ⇒ atBottom=true。
+   * 反向清:先清 timer(可能产生引用),再清 bottomSince,顺序保证。
+   */
+  function clearStableTimer(): void {
+    if (stableTimer !== null) { clearTimeout(stableTimer); stableTimer = null; }
+    bottomSince = null;
+  }
+
+  /**
+   * 任务 9 骨架: 统一失败出口(spec §2.3 审查 P1 核心)。
+   * 任务 10 接入 recordCurrentTop 各早退路径(瞬时失败:seq/writeSeq 丢弃 + saveProgress catch)。
+   * 本任务先在 scheduleStableTimer/clearStableTimer 已有逻辑上预留接口。
+   * 仅当仍在底部 + enabled + bottomSince 已设 + 无在途 timer 时重排。
+   */
+  function scheduleRetryIfStillAtBottom(): void {
+    if (
+      params.enabled.value &&
+      params.atBottom.value &&
+      bottomSince !== null &&
+      stableTimer === null
+    ) {
+      scheduleStableTimer();
+    }
+  }
+  // 任务 10 接入消费点: 任务 9 仅搭骨架, 显式 void 引用避免 TS6133。
+  // 任务 10 在 recordCurrentTop 各早退路径调 scheduleRetryIfStillAtBottom() 时删此行。
+  void scheduleRetryIfStillAtBottom;
 
   /** 3 级优先级顶部图（spec §3.2.2 P0 修复） */
   const topmostImage = computed<MediaEntry | null>(() => {
@@ -188,6 +242,10 @@ export function useMasonryBrowsePosition(
 
   /** 早捕获 5 字段 + writeSeq 防覆盖（spec §3.2.2 v4 P1 修复） */
   async function recordCurrentTop(): Promise<void> {
+    // 任务 9: 入口 enabled 守卫(审查 P1-2)。
+    // flushNow 也走此入口 → enabled=false 时跨卷前 flush 也不写普通进度。
+    // finished 写入的入口守卫也由这一行覆盖(任务 10 在此基础上叠加 finishedNow 计算)。
+    if (!params.enabled.value) return;
     const seqAtEntry = activeStartSeq;
     const descAtEntry = JSON.parse(JSON.stringify(params.descriptor.value)) as SourceDescriptor;
     const pathAtEntry = params.currentPath.value;
@@ -231,6 +289,7 @@ export function useMasonryBrowsePosition(
     // resize 后 RESIZE_COOLDOWN_MS 内任何 scheduleRecord（无论是 scroll 还是 layout
     // 重排触发的 topmostImage 漂移）都丢弃：用户没主动滚动，UI 重排不该污染进度
     if (Date.now() - lastResizeAt < RESIZE_COOLDOWN_MS) {
+      clearStableTimer();                     // 任务 9: resize 冷却清 timer + bottomSince(底部判定失效)
       if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
       return;
     }
@@ -264,6 +323,7 @@ export function useMasonryBrowsePosition(
     }
   }
   function disableWatcher(): void {
+    clearStableTimer();                       // 任务 9: enabled=false 停记录,清 timer + bottomSince
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     if (stopScrollWatch) { stopScrollWatch(); stopScrollWatch = null; }
     if (stopResizeWatch) { stopResizeWatch(); stopResizeWatch = null; }
@@ -304,6 +364,7 @@ export function useMasonryBrowsePosition(
   }
 
   async function start(): Promise<void> {
+    clearStableTimer();                       // 任务 9: start 重置(spec §2.3 不变量 A4)
     activeStartSeq += 1;
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     if (stopScrollWatch) { stopScrollWatch(); stopScrollWatch = null; }
@@ -316,13 +377,27 @@ export function useMasonryBrowsePosition(
       { immediate: true },
     );
 
+    // 任务 8: atBottom 翻转监听(布局变化入口, spec §时序 7 审查 P1)。
+    // false→true 调 scheduleRecord(等价一次滚动事件, 进入 recordCurrentTop 写顶部图);
+    // true→false 调 clearStableTimer(离开底部, 清 timer + bottomSince 留待下次进入时重置)。
+    if (stopAtBottomWatch) stopAtBottomWatch();
+    stopAtBottomWatch = watch(
+      () => params.atBottom.value,
+      (now, prev) => {
+        if (now && !prev) scheduleRecord();
+        else if (!now && prev) clearStableTimer();
+      },
+    );
+
     await restoreAndScroll();
   }
 
   function stop(): void {
+    clearStableTimer();                       // 任务 9: stop 重置(spec §2.3 不变量 A4)
     activeStartSeq += 1;
     disableWatcher();
     if (stopEnabledWatch) { stopEnabledWatch(); stopEnabledWatch = null; }
+    if (stopAtBottomWatch) { stopAtBottomWatch(); stopAtBottomWatch = null; }
     lastWrittenPath.value = null;
     lastResizeAt = 0;
   }

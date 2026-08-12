@@ -275,6 +275,11 @@ const browsePosition = useMasonryBrowsePosition({
   scrollTop,
   // v0.1.0-module3.0.8 fix19: resize 冷却依赖 colWidth 派生值（窗口尺寸变化 → 列宽重算）
   colWidth,
+  // 任务 8(原 8/9 合并): 接 atBottom 三档 computed(spec §2.1)。
+  // composable 内部 watch(atBottom) 处理翻转:
+  //   false→true 调 scheduleRecord(布局收敛贴底等价一次滚动事件)
+  //   true→false 调 clearStableTimer(任务 9 骨架, 留待任务 10 接入 finishedNow 判定)
+  atBottom,
   scrollToEntry,
   // v0.1.0-module3.0.8 (任务 14 闭环): 接入 settings 开关。
   // enabled=false → 不写 DB；autoRestoreOnMount=false → 进目录不自动跳（按钮仍可点）。
@@ -286,6 +291,8 @@ const browsePosition = useMasonryBrowsePosition({
 //  - 缩略图操作（右键菜单重建/重试）
 //  - 任务 8：scrollToEntry / jumpToLast / browsePosition（masonry 浏览位置）
 //  - 任务 9：flushBrowsePosition（跨卷前 flush 用，转发 browsePosition.flushNow）
+// 注: 任务 8 起 atBottom 不再 defineExpose — 内部状态机已被 composable 接管,
+//  暴露给父级会让 FileBrowser 误以为可独立消费(实际只是 MasonryView 内部 layout 反应)。
 defineExpose({
   regenerate: regenerateThumbnail,
   regenerateBatch: regenerateBatchFn,
@@ -297,8 +304,6 @@ defineExpose({
   // v0.1.0-module3.0.8 (任务 9): 跨卷前 flush — 立即清 debounce + 写入顶部图,
   // 不等剩余 300ms. spec §14.3 + §14.4. FileList.masonryFlushNow 转发到此.
   flushBrowsePosition: () => browsePosition.flushNow(),
-  // v0.1.0-module3.0.x (任务 7): atBottom 三档规则 computed, 任务 8 接进 browsePosition.
-  atBottom,
 });
 
 // 预读 header（v0.1.0-module3.0.8 fix: 接收明确 paths，不再读 needPrefetch/nextBatchPaths）

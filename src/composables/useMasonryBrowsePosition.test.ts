@@ -43,6 +43,8 @@ async function setup(overrides: Partial<{
   renderEntries: MediaEntry[];
   layoutMap: Map<string, { top: number; height: number }>;
   canonicalImageNames: string[];
+  /** 任务 8: atBottom 注入 ref（不传则默认 ref(false)，所有现有用例自动兼容） */
+  atBottom: import('vue').Ref<boolean>;
 }> = {}) {
   const descriptor = ref({ type: 'local' as const, rootPath: '/root' });
   const currentPath = ref('vol02');
@@ -52,6 +54,7 @@ async function setup(overrides: Partial<{
   const colWidth = ref(overrides.colWidthValue ?? 280);
   const layoutMap = computed(() => overrides.layoutMap ?? new Map());
   const scrollToEntry = vi.fn(async () => true);
+  const atBottom = overrides.atBottom ?? ref(false);
 
   const composable = useMasonryBrowsePosition({
     descriptor,
@@ -62,10 +65,11 @@ async function setup(overrides: Partial<{
     scrollTop,
     colWidth,
     scrollToEntry,
+    atBottom,
     enabled: computed(() => overrides.enabled ?? true),
     autoRestoreOnMount: computed(() => overrides.autoRestoreOnMount ?? true),
   });
-  return { ...composable, scrollTop, colWidth, currentPath, renderEntries, descriptor, scrollToEntry };
+  return { ...composable, scrollTop, colWidth, currentPath, renderEntries, descriptor, scrollToEntry, atBottom };
 }
 
 function img(n: string): MediaEntry {
@@ -445,6 +449,75 @@ describe('useMasonryBrowsePosition', () => {
     const calls = (saveProgress as Mock).mock.calls;
     expect(calls[0]?.[4]).toBe('b.jpg'); // imageName 是新的顶部图
     expect(calls[0]?.[1]).toBe(1); // page = indexOf('b.jpg') = 1
+    stop();
+  });
+
+  // ── 任务 8 合并(原任务 8/9): atBottom 管线 + stableTimer 骨架 ──
+
+  it('atBottom false→true 触发 scheduleRecord(布局变化入口, 审查 P1)', async () => {
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 100 }],
+    ]);
+    const atBottomRef = ref(false);
+    const { start, stop } = await setup({
+      renderEntries: [img('a.jpg')],
+      canonicalImageNames: ['a.jpg'],
+      layoutMap,
+      scrollTopValue: 50, // baseline 落在 a.jpg 内, 顶部图 = a.jpg
+      atBottom: atBottomRef,
+    });
+    await start();
+    expect(saveProgress).not.toHaveBeenCalled();
+    // scrollTop 不变, 仅 atBottom 翻 true(模拟布局收敛后贴底)
+    atBottomRef.value = true;
+    // 内部 watch(atBottom) 触发 scheduleRecord → debounce 300ms
+    await wait(100);
+    expect(saveProgress).not.toHaveBeenCalled();
+    await wait(350);
+    expect(saveProgress).toHaveBeenCalled();
+    stop();
+  });
+
+  it('atBottom true→false 调 clearStableTimer(不残留), 后续翻 true 重启路径', async () => {
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 100 }],
+    ]);
+    const atBottomRef = ref(true);
+    const { start, stop } = await setup({
+      renderEntries: [img('a.jpg')],
+      canonicalImageNames: ['a.jpg'],
+      layoutMap,
+      scrollTopValue: 50,
+      atBottom: atBottomRef,
+    });
+    await start();
+    // 离开底部, 调 clearStableTimer(任务 9 实现的清 timer + bottomSince 骨架)
+    atBottomRef.value = false;
+    await wait(50);
+    // 没崩 + 没残留 timer
+    expect(saveProgress).not.toHaveBeenCalled();
+    // 再次翻 true → 重启 scheduleRecord 路径
+    atBottomRef.value = true;
+    await wait(350);
+    expect(saveProgress).toHaveBeenCalled();
+    stop();
+  });
+
+  it('enabled=false: flushNow 也不写(flushNow 走 recordCurrentTop 入口, 审查 P1-2)', async () => {
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 100 }],
+    ]);
+    const { start, stop, flushNow } = await setup({
+      renderEntries: [img('a.jpg')],
+      canonicalImageNames: ['a.jpg'],
+      layoutMap,
+      scrollTopValue: 50,
+      enabled: false,
+    });
+    await start();
+    // enabled=false → recordCurrentTop 入口守卫, flushNow 也走同一入口 → 不写
+    await flushNow();
+    expect(saveProgress).not.toHaveBeenCalled();
     stop();
   });
 });
