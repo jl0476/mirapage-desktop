@@ -27,11 +27,12 @@ vi.mock('@/lib/tauri', async () => {
     createBook: vi.fn(async () => 1),
     getProgress: vi.fn(async () => null),
     saveProgress: vi.fn(async () => undefined),
+    recordHistory: vi.fn(async () => undefined),
   };
 });
 
 // 在 mock 建立后 import mock 引用
-import { saveProgress, getProgress, listDirectory, createBook } from '@/lib/tauri';
+import { saveProgress, getProgress, listDirectory, createBook, recordHistory } from '@/lib/tauri';
 
 // 测 helper：构造 composable 调用
 async function setup(overrides: Partial<{
@@ -109,6 +110,14 @@ describe('useMasonryBrowsePosition', () => {
     const calls = (saveProgress as Mock).mock.calls;
     expect(calls[0]?.[1]).toBe(0); // pageAtEntry
     expect(calls[0]?.[4]).toBe('a.jpg'); // imageName
+    // v0.1.0-...: 同步写 history, 详情视图才能在回退后看到 reading 徽章.
+    expect(recordHistory).toHaveBeenCalledTimes(1);
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/root' },   // descriptor (test default)
+      'vol02',                                 // relPath = currentPath (test default)
+      'vol02',                                 // displayName = currentPath 末段
+      1,                                       // bookId
+    );
     stop();
   });
 

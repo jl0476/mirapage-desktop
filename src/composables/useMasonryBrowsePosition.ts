@@ -24,6 +24,7 @@ import {
   createBook,
   getProgress,
   listDirectory,
+  recordHistory,
   saveProgress,
   type ProgressItem,
 } from '@/lib/tauri';
@@ -201,6 +202,12 @@ export function useMasonryBrowsePosition(
         undefined,
         e.name,
       );
+      // v0.1.0-...: 同步写 history — 瀑布流阅读也算"读者打开过",
+      // 详情视图的 marks JOIN history + progress 后才能正确显示 reading/finished 徽章.
+      // record_history 后端 INSERT OR UPDATE 幂等, 重复滚动只更新 last_visited_at.
+      const displayName = pathAtEntry.split(/[\\/]/).filter(Boolean).pop()
+        || JSON.stringify(descAtEntry);
+      await recordHistory(descAtEntry, pathAtEntry, displayName, bookId);
       if (seqAtEntry !== activeStartSeq) return;
       if (writeSeqAtEntry !== activeWriteSeq) return;
       if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
