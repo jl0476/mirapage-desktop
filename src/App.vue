@@ -7,6 +7,7 @@
 import { computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import SideNav from '@/components/layout/SideNav.vue';
+import ToastHost from '@/components/common/ToastHost.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { useLocaleSync } from '@/composables/useLocaleSync';
 import { useThemeSync } from '@/composables/useThemeSync';
@@ -30,4 +31,6 @@ onMounted(async () => {
       <RouterView />
     </main>
   </div>
+  <!-- 跨卷 toast 全局挂载点 (ReaderView + FileBrowser 都可见, 单例队列共享) -->
+  <ToastHost />
 </template>

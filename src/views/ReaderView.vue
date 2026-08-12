@@ -29,7 +29,7 @@
  *  - watch pendingNextVolume → crossVolume.maybeContinue(false, 'next')
  *  - 9 宫格 folder-next (zoneActions.nextVolume) → crossVolume.maybeContinue(true, 'next')
  *  - Alt+→ 经 useReaderHotkeys({ nextVolume: () => crossVolume.maybeContinue(true,'next') })
- *  - 模板挂 <ToastHost/> + <ContinueNextVolumeToast/> 跟 <SlideshowToast/> 同级
+ *  - ContinueNextVolumeToast 保留在 ReaderView (只 reader 场景显示, props 来自 crossVolume 实例)
  *  - onUnmounted: setOnAtLastNextAttempt(null) + activeLoadSeq++ + saveCurrentProgressNow
  *    兜底 + slideshow.pause + reader.closeBook
  */
@@ -63,7 +63,6 @@ import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
 import ReaderContextMenu from '@/components/reader/ReaderContextMenu.vue';
 import SlideshowToast from '@/components/reader/SlideshowToast.vue';
 import ContinueNextVolumeToast from '@/components/reader/ContinueNextVolumeToast.vue';
-import ToastHost from '@/components/common/ToastHost.vue';
 import type { ScaleMode } from '@/lib/readerSettings';
 
 const route = useRoute();
@@ -561,9 +560,8 @@ const zoneActions = {
 
     <!-- v0.1.0-module3.0.3: 幻灯片切换提示胶囊 (监听 isPlaying flip; 自带 1500ms auto-hide) -->
     <SlideshowToast />
-    <!-- 2026-08-12 跨卷任务 8: 通用 toast 渲染层 (useToast 单例, 队列上限 1) -->
-    <ToastHost />
     <!-- 2026-08-12 跨卷任务 8: 跨卷 manual 模式底部胶囊 (纯 props/emits, 不调 useCrossVolume) -->
+    <!-- ToastHost 已上移到 App.vue 顶层 (跨卷审查 I1), 让 FileBrowser 跨卷 toast 也能渲染 -->
     <ContinueNextVolumeToast
       :target="crossVolume.pendingCrossVolume.value"
       :loading="crossVolume.phase.value === 'navigating'"
