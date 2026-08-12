@@ -1,8 +1,8 @@
 # 瀑布流滚到底算读完 + 底栏下一卷 + StatusBar 布局优化
 
-**日期**: 2026-08-12（2026-08-13 修订 v2：审查 P0×2 + P1×3 + P2×2；v3：审查 P1×2 + P2×1；v4：审查 P0×1 + P1×2 + P2×1）
+**日期**: 2026-08-12（2026-08-13 修订 v2/v3/v4；v5：审查 P1 终项——写入后竞态）
 **前置模块**: v0.1.0-module3.1.0-path-identity
-**状态**: 设计阶段（待用户审查 v4）
+**状态**: 设计阶段（待用户审查 v5）
 
 ---
 
@@ -160,6 +160,71 @@ recordCurrentTop 改造：每个早退 return 前（除「已 finished 成功」
 
 > **边界**：writeSeq 丢弃是「这次被并发覆盖」，重试时若仍在底部会重新 `++activeWriteSeq` 再走一轮，正常。IPC 错误重试有上限考量——可加 `retryCount` 上限（如 3 次后放弃并 log），但 STABLE_MS=1200ms 间隔下 3 次=3.6s，足够瞬时恢复；MVP 可先不加 retryCount，依赖用户离开底部自然停止。
 
+#### 写入后竞态：DB 已成功则必须提交本地状态（审查 P1 终项）
+
+**问题**：现有 `recordCurrentTop`（`useMasonryBrowsePosition.ts:206-224`）在 `await saveProgress` resolve（DB 已成功）**之后**仍有竞态检查：
+```ts
+await saveProgress(bookId, page, 'single', finishedParam, imageName);  // ← DB 已写
+if (seqAtEntry !== activeStartSeq) return;    // ← 这些 return 跳过下方本地提交
+if (writeSeqAtEntry !== activeWriteSeq) return;
+if (!sameDir(...)) return;
+lastWrittenPath.value = e.path;               // ← 本地状态更新被跳过
+lastWrittenFinishedParam.value = finishedParam;
+lastBrowseProgress.value = { ..., finished: ... };
+```
+若 saveProgress resolve 后、本地提交前发生滚动/切目录（writeSeq/seq 变），直接 return → **DB 已是单调真值，但前端 `lastWrittenFinishedParam` 还是旧值、`lastBrowseProgress.finished` 还是 false**。后果：
+- 复合去重 A9 失效：同图再来一次时 `(path, true) !== (path, undefined)` 不跳过 → **重复 IPC 写 finished=true**
+- `scheduleRetryIfStillAtBottom` 误判「未成功」→ 无意义重试
+
+**修复：两阶段拆分（写入前竞态可取消，写入后竞态必须提交）**
+
+```ts
+// ── 阶段 1：写入前竞态检查（允许取消，不调 IPC）──
+const bookId = await ensureBookIdForCurrentDir(descAtEntry, pathAtEntry);
+if (seqAtEntry !== activeStartSeq) { scheduleRetryIfStillAtBottom(); return; }
+if (!sameDir(...)) return;                         // 切目录：旧请求作废，不重试
+if (bookId == null) return;                         // 持久失败：不重试
+if (writeSeqAtEntry !== activeWriteSeq) { scheduleRetryIfStillAtBottom(); return; }
+
+// ── IPC 写入（经过阶段 1 守卫，此时发起）──
+let writeSucceeded = false;
+try {
+  await saveProgress(bookId, page, 'single', finishedParam, imageName);
+  writeSucceeded = true;                            // ← DB 已成功,标记
+} catch (err) {
+  log('... saveProgress failed', err);
+  scheduleRetryIfStillAtBottom();                   // 瞬时失败：重试
+  return;
+}
+
+// ── 阶段 2：写入后竞态检查（DB 已成功，必须提交本地状态）──
+if (seqAtEntry !== activeStartSeq || writeSeqAtEntry !== activeWriteSeq || !sameDir(...)) {
+  // DB 已写入真值，但当前身份已变（用户切目录/快速滚动）。
+  // 仍要记录「这次写入成功了」，否则 A9 去重和重试逻辑误判未成功。
+  // 用写入时的身份（descAtEntry/pathAtEntry）提交，不用当前身份：
+  if (sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) {
+    // 仍在同目录：本地状态按写入结果提交
+    lastWrittenPath.value = e.path;
+    lastWrittenFinishedParam.value = finishedParam;
+    lastBrowseProgress.value = { ..., finished: finishedNow || lastBrowseProgress.value?.finished || false };
+  }
+  // 切目录了：start() 已清 lastWritten*，本次写入归属旧目录，无需提交到当前状态
+  return;                                           // 不重试（DB 已成功）
+}
+
+// ── 正常提交（无竞态）──
+lastWrittenPath.value = e.path;
+lastWrittenFinishedParam.value = finishedParam;
+lastBrowseProgress.value = { ..., finished: finishedNow || lastBrowseProgress.value?.finished || false };
+```
+
+**关键规则**（写入后竞态）：
+1. **DB 已成功 = 本地必须标记成功**：`writeSucceeded=true` 后，绝不走 `scheduleRetryIfStillAtBottom`（重试是「未成功」才需要的）
+2. **本地提交用写入时身份**：`lastWrittenFinishedParam` 记录的是「`(descAtEntry, pathAtEntry, e.path)` 这次写了 finishedParam」，与当前身份解耦
+3. **切目录时本地状态由 `start()` 清理**：阶段 2 的 `!sameDir` 分支若已切目录，本次写入归属旧目录书，`start()` 已清 `lastWritten*`，无需再提交
+
+> **`scheduleRetryIfStillAtBottom` 的调用边界**（最终汇总）：只在「**DB 未成功**」时调用——阶段 1 的瞬时失败（seq/writeSeq 丢弃）、saveProgress catch。**不**在：阶段 1 持久失败（bookId==null）、阶段 2 写入后竞态（DB 已成功）、已 finished 幂等跳过、离开底部。
+
 #### scheduleStableTimer / clearStableTimer（封装 + 置空语义）
 
 ```ts
@@ -201,6 +266,7 @@ stableTimer !== null  ⇒  bottomSince !== null  ⇒  当前 atBottom = true
 6. **持久失败**（bookId==null，路径越界）→ **不调**重试（直接 return），防死循环；bookId 缓存 30s TTL 抑制重复请求
 7. **布局高度变化**（缩略图尺寸收敛，scrollTop 不变）→ `atBottom` computed 因依赖 `layoutHeight` 重算 → 若变 true 触发 scroll watcher（`entries.length` 不变但 atBottom 变）……
    - **注**：atBottom 是注入的 ref，它变化**不会自动**触发 composable 内的 scroll watcher（watcher 监听 `[scrollTop, entries.length]`）。需在 composable 内**额外 watch `params.atBottom`**：atBottom 从 false→true 时调 `scheduleRecord()`（等价于一次滚动事件），进入 §时序 1。atBottom true→false 时调 `clearStableTimer()`。这条 watch 是「布局变化触发状态机」的入口（审查 P1 响应式盲点的 composable 侧补充）。
+8. **写入后竞态**（saveProgress resolve 后 seq/writeSeq/dir 变，审查 P1 终项）→ DB 已成功 → `writeSucceeded=true` → **阶段 2 必须提交本地状态**（用写入时身份），**不重试**（详见 §写入后竞态节）。避免「DB 已 true 但本地缓存 false」导致 A9 去重失效重复 IPC。
 
 #### stableTimer 的清理出口（必须全覆盖）
 
@@ -612,6 +678,7 @@ StatusBar emit `next-volume` → FileBrowser `@next-volume="onCrossNextVolume"`�
 | A-T17 | **布局高度变化触发**（审查 P1 响应式）：scrollTop 不变，缩略图尺寸收敛使 scrollHeight 变化，atBottom 从 false→true | composable 内 watch(atBottom) 捕获翻转 → 调 scheduleRecord → 进入停留确认流程 |
 | A-T18 | **不足一屏（档1）可完成**（审查 P2）：`sh <= ch`，scrollTop 恒 0 | atBottom=true（档1），停留 STABLE_MS → finished（不会因 scrollTop=0 永远卡住） |
 | A-T19 | **长目录（档3）正常**：`sh >= 2ch`，贴底 | atBottom = nearBottom，正常停留确认 → finished |
+| A-T20 | **写入后竞态**（审查 P1 终项）：saveProgress resolve 成功后，writeSeq/seq 因滚动/切目录变化 | DB 只写一次；本地 `lastWrittenFinishedParam=true`、`lastBrowseProgress.finished=true` 正确提交；**不重复重试**；同图再来不重复 IPC（A9 去重按已提交的 true 跳过） |
 
 **测试实现要点**：
 - `atBottom` 作为可注入的 `Ref<boolean>` 参数（测试用 `ref(false)` 手动翻转），不直接依赖 DOM。**A-T12/A-T13/A-T18/A-T19 的三档规则在 MasonryView 的 atBottom computed 内**——composable 单测直接翻转 atBottom ref（三档逻辑由 MasonryView 单测覆盖，验 computed 输出）
@@ -685,6 +752,7 @@ nextVolumeLoading: '…' / '…'                       // 或用图标 spinner
 | **§2.5 残留旧公式与 §2.1 矛盾**（审查 P0） | v4 统一：§2.5 改用三档规则代码，消除「一屏阈值」残留 |
 | **短目录顶部误判 finished**（审查 P1-b） | §2.1 三档规则：档2（1~2屏）须 `scrollTop>0`，A-T12/A-T13 验证 |
 | **不足一屏目录永远无法完成**（审查 P2） | §2.1 三档规则：档1（`sh<=ch`）停留即可，A-T18 验证（不因 scrollTop 恒 0 卡住） |
+| **DB 写成功但本地提交被竞态丢弃**（审查 P1 终项） | §2.3 两阶段拆分：写入前竞态可取消，写入后竞态（writeSucceeded=true）必须用写入时身份提交本地状态、不重试，A-T20 验证 |
 | **升级早退路径不重试 → 永久卡住**（审查 P1） | §2.3 统一失败出口 `scheduleRetryIfStillAtBottom`，覆盖早退 + catch；持久失败（bookId==null）不重试防死循环，A-T14/A-T16 验证 |
 | **scrollHeight 变化不触发 atBottom 重算**（审查 P1 响应式盲点） | §2.5 atBottom computed 依赖 `layoutHeight`（触发信号）+ §2.3 composable 内 watch(atBottom) 捕获翻转，A-T17 验证 |
 | finished 误标（用户只是滚到底看了一眼没真读） | STABLE_MS=1200ms 停留阈值；可调；右键菜单仍可重置 |
