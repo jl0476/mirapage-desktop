@@ -440,17 +440,14 @@ const ICON_NEXT_VOLUME = 'M5 4l10 8-10 8V4zM19 5v14';
 // (v-html 渲染保留 fill + viewBox 0 0 1024 1024 原貌, 尺寸 12px 由 scoped CSS 限制).
 // 之前的 lucide path d 常量已被 SVG 资产替代 — 资产文件位于 src/icons/.
 
-// v0.1.0-module3.0.2-reader-polish (Cluster A): 选中图片时立即阅读按钮也可点 (issue #3)
-// v0.1.0-module3.0.8 (任务 10): 扩展 — 未选中时, 当前 masonry 目录有 progress 记录 → 启用
-// (走 readFromCurrentPath 带 cachedProgress, 不需 IPC).
-// masonryLastBrowseProgress 是 FileList defineExpose 的 ComputedRef.
-// Vue 3 `<script setup>` defineExpose 暴露的 ref/computed 在父级访问时
-// 自动 unwrap (proxyRefs 机制), 因此 fileListRef.value.masonryLastBrowseProgress
-// 直接是 ProgressItem | null, 不要再 .value.
 const canReadNow = computed(() => {
   const e = selectedEntry.value;
   if (e) return e.isDirectory === true || isImage(e.name);
-  return fileListRef.value?.masonryLastBrowseProgress?.imageName != null;
+  // 未选中: 详情视图看含图就亮（点击走 readFromCurrentPath 内部读取/创建进度 + 从上次/第一张进入）；
+  // 瀑布流视图看浏览位置（保持现状）。
+  return fb.viewMode === 'masonry'
+    ? fileListRef.value?.masonryLastBrowseProgress?.imageName != null
+    : hasImages.value;
 });
 
 // v0.1.0-module3.0.3-hotfix11: toolbar 加的「加入书库」/「下载全部」按钮
@@ -467,12 +464,11 @@ function onReadNowClick() {
     else void readerActions.readFromImage(e);
     return;
   }
-  // v0.1.0-module3.0.8 (任务 10): 未选中 + 当前目录有 progress → 走 readFromCurrentPath
-  // 传 cachedProgress 避免 IPC getProgress (useMasonryBrowsePosition 已查过).
-  log('[FileBrowser] onReadNowClick: no selection, use cachedProgress');
-  void readerActions.readFromCurrentPath({
-    cachedProgress: fileListRef.value?.masonryLastBrowseProgress ?? null,
-  });
+  // 未选中: 直接调 readFromCurrentPath 让它内部读进度/从上次图或第一张进入阅读器.
+  // 详情视图 + 有上次记录 → 跳到该图; 详情 + 没记录 → 跳到第一张.
+  // 瀑布流视图 → masonryLastBrowseProgress 已通过 canReadNow 守门, 走 IPC 拿进度.
+  log('[FileBrowser] onReadNowClick: no selection');
+  void readerActions.readFromCurrentPath();
 }
 
 /** v0.1.0-module3.0.8 (任务 10): toolbar「↶ 跳到上次」按钮 — 转发到 MasonryView.jumpToLast */
