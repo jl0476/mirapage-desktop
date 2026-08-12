@@ -301,6 +301,9 @@ async function onUp() {
 
 async function onRefresh() {
   await fb.refresh();
+  // v0.1.0-...: 顶栏刷新按钮也要刷 readStatus — 否则目录 entries 重拉,
+  // 但 marks 还是旧数据, 详情视图看不到 reading/finished 徽章.
+  await readStatus.refresh();
 }
 
 async function onPickRoot() {
