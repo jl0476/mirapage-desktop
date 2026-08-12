@@ -265,8 +265,17 @@ onMounted(async () => {
 
 // v0.1.0-module3.0.4-virtuallist Task 3.4: 卸载清空 callback,
 // 防止 stale ref (下次 mount 前若再 scrollToPath 会调到已死的 vm).
+// 任务 6 审查修复 (2026-08-13): 卸载同时清 debounce timer + 失效在途预查请求 —
+// 否则已卸载组件的 300ms timer 仍会 fire, 对已卸载的 ref 调 findNextVolume 写 state
+// (也是 FileBrowser.test.ts 全文件跑偶发失败的根因: 泄漏 timer 消耗 mock once-queue)。
 onUnmounted(() => {
   setScrollToIndexCallback(null);
+  if (nextVolumeDebounce) {
+    clearTimeout(nextVolumeDebounce);
+    nextVolumeDebounce = null;
+  }
+  // 失效在途 prefetch: 晚到的响应不得再写已卸载组件的 state
+  ++nextVolumeRequestSeq;
 });
 
 // #1 rootPath 变化时持久化
@@ -585,6 +594,10 @@ async function prefetchNextVolume(): Promise<void> {
   const path = fb.lastFetchedPath;
   const root = masonryDescriptor.value.rootPath;
   if (!path || !root) {
+    // 审查修复 (2026-08-13): 早返必须关 loading — watcher 切目录时同步置了 true,
+    // 若不清 false, 根目录 (lastFetchedPath='') 底栏右段会永远显示「…」
+    // (StatusBar nextVolumeLabel loading 优先于 null 判定) 而非「已是最后一卷」。
+    nextVolumeLoading.value = false;
     nextVolumeTitle.value = null;
     return;
   }
