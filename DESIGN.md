@@ -3,7 +3,7 @@
 > 桌面端漫画阅读器。基于 Tauri 2.x（Rust 后端）+ Vue 3（前端）+ OpenSeadragon（图像渲染）。
 > 新独立仓库，与 MiraPage Android 工程完全独立，不引用其代码。
 >
-> ⚡ **实测状态快照（2026-08-11）**：本文档是设计意图,实际落地状态可能滞后。完整实测功能矩阵见 [`docs/superpowers/reports/2026-08-11-feature-matrix.md`](./superpowers/reports/2026-08-11-feature-matrix.md)（基于实际代码扫描 + `npm test` + `cargo test` 实测）。**当前 HEAD = `83a0c52`**,3 个 v0.1.0-module3.0.x tag 已发布（masonry / thumbnail-cache / thumbnail-polish + browse-position）。
+> ⚡ **实测状态快照（2026-08-12）**：本文档是设计意图,实际落地状态可能滞后。完整实测功能矩阵见 [`docs/superpowers/reports/2026-08-11-feature-matrix.md`](./superpowers/reports/2026-08-11-feature-matrix.md)（基于实际代码扫描 + `npm test` + `cargo test` 实测）。**当前 HEAD = `fb29346`**（tag `v0.1.0-module3.0.9-cross-volume`），5 个 v0.1.0-module3.0.x tag 已发布（masonry / thumbnail-cache / thumbnail-polish + browse-position / **cross-volume**）。
 
 ---
 
@@ -34,7 +34,7 @@
 | 10 | 书架收藏 | 收藏标记；书架视图；按收藏 / 最近阅读筛选 | P0 |
 | 11 | 标签 | 创建 / 删除标签；为书打标签；按标签筛选书架 | P1 |
 | 12 | 搜索 | 文件名 / 书名 / 标签模糊搜索（fuse.js） | P1 |
-| 13 | 跨卷连续阅读 | 读完一本自动跳到目录中下一本（OFF / AUTO / MANUAL） | P1 |
+| 13 | 跨卷连续阅读 | 读完一本自动跳到目录中下一本（OFF / AUTO / MANUAL） | ✅ `v0.1.0-module3.0.9-cross-volume` 14 commits |
 | 9 | 幻灯片 | 定时自动翻页；间隔 / 方向 / 循环可配置；播放 / 暂停 | P1 |
 
 **远程源（后期完成）**：
@@ -428,17 +428,17 @@ INSERT INTO settings (key, value) VALUES
 
 **交付**：书签 / 喜欢 / 历史 / 书架可查看与操作；标签可创建、打标、筛选；文件名 / 书名 / 标签可模糊搜索。
 
-### Phase 5 — 跨卷连续阅读 + 幻灯片（2.5 人月）
+### Phase 5 — 跨卷连续阅读 + 幻灯片（2.5 人月） ✅ v0.1.0-module3.0.9-cross-volume
 
-**跨卷连续阅读**：
-- 新算法（Rust 端）：给定当前书 + 当前所在目录，按自然排序找到下一本
-- 设置 `continue_to_next_volume`：`off` / `auto` / `manual`
-  - `off`：末页停住
-  - `auto`：末页立即跳下一本
-  - `manual`：末页弹出"继续读下一本？"提示 + 跳转按钮
-- 当前 book 是压缩包 → 跳到目录中下一个 CBZ/CBR
-- 当前 book 是目录 → 跳到目录中下一个子目录
-- 当前书末页触发 → `find_next_volume` Tauri command → 返回下一本书的 `SourceDescriptor` → 跳转 reader
+**跨卷连续阅读**（已落地，spec v2：`docs/superpowers/specs/2026-08-11-cross-volume-reading-design.md` + 计划：`docs/superpowers/plans/2026-08-11-cross-volume-reading.md`）：
+- 新算法（Rust 端）：`pick_sibling` 纯函数 + `VolumeDirection` 强类型 enum + `find_next_volume` async command（仅 Local，非 Local 明确 Err；`MediaSourceFactory` 集成测试用 tempdir + LocalMediaSource，codebase 首例 factory 集成测试）
+- 设置 `continue_to_next_volume`：**off / auto / manual 3 态**（不含 PV 的 SWIPE，详见 §12.3）
+- 11 条不变量端到端闭环（spec §4.3）：route 唯一真值 / watch immediate 唯一入口 / 失败不保留旧卷 / 去重看 phase=ready / 原子提交 / busy 覆盖 loader / pendingCrossVolume 只在 awaiting-confirm 非空 / route.query.at 清空 / pendingNextVolume 五处消费 / saveCurrentProgressNow await+取消旧 debounce / setOnAtLastNextAttempt(null) 卸载清理
+- 三层架构：意图（5 入口：末页再向下/slideshow/9 宫格/Alt+→/瀑布流按钮）→ CrossVolumeController（模式决策 + requestSeq 竞态 + sameBookIdentity 结构化校验 + canStart 加载期守卫 + settleIdle 集中收口）→ 统一 Book Loader `useReaderBookLoader.loadBookById(bookId)` 返回不可变 `ReaderBookSnapshot`（不写 refs、不调 reader.openBook）→ ReaderView.commitBookSnapshot 原子提交
+- 通用 toast（useToast 单例 ref 队列 + ToastHost Teleport 到 body）+ ContinueNextVolumeToast manual 模式底部胶囊（纯 props/emits **不调 useCrossVolume()**）+ ToastHost 挂在 `src/App.vue` 顶层（最终审查 I1 修复 FileBrowser 路径下 toast 也能渲染）
+- `ProgressItem.finished` 跨边界 gap 修复：Rust `get_progress_inner` SQL 加 finished 列 + row 解析 `!= 0`；TS `ProgressItem` 加字段；Loader 去掉 `& { finished?: boolean }` 死代码交叉类型——"已读完→首页"端到端打通
+- A7 修复（E2E 后发现）：auto/force 跨卷成功 → resume slideshow（仅当调用前 isPlaying=true）+ `pushToast('reader.crossVolume.jumped', {title})` 短暂反馈
+- 14 commits（任务 0-10 实施 + 任务5审查修复 + 最终审查I1 + A7两补）：0baa8d0/20bc8ed/aef174f/9559198/2fd7a6c/3f4963c/3d62669/0deb1c2/a81e3b0/48607c9/c4dcf3f/6a2a3fd/3a57e63/fb29346
 
 **幻灯片**：
 - `stores/slideshow.ts`：状态 + actions
@@ -1143,24 +1143,46 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 - **RTL**：LTR 时 N 在左 N+1 在右；RTL 时 N+1 在左 N 在右（`reverseLayout` 整体镜像）
 - **跨卷触发**：复用 `ContinueNextVolume` composable（按 spread 末尾 + 1/3 屏阈值）
 
-### 12.3 跨卷连续阅读（桌面端 3 模式）
+### 12.3 跨卷连续阅读（桌面端 3 模式）✅ v0.1.0-module3.0.9-cross-volume
 
-设置 `continue_to_next_directory`（v0.1.0-module3.0-settings 起与 Android **不一致**——桌面端用 3 态简化，**不**含 PV 的 SWIPE，留 OPEN/CLOSE/AUTO 语义）：
+设置 `continue_to_next_volume`（v0.1.0-module3.0-settings 起 + 跨卷模块实施，桌面端用 3 态简化，**不**含 PV 的 SWIPE——v0.1.0-module2.0 拍板的"未来加 SWIPE"在跨卷模块实施时没加，详见 CLAUDE.md §6 决策记录）：
 
 | 模式 | 行为 |
 |---|---|
 | `off` | 末页停住，无任何提示 |
-| `auto` | 末页自动跳下一本（不等用户操作） |
-| `manual` | 末页弹底部药丸"继续读下一本？" + 跳转按钮；点跳转才换书 |
+| `auto` | 末页自动跳下一本（不等用户操作）；跨卷成功后恢复 slideshow 播放（A7 修复）+ 短暂 toast"已跳转《XXX》" |
+| `manual` | 末页弹底部药丸"继续读下一本《XXX》？" + 跳转/✕；点跳转才换书；manual **不**续播 slideshow（用户主动确认，confirmManual 自己的 capsule 提示） |
 
-> 未来如果用户反馈需要 SWIPE 模式，PV 端语义可加回来（需配合 `useReaderWheel` 累计 1/3 屏宽）。
+**5 触发入口**：
+1. reader 末页再向下（滚轮/下键/触控 MR/双击）→ 末页再向下 `reader.nextPage()` 触发 onAtLastNextAttempt → 写 `slideshow.pendingNextVolume=true` → ReaderView watch → `crossVolume.maybeContinue(false, 'next')` 看模式
+2. slideshow tick 末页 → 同一 flag
+3. 9 宫格 `br=folder-next` / Alt+→ → `crossVolume.maybeContinue(true, 'next')`（force=true 不看模式）
+4. 瀑布流工具栏"下一卷"按钮 → 独立 `onCrossNextVolume`（fileListRef.masonryFlushNow → findNextVolume → 双重陈旧校验 path+root → fb.navigate；不走 Controller/Loader）
 
-**算法**（由 `FindNextDirectoryUseCase` 重写为 Rust）：
-- 输入 `(descriptor, currentPath, direction)` → `Result<String?>`
-- 解析父目录 → 列 sibling → 按 `sortOptionComparator` 排序（per-dir override > 全局 default）
-- NEXT 取 `siblings.drop(idx+1)`、PREVIOUS 取 `siblings.take(idx).reversed()`
-- 跳过空目录、archive 文件直接命中（不开内容）
-- 返回 `null` 时 UI toast "无下一卷" / "无上一卷"
+**末页再向下触发语义**：从倒数第二页 nextPage 翻到末页那次**不**触发跨卷（序列边沿自动区分"翻到末页"与"末页再向下"），在末页再向下才触发（spec §1.2 末页触发时机）。
+
+**11 条不变量端到端闭环**（spec §4.3）：
+- **route 唯一真值** — 跨卷走 `navigateToVolume(ensureBookId+router.replace)` → route watch 触发 `loadRouteBook` 加载新卷；不"先加载再 replace"（那是双入口）
+- **watch immediate 唯一入口** — 删 `onMounted(loadBook)`，改 `watch(() => Number(route.params.bookId), loadRouteBook, { immediate: true })`
+- **失败不保留旧卷** — route 变即 `visibleReader=false` 触发 loading；loadBookById throw → `reader.closeBook() + pageUrls/imageNames/book 清空 + bookLoadPhase=error`；ReaderScreen 渲染 reader-error UI（`bookId=null, status=idle`），不残留旧画面
+- **去重看 phase** — `if (bookId === lastLoadedBookId.value && bookLoadPhase.value === 'ready') return;`；`retryCurrentBook` 通过置 null 跳过去重重载
+- **原子提交** — loadBookById 全程不写 refs、不调 reader.openBook；commitBookSnapshot 一次性写 book/pageUrls/imageNames + reader.openBook + reader.imageNames
+- **busy 覆盖 loader** — `busy = phase !== 'idle' || bookLoadPhase === 'loading'`；Controller 入口 `if (!opts.canStart()) consumePendingNextVolume(); return;` 阻断
+- **pendingCrossVolume 只在 awaiting-confirm 非空** — `settleIdle()` 集中收口（clearPendingState + phase=idle）；navigateResolvedTarget finally 调 settleIdle
+- **route.query.at 清空** — `router.replace({ name: 'reader', params: { bookId }, query: {} })`
+- **pendingNextVolume 五处消费** — off 失败 / find 失败 / 导航成功 / 关闭胶囊 / Controller 内部 clearPendingState
+- **saveCurrentProgressNow await+取消旧 debounce** — reader store 实现取消 timer + await saveProgress，trySave 失败 toast 不阻断跨卷
+- **setOnAtLastNextAttempt(null) 卸载清理** — onUnmounted 调 null，避免 Pinia store 持有旧组件闭包
+
+**Rust 算法**（由 `FindNextDirectoryUseCase` 重写为 Rust，跨卷模块 spec §5.2）：
+- 输入 `(descriptor, currentPath, direction)` → `Result<Option<NextVolumeResult>>`
+- 强类型解析 descriptor（不在 command 内反复操作 `serde_json::Value`）
+- **仅 Local**（非 Local 返回明确 Err，不静默 fallback）
+- 解析父目录 → `factory.resolve(&descriptor).list_directory(&parent_path)` → `pick_sibling`（仅过滤 `is_directory`，按 natural_compare 排序，取 next/prev）
+- 构造 `NextVolumeResult { descriptor（同源 Local），rel_path，title }`（**无 is_archive 字段**）
+- `VolumeDirection` 强类型 enum（`Next` / `Prev`）；非法 IPC 入参 serde 反序列化报错，不静默当 next
+
+**TS 镜像**（spec §5.1）：`NextVolumeResult` 字段 `{ descriptor: SourceDescriptor; relPath: string; title: string }`（**无 isArchive**），Rust/TS 字节级 camelCase 一致；`findNextVolume(descriptor, currentPath, direction)` **无 filter 参数**（P1-3 删除——reader/masonry 在仅 Local 目录卷下语义一致）。
 
 ### 12.4 阅读器核心状态机
 
