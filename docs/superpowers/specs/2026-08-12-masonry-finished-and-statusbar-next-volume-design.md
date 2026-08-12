@@ -1,8 +1,8 @@
 # 瀑布流滚到底算读完 + 底栏下一卷 + StatusBar 布局优化
 
-**日期**: 2026-08-12（2026-08-13 修订 v2~v5；v6：审查 P1——陈旧成功不污染 UI）
+**日期**: 2026-08-12（2026-08-13 修订 v2~v6；v7：审查 P2——identity 稳定生成 + 测试命名）
 **前置模块**: v0.1.0-module3.1.0-path-identity
-**状态**: 设计阶段（待用户审查 v6）
+**状态**: 设计已批准，进入实现阶段
 
 ---
 
@@ -201,7 +201,7 @@ try {
 //
 // 关键区分（审查 P1 v6）：「DB 已成功记录」vs「当前 UI 去重状态」必须分开。
 // 陈旧请求（writeSeq 已变）的 DB 成功不能覆盖当前最新请求的 UI 缓存。
-const identity = `${descKey}|${pathAtEntry}|${e.path}|${finishedParam}`;
+const identity = progressWriteKey(descAtEntry, pathAtEntry, e.path, finishedParam);
 successfulWrites.add(identity);   // ① 始终记录 DB 成功（A9 跨请求去重查这个 Set）
 
 if (writeSeqAtEntry === activeWriteSeq && sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) {
@@ -226,9 +226,42 @@ return;
 4. 后果：`FileBrowser.vue` 的「跳到上次」按钮（`:696` 读 `masonryLastBrowseProgress.imageName`）指向陈旧 A，用户点跳转跳错位置；B 的在途写入若也成功，两者互相覆盖，缓存不确定
 
 **`successfulWrites: Set<string>` 语义**：
-- **key**：`${descKey}|${pathAtEntry}|${e.path}|${finishedParam}`（写入时身份 + 图 + finished 参数）
+- **key**：`progressWriteKey(descriptor, path, imageName, finished)` 纯函数生成（见下方定义，审查 P2 v7）。**不用字符串拼接**——descriptor JSON 或路径含 `|` 等分隔符会产生碰撞
 - **作用**：A9 复合去重的跨请求真值源。`recordCurrentTop` 入口去重不只查 `lastWrittenFinishedParam`（单一最新值），还查 `successfulWrites.has(identity)`——若某 (path, finishedParam) 已成功写入过（哪怕来自陈旧请求），跳过重复 IPC
 - **清理**：`start()`/`stop()` 清空（切目录/卸载，与 `lastWrittenPath` 同生命周期）。同一目录内滚动量大时 Set 会增长，MVP 不限大小（可视区图片有限，单目录去重量级可控）；若实测膨胀加 LRU 或「保留最近 N 条」
+
+#### `progressWriteKey` 纯函数（审查 P2 v7）
+
+**定义**（放 `src/lib/progressWriteKey.ts`，纯函数无 Vue/Tauri 依赖，可独立单测）：
+```ts
+import type { SourceDescriptor } from '@/lib/sourceDescriptor';
+
+/**
+ * 生成 progress 写入去重的稳定 key。
+ * 用 JSON.stringify 结构化序列化，避免字符串拼接分隔符碰撞
+ * （descriptor JSON 或 Windows/UNC 路径可能含 `|` 等字符）。
+ *
+ * 语义：同一 (descriptor, relPath, imageName, finished) 组合 → 同一 key。
+ * finished 用 `?? null` 归一化（undefined 与 null 视为同一「普通进度」语义）。
+ */
+export function progressWriteKey(
+  descriptor: SourceDescriptor,
+  relPath: string,
+  imageName: string,
+  finished: boolean | undefined,
+): string {
+  return JSON.stringify([descriptor, relPath, imageName, finished ?? null]);
+}
+```
+
+**单测**（`progressWriteKey.test.ts`，纯函数）：
+- Windows 路径含 `\` / `/` 混用 → 不碰撞
+- UNC 路径 `\\server\share` → 稳定
+- descriptor JSON 含 `|` 字符 → 不碰撞（结构化序列化）
+- Archive/Smb/WebDav descriptor 不同 → 不同 key
+- `finished=undefined` 与 `finished=null` → 同一 key（归一化）
+- `finished=true` 与 `finished=undefined` → 不同 key（A9 升级判定基础）
+- 跨调用稳定（同输入两次调 → 严格相等）
 
 > **A9 去重的最终实现**（v6 修正）：入口去重条件 = `(e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value)` **||** `successfulWrites.has(identity)`。前者覆盖「最新请求连续同图」快路径，后者覆盖「陈旧请求已成功、最新请求又滚回该图」慢路径。
 
@@ -410,7 +443,7 @@ lastBrowseProgress.value = {
 **修复**：去重维度扩展为 `(path, finishedParam)`，且分**快路径**（最新请求）与**慢路径**（跨请求，陈旧成功）：
 ```ts
 // recordCurrentTop 入口,在 atBottom/finishedNow 计算之后,saveProgress 之前
-const identity = `${descKey}|${pathAtEntry}|${e.path}|${finishedParam}`;
+const identity = progressWriteKey(descAtEntry, pathAtEntry, e.path, finishedParam);
 const alreadyWritten =
   (e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value)  // 快路径:最新请求连续同图
   || successfulWrites.has(identity);                                                        // 慢路径:跨请求已成功
@@ -692,8 +725,8 @@ StatusBar emit `next-volume` → FileBrowser `@next-volume="onCrossNextVolume"`�
 | A-T17 | **布局高度变化触发**（审查 P1 响应式）：scrollTop 不变，缩略图尺寸收敛使 scrollHeight 变化，atBottom 从 false→true | composable 内 watch(atBottom) 捕获翻转 → 调 scheduleRecord → 进入停留确认流程 |
 | A-T18 | **不足一屏（档1）可完成**（审查 P2）：`sh <= ch`，scrollTop 恒 0 | atBottom=true（档1），停留 STABLE_MS → finished（不会因 scrollTop=0 永远卡住） |
 | A-T19 | **长目录（档3）正常**：`sh >= 2ch`，贴底 | atBottom = nearBottom，正常停留确认 → finished |
-| A-T20 | **写入后竞态（最新请求）**（审查 P1 终项）：saveProgress resolve 成功后，writeSeq/seq **未变** | DB 只写一次；本地 `lastWrittenFinishedParam=true`、`lastBrowseProgress.finished=true` 正确提交；**不重复重试** |
-| A-T21 | **陈旧成功不污染当前 UI**（审查 P1 v6）：A(finished=true)写入在途时用户滚到 B(`activeWriteSeq++`)，A 的 IPC 晚返回成功 | A 的 DB 写入保留(`successfulWrites` 记 A 的 identity)；**不覆盖** B 的 `lastBrowseProgress`(仍指向 B)；B 的在途写入正常提交；用户滚回 A 时慢路径去重命中不重复 IPC |
+| A-T20 | **最新请求成功写入**（审查 P1 v5）：saveProgress resolve 成功后，writeSeq/seq **未变**（仍是最新请求） | DB 只写一次；本地 `lastWrittenFinishedParam=true`、`lastBrowseProgress.finished=true` 正确提交；**不重复重试** |
+| A-T21 | **陈旧请求成功写入不污染 UI**（审查 P1 v6）：A(finished=true)写入在途时用户滚到 B(`activeWriteSeq++`)，A 的 IPC 晚返回成功 | A 的 DB 写入保留(`successfulWrites` 记 A 的 identity)；**不覆盖** B 的 `lastBrowseProgress`(仍指向 B)；B 的在途写入正常提交；用户滚回 A 时慢路径去重命中不重复 IPC |
 
 **测试实现要点**：
 - `atBottom` 作为可注入的 `Ref<boolean>` 参数（测试用 `ref(false)` 手动翻转），不直接依赖 DOM。**A-T12/A-T13/A-T18/A-T19 的三档规则在 MasonryView 的 atBottom computed 内**——composable 单测直接翻转 atBottom ref（三档逻辑由 MasonryView 单测覆盖，验 computed 输出）
@@ -769,6 +802,7 @@ nextVolumeLoading: '…' / '…'                       // 或用图标 spinner
 | **不足一屏目录永远无法完成**（审查 P2） | §2.1 三档规则：档1（`sh<=ch`）停留即可，A-T18 验证（不因 scrollTop 恒 0 卡住） |
 | **DB 写成功但本地提交被竞态丢弃**（审查 P1 v5） | §2.3 两阶段拆分：写入前竞态可取消，写入后(writeSucceeded)记录到 successfulWrites + 仅最新请求更新 UI 缓存，A-T20 验证 |
 | **陈旧成功覆盖当前 UI 缓存**（审查 P1 v6） | §2.3 阶段 2 区分：DB 成功 always 记 `successfulWrites`；当前 UI 缓存(`lastWritten*`/`lastBrowseProgress`)仅 `writeSeq===activeWriteSeq && sameDir` 时更新；A9 慢路径去重查 successfulWrites，A-T21 验证 |
+| **identity 字符串拼接碰撞**（审查 P2 v7） | `progressWriteKey` 纯函数用 `JSON.stringify` 结构化序列化，覆盖 Windows/UNC 路径 + descriptor 含 `\|`；纯函数单测 |
 | **升级早退路径不重试 → 永久卡住**（审查 P1） | §2.3 统一失败出口 `scheduleRetryIfStillAtBottom`，覆盖早退 + catch；持久失败（bookId==null）不重试防死循环，A-T14/A-T16 验证 |
 | **scrollHeight 变化不触发 atBottom 重算**（审查 P1 响应式盲点） | §2.5 atBottom computed 依赖 `layoutHeight`（触发信号）+ §2.3 composable 内 watch(atBottom) 捕获翻转，A-T17 验证 |
 | finished 误标（用户只是滚到底看了一眼没真读） | STABLE_MS=1200ms 停留阈值；可调；右键菜单仍可重置 |
