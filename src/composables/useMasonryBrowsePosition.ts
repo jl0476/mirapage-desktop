@@ -202,12 +202,6 @@ export function useMasonryBrowsePosition(
         undefined,
         e.name,
       );
-      // v0.1.0-...: 同步写 history — 瀑布流阅读也算"读者打开过",
-      // 详情视图的 marks JOIN history + progress 后才能正确显示 reading/finished 徽章.
-      // record_history 后端 INSERT OR UPDATE 幂等, 重复滚动只更新 last_visited_at.
-      const displayName = pathAtEntry.split(/[\\/]/).filter(Boolean).pop()
-        || JSON.stringify(descAtEntry);
-      await recordHistory(descAtEntry, pathAtEntry, displayName, bookId);
       if (seqAtEntry !== activeStartSeq) return;
       if (writeSeqAtEntry !== activeWriteSeq) return;
       if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
@@ -282,6 +276,13 @@ export function useMasonryBrowsePosition(
       if (seqAtEntry !== activeStartSeq) return;
       if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
       if (bookId == null) return;
+      // v0.1.0-...: 进入瀑布流时一次性写 history — 滚动不写 (滚动太频繁, 反复更新 last_visited_at 不妥).
+      // record_history INSERT OR UPDATE 幂等, 重复进入只更新 last_visited_at.
+      const displayName = pathAtEntry.split(/[\\/]/).filter(Boolean).pop()
+        || JSON.stringify(descAtEntry);
+      await recordHistory(descAtEntry, pathAtEntry, displayName, bookId);
+      if (seqAtEntry !== activeStartSeq) return;
+      if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
       const progress = await getProgress(bookId);
       if (seqAtEntry !== activeStartSeq) return;
       if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;

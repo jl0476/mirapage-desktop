@@ -110,14 +110,40 @@ describe('useMasonryBrowsePosition', () => {
     const calls = (saveProgress as Mock).mock.calls;
     expect(calls[0]?.[1]).toBe(0); // pageAtEntry
     expect(calls[0]?.[4]).toBe('a.jpg'); // imageName
-    // v0.1.0-...: 同步写 history, 详情视图才能在回退后看到 reading 徽章.
+    // v0.1.0-...: recordHistory 写在 start() 入口, 不在 recordCurrentTop 滚动路径
+    // (滚动太频繁, 反复更新 last_visited_at 不妥). 滚动期间 recordHistory 只被调 1 次 (start 时).
+    expect(recordHistory).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('进入瀑布流时写一次 history (start → recordHistory), 滚动不写', async () => {
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 100 }],
+      ['b.jpg', { top: 100, height: 100 }],
+    ]);
+    const { start, stop, scrollTop } = await setup({
+      renderEntries: [img('a.jpg'), img('b.jpg')],
+      canonicalImageNames: ['a.jpg', 'b.jpg'],
+      layoutMap,
+      scrollTopValue: 50,
+    });
+    // start 前: recordHistory 未调
+    expect(recordHistory).not.toHaveBeenCalled();
+    await start();
+    // start 后: 写 1 次 history
     expect(recordHistory).toHaveBeenCalledTimes(1);
     expect(recordHistory).toHaveBeenCalledWith(
-      { type: 'local', rootPath: '/root' },   // descriptor (test default)
-      'vol02',                                 // relPath = currentPath (test default)
-      'vol02',                                 // displayName = currentPath 末段
-      1,                                       // bookId
+      { type: 'local', rootPath: '/root' },
+      'vol02',
+      'vol02',
+      1,
     );
+    // 滚动
+    scrollTop.value = 60;
+    await wait(350);
+    // 滚动后: recordHistory 仍是 1 次 (没增加)
+    expect(recordHistory).toHaveBeenCalledTimes(1);
+    expect(saveProgress).toHaveBeenCalled();
     stop();
   });
 
