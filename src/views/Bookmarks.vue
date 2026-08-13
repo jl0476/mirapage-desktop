@@ -54,7 +54,7 @@ function jumpTo(bookId: number, page: number) {
   <main class="p-6 h-full overflow-y-auto">
     <header class="flex justify-between items-center mb-6">
       <h2 class="m-0 text-xl font-semibold">{{ t('bookmarks.title') }}</h2>
-      <RouterLink to="/library" class="text-xs text-text-secondary hover:text-accent">
+      <RouterLink to="/likes" class="text-xs text-text-secondary hover:text-accent">
         ← {{ t('common.back') }}
       </RouterLink>
     </header>
