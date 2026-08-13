@@ -57,8 +57,6 @@ pub fn run() {
             commands::bookmarks::list_bookmarks,
             commands::bookmarks::add_bookmark,
             commands::bookmarks::remove_bookmark,
-            commands::likes::list_likes,
-            commands::likes::toggle_like,
             commands::history::list_history,
             commands::history::record_history,
             commands::history::delete_history,
