@@ -1402,4 +1402,62 @@ mod tests {
             .unwrap();
         assert_eq!(v2, 12, "重复 run 不应再升版本号");
     }
+
+    /// 任务 7：EXPLAIN QUERY PLAN 手动验证（`--ignored --nocapture` 跑，输出写入报告）。
+    ///
+    /// 标 `#[ignore]`：查询规划器的索引选择依赖数据量/统计启发式，断言在 CI 不稳定；
+    /// 索引**存在性**已由 `migration_012_creates_query_indexes` 守护。本测试用代表性数据量
+    /// 打印 3 条 plan，人工确认 spec §7 索引被采用，结果记入验收报告。
+    #[test]
+    #[ignore]
+    fn explain_query_plan_snapshot() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        for i in 0..200i64 {
+            tx.execute(
+                "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, visit_count)
+                 VALUES (?1, ?2, ?3, ?4, 1)",
+                rusqlite::params!["{\"type\":\"local\"}", format!("/p{i:03}"), format!("P{i}"), 1000 + i],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO library (title, source_descriptor, source_type, absolute_path, page_count, added_at, is_favorite, last_read_at)
+                 VALUES (?1, '{\"type\":\"local\"}', 'Local', ?2, 1, ?3, ?4, ?5)",
+                rusqlite::params![format!("T{i}"), format!("/x{i}"), i, (i % 2) as i64, Some(i)],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO thumbnail_cache (cache_key, source_key, rel_path, target_bucket, quality, cache_rel_path, output_width, output_height, byte_size, created_at, last_accessed_at)
+                 VALUES (?1, 's', 'p', 256, 'q', 'c', 10, 20, 100, 1, ?2)",
+                rusqlite::params![format!("k{i:03}"), i],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+
+        fn detail(conn: &Connection, sql: &str) -> String {
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let mut rows = stmt.query([]).unwrap();
+            let mut out = String::new();
+            while let Ok(Some(r)) = rows.next() {
+                out.push_str(&r.get::<_, String>(3).unwrap_or_default());
+                out.push('\n');
+            }
+            out.trim().to_string()
+        }
+
+        eprintln!(
+            "PLAN history  : {}",
+            detail(&conn, "SELECT rel_path FROM browse_history WHERE last_visited_at < 1100 ORDER BY last_visited_at DESC, source_descriptor DESC LIMIT 100")
+        );
+        eprintln!(
+            "PLAN library  : {}",
+            detail(&conn, "SELECT id FROM library WHERE is_favorite = 1 ORDER BY last_read_at IS NULL, last_read_at DESC, added_at DESC, id DESC")
+        );
+        eprintln!(
+            "PLAN thumbnail: {}",
+            detail(&conn, "SELECT cache_key FROM thumbnail_cache ORDER BY last_accessed_at ASC, cache_key ASC LIMIT 256")
+        );
+    }
 }

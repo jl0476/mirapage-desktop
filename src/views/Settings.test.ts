@@ -10,6 +10,21 @@ import { setActivePinia, createPinia } from 'pinia';
 vi.mock('@/lib/tauri', () => ({
   getSetting: vi.fn(async () => null),
   setSetting: vi.fn(async () => undefined),
+  // 维护（v0.1.0-database-retention-and-cleanup）：Settings onMounted 调 loadSummary
+  getMaintenanceSummary: vi.fn(async () => ({
+    historyTotal: 0, historyMaxEntries: 2000, historyRetentionDays: 365,
+    historyProtectDays: 7, autoEnabled: true, lastRunAt: 0, lastResultJson: '{}',
+    thumbnailTotalBytes: 0, thumbnailCount: 0, thumbnailLimitBytes: 512000000,
+  })),
+  getMaintenancePreview: vi.fn(async () => ({
+    history: { total: 0, daysCandidates: 0, countCandidates: 0, protectedInWindow: 0, protectedExceedsLimit: false },
+    thumbnailTotalBytes: 0, thumbnailLimitBytes: 512000000,
+  })),
+  runMaintenance: vi.fn(async () => ({
+    historyDeleted: 0, thumbnailFreedBytes: 0, thumbnailDirtyCleaned: 0,
+    protectedExceedsLimit: false, source: 'manual',
+  })),
+  updateMaintenanceSettings: vi.fn(async () => undefined),
 }));
 
 import Settings from './Settings.vue';
@@ -22,11 +37,11 @@ beforeEach(() => {
 });
 
 describe('Settings.vue', () => {
-  it('renders all 7 sections with anchors', () => {
+  it('renders all 8 sections with anchors', () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const anchors = wrapper.findAll('[data-test^="anchor-"]');
-    expect(anchors.length).toBe(7);
-    for (const id of ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry']) {
+    expect(anchors.length).toBe(8);
+    for (const id of ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry', 'maintenance']) {
       expect(wrapper.find(`#${id}`).exists()).toBe(true);
     }
   });
