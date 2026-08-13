@@ -14,6 +14,7 @@ pub mod image_dimensions;
 pub mod keep_screen_on;
 pub mod library;
 pub mod log;
+pub mod maintenance;
 pub mod progress;
 pub mod settings;
 pub mod shortcuts;

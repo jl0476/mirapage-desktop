@@ -762,6 +762,34 @@ impl ThumbnailService {
         (total, count as u64)
     }
 
+    /// 当前缓存容量上限（字节）。
+    pub fn cache_limit_bytes(&self) -> u64 {
+        *self.cache_limit_mb.read().unwrap() * 1_000_000
+    }
+
+    /// 立即触发一次 LRU 淘汰（维护「立即维护」按钮调用）。返回释放字节。
+    /// 复用既有 `evict_to_limit`，跳过 protected（可见 + in-flight）。
+    pub fn evict_now(&self) -> u64 {
+        let db = self.app.state::<Db>();
+        let conn = db.conn();
+        let root = self.cache_root();
+        let limit = self.cache_limit_bytes();
+        let protected = self
+            .protected_keys
+            .lock()
+            .unwrap()
+            .clone();
+        evict_to_limit(&conn, &root, limit, &protected).unwrap_or(0)
+    }
+
+    /// 脏索引抽样清理（spec §6.3）：两端各 `per_end` 条。返回清理行数。
+    pub fn sample_dirty(&self, per_end: i64) -> usize {
+        let db = self.app.state::<Db>();
+        let conn = db.conn();
+        let root = self.cache_root();
+        index::sample_and_clean_dirty(&conn, &root, per_end).unwrap_or(0)
+    }
+
     /// 清空缓存：删全部文件 + 索引（不删根目录）。
     /// P2-2: 先 cancel_all 使排队/in-flight 任务变 Stale（完成后不写索引），避免清空后被后台任务重新写回。
     pub fn clear(&self) {

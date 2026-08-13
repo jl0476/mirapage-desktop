@@ -45,6 +45,10 @@ pub fn run() {
             // 初始化缩略图缓存服务（v0.1.0-module3.0.7）
             init_thumbnail_service(app_handle)?;
 
+            // 维护服务（v0.1.0-database-retention-and-cleanup）：历史保留防抖自动清理
+            let maintenance_svc = maintenance::MaintenanceService::new(app_handle.clone());
+            app.manage(maintenance_svc);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -112,6 +116,11 @@ pub fn run() {
             commands::thumbnails::resume_thumbnail_cache_migration,
             commands::thumbnails::rollback_thumbnail_cache_migration,
             commands::thumbnails::get_thumbnail_migration_state,
+            // 维护（v0.1.0-database-retention-and-cleanup）
+            commands::maintenance::get_maintenance_summary,
+            commands::maintenance::get_maintenance_preview,
+            commands::maintenance::run_maintenance,
+            commands::maintenance::update_maintenance_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

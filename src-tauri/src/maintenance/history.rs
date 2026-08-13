@@ -4,6 +4,7 @@
 //! 不触碰 `library` / `progress` / `shortcut` / 目录配置（spec §2/§9）。
 
 use rusqlite::{Connection, Row};
+use serde::Serialize;
 
 /// 历史保留配置（来自 settings，task 4 的 MaintenanceService 负责读取拼装）。
 #[derive(Debug, Clone)]
@@ -27,7 +28,7 @@ impl Default for HistoryRetentionConfig {
 }
 
 /// 历史清理执行结果（单次 run 的统计）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct HistoryCleanupResult {
     /// 天数规则删除的行数（无条件，不受保护窗口影响）
     pub deleted_by_days: i64,
@@ -46,7 +47,8 @@ impl HistoryCleanupResult {
 }
 
 /// 历史清理预览（只读，不写库不删文件；spec §8 维护预览用）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HistoryCleanupPreview {
     /// 当前历史总条数
     pub total: i64,

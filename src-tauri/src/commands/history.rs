@@ -53,7 +53,11 @@ pub struct RecordHistoryArgs {
 }
 
 #[tauri::command]
-pub fn record_history(args: RecordHistoryArgs, db: tauri::State<crate::db::Db>) -> Result<(), String> {
+pub fn record_history(
+    args: RecordHistoryArgs,
+    db: tauri::State<crate::db::Db>,
+    maintenance: tauri::State<'_, crate::maintenance::MaintenanceService>,
+) -> Result<(), String> {
     let conn = db.conn();
     // 路径身份修复 (2026-08-12, spec §6.3): descriptor 反序列化校验 + rel_path 校验 source-relative。
     let descriptor: crate::source::descriptor::SourceDescriptor =
@@ -72,6 +76,9 @@ pub fn record_history(args: RecordHistoryArgs, db: tauri::State<crate::db::Db>) 
         args.book_id,
     )
     .map_err(|e| e.to_string())?;
+    // v0.1.0-database-retention-and-cleanup：成功写入后标记 history dirty，
+    // 触发防抖自动维护（spec §5.1）。
+    maintenance.notify_dirty();
     Ok(())
 }
 
