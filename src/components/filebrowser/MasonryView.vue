@@ -11,6 +11,7 @@ import {
   toRootRelativePath,
   captureMasonryViewportAnchor,
   restoreMasonryViewportAnchor,
+  computeAtBottom,
   type MasonryItem,
   type MasonryViewportAnchor,
 } from '@/composables/useMasonryLayout';
@@ -248,6 +249,17 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
   return true;
 }
 
+/** atBottom 三档规则(spec §2.1): layoutHeight 作响应式触发源(审查 P1), 判定读 el.scrollHeight.
+ *  - layout.totalHeight 是 computed, 缩略图尺寸收敛会变, 把它纳入依赖强制 atBottom 重算.
+ *  - 判定值仍读 el.scrollHeight(准), 不读 layout.value.totalHeight(可能是估算高度).
+ *  - 任务 7 只暴露 computed, 任务 8 才接进 useMasonryBrowsePosition. */
+const atBottom = computed(() => {
+  const el = containerRef.value;
+  if (!el) return false;
+  void layout.value.totalHeight;
+  return computeAtBottom(el.scrollHeight, el.clientHeight, el.scrollTop);
+});
+
 /** v0.1.0-module3.0.8 (任务 8): 浏览位置 composable（任务 7 实现）。
  *  - 监听 scrollTop + 300ms debounce 写入顶部可见图（progress image_name + page）
  *  - 进目录查 progress，可选自动 scrollToEntry（autoRestoreOnMount 开关）
@@ -263,6 +275,11 @@ const browsePosition = useMasonryBrowsePosition({
   scrollTop,
   // v0.1.0-module3.0.8 fix19: resize 冷却依赖 colWidth 派生值（窗口尺寸变化 → 列宽重算）
   colWidth,
+  // 任务 8(原 8/9 合并): 接 atBottom 三档 computed(spec §2.1)。
+  // composable 内部 watch(atBottom) 处理翻转:
+  //   false→true 调 scheduleRecord(布局收敛贴底等价一次滚动事件)
+  //   true→false 调 clearStableTimer(任务 9 骨架, 留待任务 10 接入 finishedNow 判定)
+  atBottom,
   scrollToEntry,
   // v0.1.0-module3.0.8 (任务 14 闭环): 接入 settings 开关。
   // enabled=false → 不写 DB；autoRestoreOnMount=false → 进目录不自动跳（按钮仍可点）。
@@ -274,6 +291,8 @@ const browsePosition = useMasonryBrowsePosition({
 //  - 缩略图操作（右键菜单重建/重试）
 //  - 任务 8：scrollToEntry / jumpToLast / browsePosition（masonry 浏览位置）
 //  - 任务 9：flushBrowsePosition（跨卷前 flush 用，转发 browsePosition.flushNow）
+// 注: 任务 8 起 atBottom 不再 defineExpose — 内部状态机已被 composable 接管,
+//  暴露给父级会让 FileBrowser 误以为可独立消费(实际只是 MasonryView 内部 layout 反应)。
 defineExpose({
   regenerate: regenerateThumbnail,
   regenerateBatch: regenerateBatchFn,
