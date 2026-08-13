@@ -110,6 +110,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 12 {
+        apply_012_maintenance_retention(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (12, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -495,6 +503,69 @@ fn apply_011_drop_like_table(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Migration 012 —— 数据库保留与自动清理（v0.1.0-database-retention-and-cleanup）
+///
+/// 仅新增列/表/索引/默认设置，不在升级过程删除任何历史或缓存文件。
+/// 首次实际清理由运行时 maintenance 服务按配置触发（spec §9）。
+///
+/// - `browse_history` 加 `visit_count`(默认 1) + `last_cleanup_candidate_at`(可空)
+/// - 建 `maintenance_state` 单行 KV 表，回填 `thumbnail_cache_total_bytes = SUM(byte_size)`
+/// - spec §7 查询索引 + spec §6.2 稳定 LRU 索引（替换旧 idx_thumbnail_cache_lru）
+/// - INSERT OR IGNORE 写入维护设置默认值（不覆盖用户已有）
+fn apply_012_maintenance_retention(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        -- 1. browse_history 访问价值评分字段（spec §3.1）
+        ALTER TABLE browse_history ADD COLUMN visit_count INTEGER NOT NULL DEFAULT 1;
+        ALTER TABLE browse_history ADD COLUMN last_cleanup_candidate_at INTEGER;
+
+        -- 2. 维护状态 KV 表（缩略图总字节计数等，spec §6.1）
+        CREATE TABLE IF NOT EXISTS maintenance_state (
+          key TEXT PRIMARY KEY,
+          integer_value INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        -- 3. spec §7 查询索引治理
+        CREATE INDEX IF NOT EXISTS idx_library_favorite_read
+            ON library(is_favorite, last_read_at DESC, added_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_shortcut_created_at
+            ON shortcut(created_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_bookmark_book_page
+            ON bookmark(book_id, page);
+        CREATE INDEX IF NOT EXISTS idx_book_tag_tag_book
+            ON book_tag(tag_id, book_id);
+        CREATE INDEX IF NOT EXISTS idx_browse_history_cleanup
+            ON browse_history(last_visited_at ASC, visit_count ASC);
+
+        -- 4. spec §6.2 稳定 LRU 索引（替换旧单列索引，加入 cache_key 做稳定排序）
+        DROP INDEX IF EXISTS idx_thumbnail_cache_lru;
+        CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_lru_key
+            ON thumbnail_cache(last_accessed_at ASC, cache_key ASC);
+
+        -- 5. 维护设置默认值（INSERT OR IGNORE 不覆盖用户已有，spec §4）
+        INSERT OR IGNORE INTO settings (key, value) VALUES
+          ('maintenance_auto_cleanup_enabled', '1'),
+          ('history_retention_max_entries', '2000'),
+          ('history_retention_days', '365'),
+          ('history_recent_protect_days', '7'),
+          ('maintenance_last_run_at', '0'),
+          ('maintenance_last_result_json', '{}');
+        "#,
+    )?;
+
+    // 6. 回填缩略图总字节：一次 SUM，此后由 thumbnail::index DAO 维护（spec §6.1）
+    conn.execute(
+        "INSERT OR REPLACE INTO maintenance_state (key, integer_value, updated_at)
+         VALUES ('thumbnail_cache_total_bytes',
+                 COALESCE((SELECT SUM(byte_size) FROM thumbnail_cache), 0),
+                 ?1)",
+        [chrono_now()],
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,15 +921,15 @@ mod tests {
             .unwrap();
         assert_eq!(table_exists, 1, "thumbnail_cache 表未创建");
 
-        // LRU 索引存在
+        // LRU 索引存在（migration 012 将单列 idx_thumbnail_cache_lru 替换为稳定排序的 idx_thumbnail_cache_lru_key）
         let idx_exists: i32 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_thumbnail_cache_lru'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_thumbnail_cache_lru_key'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(idx_exists, 1, "idx_thumbnail_cache_lru 索引未创建");
+        assert_eq!(idx_exists, 1, "idx_thumbnail_cache_lru_key 索引未创建");
 
         // 16 列全部存在
         let cols: Vec<String> = conn
@@ -981,14 +1052,14 @@ mod tests {
 
     #[test]
     fn migration_010_run_bumps_version_to_10() {
-        // 走完整 run()，验证版本号到 11 且幂等(migration 011 后,完整 run 到 11)
+        // 走完整 run()，验证版本号到最新且幂等（migration 012 后,完整 run 到 12）
         let conn = Connection::open_in_memory().unwrap();
         super::run(&conn).unwrap();
 
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 11, "完整 run 后版本号应为 11");
+        assert_eq!(v, 12, "完整 run 后版本号应为 12");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -1075,5 +1146,260 @@ mod tests {
             is_fav, 1,
             "migration 011 应把 like 表数据合并到 library.is_favorite=1"
         );
+    }
+
+    // —— Migration 012：数据库保留与自动清理（TDD）——
+
+    /// 跑到 migration 011（不含 012），用于在 012 前准备数据。
+    fn run_until_011(conn: &Connection) {
+        apply_001_init(conn).unwrap();
+        apply_002_shortcuts(conn).unwrap();
+        apply_003_finished_flag(conn).unwrap();
+        apply_004_book_source_descriptor_unique(conn).unwrap();
+        apply_005_library_history_redesign(conn).unwrap();
+        apply_006_history_book_id(conn).unwrap();
+        apply_007_shortcuts_cross_source(conn).unwrap();
+        apply_008_directory_masonry(conn).unwrap();
+        apply_009_thumbnail_cache(conn).unwrap();
+        apply_010_progress_image_name(conn).unwrap();
+        apply_011_drop_like_table(conn).unwrap();
+    }
+
+    #[test]
+    fn migration_012_adds_browse_history_visit_count_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(browse_history)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            cols.contains(&"visit_count".to_string()),
+            "browse_history 应有 visit_count 列"
+        );
+        assert!(
+            cols.contains(&"last_cleanup_candidate_at".to_string()),
+            "browse_history 应有 last_cleanup_candidate_at 列"
+        );
+
+        // 新行 visit_count 默认 1（NOT NULL DEFAULT 1）
+        conn.execute(
+            "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at)
+             VALUES ('Local', '/x', 'x', 100)",
+            [],
+        )
+        .unwrap();
+        let vc: i64 = conn
+            .query_row(
+                "SELECT visit_count FROM browse_history WHERE rel_path='/x'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(vc, 1, "新行 visit_count 默认应为 1");
+
+        // last_cleanup_candidate_at 默认 NULL（仅诊断用）
+        let lcc: Option<i64> = conn
+            .query_row(
+                "SELECT last_cleanup_candidate_at FROM browse_history WHERE rel_path='/x'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(lcc.is_none(), "last_cleanup_candidate_at 默认应为 NULL");
+    }
+
+    #[test]
+    fn migration_012_creates_maintenance_state_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='maintenance_state'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1, "maintenance_state 表应存在");
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(maintenance_state)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for expected in ["key", "integer_value", "updated_at"] {
+            assert!(
+                cols.contains(&expected.to_string()),
+                "maintenance_state 缺列 {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_012_backfills_thumbnail_cache_total_bytes() {
+        let conn = Connection::open_in_memory().unwrap();
+        run_until_011(&conn);
+
+        // 塞 3 行 thumbnail_cache（byte_size 100/200/300，sum=600）
+        for (i, size) in [100i64, 200, 300].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO thumbnail_cache (cache_key, source_key, rel_path, target_bucket,
+                    quality, cache_rel_path, output_width, output_height, byte_size,
+                    created_at, last_accessed_at)
+                 VALUES (?1, 'sk', '/p', 256, 'q', 'c', 10, 20, ?2, 1, ?3)",
+                rusqlite::params![format!("key_{i}"), size, i as i64],
+            )
+            .unwrap();
+        }
+
+        super::apply_012_maintenance_retention(&conn).unwrap();
+
+        let total: i64 = conn
+            .query_row(
+                "SELECT integer_value FROM maintenance_state WHERE key='thumbnail_cache_total_bytes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            total, 600,
+            "012 应以 SUM(byte_size) 回填 thumbnail_cache_total_bytes"
+        );
+    }
+
+    #[test]
+    fn migration_012_inserts_default_maintenance_settings() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let expected: &[(&str, &str)] = &[
+            ("maintenance_auto_cleanup_enabled", "1"),
+            ("history_retention_max_entries", "2000"),
+            ("history_retention_days", "365"),
+            ("history_recent_protect_days", "7"),
+            ("maintenance_last_run_at", "0"),
+            ("maintenance_last_result_json", "{}"),
+        ];
+        for (k, v) in expected {
+            let val: String = conn
+                .query_row("SELECT value FROM settings WHERE key=?1", [k], |row| row.get(0))
+                .unwrap_or_else(|_| panic!("settings 缺 key {k}"));
+            assert_eq!(val, *v, "settings.{k} 默认值应为 {v}");
+        }
+    }
+
+    #[test]
+    fn migration_012_does_not_overwrite_existing_settings() {
+        // INSERT OR IGNORE 不得覆盖用户已配置的值
+        let conn = Connection::open_in_memory().unwrap();
+        run_until_011(&conn);
+
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('history_retention_max_entries', '500')",
+            [],
+        )
+        .unwrap();
+
+        super::apply_012_maintenance_retention(&conn).unwrap();
+
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key='history_retention_max_entries'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(val, "500", "INSERT OR IGNORE 不应覆盖用户已有设置");
+    }
+
+    #[test]
+    fn migration_012_creates_query_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        for idx in [
+            "idx_library_favorite_read",
+            "idx_shortcut_created_at",
+            "idx_bookmark_book_page",
+            "idx_book_tag_tag_book",
+            "idx_browse_history_cleanup",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+                    [idx],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "索引 {idx} 应由 migration 012 创建");
+        }
+    }
+
+    #[test]
+    fn migration_012_replaces_thumbnail_cache_lru_index_with_stable_key() {
+        // spec §6.2：旧单列 idx_thumbnail_cache_lru → 新稳定排序 idx_thumbnail_cache_lru_key
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let old_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_thumbnail_cache_lru'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_exists, 0, "旧 idx_thumbnail_cache_lru 应已删除");
+
+        let new_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_thumbnail_cache_lru_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_exists, 1, "新 idx_thumbnail_cache_lru_key 应存在");
+    }
+
+    #[test]
+    fn migration_012_like_table_still_absent() {
+        // 回归守卫：012 不得重建 like 表，也不得引用它（spec §9）
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='like'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 0, "like 表在 012 后仍不应存在");
+    }
+
+    #[test]
+    fn migration_012_run_bumps_version_to_12_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let v: i32 = conn
+            .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v, 12, "完整 run 后版本号应为 12");
+
+        // 幂等：run() 的 current<12 守卫使重复调用不再执行 012
+        super::run(&conn).expect("重复 run 应幂等无错");
+        super::run(&conn).expect("三次 run 仍幂等");
+
+        let v2: i32 = conn
+            .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(v2, 12, "重复 run 不应再升版本号");
     }
 }
