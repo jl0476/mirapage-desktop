@@ -2,7 +2,7 @@
 
 - **日期**: 2026-08-13
 - **模块**: v0.1.0-module3.0.10-likes-browse-jump
-- **状态**: 设计中
+- **状态**: 已实现
 - **相关代码**: `src/views/Likes.vue` / `src/stores/fileBrowser.ts` / `src/components/filebrowser/FileBrowser.vue` / `src/locales/{zh-CN,en-US}.ts`
 
 ---
