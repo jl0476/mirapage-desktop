@@ -235,6 +235,14 @@ onMounted(async () => {
   await readStatus.refresh();
   // v0.1.0-module1.22: 加载 sortField/sortAscending/viewMode/hideFinished 持久化
   await fb.loadLayout();
+  // v0.1.0-module3.0.10: likes「浏览」跳转意图 —— 一次性 consume，显式新意图
+  // 优先于 reader 残留上下文 / shortcut 重放（两类陈旧意图已在 requestOpenLocation
+  // 写入时点清理）。必须在 loadLayout 之后：setViewMode('masonry') 不能被旧持久化值覆盖。
+  const pendingLoc = fb.consumePendingOpenLocation();
+  if (pendingLoc) {
+    await openPendingLocation(pendingLoc);
+    return;
+  }
   // v0.1.0-module3.0.3-hotfix (Bug 2): 如果 reader 退出时已保存了导航上下文,
   // 先恢复 (rootPath + currentPath) 再决定是否走默认的 LAST_ROOT_KEY 路径.
   // 之前无脑 setRoot(stored) 会抹掉 currentPath, 导致嵌套目录下阅读后退回到 root.
@@ -291,6 +299,23 @@ watch(
     }
   },
 );
+
+// v0.1.0-module3.0.10: pendingOpenLocation 消费逻辑（likes「浏览」跳转）。
+// 防御模式对齐 openShortcut：relPath 校验非法则 log + 放弃不导航；
+// setRoot 无条件调（同 openShortcut：避免同根不同 relPath 切换时 currentPath 残留）。
+async function openPendingLocation(p: { rootPath: string; relPath: string }): Promise<void> {
+  const relCheck = validateSourceRelativePath(p.relPath);
+  if (!relCheck.ok) {
+    log('[FileBrowser] pendingOpenLocation relPath 越界, 拒绝打开', { relPath: p.relPath, reason: relCheck.reason });
+    return;
+  }
+  await fb.setRoot(p.rootPath);
+  if (relCheck.normalized) {
+    await fb.navigate(relCheck.normalized);
+  }
+  // 无图目录由 watch([viewMode, hasImages]) 守卫自动回落 details
+  fb.setViewMode('masonry');
+}
 
 // v0.1.0-module3.0.5: shortcut 打开的【唯一执行点】(spec §6.4 收敛).
 // Shortcuts.vue onOpen 只 setActive + router.push('/'); 实际 setRoot + navigate 在这里做.

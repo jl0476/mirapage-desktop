@@ -8,7 +8,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import FileBrowser from './FileBrowser.vue';
-import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook } from '@/lib/tauri';
+import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -32,6 +32,7 @@ vi.mock('@/lib/tauri', () => ({
   getProgress: vi.fn(async () => null),
   // v0.1.0-module3.0.x-cross-volume (任务 9): 瀑布流跨卷按钮
   findNextVolume: vi.fn(async () => null),
+  getDirectoryMasonry: vi.fn(async () => null),
 }));
 
 // Cluster A: spy on router.push
@@ -45,6 +46,7 @@ const mockedList = vi.mocked(listDirectory);
 const mockedShortcuts = vi.mocked(listShortcuts);
 const mockedCreate = vi.mocked(createShortcut);
 const mockedFindNextVolume = vi.mocked(findNextVolume);
+const mockedGet = vi.mocked(getSetting);
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
 // 审查修复 (2026-08-13): 跟踪 mountFileBrowser 挂载的 wrapper, 全局 afterEach 统一卸载.
@@ -2084,5 +2086,110 @@ describe('FileBrowser — 底栏 StatusBar 下一卷预查 (Task 6)', () => {
     expect(wrapper.find('[data-test="statusbar-next-volume"]').text()).toBe('已是最后一卷');
     // 根目录无"卷"起点, 不查 IPC (只有 vol01 那一次预查)
     expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── v0.1.0-module3.0.10: pendingOpenLocation 消费（likes「浏览」跳转）───
+// spec §4.3/§5.3：消费点必须在 loadLayout 之后（否则旧持久化 fb_view_mode 覆盖
+// setViewMode('masonry')）；优先级 pending > restoreNavigationContext > shortcut。
+// FileList stub 对齐 Task 10 模式（避免真实 MasonryView 拉起未 mock 的缩略图 IPC）。
+describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', () => {
+  const FileListNullStub = { name: 'FileList', setup: () => () => null };
+
+  function mountBrowser() {
+    const wrapper = mount(FileBrowser, {
+      global: { plugins: [i18n], stubs: { FileList: FileListNullStub } },
+    });
+    _mountedWrappers.push(wrapper);
+    return wrapper;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // 必须含图片条目：FileBrowser.vue 有守卫 watch([viewMode, hasImages])——
+    // masonry + 无图目录会自动回落 details，空 mock 会让 viewMode 断言失败
+    mockedList.mockResolvedValue([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    mockedShortcuts.mockResolvedValue([]);
+  });
+
+  it('消费 pending → setRoot + navigate + masonry，且 loadLayout 旧持久化值(list)不覆盖', async () => {
+    // loadLayout 的 4 次 getSetting 依序: fb_sort_field / fb_sort_ascending / fb_view_mode / fb_hide_finished
+    mockedGet
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('list')
+      .mockResolvedValueOnce(null);
+    setActivePinia(createPinia());
+    const fb = useFileBrowserStore();
+    fb.requestOpenLocation('C:/comics', 'VOL.11');
+    mountBrowser();
+    await flushPromises();
+
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentPath).toBe('VOL.11');
+    expect(fb.viewMode).toBe('masonry');
+    // 一次性：已消费
+    expect(fb.consumePendingOpenLocation()).toBeNull();
+  });
+
+  it("relPath=''（root 级书）→ 仅 setRoot + masonry，不 navigate", async () => {
+    setActivePinia(createPinia());
+    const fb = useFileBrowserStore();
+    fb.requestOpenLocation('C:/comics', '');
+    mountBrowser();
+    await flushPromises();
+
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentPath).toBe('');
+    expect(fb.viewMode).toBe('masonry');
+  });
+
+  it('relPath 非法 → 不 setRoot 不 navigate，viewMode 保持 details', async () => {
+    setActivePinia(createPinia());
+    const fb = useFileBrowserStore();
+    fb.requestOpenLocation('C:/comics', '..\\evil');
+    mountBrowser();
+    await flushPromises();
+
+    expect(fb.rootPath).toBeNull();
+    expect(fb.viewMode).toBe('details');
+  });
+
+  it('pending 优先于 savedNavigationContext（request 时点已清空旧上下文）', async () => {
+    setActivePinia(createPinia());
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/old');
+    fb.saveNavigationContext();
+    fb.requestOpenLocation('C:/comics', 'VOL.11');
+    mountBrowser();
+    await flushPromises();
+
+    // 导航到 pending 目标，而非旧上下文 C:/old
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentPath).toBe('VOL.11');
+  });
+
+  it('setActive(3) 后浏览跳转 → 重挂载不重放旧 shortcut', async () => {
+    mockedShortcuts.mockResolvedValue([mkShortcut(3, 'C:/other', '别的', 'sub')]);
+    setActivePinia(createPinia());
+    const shortcuts = useShortcutsStore();
+    const fb = useFileBrowserStore();
+    shortcuts.setActive(3);
+    fb.requestOpenLocation('C:/comics', 'VOL.11');
+
+    const w1 = mountBrowser();
+    await flushPromises();
+    // pending 执行、shortcut 未导航；activeId 已在 request 时点清空
+    expect(fb.currentPath).toBe('VOL.11');
+    expect(shortcuts.activeId).toBeNull();
+    w1.unmount();
+
+    // 二次挂载（无新意图）：activeId 已清 → 不得重放 shortcut 3（C:/other/sub）
+    mountBrowser();
+    await flushPromises();
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentPath).toBe('VOL.11');
   });
 });
