@@ -251,24 +251,8 @@ pub struct MaintenanceService {
 impl MaintenanceService {
     /// 在 Tauri setup 内构造：用 `tauri::async_runtime::spawn` 驱动 actor。
     pub fn new(app: AppHandle) -> Self {
-        Self::with_spawn(app, Arc::new(|f| {
-            let _ = tauri::async_runtime::spawn(f);
-        }))
-    }
-
-    /// 注入定时器 spawner（生产用，测试可注入 tokio::spawn）。
-    fn with_spawn(
-        app: AppHandle,
-        spawn_timer: scheduler::TimerSpawner,
-    ) -> Self {
         let executor = Arc::new(AppExecutor { app: app.clone() });
-        // 110% 判定器：notify_dirty 时查（超阈则绕防抖立即触发，仍守 60s 节流）
-        let is_over: scheduler::OverLimitChecker = {
-            let app_for_check = app.clone();
-            Arc::new(move || is_history_over_110(&app_for_check))
-        };
-        let (handle, actor) =
-            scheduler::build(MaintenanceTiming::DEFAULT, executor, spawn_timer, is_over);
+        let (handle, actor) = scheduler::build(MaintenanceTiming::DEFAULT, executor);
         tauri::async_runtime::spawn(actor.run());
         Self { handle }
     }
