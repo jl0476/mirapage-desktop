@@ -21,7 +21,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { getBook, saveProgress, getProgress, listDirectory, toggleLike, addBookmark, setFavorite } from '@/lib/tauri';
+import { getBook, saveProgress, getProgress, listDirectory, addBookmark, setFavorite } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useDirectorySortStore } from '@/stores/directorySort';
@@ -635,7 +635,7 @@ watch(
       @toggle-slideshow-direction="onToggleSlideshowDirection"
       @navigate="(p: string) => router.push(p)"
       @add-to-library="book?.id != null && setFavorite(book.id, true)"
-      @toggle-like="book?.id != null && toggleLike(book.id)"
+      @toggle-like="book?.id != null && setFavorite(book.id, !book.isFavorite)"
       @add-bookmark="book?.id != null && addBookmark(book.id, currentReadPage(), null)"
     >
     </ReaderMainMenu>

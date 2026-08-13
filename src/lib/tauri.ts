@@ -62,18 +62,6 @@ export async function removeBookmark(id: number): Promise<void> {
   await invoke<void>('remove_bookmark', { id });
 }
 
-// ─── Likes (Phase 4) ────────────────────────────────────────────────────
-export interface LikeItem {
-  bookId: number;
-  likedAt: number;
-}
-export async function listLikes(): Promise<LikeItem[]> {
-  return invoke<LikeItem[]>('list_likes');
-}
-export async function toggleLike(bookId: number): Promise<boolean> {
-  return invoke<boolean>('toggle_like', { bookId });
-}
-
 // ─── History (v0.1.0-module3.0: folder-level, Android BrowseHistory 对齐) ──
 export interface BrowseHistoryEntry {
   sourceDescriptor: SourceDescriptor;
