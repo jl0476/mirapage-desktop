@@ -168,7 +168,7 @@ const isDirectory = computed(() => props.entry?.isDirectory === true);
         :disabled="!isDirectory"
         @click="emit('add-to-library')"
       >
-        ＋ {{ t('fileBrowser.addToLibrary') }}
+        ＋ {{ t('reader.like') }}
       </button>
       <button
         type="button"

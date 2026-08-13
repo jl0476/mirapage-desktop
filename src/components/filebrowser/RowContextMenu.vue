@@ -146,7 +146,7 @@ function onRetry() {
         class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
         @click="emit('add-to-library', firstItem); emit('close')"
       >
-        ＋ {{ t('fileBrowser.contextMenu.addToLibrary') }}
+        ＋ {{ t('reader.like') }}
       </button>
       <div class="my-1 mx-2 h-px bg-white/5" aria-hidden="true" />
     </template>

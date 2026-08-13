@@ -622,7 +622,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           data-test="btn-add-to-library"
           class="tb-btn"
           :disabled="!canAddToLibrary"
-          :title="t('fileBrowser.addToLibrary')"
+          :title="t('reader.like')"
           @click="onAddToLibraryClick"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
@@ -630,7 +630,7 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
                stroke-linejoin="round" aria-hidden="true">
             <path :d="ICON_LIBRARY_PLUS" />
           </svg>
-          {{ t('fileBrowser.addToLibrary') }}
+          {{ t('reader.like') }}
         </button>
         <button
           data-test="btn-download-all"
