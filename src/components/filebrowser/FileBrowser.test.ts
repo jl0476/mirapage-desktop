@@ -47,6 +47,23 @@ const mockedCreate = vi.mocked(createShortcut);
 const mockedFindNextVolume = vi.mocked(findNextVolume);
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
+// 审查修复 (2026-08-13): 跟踪 mountFileBrowser 挂载的 wrapper, 全局 afterEach 统一卸载.
+// navigate() 会触发 watch(lastFetchedPath) 调度真实 setTimeout(prefetchNextVolume, 300);
+// 用例不卸载时泄漏的 300ms timer 会在后续用例 (Task 6) 执行期 fire, 对 mock findNextVolume
+// 额外调用 — 消耗 once-queue + 打破 toHaveBeenCalledTimes, 是全文件偶发失败根因
+// (已用 B-T1 诊断断言捕获到来自 line-832 用例的泄漏调用 ['C:/comics','sub','next']).
+const _mountedWrappers: ReturnType<typeof mount>[] = [];
+
+// 全局卸载: 覆盖所有经 mountFileBrowser 挂载的组件（含 6 个 navigate 泄漏点 +
+// 未来新增用例）。二次 unmount 安全 — VTU app.unmount() 幂等（Vue render(null) 空容器 no-op，
+// 实测不抛错）；显式 wrapper.unmount() 的用例也走这里兜底。
+afterEach(() => {
+  for (const w of _mountedWrappers) {
+    w.unmount();
+  }
+  _mountedWrappers.length = 0;
+});
+
 // v0.1.0-module3.0.5: ShortcutItem mock helper (跨源 schema)
 function localJson(rootPath: string): string {
   return JSON.stringify({ type: 'local', rootPath });
@@ -68,6 +85,7 @@ async function mountFileBrowser() {
     global: { plugins: [i18n] },
   });
   await flushPromises();
+  _mountedWrappers.push(wrapper);
   return wrapper;
 }
 
@@ -1715,6 +1733,11 @@ describe('FileBrowser — openShortcut 唯一执行点 + 路径校验', () => {
 
     expect(fb.rootPath).toBe('C:/comics');
     expect(fb.currentPath).toBe('sub/vol01');
+
+    // 审查修复 (2026-08-13): 卸载清 nextVolumeDebounce — navigate 到子目录已调度 300ms
+    // 真实 timer, 不卸载会在后续 Task 6 用例执行期 fire, 产生多余的 findNextVolume 调用
+    // (消耗 mock once-queue / 打破 toHaveBeenCalledTimes 断言), 是全文件偶发失败根因之一。
+    wrapper.unmount();
   });
 
   it('坏 shortcut (绝对 relPath): setActive 后拒绝导航, currentPath 不被污染', async () => {
@@ -1735,6 +1758,9 @@ describe('FileBrowser — openShortcut 唯一执行点 + 路径校验', () => {
     expect(fb.currentPath).toBe('');
     // listDirectory 不应收到绝对路径
     expect(mockedList).not.toHaveBeenCalledWith(expect.anything(), 'F:/WallPaper');
+
+    // 审查修复: 卸载清 nextVolumeDebounce (setRoot 重置 lastFetchedPath 也会调度 300ms timer)
+    wrapper.unmount();
   });
 
   it('根目录 shortcut (relPath=""): setActive 后 setRoot, 不 navigate', async () => {
@@ -1753,6 +1779,9 @@ describe('FileBrowser — openShortcut 唯一执行点 + 路径校验', () => {
 
     expect(fb.rootPath).toBe('C:/root');
     expect(fb.currentPath).toBe(''); // 根目录, 不 navigate
+
+    // 审查修复: 卸载清 nextVolumeDebounce (setRoot 重置 lastFetchedPath 可能触发 watcher)
+    wrapper.unmount();
   });
 });
 
@@ -1770,6 +1799,10 @@ describe('FileBrowser — openShortcut 唯一执行点 + 路径校验', () => {
 describe('FileBrowser — 底栏 StatusBar 下一卷预查 (Task 6)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // 审查修复 (2026-08-13): clearAllMocks 不清 mockResolvedValueOnce/mockImplementationOnce
+    // once-queue — B-T7 泄漏的 never-resolving mockImplementationOnce 会被 B-T8 第一次预查消费,
+    // 导致 title 永远 undefined。mockReset 清空 once-queue + 默认实现, 再重设默认。
+    mockedFindNextVolume.mockReset();
     setActivePinia(createPinia());
     mockedList.mockResolvedValue([]);
     mockedShortcuts.mockResolvedValue([]);
@@ -1820,7 +1853,7 @@ describe('FileBrowser — 底栏 StatusBar 下一卷预查 (Task 6)', () => {
     vi.advanceTimersByTime(300);
     await flushPromises();
 
-    // findNextVolume 应被调: descriptor + 'vol01' + 'next'
+    // findNextVolume 应被调: descriptor + 'vol01' + 'next' (仅预查 1 次 — 泄漏 timer 已修)
     expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
     expect(mockedFindNextVolume).toHaveBeenCalledWith(
       { type: 'local', rootPath: 'D:/comics' },
@@ -2014,5 +2047,42 @@ describe('FileBrowser — 底栏 StatusBar 下一卷预查 (Task 6)', () => {
     sb = wrapper.findComponent({ name: 'StatusBar' });
     expect(sb.props('nextVolumeLoading')).toBe(true);
     expect(sb.props('nextVolumeTitle')).toBe('vol02'); // 保持, 不闪空
+  });
+
+  it('B-T8: 子目录切回根目录 → 早返清 loading, StatusBar 显示「已是最后一卷」而非「…」', async () => {
+    // 审查修复 (2026-08-13): 早返分支漏关 loading — watcher 切目录同步置 true,
+    // 根目录 (lastFetchedPath='') 早返后 loading 永久 true, 右段永远「…」。
+    // 先有子目录 title ('vol02'), 再切回根目录模拟转换 (B-T6 初始即根测不到)。
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol02',
+      title: 'vol02',
+    });
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 子目录预查完成: title='vol02', loading=false
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+    expect(wrapper.find('[data-test="statusbar-next-volume"]').text()).toBe('下一卷: vol02');
+
+    // 切回根目录: lastFetchedPath='' → watcher 置 loading=true, debounce 300ms
+    await setLastFetchedPath(wrapper, '');
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeLoading')).toBe(true); // 过渡态
+
+    // 300ms 后 prefetchNextVolume 早返 → loading=false, title=null (修复点)
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+    expect(sb.props('nextVolumeTitle')).toBe(null);
+    // 右段渲染「已是最后一卷」而非「…」
+    expect(wrapper.find('[data-test="statusbar-next-volume"]').text()).toBe('已是最后一卷');
+    // 根目录无"卷"起点, 不查 IPC (只有 vol01 那一次预查)
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
   });
 });
