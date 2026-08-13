@@ -33,6 +33,7 @@ import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import { validateSourceRelativePath } from '@/lib/relativePath';
 import { naturalCompare } from '@/lib/naturalSort';
+import { progressWriteKey } from '@/lib/progressWriteKey';
 
 const DEBOUNCE_MS = 300;
 const RESIZE_COOLDOWN_MS = 500;
@@ -123,6 +124,10 @@ export function useMasonryBrowsePosition(
 
   const lastWrittenPath = ref<string | null>(null);
   const lastBrowseProgress = ref<ProgressItem | null>(null);
+  /** 任务 10: 缓存最后一次写成功的 finishedParam(给 A9 快路径去重同图同 finished 查询用, spec §2.8) */
+  const lastWrittenFinishedParam = ref<boolean | undefined>(undefined);
+  /** 任务 10: A9 慢路径去重用的 DB 成功写入 Set(identity = progressWriteKey(...), spec §2.8) */
+  const successfulWrites = new Set<string>();
 
   /**
    * 任务 9: 调度 STABLE_MS 后的升级判定(spec §2.3 scheduleStableTimer)。
@@ -165,9 +170,6 @@ export function useMasonryBrowsePosition(
       scheduleStableTimer();
     }
   }
-  // 任务 10 接入消费点: 任务 9 仅搭骨架, 显式 void 引用避免 TS6133。
-  // 任务 10 在 recordCurrentTop 各早退路径调 scheduleRetryIfStillAtBottom() 时删此行。
-  void scheduleRetryIfStillAtBottom;
 
   /** 3 级优先级顶部图（spec §3.2.2 P0 修复） */
   const topmostImage = computed<MediaEntry | null>(() => {
@@ -240,46 +242,96 @@ export function useMasonryBrowsePosition(
     return promise;
   }
 
-  /** 早捕获 5 字段 + writeSeq 防覆盖（spec §3.2.2 v4 P1 修复） */
+  /**
+   * 早捕获 5 字段 + writeSeq 防覆盖 + atBottom/finishedNow 计算(spec §2.3 v6)。
+   *
+   * 两阶段提交(审查 P1 v5/v6):
+   * - 阶段 1(写入前): seq/writeSeq/dir 早退可取消, 瞬时失败(丢弃)调 scheduleRetryIfStillAtBottom,
+   *   持久失败(bookId==null)不调。
+   * - IPC: try/catch, catch 调 scheduleRetryIfStillAtBottom。
+   * - 阶段 2(写入后): saveProgress 已 resolve → always 记 successfulWrites.add(identity);
+   *   当前 UI 缓存仅 writeSeqAtEntry===activeWriteSeq && sameDir 时更新(陈旧成功不污染当前 UI);
+   *   不重试。
+   */
   async function recordCurrentTop(): Promise<void> {
     // 任务 9: 入口 enabled 守卫(审查 P1-2)。
     // flushNow 也走此入口 → enabled=false 时跨卷前 flush 也不写普通进度。
-    // finished 写入的入口守卫也由这一行覆盖(任务 10 在此基础上叠加 finishedNow 计算)。
     if (!params.enabled.value) return;
     const seqAtEntry = activeStartSeq;
     const descAtEntry = JSON.parse(JSON.stringify(params.descriptor.value)) as SourceDescriptor;
     const pathAtEntry = params.currentPath.value;
     const e = topmostImage.value;
     if (!e) return;
-    if (e.path === lastWrittenPath.value) return;
+
+    // ── atBottom + 停留判定(spec §2.3) ──
+    const atBottom = params.atBottom.value;
+    let finishedNow = false;
+    if (atBottom) {
+      if (bottomSince === null) {
+        bottomSince = Date.now();
+        scheduleStableTimer();
+        // 首次到底: 先写普通进度, finishedNow=false
+      } else {
+        finishedNow = Date.now() - bottomSince >= STABLE_MS;
+      }
+    } else {
+      clearStableTimer();                                 // 离开底部(5 出口之一, 任务 8 审查契约 a)
+      finishedNow = false;
+    }
+
+    // finished 单调: 只传 true, 不传 false(spec A1)
+    const finishedParam: boolean | undefined = finishedNow ? true : undefined;
+
+    // ── A7 幂等: 已 finished 跳过整个 recordCurrentTop(spec §2.7 + §2.8 A7) ──
+    // 入口检查单调保留后的 lastBrowseProgress.finished;
+    // 已 finished → 跳过整次(含 finished=undefined 普通滚动), 防止覆盖 imageName。
+    // spec §2.7 显式:"幂等跳过依据(A7): recordCurrentTop 入口判断「当前已 finished 则跳过」"
+    if (lastBrowseProgress.value?.finished === true) return;
+
+    // ── A9 复合去重(快+慢路径, spec §2.8) ──
+    const identity = progressWriteKey(descAtEntry, pathAtEntry, e.path, finishedParam);
+    const alreadyWritten =
+      (e.path === lastWrittenPath.value && finishedParam === lastWrittenFinishedParam.value)
+      || successfulWrites.has(identity);
+    if (alreadyWritten) return;
+
     const pageAtEntry = params.canonicalImageNames.value.indexOf(e.name);
     const writeSeqAtEntry = activeWriteSeq;
 
     try {
+      // ── 阶段 1: 写入前竞态(允许取消) ──
       const bookId = await ensureBookIdForCurrentDir(descAtEntry, pathAtEntry);
-      if (seqAtEntry !== activeStartSeq) return;
-      if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
-      if (bookId == null) return;
-      if (writeSeqAtEntry !== activeWriteSeq) return;
-      await saveProgress(
-        bookId,
-        pageAtEntry,
-        'single',
-        undefined,
-        e.name,
-      );
-      if (seqAtEntry !== activeStartSeq) return;
-      if (writeSeqAtEntry !== activeWriteSeq) return;
-      if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;
-      lastWrittenPath.value = e.path;
-      lastBrowseProgress.value = {
-        bookId,
-        page: pageAtEntry,
-        imageName: e.name,
-        readerMode: 'single',
-        updatedAt: Date.now(),
-        finished: false,
-      };
+      if (seqAtEntry !== activeStartSeq) { scheduleRetryIfStillAtBottom(); return; }
+      if (!sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) return;  // 切目录: 不重试
+      if (bookId == null) return;                         // 持久失败: 不重试
+      if (writeSeqAtEntry !== activeWriteSeq) { scheduleRetryIfStillAtBottom(); return; }
+
+      // ── IPC 写入 ──
+      try {
+        await saveProgress(bookId, pageAtEntry, 'single', finishedParam, e.name);
+      } catch (err) {
+        log('[useMasonryBrowsePosition] saveProgress failed', err);
+        scheduleRetryIfStillAtBottom();
+        return;
+      }
+
+      // ── 阶段 2: 写入后(DB 已成功) ──
+      successfulWrites.add(identity);                     // ① 始终记 DB 成功(慢路径去重)
+      if (writeSeqAtEntry === activeWriteSeq
+          && sameDir(descAtEntry, pathAtEntry, params.descriptor.value, params.currentPath.value)) {
+        // ② 仅最新请求 + 同目录: 更新当前 UI 缓存
+        lastWrittenPath.value = e.path;
+        lastWrittenFinishedParam.value = finishedParam;
+        lastBrowseProgress.value = {
+          bookId,
+          page: pageAtEntry,
+          imageName: e.name,
+          readerMode: 'single',
+          updatedAt: Date.now(),
+          finished: finishedNow || lastBrowseProgress.value?.finished || false,  // 单调(审查 P1-1)
+        };
+      }
+      // ③ 陈旧成功(writeSeq 变): 不碰 UI 缓存, 不重试(DB 已成功)
     } catch (err) {
       log('[useMasonryBrowsePosition] recordCurrentTop failed', err);
     }
@@ -366,6 +418,8 @@ export function useMasonryBrowsePosition(
   async function start(): Promise<void> {
     clearStableTimer();                       // 任务 9: start 重置(spec §2.3 不变量 A4)
     activeStartSeq += 1;
+    successfulWrites.clear();                 // 任务 10: A9 慢路径去重集随 start 重置(spec §2.8)
+    lastWrittenFinishedParam.value = undefined; // 任务 10: 缓存 finishedParam 同步重置
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null; }
     if (stopScrollWatch) { stopScrollWatch(); stopScrollWatch = null; }
     lastWrittenPath.value = null;
@@ -395,6 +449,8 @@ export function useMasonryBrowsePosition(
   function stop(): void {
     clearStableTimer();                       // 任务 9: stop 重置(spec §2.3 不变量 A4)
     activeStartSeq += 1;
+    successfulWrites.clear();                 // 任务 10: A9 慢路径去重集随 stop 重置(spec §2.8)
+    lastWrittenFinishedParam.value = undefined; // 任务 10: 缓存 finishedParam 同步重置
     disableWatcher();
     if (stopEnabledWatch) { stopEnabledWatch(); stopEnabledWatch = null; }
     if (stopAtBottomWatch) { stopAtBottomWatch(); stopAtBottomWatch = null; }
