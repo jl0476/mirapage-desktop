@@ -102,6 +102,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 11 {
+        apply_011_drop_like_table(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (11, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -465,6 +473,25 @@ fn apply_009_thumbnail_cache(conn: &Connection) -> anyhow::Result<()> {
 /// fallback（spec §4.1），新行由 `commands::progress::save_progress` 写入。
 fn apply_010_progress_image_name(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch("ALTER TABLE progress ADD COLUMN image_name TEXT")?;
+    Ok(())
+}
+
+/// Migration 011 —— Library→Likes 合并:UPDATE 合并 like 数据到 library.is_favorite,再 DROP `like` 表
+///
+/// `like.book_id` 必有对应 `library.id`(toggle_like 调用点 ReaderView 守
+/// `book?.id != null`,book.id 来自 get_book 查 library 表),所以 IN 子查询
+/// 无丢失风险 — 任何 like 行都能在 library 找到对应 row。
+fn apply_011_drop_like_table(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        UPDATE library
+           SET is_favorite = 1
+         WHERE id IN (SELECT book_id FROM `like`)
+           AND is_favorite = 0;
+
+        DROP TABLE IF EXISTS `like`;
+        "#,
+    )?;
     Ok(())
 }
 
@@ -954,14 +981,14 @@ mod tests {
 
     #[test]
     fn migration_010_run_bumps_version_to_10() {
-        // 走完整 run()，验证版本号到 10 且幂等
+        // 走完整 run()，验证版本号到 11 且幂等(migration 011 后,完整 run 到 11)
         let conn = Connection::open_in_memory().unwrap();
         super::run(&conn).unwrap();
 
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 10, "完整 run 后版本号应为 10");
+        assert_eq!(v, 11, "完整 run 后版本号应为 11");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -978,5 +1005,75 @@ mod tests {
 
         // 幂等
         super::run(&conn).expect("重复 run 应幂等无错");
+    }
+
+    #[test]
+    fn migration_011_drops_like_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        // `like` 表应已不存在
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='like'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 0, "`like` 表应在 migration 011 后不存在");
+    }
+
+    #[test]
+    fn migration_011_merges_like_data_into_library_is_favorite() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 跑到 010(不跑 011,先准备数据)
+        apply_001_init(&conn).unwrap();
+        apply_002_shortcuts(&conn).unwrap();
+        apply_003_finished_flag(&conn).unwrap();
+        apply_004_book_source_descriptor_unique(&conn).unwrap();
+        apply_005_library_history_redesign(&conn).unwrap();
+        apply_006_history_book_id(&conn).unwrap();
+        apply_007_shortcuts_cross_source(&conn).unwrap();
+        apply_008_directory_masonry(&conn).unwrap();
+        apply_009_thumbnail_cache(&conn).unwrap();
+        apply_010_progress_image_name(&conn).unwrap();
+
+        // 准备:library.id=42 is_favorite=0 + like(book_id=42)
+        // library 表 schema 在 apply_005_library_history_redesign 后定型,字段对齐当前 11 列
+        conn.execute(
+            "INSERT INTO library (title, source_descriptor, source_type, absolute_path,
+                                  cover_entry_path, cover_entry_name, page_count,
+                                  last_read_at, added_at, is_favorite)
+             VALUES ('Test', '{}', 'Local', '/x', NULL, NULL, 10, NULL, 0, 0)",
+            [],
+        )
+        .unwrap();
+        let book_id: i64 = conn
+            .query_row(
+                "SELECT id FROM library WHERE title='Test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        conn.execute(
+            "INSERT INTO `like` (book_id, liked_at) VALUES (?1, 100)",
+            [book_id],
+        )
+        .unwrap();
+
+        // 跑 011
+        apply_011_drop_like_table(&conn).unwrap();
+
+        let is_fav: i64 = conn
+            .query_row(
+                "SELECT is_favorite FROM library WHERE id=?1",
+                [book_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            is_fav, 1,
+            "migration 011 应把 like 表数据合并到 library.is_favorite=1"
+        );
     }
 }
