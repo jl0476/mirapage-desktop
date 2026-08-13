@@ -560,6 +560,8 @@ async function onCrossNextVolume() {
     }
     await fb.navigate(result.relPath);
     pushToast(t('reader.crossVolume.jumped', { title: result.title }));
+    // 任务 6 (spec §3.6): 跨卷成功后刷新预查 — 新卷的下一卷候选变了
+    void prefetchNextVolume();
   } catch (e) {
     log('[FileBrowser] onCrossNextVolume failed', e);
     pushToast(t('reader.crossVolume.failed'));
@@ -567,6 +569,49 @@ async function onCrossNextVolume() {
     swapping.value = false;
   }
 }
+
+// ─── 任务 6 (功能 B 逻辑层): 底栏下一卷预查 (spec §3.5, 审查 P1-3 三分支陈旧校验) ───
+// watch fb.lastFetchedPath 变化 → debounce 300ms → prefetchNextVolume
+// 模块级 nextVolumeRequestSeq 在 try/catch/finally 三个分支都校验:
+//   - 成功:陈旧则丢弃,不覆盖新目录 title
+//   - 失败:陈旧则丢弃,不提前关 loading
+//   - finally:仅当仍是最新请求才关 loading
+const nextVolumeTitle = ref<string | null | undefined>(undefined);
+const nextVolumeLoading = ref(false);
+let nextVolumeDebounce: ReturnType<typeof setTimeout> | null = null;
+let nextVolumeRequestSeq = 0;
+
+async function prefetchNextVolume(): Promise<void> {
+  const path = fb.lastFetchedPath;
+  const root = masonryDescriptor.value.rootPath;
+  if (!path || !root) {
+    nextVolumeTitle.value = null;
+    return;
+  }
+  const seq = ++nextVolumeRequestSeq;
+  nextVolumeLoading.value = true;
+  try {
+    const result = await findNextVolume(masonryDescriptor.value, path, 'next');
+    if (seq !== nextVolumeRequestSeq) return; // 成功:陈旧丢弃
+    nextVolumeTitle.value = result?.title ?? null;
+  } catch (e) {
+    if (seq !== nextVolumeRequestSeq) return; // 失败:陈旧丢弃
+    log('[FileBrowser] prefetchNextVolume failed', e);
+    nextVolumeTitle.value = null;
+  } finally {
+    if (seq === nextVolumeRequestSeq) {
+      // finally:仅最新请求关 loading
+      nextVolumeLoading.value = false;
+    }
+  }
+}
+
+watch(() => fb.lastFetchedPath, () => {
+  if (nextVolumeDebounce) clearTimeout(nextVolumeDebounce);
+  // 切目录立即置 loading(不设 undefined,右段显示「…」不闪空, spec §3.3 时序)
+  nextVolumeLoading.value = true;
+  nextVolumeDebounce = setTimeout(() => void prefetchNextVolume(), 300);
+});
 
 function onAddToLibraryClick() {
   log('[FileBrowser] onAddToLibraryClick fired', selectedEntry.value?.name);
@@ -920,13 +965,17 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
         {{ t('common.loading') }}
       </p>
 
-      <!-- StatusBar (v0.1.0-module1.22 新增) -->
+      <!-- StatusBar (v0.1.0-module1.22 新增, v0.1.0-module3.1.1 任务 6 接入预查) -->
       <StatusBar
         :total="fb.sortedEntries.length"
         :selected-count="fb.selectedCount"
         :selection-size-bytes="fb.selectionSizeBytes"
         :current-path="displayPath"
         :items-text="statusBarItemsText"
+        :next-volume-title="nextVolumeTitle"
+        :next-volume-loading="nextVolumeLoading"
+        :next-volume-disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"
+        @next-volume="onCrossNextVolume"
       />
 
       <!-- Save dialog -->

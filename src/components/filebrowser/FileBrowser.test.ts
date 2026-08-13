@@ -3,7 +3,7 @@
  * 5 元素工具栏 (rootPath 有值时) + dropdown 切换 + dblclick + error + save dialog
  * 注意: 设计中 rootPath=null 时 empty-state 全屏,无 toolbar — Save 按钮不存在
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
@@ -1753,5 +1753,266 @@ describe('FileBrowser — openShortcut 唯一执行点 + 路径校验', () => {
 
     expect(fb.rootPath).toBe('C:/root');
     expect(fb.currentPath).toBe(''); // 根目录, 不 navigate
+  });
+});
+
+// ─── v0.1.0-module3.1.1 (任务 6 功能 B): 底栏下一卷预查 + StatusBar 绑定 ───
+//
+// spec: docs/superpowers/specs/2026-08-12-masonry-finished-and-statusbar-next-volume-design.md §3.5
+//  4 处改动:
+//   1. FileBrowser prefetchNextVolume (请求序号三分支陈旧校验)
+//   2. watch fb.lastFetchedPath → debounce 300ms → 预查
+//   3. onCrossNextVolume 成功后调 prefetchNextVolume 刷新
+//   4. StatusBar 绑 nextVolumeTitle/nextVolumeLoading/nextVolumeDisabled + @next-volume
+//
+// 测试策略: 复用现有 vi.mock('@/lib/tauri', ...) + mockedFindNextVolume 控制返回.
+// 用 fake timers + advanceTimersByTime 推进 debounce. 不依赖 DOM (StatusBar props via findComponent).
+describe('FileBrowser — 底栏 StatusBar 下一卷预查 (Task 6)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    // 默认无下一卷 (mockResolvedValue 影响所有调用; 个例用 mockResolvedValueOnce/mockImplementationOnce 覆盖)
+    mockedFindNextVolume.mockResolvedValue(null);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Mount helper: 模拟用户 setRoot(root) 后 navigate(path) 到达 lastFetchedPath.
+   * setRoot + navigate 各触发一次 listDirectory, 都 mock 成空 entries.
+   * 返回的 wrapper + fb 都可被测试继续操作.
+   */
+  async function mountFileBrowserWithRoot(root: string, lastFetchedPath: string) {
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    // setRoot 触发 fetch('')
+    await fb.setRoot(root);
+    await flushPromises();
+    if (lastFetchedPath !== '') {
+      // navigate 触发 fetch(lastFetchedPath)
+      await fb.navigate(lastFetchedPath);
+      await flushPromises();
+    }
+    return wrapper;
+  }
+
+  /** 切到新目录: 同步改 fb.lastFetchedPath (走 store.fetch). 等价用户 navigate 行为. */
+  async function setLastFetchedPath(wrapper: ReturnType<typeof mount>, path: string) {
+    const fb = useFileBrowserStore();
+    await fb.navigate(path);
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('B-T1: lastFetchedPath 变化 → debounce 300ms → findNextVolume 返回 title → StatusBar 收到', async () => {
+    mockedFindNextVolume.mockResolvedValue({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol02',
+      title: 'vol02',
+    });
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    // 推进 debounce 300ms (setTimeout(prefetchNextVolume, 300))
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // findNextVolume 应被调: descriptor + 'vol01' + 'next'
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
+    expect(mockedFindNextVolume).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'D:/comics' },
+      'vol01',
+      'next',
+    );
+    // StatusBar 收到 nextVolumeTitle = 'vol02'
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.exists()).toBe(true);
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+  });
+
+  it('B-T2: findNextVolume 返回 null → nextVolumeTitle=null (无下一卷)', async () => {
+    // 默认 mockedFindNextVolume.mockResolvedValue(null) → null
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe(null);
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+  });
+
+  it('B-T3: 旧请求晚返回失败不覆盖新目录(请求序号陈旧校验, 审查 P1-3)', async () => {
+    // vol01 预查: 挂起(返回可控 promise)
+    let rejectVol01: (e: Error) => void = () => { /* noop */ };
+    mockedFindNextVolume.mockImplementationOnce(
+      () => new Promise<{ descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null>(
+        (_, rej) => { rejectVol01 = rej; },
+      ),
+    );
+    // vol02 预查: 成功返回 title 'vol03'
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol03',
+      title: 'vol03',
+    });
+
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    // 推进 300ms → vol01 预查发出(挂起, seq=1)
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 切到 vol02: 新 fetch + 新预查 (seq=2)
+    await setLastFetchedPath(wrapper, 'vol02');
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 此时 vol02 预查完成: title='vol03', loading=false
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+
+    // vol01 旧请求现在失败返回(陈旧)
+    rejectVol01(new Error('network'));
+    await flushPromises();
+
+    // vol01 失败不该把 vol02 的 title 覆盖成 null, loading 不该被提前关
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+  });
+
+  it('B-T4: 旧请求晚返回成功也不覆盖新目录 title (陈旧成功路径校验)', async () => {
+    // vol01 预查: 挂起
+    let resolveVol01!: (v: { descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null) => void;
+    mockedFindNextVolume.mockImplementationOnce(
+      () => new Promise<{ descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null>(
+        (r) => { resolveVol01 = r; },
+      ),
+    );
+    // vol02 预查: 成功 'vol03'
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol03',
+      title: 'vol03',
+    });
+
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    await setLastFetchedPath(wrapper, 'vol02');
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+
+    // vol01 旧请求晚成功返回 (title='vol01Next')
+    resolveVol01({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol01Next',
+      title: 'vol01Next',
+    });
+    await flushPromises();
+
+    // 陈旧成功不该覆盖 vol02 的 title='vol03'
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+  });
+
+  it('B-T5: StatusBar @next-volume 触发 onCrossNextVolume (复用跳转逻辑)', async () => {
+    // 预查 + 点击 → 触发 onCrossNextVolume
+    mockedList
+      .mockResolvedValueOnce([]) // setRoot fetch
+      .mockResolvedValueOnce([]) // navigate vol01
+      .mockResolvedValueOnce([]); // navigate vol02 (跨卷)
+    mockedFindNextVolume
+      .mockResolvedValueOnce({
+        descriptor: { type: 'local', rootPath: 'D:/comics' },
+        relPath: 'vol02',
+        title: 'vol02',
+      }) // 1. 预查 vol01 (mount 时)
+      .mockResolvedValueOnce({
+        descriptor: { type: 'local', rootPath: 'D:/comics' },
+        relPath: 'vol02',
+        title: 'vol02',
+      }) // 2. onCrossNextVolume 内的 findNextVolume
+      .mockResolvedValueOnce({
+        descriptor: { type: 'local', rootPath: 'D:/comics' },
+        relPath: 'vol03',
+        title: 'vol03',
+      }); // 3. 跨卷成功后显式 prefetchNextVolume (spec §3.6)
+
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 预查到 title='vol02'
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+
+    // 点 StatusBar 右段 (StatusBar.vue data-test="statusbar-next-volume")
+    const nextBtn = wrapper.find('[data-test="statusbar-next-volume"]');
+    expect(nextBtn.exists()).toBe(true);
+    await nextBtn.trigger('click');
+    await flushPromises();
+
+    // onCrossNextVolume 应调 findNextVolume (第二次) + fb.navigate('vol02') + 跨卷后显式预查 (第三次)
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(3);
+    const fb = useFileBrowserStore();
+    expect(fb.currentPath).toBe('vol02');
+    // 跨卷成功后,显式 prefetchNextVolume 已更新右段为新卷 vol02 的下一卷 'vol03'
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+  });
+
+  it('B-T6: 根目录 lastFetchedPath="" → prefetchNextVolume 早返, 不查 IPC', async () => {
+    // 只 setRoot 不 navigate → lastFetchedPath = ''
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', '');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // findNextVolume 不应被调(根目录无"卷"起点)
+    expect(mockedFindNextVolume).not.toHaveBeenCalled();
+    // StatusBar nextVolumeDisabled = true (无 lastFetchedPath)
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeDisabled')).toBe(true);
+  });
+
+  it('B-T7: 切目录瞬间 nextVolumeLoading=true (右段不闪空, spec §3.3)', async () => {
+    // 第一次预查返回 'vol02' → title 已设
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol02',
+      title: 'vol02',
+    });
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+
+    // 切到 vol02 (新挂起的请求)
+    mockedFindNextVolume.mockImplementationOnce(
+      () => new Promise<{ descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null>(
+        () => { /* never resolves */ },
+      ),
+    );
+    await setLastFetchedPath(wrapper, 'vol02');
+    // 切目录后立刻 (debounce 未到) → loading 已置 true, title 保持旧值(不闪空)
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeLoading')).toBe(true);
+    expect(sb.props('nextVolumeTitle')).toBe('vol02'); // 保持, 不闪空
   });
 });
