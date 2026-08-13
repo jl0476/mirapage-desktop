@@ -16,8 +16,13 @@
  *  - emit next-volume
  *  - 右段四态: undefined 不渲染 / loading 「…」 / null 「已是最后一卷」灰 disabled /
  *    有值「下一卷: {title}」可点
+ *
+ * v0.1.0-module3.1.1 (任务 4 功能 D 跑马灯):
+ *  - .next-volume-name 固定 max-width:160px, 溢出时 hover 触发 translateX 滚动
+ *  - JS 测量 scrollWidth vs clientWidth 判定 needs-marquee (ResizeObserver 兜底)
+ *  - button 补 min-w-0 max-w-full (否则默认 min-width:auto 不收缩, 架空 truncate)
  */
-import { computed } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatBytes } from '@/locales/helpers';
 
@@ -65,6 +70,29 @@ const nextVolumeLabel = computed(() => {
 const nextVolumeDisabledActual = computed(() =>
   props.nextVolumeDisabled || props.nextVolumeTitle === null || props.nextVolumeLoading,
 );
+
+/* ————— 任务 4: 卷名 hover 跑马灯 (JS 测量 scrollWidth) ————— */
+const nextVolumeNameEl = ref<HTMLElement | null>(null);
+const marqueeOffset = ref(0);
+const needsMarquee = ref(false);
+
+function measureMarquee() {
+  const el = nextVolumeNameEl.value;
+  if (!el) return;
+  const span = el.querySelector('span') ?? el;
+  needsMarquee.value = span.scrollWidth > el.clientWidth + 1;
+  marqueeOffset.value = needsMarquee.value ? span.scrollWidth - el.clientWidth : 0;
+}
+
+let ro: ResizeObserver | null = null;
+onMounted(() => {
+  measureMarquee();
+  if (nextVolumeNameEl.value) {
+    ro = new ResizeObserver(() => measureMarquee());
+    ro.observe(nextVolumeNameEl.value);
+  }
+});
+onBeforeUnmount(() => ro?.disconnect());
 </script>
 
 <template>
@@ -100,12 +128,17 @@ const nextVolumeDisabledActual = computed(() =>
         v-if="nextVolumeLabel !== null"
         data-test="statusbar-next-volume"
         type="button"
-        class="next-volume-btn flex items-center gap-1 px-2 py-0.5 text-text-muted hover:text-accent hover:bg-surface-light transition-colors disabled:text-text-tertiary disabled:hover:bg-transparent disabled:cursor-not-allowed"
+        class="next-volume-btn flex items-center gap-1 px-2 py-0.5 min-w-0 max-w-full text-text-muted hover:text-accent hover:bg-surface-light transition-colors disabled:text-text-tertiary disabled:hover:bg-transparent disabled:cursor-not-allowed"
         :disabled="nextVolumeDisabledActual"
         :title="nextVolumeLabel"
         @click="emit('next-volume')"
       >
-        <span class="next-volume-name truncate">{{ nextVolumeLabel }}</span>
+        <span
+          ref="nextVolumeNameEl"
+          class="next-volume-name"
+          :class="{ 'needs-marquee': needsMarquee }"
+          :style="{ '--marquee-offset': `-${marqueeOffset}px` }"
+        >{{ nextVolumeLabel }}</span>
         <svg
           v-if="nextVolumeTitle"
           width="12" height="12" viewBox="0 0 24 24" fill="none"
@@ -118,3 +151,24 @@ const nextVolumeDisabledActual = computed(() =>
     </div>
   </footer>
 </template>
+
+<style scoped>
+.next-volume-name {
+  max-width: 160px;
+  overflow: hidden;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+}
+/* hover 滚动: 不溢出时(needs-marquee false)无效果 */
+.next-volume-name.needs-marquee {
+  cursor: pointer;
+}
+.next-volume-btn:hover .next-volume-name.needs-marquee {
+  animation: statusbar-marquee 4s linear forwards;
+}
+@keyframes statusbar-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(var(--marquee-offset, 0)); }
+}
+</style>
