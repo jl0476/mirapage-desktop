@@ -137,4 +137,16 @@ describe('StatusBar 下一卷右段', () => {
     // 固定宽度容器(scoped CSS 限制, happy-dom 测不了实际 px, 验 class + style 注入点)
     expect(name.classes()).toContain('next-volume-name');
   });
+
+  it('nextVolumeLabel undefined → 有值: button 首次渲染后 watch 兜底重测不崩', async () => {
+    const wrapper = mount(StatusBar, { props: base, global: { plugins: [i18n] } });
+    // 初始未传入 title → 不渲染
+    expect(wrapper.find('[data-test="statusbar-next-volume"]').exists()).toBe(false);
+    // title 异步到达 → watch(nextVolumeLabel) 兜底: button 首次渲染 + RO 重建 + measureMarquee
+    await wrapper.setProps({ nextVolumeTitle: 'vol02' });
+    const btn = wrapper.find('[data-test="statusbar-next-volume"]');
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain('vol02');
+    expect(wrapper.find('.next-volume-name').exists()).toBe(true);
+  });
 });

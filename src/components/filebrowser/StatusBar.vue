@@ -22,7 +22,7 @@
  *  - JS 测量 scrollWidth vs clientWidth 判定 needs-marquee (ResizeObserver 兜底)
  *  - button 补 min-w-0 max-w-full (否则默认 min-width:auto 不收缩, 架空 truncate)
  */
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatBytes } from '@/locales/helpers';
 
@@ -93,6 +93,21 @@ onMounted(() => {
   }
 });
 onBeforeUnmount(() => ro?.disconnect());
+
+// 兜底: nextVolumeLabel 变化(button 可能首次渲染/重建)后重测
+// 首帧 onMounted 时 button 未渲染(nextVolumeTitle=undefined) → RO 从未创建;
+// title 异步到达后 button 首次渲染, 此 watch 兜底重建 RO + 重测溢出。
+// 旧 RO 可能 observe 着已卸载的旧元素, 一律先 disconnect 再重建, 不重复 observe、不泄漏。
+watch(nextVolumeLabel, () => {
+  nextTick(() => {
+    if (nextVolumeNameEl.value) {
+      ro?.disconnect();
+      ro = new ResizeObserver(() => measureMarquee());
+      ro.observe(nextVolumeNameEl.value);
+    }
+    measureMarquee();
+  });
+});
 </script>
 
 <template>
@@ -164,7 +179,7 @@ onBeforeUnmount(() => ro?.disconnect());
 .next-volume-name.needs-marquee {
   cursor: pointer;
 }
-.next-volume-btn:hover .next-volume-name.needs-marquee {
+.next-volume-btn:hover:not(:disabled) .next-volume-name.needs-marquee {
   animation: statusbar-marquee 4s linear forwards;
 }
 @keyframes statusbar-marquee {
