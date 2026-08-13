@@ -4,9 +4,10 @@
  * 6 section + 左侧 anchor nav + 9 宫格触控编辑器 + reset 按钮.
  * 视觉基线: Tailwind utility class (CLAUDE.md §1.1), 无 scoped hex 色.
  */
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSettingsStore } from '@/stores/settings';
+import { useMaintenanceStore } from '@/stores/maintenance';
 import {
   TOUCH_ACTIONS,
   type ScaleMode, type ReadDirection,
@@ -20,9 +21,27 @@ import NumberRow from '@/components/settings/NumberRow.vue';
 
 const { t } = useI18n();
 const settings = useSettingsStore();
+const maintenance = useMaintenanceStore();
 
-const sections = ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry'] as const;
+const sections = ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry', 'maintenance'] as const;
 const { activeId, scrollTo } = useSectionAnchors([...sections]);
+
+// ─── 维护（spec §8）──────────────────────────────────────────────────
+onMounted(() => {
+  maintenance.loadSummary();
+});
+const mb = (bytes: number) => Math.round((bytes || 0) / 1_000_000);
+async function setAutoEnabled(v: boolean) { await maintenance.saveConfig({ autoCleanupEnabled: v }); }
+async function setMaxEntries(v: number) { await maintenance.saveConfig({ historyMaxEntries: v }); }
+async function setRetentionDays(v: number) { await maintenance.saveConfig({ historyRetentionDays: v }); }
+async function setProtectDays(v: number) { await maintenance.saveConfig({ historyProtectDays: v }); }
+const showPreview = ref(false);
+async function doPreview() { await maintenance.fetchPreview(); showPreview.value = true; }
+async function doRun() {
+  if (!window.confirm(t('settings.maintenance.runConfirm'))) return;
+  showPreview.value = false;
+  await maintenance.runConfirmed();
+}
 
 // ─── 枚举选项源 ───────────────────────────────────────────────────────
 const readerModes = [
@@ -434,6 +453,91 @@ function closeOpenCell(e: MouseEvent) {
           <!-- 缩略图缓存资源 / 清晰度 / 容量（v0.1.0-module3.0.7） -->
           <hr class="my-4 border-[color:var(--color-border-default)]" />
           <ThumbnailCacheSettings />
+        </section>
+
+        <!-- 存储与数据维护（spec §8）-->
+        <section id="maintenance" data-test="section-maintenance" class="scroll-mt-4 bg-surface-1 xp-bd rounded-lg p-6">
+          <h3 class="text-sm font-semibold text-accent uppercase tracking-wider mb-4">
+            {{ t('settings.section.maintenance') }}
+          </h3>
+          <div class="flex flex-col gap-3">
+            <BooleanRow
+              :label="t('settings.maintenance.autoEnabled')"
+              :description="t('settings.maintenance.autoEnabledDesc')"
+              :value="maintenance.summary?.autoEnabled ?? true"
+              data-test="maintenance-auto-enabled"
+              @change="setAutoEnabled"
+            />
+
+            <div class="xp-bdt pt-3 mt-1">
+              <p class="text-xs font-semibold text-text-secondary mb-2">{{ t('settings.maintenance.historyTitle') }}</p>
+              <p v-if="maintenance.summary" class="text-xs text-text-muted mb-3" data-test="maintenance-history-count">
+                {{ t('settings.maintenance.historyCount', { count: maintenance.summary.historyTotal, max: maintenance.summary.historyMaxEntries }) }}
+              </p>
+              <div class="flex flex-col gap-3">
+                <NumberRow
+                  :label="t('settings.maintenance.historyDays')"
+                  :value="maintenance.summary?.historyRetentionDays ?? 365"
+                  :min="0" :max="3650"
+                  data-test="maintenance-retention-days"
+                  @change="setRetentionDays"
+                />
+                <NumberRow
+                  :label="t('settings.maintenance.historyProtect')"
+                  :value="maintenance.summary?.historyProtectDays ?? 7"
+                  :min="0" :max="30"
+                  data-test="maintenance-protect-days"
+                  @change="setProtectDays"
+                />
+                <NumberRow
+                  :label="t('settings.maintenance.historyMaxEntries')"
+                  :value="maintenance.summary?.historyMaxEntries ?? 2000"
+                  :min="0" :max="100000"
+                  data-test="maintenance-max-entries"
+                  @change="setMaxEntries"
+                />
+              </div>
+            </div>
+
+            <div class="xp-bdt pt-3 mt-1">
+              <p class="text-xs font-semibold text-text-secondary mb-2">{{ t('settings.maintenance.thumbnailTitle') }}</p>
+              <p v-if="maintenance.summary" class="text-xs text-text-muted mb-3" data-test="maintenance-thumbnail-used">
+                {{ t('settings.maintenance.thumbnailUsed', { mb: mb(maintenance.summary.thumbnailTotalBytes), limitMb: mb(maintenance.summary.thumbnailLimitBytes), count: maintenance.summary.thumbnailCount }) }}
+              </p>
+            </div>
+
+            <div class="flex items-center gap-2 xp-bdt pt-3 mt-1">
+              <button class="tb-btn" data-test="maintenance-preview-btn" @click="doPreview">
+                {{ t('settings.maintenance.previewBtn') }}
+              </button>
+              <button class="tb-btn text-accent" data-test="maintenance-run-btn" :disabled="maintenance.loading" @click="doRun">
+                {{ maintenance.loading ? t('settings.maintenance.running') : t('settings.maintenance.runBtn') }}
+              </button>
+            </div>
+
+            <!-- 预览弹层（只读）-->
+            <div v-if="showPreview && maintenance.preview" class="xp-bd rounded-lg p-3 bg-surface-2" data-test="maintenance-preview">
+              <p class="text-xs font-semibold text-text-primary mb-2">{{ t('settings.maintenance.previewTitle') }}</p>
+              <p class="text-xs text-text-muted">
+                {{ t('settings.maintenance.previewHistoryDelete', { count: maintenance.preview.history.daysCandidates + maintenance.preview.history.countCandidates, days: maintenance.preview.history.daysCandidates, count2: maintenance.preview.history.countCandidates }) }}
+              </p>
+              <p class="text-xs text-text-muted">
+                {{ t('settings.maintenance.previewProtected', { n: maintenance.preview.history.protectedInWindow, exceed: maintenance.preview.history.protectedExceedsLimit }) }}
+              </p>
+            </div>
+
+            <!-- 最近结果 -->
+            <div v-if="maintenance.lastRun" class="xp-bdt pt-3 mt-1" data-test="maintenance-last-run">
+              <p class="text-xs font-semibold text-text-secondary mb-1">{{ t('settings.maintenance.resultTitle') }}</p>
+              <p class="text-xs text-text-muted">
+                {{ t('settings.maintenance.resultDeleted', { history: maintenance.lastRun.historyDeleted, mb: mb(maintenance.lastRun.thumbnailFreedBytes), dirty: maintenance.lastRun.thumbnailDirtyCleaned }) }}
+                · {{ maintenance.lastRun.source === 'manual' ? t('settings.maintenance.resultManual') : t('settings.maintenance.resultAuto') }}
+              </p>
+            </div>
+            <p v-else-if="maintenance.summary && maintenance.summary.lastRunAt === 0" class="text-xs text-text-muted" data-test="maintenance-never-run">
+              {{ t('settings.maintenance.neverRun') }}
+            </p>
+          </div>
         </section>
       </div>
     </main>

@@ -425,6 +425,61 @@ export async function listProgressFinished(bookIds?: number[]): Promise<Record<s
   });
 }
 
+// ─── Maintenance（v0.1.0-database-retention-and-cleanup，spec §8）─────────
+export interface HistoryCleanupPreview {
+  total: number;
+  daysCandidates: number;
+  countCandidates: number;
+  protectedInWindow: number;
+  protectedExceedsLimit: boolean;
+}
+export interface MaintenanceSummary {
+  historyTotal: number;
+  historyMaxEntries: number;
+  historyRetentionDays: number;
+  historyProtectDays: number;
+  autoEnabled: boolean;
+  lastRunAt: number;
+  lastResultJson: string;
+  thumbnailTotalBytes: number;
+  thumbnailCount: number;
+  thumbnailLimitBytes: number;
+}
+export interface MaintenancePreview {
+  history: HistoryCleanupPreview;
+  thumbnailTotalBytes: number;
+  thumbnailLimitBytes: number;
+}
+export interface MaintenanceRunResult {
+  historyDeleted: number;
+  thumbnailFreedBytes: number;
+  thumbnailDirtyCleaned: number;
+  protectedExceedsLimit: boolean;
+  source: 'auto' | 'manual';
+}
+export interface UpdateMaintenanceSettings {
+  autoCleanupEnabled?: boolean;
+  historyMaxEntries?: number;
+  historyRetentionDays?: number;
+  historyProtectDays?: number;
+}
+
+export function getMaintenanceSummary(): Promise<MaintenanceSummary> {
+  return invoke<MaintenanceSummary>('get_maintenance_summary');
+}
+export function getMaintenancePreview(): Promise<MaintenancePreview> {
+  return invoke<MaintenancePreview>('get_maintenance_preview');
+}
+/** 立即维护。必须先在前端确认预览后传 confirmed=true（spec §8）。 */
+export function runMaintenance(): Promise<MaintenanceRunResult> {
+  return invoke<MaintenanceRunResult>('run_maintenance', { confirmed: true });
+}
+export function updateMaintenanceSettings(
+  args: UpdateMaintenanceSettings,
+): Promise<void> {
+  return invoke<void>('update_maintenance_settings', { args });
+}
+
 // ─── Tags (Phase 4) ─────────────────────────────────────────────────────
 export interface TagItem {
   id: number;
