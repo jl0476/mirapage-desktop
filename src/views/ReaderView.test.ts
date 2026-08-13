@@ -37,6 +37,7 @@ vi.mock('@/lib/tauri', async () => {
     ]),
     getSetting: vi.fn(async () => null),
     setSetting: vi.fn(async () => undefined),
+    setFavorite: vi.fn(async () => undefined),
   };
 });
 
@@ -66,7 +67,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { getBook, getProgress, listDirectory } from '@/lib/tauri';
+import { getBook, getProgress, listDirectory, setFavorite } from '@/lib/tauri';
 import ReaderView from './ReaderView.vue';
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
@@ -811,5 +812,70 @@ describe('ReaderView.vue', () => {
     expect(urls[0]).toContain('b.jpg');
     expect(urls[1]).toContain('c.jpg');
     expect(urls[2]).toContain('a.jpg');
+  });
+
+  // v0.1.0-module3.0.7: Reader 主菜单 ❤️ toggle 连续切换
+  // 验证: ① onToggleLike 调 setFavorite ② book ref 同步 ③ 同会话可反复切换
+  // 这是代码审查 P1 反馈要求 — 原本 toggleLike 写 like 表 + book 快照不刷,无法取消喜欢
+  it('ReaderMainMenu emit toggle-like 连续两次 → setFavorite(true)→(false),book.isFavorite 同步翻转', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    // 初始 isFavorite=false
+    vi.mocked(getBook).mockResolvedValue({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    vi.mocked(setFavorite).mockReset();
+    vi.mocked(setFavorite).mockResolvedValue(undefined);
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const wrapper = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    // 找到 ReaderMainMenu 子组件
+    const menu = wrapper.findComponent({ name: 'ReaderMainMenu' });
+    expect(menu.exists()).toBe(true);
+    // 初始 :is-liked=false(book.isFavorite=false)
+    expect(menu.props('isLiked')).toBe(false);
+
+    // 第一次 toggle-like emit: false → true
+    menu.vm.$emit('toggle-like');
+    await flushPromises();
+    expect(setFavorite).toHaveBeenCalledWith(7, true);
+    expect(setFavorite).toHaveBeenCalledTimes(1);
+    // book ref 同步 → :is-liked=true
+    expect(menu.props('isLiked')).toBe(true);
+
+    // 第二次 toggle-like emit: true → false(关键: 原本无法取消,现在可以)
+    menu.vm.$emit('toggle-like');
+    await flushPromises();
+    expect(setFavorite).toHaveBeenCalledWith(7, false);
+    expect(setFavorite).toHaveBeenCalledTimes(2);
+    expect(menu.props('isLiked')).toBe(false);
   });
 });

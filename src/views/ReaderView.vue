@@ -133,6 +133,17 @@ function onToggleSlideshowDirection(): void {
   void slideshow.updateDirection(slideshow.direction === 'forward' ? 'backward' : 'forward');
 }
 
+// v0.1.0-module3.0.7: Reader 主菜单 ❤️ toggle handler。
+// 关键: IPC 成功后同步本地 book ref,否则同会话无法反复切换
+// (book 是 get_book 单次查的快照,不刷则下次点击仍读旧 isFavorite,
+//  第二次会再写 setFavorite(id, true),无法取消喜欢 — 代码审查 P1 反馈)。
+async function onToggleLike(): Promise<void> {
+  if (!book.value?.id) return;
+  const nextFav = !book.value.isFavorite;
+  await setFavorite(book.value.id, nextFav);
+  book.value = { ...book.value, isFavorite: nextFav };
+}
+
 // v0.1.0-reader-review: 跳页 dialog
 function openJumpDialog(): void {
   jumpDialogValue.value = reader.currentSpreadIndex + 1;
@@ -634,8 +645,7 @@ watch(
       @toggle-slideshow="() => slideshow.toggle()"
       @toggle-slideshow-direction="onToggleSlideshowDirection"
       @navigate="(p: string) => router.push(p)"
-      @add-to-library="book?.id != null && setFavorite(book.id, true)"
-      @toggle-like="book?.id != null && setFavorite(book.id, !book.isFavorite)"
+      @toggle-like="onToggleLike"
       @add-bookmark="book?.id != null && addBookmark(book.id, currentReadPage(), null)"
     >
     </ReaderMainMenu>
