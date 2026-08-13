@@ -844,4 +844,29 @@ describe('useMasonryBrowsePosition', () => {
     expect(saveProgress).toHaveBeenCalledTimes(2);
     stop();
   }, 15000);
+
+  // A-T9: enabled=false 入口守卫 — flushNow 也不写(审查 P1-2)
+  it('A-T9: enabled=false 时 flushNow 也不写(recordCurrentTop 入口守卫, 跨卷前 flush 安全)', async () => {
+    vi.useFakeTimers();
+    const layoutMap = new Map([
+      ['a.jpg', { top: 0, height: 100 }],
+    ]);
+    const atBottomRef = ref(false);
+    const { start, stop, flushNow } = await setup({
+      renderEntries: [img('a.jpg')],
+      canonicalImageNames: ['a.jpg'],
+      layoutMap,
+      scrollTopValue: 50,
+      atBottom: atBottomRef,
+      enabled: false,  // 关键: 关闭 recordBrowsePosition
+    });
+    await start();
+    atBottomRef.value = true;
+    await flushPromises();
+    // flushNow 绕过 debounce 直接调 recordCurrentTop(enabled=false 入口守卫应拦)
+    await flushNow();
+    await flushPromises();
+    expect(saveProgress).not.toHaveBeenCalled();
+    stop();
+  }, 15000);
 });
