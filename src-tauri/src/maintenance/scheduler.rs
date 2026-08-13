@@ -42,19 +42,16 @@ impl MaintenanceTiming {
     };
 }
 
-/// 节流 / 110% 旁路的纯决策（无 IO，可单测）。
+/// 节流纯决策（无 IO，可单测）。同类任务最小间隔——**始终**适用，110% 也不例外
+/// （spec §5.4「最多每 60 秒运行一次」）。110% 仅决定「是否跳过防抖立即触发」，
+/// 见 `MaintenanceHandle::notify_dirty`；是否真跑仍受本节流约束。
 ///
 /// - `elapsed`：距上次执行的耗时（None 表示从未执行）
-/// - `over_limit_110`：历史条数是否已超上限 110%（spec §5.4 允许立即调度）
 /// - `min_interval`：同类最小间隔
-pub fn should_run_after_debounce(
-    elapsed: Option<Duration>,
-    over_limit_110: bool,
-    min_interval: Duration,
-) -> bool {
+pub fn should_run_after_debounce(elapsed: Option<Duration>, min_interval: Duration) -> bool {
     match elapsed {
         None => true,
-        Some(e) => over_limit_110 || e >= min_interval,
+        Some(e) => e >= min_interval,
     }
 }
 
@@ -62,16 +59,19 @@ pub fn should_run_after_debounce(
 pub trait MaintenanceExecutor: Send + Sync {
     /// 执行一次维护（历史清理 + 缩略图淘汰等）。返回 BoxFuture<'static>。
     fn execute(&self) -> BoxFut;
-    /// 历史条数是否已超上限 110%（spec §5.4 旁路节流）。
+    /// 历史条数是否已超上限 110%（spec §5.4：超阈时跳过防抖**立即**触发，但仍守 60s 节流）。
     fn is_over_limit_110(&self) -> bool;
 }
 
 /// 定时器启动器（生产 tauri::async_runtime::spawn / 测试 tokio::spawn）。
 pub type TimerSpawner = Arc<dyn Fn(BoxFut) + Send + Sync>;
 
+/// 110% 判定器（注入：生产走 DB COUNT，测试走 mock 开关）。
+pub type OverLimitChecker = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// actor 消息。
 enum Msg {
-    /// 防抖到期（携带发起时的 generation）。
+    /// 防抖到期 / 110% 立即触发（携带发起时的 generation）。
     DebounceFired(u64),
     /// 立即执行（手动按钮，绕过防抖/节流）。
     RunNow(oneshot::Sender<()>),
@@ -83,14 +83,22 @@ pub struct MaintenanceHandle {
     gen: Arc<AtomicU64>,
     timing: MaintenanceTiming,
     spawn_timer: TimerSpawner,
+    is_over: OverLimitChecker,
 }
 
 impl MaintenanceHandle {
-    /// 标记 history dirty：自增 gen，起一个 debounce timer。
-    /// 窗口内多次调用只有最后一次（最新 gen）的 timer 会被 actor 认可。
+    /// 标记 history dirty。
+    ///
+    /// spec §5.4：若已超上限 110%，**跳过防抖立即**投递 fire（仍受 actor 端 60s 节流约束）；
+    /// 否则起一个 debounce timer（窗口内多次调用只有最新 gen 的 timer 被 actor 认可）。
     pub fn notify_dirty(&self) {
         let gen = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
         let tx = self.tx.clone();
+        if (self.is_over)() {
+            // 110%：立即触发（绕防抖），节流由 actor 端 should_run_after_debounce 守
+            let _ = tx.send(Msg::DebounceFired(gen));
+            return;
+        }
         let dur = self.timing.debounce;
         (self.spawn_timer)(Box::pin(async move {
             tokio::time::sleep(dur).await;
@@ -120,10 +128,12 @@ pub struct MaintenanceActor<E: MaintenanceExecutor> {
 ///
 /// `spawn_timer`：生产传 `Arc::new(|f| { let _ = tauri::async_runtime::spawn(f); })`，
 /// 测试传 `Arc::new(|f| { let _ = tokio::spawn(f); })`。
+/// `is_over`：110% 判定器；生产走 DB COUNT，测试走 mock。
 pub fn build<E: MaintenanceExecutor>(
     timing: MaintenanceTiming,
     executor: Arc<E>,
     spawn_timer: TimerSpawner,
+    is_over: OverLimitChecker,
 ) -> (MaintenanceHandle, MaintenanceActor<E>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let gen = Arc::new(AtomicU64::new(0));
@@ -132,6 +142,7 @@ pub fn build<E: MaintenanceExecutor>(
         gen: gen.clone(),
         timing,
         spawn_timer,
+        is_over,
     };
     let actor = MaintenanceActor {
         rx,
@@ -152,9 +163,10 @@ impl<E: MaintenanceExecutor> MaintenanceActor<E> {
                     if gen != self.gen.load(Ordering::SeqCst) {
                         continue;
                     }
+                    // 110% 的「立即」已在 notify_dirty 投递时体现（绕防抖）；
+                    // 此处只守 60s 同类节流——110% 也不例外（spec §5.4）。
                     let elapsed = self.last_run.map(|t| t.elapsed());
-                    let over = self.executor.is_over_limit_110();
-                    if should_run_after_debounce(elapsed, over, self.timing.min_interval) {
+                    if should_run_after_debounce(elapsed, self.timing.min_interval) {
                         self.executor.execute().await;
                         self.last_run = Some(Instant::now());
                     }
@@ -197,26 +209,28 @@ mod tests {
         })
     }
 
+    fn checker(over: Arc<std::sync::atomic::AtomicBool>) -> OverLimitChecker {
+        Arc::new(move || over.load(Ordering::SeqCst))
+    }
+
     // —— 纯决策 ——
 
     #[test]
     fn should_run_when_never_run() {
-        assert!(should_run_after_debounce(None, false, Duration::from_secs(60)));
+        assert!(should_run_after_debounce(None, Duration::from_secs(60)));
     }
 
     #[test]
-    fn should_skip_within_min_interval_unless_over_110() {
+    fn should_skip_within_min_interval() {
         let min = Duration::from_secs(60);
-        assert!(!should_run_after_debounce(Some(Duration::from_secs(10)), false, min));
-        // 超过 110% 旁路节流
-        assert!(should_run_after_debounce(Some(Duration::from_secs(10)), true, min));
+        assert!(!should_run_after_debounce(Some(Duration::from_secs(10)), min));
     }
 
     #[test]
     fn should_run_after_min_interval() {
         let min = Duration::from_secs(60);
-        assert!(should_run_after_debounce(Some(Duration::from_secs(61)), false, min));
-        assert!(should_run_after_debounce(Some(min), false, min));
+        assert!(should_run_after_debounce(Some(Duration::from_secs(61)), min));
+        assert!(should_run_after_debounce(Some(min), min));
     }
 
     // —— 时序：防抖合并 ——
@@ -229,21 +243,18 @@ mod tests {
             calls: calls.clone(),
             over: over.clone(),
         });
-        let (handle, actor) = build(MaintenanceTiming::TEST, exec, mock_spawn());
+        let (handle, actor) = build(MaintenanceTiming::TEST, exec, mock_spawn(), checker(over.clone()));
         let _task = tokio::spawn(actor.run());
 
-        // 30s 窗口内连续 5 次 dirty（gen 1..5），只有最后一个 timer 的 gen 匹配
         for _ in 0..5 {
             handle.notify_dirty();
         }
-        // 等 debounce + 执行
         tokio::time::sleep(Duration::from_millis(120)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1, "5 次防抖应合并为 1 次执行");
     }
 
     #[tokio::test]
     async fn throttle_skips_second_run_within_min_interval() {
-        // 用足够余量避免计时抖动：debounce 30ms / min_interval 200ms
         let timing = MaintenanceTiming {
             debounce: Duration::from_millis(30),
             min_interval: Duration::from_millis(200),
@@ -254,54 +265,55 @@ mod tests {
             calls: calls.clone(),
             over: over.clone(),
         });
-        let (handle, actor) = build(timing, exec, mock_spawn());
+        let (handle, actor) = build(timing, exec, mock_spawn(), checker(over.clone()));
         let _task = tokio::spawn(actor.run());
 
-        // 第一次：fire 在 ~30ms → 执行
         handle.notify_dirty();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1, "首次执行");
 
-        // 第二次 dirty 紧随：fire 在 ~130ms，距上次执行 ~100ms < 200ms → 节流跳过
         handle.notify_dirty();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "min_interval 内应节流跳过"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "min_interval 内应节流跳过");
 
-        // 等 min_interval 过后再 dirty：恢复执行
-        tokio::time::sleep(Duration::from_millis(150)).await; // 距上次执行已 ~250ms
+        tokio::time::sleep(Duration::from_millis(150)).await;
         handle.notify_dirty();
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "min_interval 后应恢复执行"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "min_interval 后应恢复执行");
     }
 
     #[tokio::test]
-    async fn over_110_bypasses_throttle() {
+    async fn over_110_schedules_immediately_but_still_throttled() {
+        // spec §5.4：110% 跳过防抖**立即**触发，但仍守 60s 节流。
+        // debounce=30ms / min_interval=200ms。
+        let timing = MaintenanceTiming {
+            debounce: Duration::from_millis(30),
+            min_interval: Duration::from_millis(200),
+        };
         let calls = Arc::new(AtomicU32::new(0));
-        let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let over = Arc::new(std::sync::atomic::AtomicBool::new(true)); // 一直超 110%
         let exec = Arc::new(MockExec {
             calls: calls.clone(),
             over: over.clone(),
         });
-        let (handle, actor) = build(MaintenanceTiming::TEST, exec, mock_spawn());
+        let (handle, actor) = build(timing, exec, mock_spawn(), checker(over.clone()));
         let _task = tokio::spawn(actor.run());
 
-        over.store(true, Ordering::SeqCst);
+        // 110%：立即触发（不等 30ms 防抖）。sleep 极短即可观察到执行。
         handle.notify_dirty();
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "首次（110%）");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "110% 应立即执行（绕防抖）");
 
-        // 110% + min_interval 内 → 仍放行（旁路节流）
+        // 紧接着再 dirty：仍立即投递，但 min_interval(200ms) 内 → 节流跳过
         handle.notify_dirty();
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "110% 应旁路节流立即放行");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "110% 也受 60s 节流约束");
+
+        // 等 min_interval 过后再 dirty：恢复执行
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        handle.notify_dirty();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "节流窗口过后应执行");
     }
 
     #[tokio::test]
@@ -310,15 +322,13 @@ mod tests {
         let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let exec = Arc::new(MockExec {
             calls: calls.clone(),
-            over,
+            over: over.clone(),
         });
-        let (handle, actor) = build(MaintenanceTiming::TEST, exec, mock_spawn());
+        let (handle, actor) = build(MaintenanceTiming::TEST, exec, mock_spawn(), checker(over.clone()));
         let _task = tokio::spawn(actor.run());
 
-        // run_now 立即执行，不等 debounce
         handle.run_now().await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        // 紧接着第二次 run_now（无视节流）
         handle.run_now().await;
         assert_eq!(calls.load(Ordering::SeqCst), 2, "run_now 绕过节流");
     }

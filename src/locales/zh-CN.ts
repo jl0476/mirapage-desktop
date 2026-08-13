@@ -361,7 +361,7 @@ export default {
     },
     maintenance: {
       autoEnabled: '自动清理',
-      autoEnabledDesc: '关闭后只统计超限状态，不删除任何历史或缓存。',
+      autoEnabledDesc: '关闭后不自动清理浏览历史（仅统计超限）。缩略图缓存仍按容量上限自动回收以防磁盘膨胀。',
       historyTitle: '浏览历史',
       historyCount: '当前 {count} 条 / 上限 {max} 条',
       historyMaxEntries: '条数上限（0 = 不限）',

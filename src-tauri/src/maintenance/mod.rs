@@ -123,15 +123,19 @@ pub fn run_maintenance_once(app: &AppHandle, auto: bool) -> MaintenanceRunResult
     let source: &'static str = if auto { "auto" } else { "manual" };
     let now = now_secs();
 
-    // 阶段 1：读配置 + 历史清理（同 Db 借用，块结束释放）
+    // 阶段 1：读配置（短 guard）+ 历史清理（run_history_cleanup 自管 guard，3 阶段释锁）
     let (hist_result, do_delete) = {
         let db = app.state::<Db>();
-        let conn = db.conn();
-        let cfg = read_history_config(&conn);
-        let auto_enabled = setting_bool(&conn, "maintenance_auto_cleanup_enabled", true);
+        let (cfg, auto_enabled) = {
+            let conn = db.conn();
+            (
+                read_history_config(&conn),
+                setting_bool(&conn, "maintenance_auto_cleanup_enabled", true),
+            )
+        };
         let do_delete = !auto || auto_enabled;
         let hist = if do_delete {
-            history::run_history_cleanup(&conn, now, &cfg).unwrap_or_default()
+            history::run_history_cleanup(db.inner(), now, &cfg).unwrap_or_default()
         } else {
             HistoryCleanupResult::default()
         };
@@ -258,8 +262,13 @@ impl MaintenanceService {
         spawn_timer: scheduler::TimerSpawner,
     ) -> Self {
         let executor = Arc::new(AppExecutor { app: app.clone() });
+        // 110% 判定器：notify_dirty 时查（超阈则绕防抖立即触发，仍守 60s 节流）
+        let is_over: scheduler::OverLimitChecker = {
+            let app_for_check = app.clone();
+            Arc::new(move || is_history_over_110(&app_for_check))
+        };
         let (handle, actor) =
-            scheduler::build(MaintenanceTiming::DEFAULT, executor, spawn_timer);
+            scheduler::build(MaintenanceTiming::DEFAULT, executor, spawn_timer, is_over);
         tauri::async_runtime::spawn(actor.run());
         Self { handle }
     }

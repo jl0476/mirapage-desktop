@@ -359,7 +359,7 @@ export default {
     },
     maintenance: {
       autoEnabled: 'Auto cleanup',
-      autoEnabledDesc: 'When off, only over-limit status is reported; nothing is deleted.',
+      autoEnabledDesc: 'When off, browse history is not auto-cleaned (only over-limit reported). Thumbnails still auto-reclaim to their size cap to prevent disk bloat.',
       historyTitle: 'Browse history',
       historyCount: '{count} entries / limit {max}',
       historyMaxEntries: 'Max entries (0 = no limit)',

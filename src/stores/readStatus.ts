@@ -62,12 +62,27 @@ export const useReadStatusStore = defineStore('readStatus', () => {
     finishedSet.value = s;
   }
 
-  async function refresh(): Promise<void> {
+  /**
+   * 重建 marks。`bookIds` 可选——传入则只查这批（当前目录收敛，spec §7）；
+   * 省略则从 history.items 派生（仍比全表 progress 收敛：progress 可能有不在 history 的书）。
+   *
+   * v0.1.0-database-retention-and-cleanup 审查修复 #6：不再无条件全表查 progress。
+   */
+  async function refresh(bookIds?: number[]): Promise<void> {
     const history = useHistoryStore();
     if (history.items.length === 0) {
       await history.refresh();
     }
-    const finishedMap = await listProgressFinished();
+    const ids =
+      bookIds ??
+      Array.from(
+        new Set(
+          history.items
+            .map((h) => h.bookId)
+            .filter((b): b is number => b != null),
+        ),
+      );
+    const finishedMap = ids.length === 0 ? {} : await listProgressFinished(ids);
 
     const m: ReadStatusMap = {};
     for (const h of history.items) {

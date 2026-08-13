@@ -196,18 +196,143 @@ pub fn preview_history_cleanup(
     })
 }
 
-/// 执行历史清理（写）。所有删除在单一短事务内完成（spec §5.5/§9）。
+/// 执行历史清理（写）。返回执行统计。`library` / `progress` / `shortcut` /
+/// 目录配置行不受影响。
 ///
-/// 顺序：① 天数规则（无条件删旧）→ ② 条数规则（保护窗口外最低分候选）。
-/// 返回执行统计。`library` / `progress` / `shortcut` / 目录配置行不受影响。
+/// **三阶段、最小化 Mutex 持有（审查修复 #4）**：单连接下阻塞其他 Db 用户的是
+/// `Db` 的 Mutex，而非 SQLite 事务边界。因此：
+/// - 阶段 A（短持锁）：读出条数判断 + 候选行；
+/// - 阶段 B（**释放锁**）：评分 + 排序 + 选键（纯 CPU）；
+/// - 阶段 C（短持锁）：单一事务做天数删除 + 条数删除。
+/// 候选可能在 A/C 之间被其他写入改变（罕见）；按 key 删除幂等，最坏少删/漏删一两行，
+/// 下次清理补回——spec 接受这种 best-effort 语义。
 pub fn run_history_cleanup(
-    conn: &Connection,
+    db: &crate::db::Db,
     now: i64,
     cfg: &HistoryRetentionConfig,
 ) -> rusqlite::Result<HistoryCleanupResult> {
-    // 单一短事务：BEGIN → 天数删 + 条数删 → COMMIT（出错 ROLLBACK）
+    // 阶段 A：读（短锁）
+    let plan = {
+        let conn = db.conn();
+        build_plan(&conn, now, cfg)?
+    };
+    // 阶段 B：评分选键（无锁）
+    let keys = score_and_select(plan.candidates, now, plan.count_over);
+    // 阶段 C：写（短锁 + 单一事务）
+    let (deleted_by_days, deleted_by_count) = {
+        let conn = db.conn();
+        apply_deletes(&conn, plan.days_cutoff, &keys)?
+    };
+    let remaining = {
+        let conn = db.conn();
+        count_history(&conn)?
+    };
+    Ok(HistoryCleanupResult {
+        deleted_by_days,
+        deleted_by_count,
+        remaining,
+        protected_exceeds_limit: plan.protected_exceeds,
+    })
+}
+
+/// 清理计划（阶段 A 产出，供阶段 B/C 用）。
+struct CleanupPlan {
+    days_cutoff: Option<i64>,
+    candidates: Vec<Candidate>,
+    count_over: i64,
+    protected_exceeds: bool,
+}
+
+fn build_plan(
+    conn: &Connection,
+    now: i64,
+    cfg: &HistoryRetentionConfig,
+) -> rusqlite::Result<CleanupPlan> {
+    let days_cutoff = if cfg.retention_days > 0 {
+        Some(now - cfg.retention_days.saturating_mul(SECS_PER_DAY))
+    } else {
+        None
+    };
+
+    if cfg.max_entries <= 0 {
+        return Ok(CleanupPlan { days_cutoff, candidates: vec![], count_over: 0, protected_exceeds: false });
+    }
+    let total = count_history(conn)?;
+    if total <= cfg.max_entries {
+        return Ok(CleanupPlan { days_cutoff, candidates: vec![], count_over: 0, protected_exceeds: false });
+    }
+    let protect_cutoff = now - cfg.protect_days.saturating_mul(SECS_PER_DAY);
+    let protected_in_window: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM browse_history WHERE last_visited_at >= ?1",
+        [protect_cutoff],
+        |r| r.get(0),
+    )?;
+    if protected_in_window >= cfg.max_entries {
+        // 保护记录已超上限：不删保护记录（spec §3.2）
+        return Ok(CleanupPlan { days_cutoff, candidates: vec![], count_over: 0, protected_exceeds: true });
+    }
+    // 天数规则会先删旧（旧的全在保护窗口外），但本规划在删除前计算；
+    // 按「删除前总量 - 上限」估 over，候选取保护窗口外的行，评分阶段挑最低分。
+    let over = total - cfg.max_entries;
+    let candidates = fetch_count_candidates(conn, protect_cutoff)?;
+    Ok(CleanupPlan { days_cutoff, candidates, count_over: over, protected_exceeds: false })
+}
+
+/// 阶段 B：评分 + 稳定排序 + 取前 `count_over` 个的 (source_descriptor, rel_path)。
+fn score_and_select(candidates: Vec<Candidate>, now: i64, count_over: i64) -> Vec<(String, String)> {
+    if count_over <= 0 {
+        return vec![];
+    }
+    let mut scored: Vec<(f64, i64, String, String)> = candidates
+        .into_iter()
+        .map(|c| {
+            let days = ((now - c.last_visited_at) as f64 / SECS_PER_DAY as f64).max(0.0);
+            let s = score_entry(days, c.visit_count, c.pinned);
+            (s, c.last_visited_at, c.source_descriptor, c.rel_path)
+        })
+        .collect();
+    // 稳定排序：score ASC, last_visited_at ASC, source_descriptor ASC, rel_path ASC（spec §3.3）
+    scored.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
+    scored
+        .into_iter()
+        .take(count_over as usize)
+        .map(|(_, _, sd, rp)| (sd, rp))
+        .collect()
+}
+
+/// 阶段 C：单一短事务——天数删除 + 按 key 条数删除。
+fn apply_deletes(
+    conn: &Connection,
+    days_cutoff: Option<i64>,
+    keys: &[(String, String)],
+) -> rusqlite::Result<(i64, i64)> {
     conn.execute_batch("BEGIN")?;
-    match run_history_cleanup_inner(conn, now, cfg) {
+    let result = (|| -> rusqlite::Result<(i64, i64)> {
+        let deleted_by_days = if let Some(cutoff) = days_cutoff {
+            conn.execute(
+                "DELETE FROM browse_history WHERE last_visited_at < ?1",
+                [cutoff],
+            )? as i64
+        } else {
+            0
+        };
+        let mut deleted_by_count = 0i64;
+        for (sd, rp) in keys {
+            conn.execute(
+                "DELETE FROM browse_history WHERE source_descriptor = ?1 AND rel_path = ?2",
+                rusqlite::params![sd, rp],
+            )?;
+            deleted_by_count += 1;
+        }
+        Ok((deleted_by_days, deleted_by_count))
+    })();
+    match result {
         Ok(r) => {
             conn.execute_batch("COMMIT")?;
             Ok(r)
@@ -219,91 +344,17 @@ pub fn run_history_cleanup(
     }
 }
 
-fn run_history_cleanup_inner(
-    conn: &Connection,
-    now: i64,
-    cfg: &HistoryRetentionConfig,
-) -> rusqlite::Result<HistoryCleanupResult> {
-    // ① 天数规则（spec §3.2）：超天数的记录一定是候选，不论评分/频次
-    let deleted_by_days = if cfg.retention_days > 0 {
-        let cutoff = now - cfg.retention_days.saturating_mul(SECS_PER_DAY);
-        conn.execute(
-            "DELETE FROM browse_history WHERE last_visited_at < ?1",
-            [cutoff],
-        )? as i64
-    } else {
-        0
-    };
-
-    // ② 条数规则
-    let mut deleted_by_count = 0i64;
-    let mut protected_exceeds = false;
-
-    if cfg.max_entries > 0 {
-        let remaining = count_history(conn)?;
-        if remaining > cfg.max_entries {
-            let protect_cutoff = now - cfg.protect_days.saturating_mul(SECS_PER_DAY);
-            let protected_in_window: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM browse_history WHERE last_visited_at >= ?1",
-                [protect_cutoff],
-                |r| r.get(0),
-            )?;
-
-            if protected_in_window >= cfg.max_entries {
-                // 保护记录已超上限：不删保护记录，等窗口自然过期（spec §3.2）
-                protected_exceeds = true;
-            } else {
-                let over = remaining - cfg.max_entries;
-                // 候选：保护窗口外的行，按评分 ASC 删 over 条
-                let cands = fetch_count_candidates(conn, protect_cutoff)?;
-                let mut scored: Vec<(f64, i64, String, String, bool)> = cands
-                    .into_iter()
-                    .map(|c| {
-                        let days = ((now - c.last_visited_at) as f64 / SECS_PER_DAY as f64).max(0.0);
-                        let s = score_entry(days, c.visit_count, c.pinned);
-                        (s, c.last_visited_at, c.source_descriptor, c.rel_path, c.pinned)
-                    })
-                    .collect();
-                // 稳定排序：score ASC, last_visited_at ASC, source_descriptor ASC, rel_path ASC（spec §3.3）
-                scored.sort_by(|a, b| {
-                    a.0.partial_cmp(&b.0)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.1.cmp(&b.1))
-                        .then(a.2.cmp(&b.2))
-                        .then(a.3.cmp(&b.3))
-                });
-                for (_, _, sd, rp, _) in scored.into_iter().take(over as usize) {
-                    conn.execute(
-                        "DELETE FROM browse_history WHERE source_descriptor = ?1 AND rel_path = ?2",
-                        rusqlite::params![sd, rp],
-                    )?;
-                    deleted_by_count += 1;
-                }
-            }
-        }
-    }
-
-    let remaining = count_history(conn)?;
-    Ok(HistoryCleanupResult {
-        deleted_by_days,
-        deleted_by_count,
-        remaining,
-        protected_exceeds_limit: protected_exceeds,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 建一个跑完所有 migration 的 in-memory DB。
-    fn test_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        crate::db::migrations::run(&conn).unwrap();
-        conn
+    /// 建一个跑完所有 migration 的 in-memory DB（审查修复 #4：run_history_cleanup 接 &Db）。
+    fn test_db() -> crate::db::Db {
+        crate::db::Db::open_in_memory().expect("in-memory db with migrations")
     }
 
-    fn insert_history(conn: &Connection, sd: &str, rel: &str, name: &str, visited: i64, vc: i64) {
+    fn insert_history(db: &crate::db::Db, sd: &str, rel: &str, name: &str, visited: i64, vc: i64) {
+        let conn = db.conn();
         conn.execute(
             "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, visit_count)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -312,7 +363,8 @@ mod tests {
         .unwrap();
     }
 
-    fn history_exists(conn: &Connection, sd: &str, rel: &str) -> bool {
+    fn history_exists(db: &crate::db::Db, sd: &str, rel: &str) -> bool {
+        let conn = db.conn();
         conn.query_row(
             "SELECT 1 FROM browse_history WHERE source_descriptor=?1 AND rel_path=?2",
             rusqlite::params![sd, rel],
@@ -321,7 +373,8 @@ mod tests {
         .is_ok()
     }
 
-    fn insert_shortcut(conn: &Connection, sd: &str, rel: &str) {
+    fn insert_shortcut(db: &crate::db::Db, sd: &str, rel: &str) {
+        let conn = db.conn();
         conn.execute(
             "INSERT INTO shortcut (source_descriptor_json, rel_path, alias, icon_hint, created_at)
              VALUES (?1, ?2, 'a', 'local', 1)",
@@ -330,7 +383,8 @@ mod tests {
         .unwrap();
     }
 
-    fn insert_library(conn: &Connection, sd: &str, abs_path: &str) {
+    fn insert_library(db: &crate::db::Db, sd: &str, abs_path: &str) -> i64 {
+        let conn = db.conn();
         conn.execute(
             "INSERT INTO library (title, source_descriptor, source_type, absolute_path,
                  cover_entry_path, cover_entry_name, page_count, last_read_at, added_at, is_favorite)
@@ -338,9 +392,16 @@ mod tests {
             rusqlite::params![sd, abs_path],
         )
         .unwrap();
+        conn.query_row::<i64, _, _>(
+            "SELECT id FROM library WHERE absolute_path=?1",
+            [abs_path],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
-    fn insert_progress(conn: &Connection, book_id: i64) {
+    fn insert_progress(db: &crate::db::Db, book_id: i64) {
+        let conn = db.conn();
         conn.execute(
             "INSERT INTO progress (book_id, page, reader_mode, updated_at) VALUES (?1, 0, 'single', 1)",
             [book_id],
@@ -348,7 +409,8 @@ mod tests {
         .unwrap();
     }
 
-    fn library_exists(conn: &Connection, sd: &str, abs_path: &str) -> bool {
+    fn library_exists(db: &crate::db::Db, sd: &str, abs_path: &str) -> bool {
+        let conn = db.conn();
         conn.query_row(
             "SELECT 1 FROM library WHERE source_descriptor=?1 AND absolute_path=?2",
             rusqlite::params![sd, abs_path],
@@ -357,7 +419,8 @@ mod tests {
         .is_ok()
     }
 
-    fn shortcut_exists(conn: &Connection, sd: &str, rel: &str) -> bool {
+    fn shortcut_exists(db: &crate::db::Db, sd: &str, rel: &str) -> bool {
+        let conn = db.conn();
         conn.query_row(
             "SELECT 1 FROM shortcut WHERE source_descriptor_json=?1 AND rel_path=?2",
             rusqlite::params![sd, rel],
@@ -401,165 +464,144 @@ mod tests {
 
     // —— 清理：天数规则 ——
 
+    fn count(db: &crate::db::Db) -> i64 {
+        count_history(&db.conn()).unwrap()
+    }
+
     #[test]
     fn cleanup_deletes_over_retention_days_regardless_of_score() {
-        let conn = test_db();
+        let db = test_db();
         let now = 1_000_000_000i64;
-        // 100 天前 + 高频（visit_count=100）—— 天数规则无条件删
-        insert_history(&conn, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 100);
-        // 1 天前 —— 保留
-        insert_history(&conn, "{\"type\":\"local\"}", "/b", "B", now - 1 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 100);
+        insert_history(&db, "{\"type\":\"local\"}", "/b", "B", now - 1 * 86400, 1);
 
         let cfg = HistoryRetentionConfig {
             max_entries: 0,
             retention_days: 30,
             protect_days: 7,
         };
-        let res = run_history_cleanup(&conn, now, &cfg).unwrap();
+        let res = run_history_cleanup(&db, now, &cfg).unwrap();
         assert_eq!(res.deleted_by_days, 1, "天数规则应删 1 行");
-        assert!(!history_exists(&conn, "{\"type\":\"local\"}", "/a"));
-        assert!(history_exists(&conn, "{\"type\":\"local\"}", "/b"));
+        assert!(!history_exists(&db, "{\"type\":\"local\"}", "/a"));
+        assert!(history_exists(&db, "{\"type\":\"local\"}", "/b"));
     }
-
-    // —— 清理：保护窗口阻止条数淘汰 ——
 
     #[test]
     fn cleanup_protect_window_blocks_count_deletion() {
-        let conn = test_db();
+        let db = test_db();
         let now = 1_000_000_000i64;
-        // 3 行都在保护窗口内（1 天前），max_entries=2 超限 1，但保护窗口内不删
-        insert_history(&conn, "{\"type\":\"local\"}", "/a", "A", now - 1 * 86400, 1);
-        insert_history(&conn, "{\"type\":\"local\"}", "/b", "B", now - 1 * 86400, 1);
-        insert_history(&conn, "{\"type\":\"local\"}", "/c", "C", now - 1 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/a", "A", now - 1 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/b", "B", now - 1 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/c", "C", now - 1 * 86400, 1);
 
         let cfg = HistoryRetentionConfig {
             max_entries: 2,
             retention_days: 0,
             protect_days: 7,
         };
-        let res = run_history_cleanup(&conn, now, &cfg).unwrap();
+        let res = run_history_cleanup(&db, now, &cfg).unwrap();
         assert_eq!(res.deleted_by_count, 0, "保护窗口内不应有条数删除");
         assert!(
             res.protected_exceeds_limit,
             "保护记录已超上限应标记 protected_exceeds_limit"
         );
-        assert_eq!(count_history(&conn).unwrap(), 3, "三行都应保留");
+        assert_eq!(count(&db), 3, "三行都应保留");
     }
-
-    // —— 清理：条数淘汰按评分 ASC ——
 
     #[test]
     fn cleanup_count_deletes_lowest_score_first() {
-        let conn = test_db();
+        let db = test_db();
         let now = 1_000_000_000i64;
-        // 4 行，max_entries=2 需删 2。都在保护窗口外（protect_days=7，全部 ≥10 天前）
-        // /a 最老+低频 → 最低分，先删
-        insert_history(&conn, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 1);
-        // /b 较老+低频 → 次低，删
-        insert_history(&conn, "{\"type\":\"local\"}", "/b", "B", now - 90 * 86400, 1);
-        // /c 高频 → 保留
-        insert_history(&conn, "{\"type\":\"local\"}", "/c", "C", now - 80 * 86400, 50);
-        // /d 近期+高频 → 保留
-        insert_history(&conn, "{\"type\":\"local\"}", "/d", "D", now - 10 * 86400, 50);
+        insert_history(&db, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/b", "B", now - 90 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/c", "C", now - 80 * 86400, 50);
+        insert_history(&db, "{\"type\":\"local\"}", "/d", "D", now - 10 * 86400, 50);
 
         let cfg = HistoryRetentionConfig {
             max_entries: 2,
             retention_days: 0,
             protect_days: 7,
         };
-        let res = run_history_cleanup(&conn, now, &cfg).unwrap();
+        let res = run_history_cleanup(&db, now, &cfg).unwrap();
         assert_eq!(res.deleted_by_count, 2);
-        assert!(!history_exists(&conn, "{\"type\":\"local\"}", "/a"), "/a 应删");
-        assert!(!history_exists(&conn, "{\"type\":\"local\"}", "/b"), "/b 应删");
-        assert!(history_exists(&conn, "{\"type\":\"local\"}", "/c"), "/c 高频保留");
-        assert!(history_exists(&conn, "{\"type\":\"local\"}", "/d"), "/d 近期高频保留");
+        assert!(!history_exists(&db, "{\"type\":\"local\"}", "/a"), "/a 应删");
+        assert!(!history_exists(&db, "{\"type\":\"local\"}", "/b"), "/b 应删");
+        assert!(history_exists(&db, "{\"type\":\"local\"}", "/c"), "/c 高频保留");
+        assert!(history_exists(&db, "{\"type\":\"local\"}", "/d"), "/d 近期高频保留");
         assert_eq!(res.remaining, 2);
     }
 
-    // —— 清理：pin 提升生存优先级 ——
-
     #[test]
     fn cleanup_pin_gives_pinned_higher_survival_priority() {
-        let conn = test_db();
+        let db = test_db();
         let now = 1_000_000_000i64;
-        // 两行完全一样（同时间/同频次），/a 被 shortcut pin，/b 不 pin
-        insert_history(&conn, "{\"type\":\"local\"}", "/a", "A", now - 50 * 86400, 5);
-        insert_history(&conn, "{\"type\":\"local\"}", "/b", "B", now - 50 * 86400, 5);
-        insert_shortcut(&conn, "{\"type\":\"local\"}", "/a"); // pin /a
+        insert_history(&db, "{\"type\":\"local\"}", "/a", "A", now - 50 * 86400, 5);
+        insert_history(&db, "{\"type\":\"local\"}", "/b", "B", now - 50 * 86400, 5);
+        insert_shortcut(&db, "{\"type\":\"local\"}", "/a");
 
         let cfg = HistoryRetentionConfig {
             max_entries: 1,
             retention_days: 0,
             protect_days: 7,
         };
-        let res = run_history_cleanup(&conn, now, &cfg).unwrap();
+        let res = run_history_cleanup(&db, now, &cfg).unwrap();
         assert_eq!(res.deleted_by_count, 1);
-        assert!(history_exists(&conn, "{\"type\":\"local\"}", "/a"), "pin 的 /a 应保留");
-        assert!(!history_exists(&conn, "{\"type\":\"local\"}", "/b"), "未 pin 的 /b 先删");
+        assert!(history_exists(&db, "{\"type\":\"local\"}", "/a"), "pin 的 /a 应保留");
+        assert!(!history_exists(&db, "{\"type\":\"local\"}", "/b"), "未 pin 的 /b 先删");
     }
-
-    // —— 清理：不触碰其他表（spec §2/§9）——
 
     #[test]
     fn cleanup_does_not_touch_library_shortcut_progress() {
-        let conn = test_db();
+        let db = test_db();
         let now = 1_000_000_000i64;
-        insert_history(&conn, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 1);
-        // 对应 library / shortcut 行（pin 来源，清理历史不应删它们）
-        insert_library(&conn, "{\"type\":\"local\"}", "/a");
-        insert_shortcut(&conn, "{\"type\":\"local\"}", "/a");
-        // 独立 progress 行
-        let book_id: i64 = conn
-            .query_row(
-                "SELECT id FROM library WHERE absolute_path='/a'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        insert_progress(&conn, book_id);
+        insert_history(&db, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 1);
+        let book_id = insert_library(&db, "{\"type\":\"local\"}", "/a");
+        insert_shortcut(&db, "{\"type\":\"local\"}", "/a");
+        insert_progress(&db, book_id);
 
         let cfg = HistoryRetentionConfig {
             max_entries: 0,
             retention_days: 30,
             protect_days: 7,
         };
-        let res = run_history_cleanup(&conn, now, &cfg).unwrap();
+        let res = run_history_cleanup(&db, now, &cfg).unwrap();
         assert_eq!(res.deleted_by_days, 1, "历史行应删");
-        assert!(!history_exists(&conn, "{\"type\":\"local\"}", "/a"));
+        assert!(!history_exists(&db, "{\"type\":\"local\"}", "/a"));
 
-        // library / shortcut / progress 全部保留
-        assert!(library_exists(&conn, "{\"type\":\"local\"}", "/a"), "library 行不应删");
-        assert!(shortcut_exists(&conn, "{\"type\":\"local\"}", "/a"), "shortcut 行不应删");
-        let prog: i64 = conn
-            .query_row(
+        assert!(library_exists(&db, "{\"type\":\"local\"}", "/a"), "library 行不应删");
+        assert!(shortcut_exists(&db, "{\"type\":\"local\"}", "/a"), "shortcut 行不应删");
+        let prog: i64 = {
+            let conn = db.conn();
+            conn.query_row(
                 "SELECT COUNT(*) FROM progress WHERE book_id=?1",
                 [book_id],
                 |r| r.get(0),
             )
-            .unwrap();
+            .unwrap()
+        };
         assert_eq!(prog, 1, "progress 行不应删");
     }
 
-    // —— 预览：只读，不改数据 ——
-
     #[test]
     fn preview_does_not_modify_data() {
-        let conn = test_db();
+        let db = test_db();
         let now = 1_000_000_000i64;
-        insert_history(&conn, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 1);
-        insert_history(&conn, "{\"type\":\"local\"}", "/b", "B", now - 1 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/a", "A", now - 100 * 86400, 1);
+        insert_history(&db, "{\"type\":\"local\"}", "/b", "B", now - 1 * 86400, 1);
 
         let cfg = HistoryRetentionConfig {
             max_entries: 1,
             retention_days: 30,
             protect_days: 7,
         };
-        let p = preview_history_cleanup(&conn, now, &cfg).unwrap();
+        let p = {
+            let conn = db.conn();
+            preview_history_cleanup(&conn, now, &cfg).unwrap()
+        };
         assert_eq!(p.total, 2);
         assert_eq!(p.days_candidates, 1, "/a 超天数");
         assert_eq!(p.to_delete(), 1);
-        // 预览后数据原封不动
-        assert_eq!(count_history(&conn).unwrap(), 2);
-        assert!(history_exists(&conn, "{\"type\":\"local\"}", "/a"));
+        assert_eq!(count(&db), 2);
+        assert!(history_exists(&db, "{\"type\":\"local\"}", "/a"));
     }
 }

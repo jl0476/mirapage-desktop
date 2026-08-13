@@ -236,25 +236,17 @@ pub fn evict_to_limit(
         if (index::total_bytes(conn)? as i64) <= target {
             break;
         }
-        // 候选：稳定排序，单批最多 256 行，到 need_to_free 即停
-        let batch = index::oldest_until_bytes(conn, target)?;
+        // 候选：稳定排序，单批最多 256 行，到 need_to_free 即停；
+        // protected 在 SQL 层 NOT IN 排除（审查修复 #2），能扫到可删项而非卡在最旧批
+        let batch = index::oldest_until_bytes(conn, target, protected_keys)?;
         if batch.is_empty() {
-            break;
+            break; // 已无可删的非 protected 项
         }
-        // 过滤 protected
-        let to_delete: Vec<&index::ThumbnailCacheRow> = batch
-            .iter()
-            .filter(|c| !protected_keys.contains(&c.cache_key))
-            .collect();
-        if to_delete.is_empty() {
-            // 本批全 protected：无法继续回收，退出避免死循环
-            break;
-        }
-        let keys: Vec<String> = to_delete.iter().map(|c| c.cache_key.clone()).collect();
+        let keys: Vec<String> = batch.iter().map(|c| c.cache_key.clone()).collect();
         // ① DB 索引删除（事务内，同步扣减 total_bytes 计数）
         let freed = index::remove_batch(conn, &keys)? as u64;
         // ② 文件删除（事务提交后）
-        for c in &to_delete {
+        for c in &batch {
             let _ = std::fs::remove_file(cache_root.join(&c.cache_rel_path));
         }
         freed_total += freed;

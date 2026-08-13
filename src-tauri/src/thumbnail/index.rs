@@ -251,18 +251,36 @@ pub fn total_bytes(conn: &Connection) -> rusqlite::Result<i64> {
 pub fn oldest_until_bytes(
     conn: &Connection,
     keep_bytes: i64,
+    protected: &std::collections::HashSet<String>,
 ) -> rusqlite::Result<Vec<ThumbnailCacheRow>> {
+    // v0.1.0-database-retention-and-cleanup 审查修复：protected 在 SQL 层 NOT IN 排除，
+    // 这样能扫到 protected 之外的较新可删项，而非只在最旧 256 行里 skip 后卡住
+    // （否则最旧批全 protected 时会放弃，缓存长期超限）。
     const SCAN_CAP: i64 = 256;
     let total = total_bytes(conn)?;
     if total <= keep_bytes {
         return Ok(vec![]);
     }
     let need_to_free = total - keep_bytes;
-    let sql = format!(
-        "SELECT {ALL_COLUMNS} FROM thumbnail_cache ORDER BY last_accessed_at ASC, cache_key ASC LIMIT ?1"
+    let mut sql = format!(
+        "SELECT {ALL_COLUMNS} FROM thumbnail_cache"
     );
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if !protected.is_empty() {
+        let placeholders = (0..protected.len())
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(",");
+        sql.push_str(&format!(" WHERE cache_key NOT IN ({placeholders})"));
+        for k in protected.iter() {
+            args.push(Box::new(k.clone()));
+        }
+    }
+    sql.push_str(" ORDER BY last_accessed_at ASC, cache_key ASC LIMIT ?");
+    args.push(Box::new(SCAN_CAP));
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![SCAN_CAP], row_from_db)?;
+    let params = rusqlite::params_from_iter(args.iter().map(|b| b.as_ref()));
+    let rows = stmt.query_map(params, row_from_db)?;
     let mut result = Vec::new();
     let mut freed: i64 = 0;
     for r in rows {
@@ -485,7 +503,7 @@ mod tests {
         upsert(&conn, &sample_row("aa00", 1, 100)).unwrap(); // A
         upsert(&conn, &sample_row("bb00", 2, 200)).unwrap(); // B
         upsert(&conn, &sample_row("cc00", 3, 300)).unwrap(); // C
-        let evict = oldest_until_bytes(&conn, 400).unwrap();
+        let evict = oldest_until_bytes(&conn, 400, &Default::default()).unwrap();
         // 最旧优先：A(100) 不够，再加 B(累计 300 >= 200) 停止 -> [A, B]
         assert_eq!(evict.len(), 2);
         assert_eq!(evict[0].cache_key, "aa00");
@@ -501,7 +519,7 @@ mod tests {
     fn oldest_until_bytes_empty_when_under_keep() {
         let conn = open();
         upsert(&conn, &sample_row("aa00", 1, 100)).unwrap();
-        assert!(oldest_until_bytes(&conn, 1000).unwrap().is_empty());
+        assert!(oldest_until_bytes(&conn, 1000, &Default::default()).unwrap().is_empty());
     }
 
     #[test]
@@ -667,10 +685,26 @@ mod tests {
         upsert(&conn, &sample_row("cc00", 5, 100)).unwrap(); // t=5
         upsert(&conn, &sample_row("aa00", 5, 100)).unwrap(); // t=5（同时间，key 靠前）
         upsert(&conn, &sample_row("bb00", 5, 100)).unwrap(); // t=5
-        let evict = oldest_until_bytes(&conn, 0).unwrap(); // 全删
+        let evict = oldest_until_bytes(&conn, 0, &Default::default()).unwrap(); // 全删
         assert_eq!(evict[0].cache_key, "aa00");
         assert_eq!(evict[1].cache_key, "bb00");
         assert_eq!(evict[2].cache_key, "cc00");
+    }
+
+    #[test]
+    fn oldest_until_bytes_skips_protected_and_continues() {
+        // 审查修复 #2：最旧的被 protected 时，应跳过它继续找可删项，而非卡在最旧批
+        let conn = open();
+        upsert(&conn, &sample_row("aa00", 1, 100)).unwrap(); // 最旧，将标 protected
+        upsert(&conn, &sample_row("bb00", 2, 100)).unwrap();
+        upsert(&conn, &sample_row("cc00", 3, 100)).unwrap();
+        let mut protected = std::collections::HashSet::new();
+        protected.insert("aa00".to_string());
+        // keep=0 → 需释放全部 300；aa00 protected 被排除 → 返回 bb00+cc00
+        let evict = oldest_until_bytes(&conn, 0, &protected).unwrap();
+        let keys: Vec<_> = evict.iter().map(|r| r.cache_key.as_str()).collect();
+        assert!(!keys.contains(&"aa00"), "protected aa00 应被跳过");
+        assert!(keys.contains(&"bb00") && keys.contains(&"cc00"), "应继续返回可删项");
     }
 
     #[test]
