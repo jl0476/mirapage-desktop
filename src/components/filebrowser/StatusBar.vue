@@ -9,7 +9,13 @@
  *
  * v0.1.0-module3.1.1 (三段等宽):
  *  - 左/中/右 各 flex-1 等宽, 中段 justify-center 让路径真正居中
- *  - 右段 slot name="right" 占位(任务 2 填下一卷内容后移除 slot)
+ *  - 右段 slot name="right" 占位 → 任务 2 已移除 slot, 改为内部渲染下一卷按钮
+ *
+ * v0.1.0-module3.1.1 (任务 2 功能 B 展示层):
+ *  - 接收 nextVolumeTitle / nextVolumeLoading / nextVolumeDisabled props
+ *  - emit next-volume
+ *  - 右段四态: undefined 不渲染 / loading 「…」 / null 「已是最后一卷」灰 disabled /
+ *    有值「下一卷: {title}」可点
  */
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -22,8 +28,21 @@ interface Props {
   currentPath: string;
   /** v0.1.0-module3.0.3: 父级可覆盖左段文案 (搜索态显示 "找到 N 项") */
   itemsText?: string;
+  /** 预查到的下一卷名; null=无下一卷(查完确定); undefined=未传入(不渲染右段) */
+  nextVolumeTitle?: string | null;
+  /** 预查中(防抖/在途), 右段显示「…」 */
+  nextVolumeLoading?: boolean;
+  /** 禁用点击: swapping/根目录/无 lastFetchedPath */
+  nextVolumeDisabled?: boolean;
 }
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  itemsText: undefined,
+  nextVolumeTitle: undefined,
+  nextVolumeLoading: false,
+  nextVolumeDisabled: false,
+});
+
+const emit = defineEmits<{ (e: 'next-volume'): void }>();
 
 const { t } = useI18n();
 
@@ -34,6 +53,18 @@ const selectedLabel = computed(() =>
   t('fileBrowser.statusBar.selected', { count: props.selectedCount }),
 );
 const selectionSizeLabel = computed(() => formatBytes(props.selectionSizeBytes));
+
+const nextVolumeLabel = computed(() => {
+  // loading 优先于 undefined: 预查中尚不知标题, 也需显示「…」(测试要求)
+  if (props.nextVolumeLoading) return '…';
+  if (props.nextVolumeTitle === undefined) return null; // 不渲染
+  if (props.nextVolumeTitle === null) return t('fileBrowser.statusBar.noNextVolume');
+  return t('fileBrowser.statusBar.nextVolume', { title: props.nextVolumeTitle });
+});
+
+const nextVolumeDisabledActual = computed(() =>
+  props.nextVolumeDisabled || props.nextVolumeTitle === null || props.nextVolumeLoading,
+);
 </script>
 
 <template>
@@ -63,9 +94,27 @@ const selectionSizeLabel = computed(() => formatBytes(props.selectionSizeBytes))
     >
       <span class="truncate opacity-80 font-mono">{{ currentPath }}</span>
     </div>
-    <!-- Right: 下一卷 (flex-1, 右对齐) - 任务 2 填内容, 此任务先 slot 占位保持对称 -->
+    <!-- Right: 下一卷 (flex-1, 右对齐) -->
     <div class="flex-1 flex items-center justify-end min-w-0" data-test="statusbar-right">
-      <slot name="right" />
+      <button
+        v-if="nextVolumeLabel !== null"
+        data-test="statusbar-next-volume"
+        type="button"
+        class="next-volume-btn flex items-center gap-1 px-2 py-0.5 text-text-muted hover:text-accent hover:bg-surface-light transition-colors disabled:text-text-tertiary disabled:hover:bg-transparent disabled:cursor-not-allowed"
+        :disabled="nextVolumeDisabledActual"
+        :title="nextVolumeLabel"
+        @click="emit('next-volume')"
+      >
+        <span class="next-volume-name truncate">{{ nextVolumeLabel }}</span>
+        <svg
+          v-if="nextVolumeTitle"
+          width="12" height="12" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M5 4l10 8-10 8V4zM19 5v14" />
+        </svg>
+      </button>
     </div>
   </footer>
 </template>

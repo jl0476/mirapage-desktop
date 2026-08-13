@@ -181,6 +181,9 @@ export default {
       items: '共 {count} 项',
       selected: '已选 {count} 项',
       path: '当前路径',
+      // v0.1.0-module3.1.1 (任务 2): 底栏右段下一卷 (功能 B 展示层)
+      nextVolume: '下一卷: {title}',
+      noNextVolume: '已是最后一卷',
     },
   },
   library: {

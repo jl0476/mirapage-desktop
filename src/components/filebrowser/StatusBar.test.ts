@@ -80,3 +80,50 @@ describe('StatusBar.vue', () => {
     expect(right.querySelector('[data-test="statusbar-next-volume"]')).toBeNull();
   });
 });
+
+describe('StatusBar 下一卷右段', () => {
+  const base = { total: 12, selectedCount: 0, selectionSizeBytes: 0, currentPath: 'D:/p' };
+
+  it('nextVolumeTitle 有值: 显示「下一卷: title」, 点击 emit next-volume', async () => {
+    const wrapper = mount(StatusBar, {
+      props: { ...base, nextVolumeTitle: 'vol02' },
+      global: { plugins: [i18n] },
+    });
+    const btn = wrapper.find('[data-test="statusbar-next-volume"]');
+    expect(btn.text()).toContain('vol02');
+    await btn.trigger('click');
+    expect(wrapper.emitted('next-volume')).toHaveLength(1);
+  });
+
+  it('nextVolumeTitle=null: 显示「已是最后一卷」灰 disabled', () => {
+    const wrapper = mount(StatusBar, {
+      props: { ...base, nextVolumeTitle: null },
+      global: { plugins: [i18n] },
+    });
+    const el = wrapper.find('[data-test="statusbar-next-volume"]');
+    expect(el.attributes('disabled')).toBeDefined();
+    expect(el.text()).toContain('最后一卷');
+  });
+
+  it('nextVolumeLoading=true: 显示「…」', () => {
+    const wrapper = mount(StatusBar, {
+      props: { ...base, nextVolumeLoading: true },
+      global: { plugins: [i18n] },
+    });
+    const el = wrapper.find('[data-test="statusbar-next-volume"]');
+    expect(el.text()).toContain('…');
+  });
+
+  it('nextVolumeTitle=undefined: 右段无 next-volume 元素(兼容)', () => {
+    const wrapper = mount(StatusBar, { props: base, global: { plugins: [i18n] } });
+    expect(wrapper.find('[data-test="statusbar-next-volume"]').exists()).toBe(false);
+  });
+
+  it('nextVolumeDisabled=true: 有 title 但 disabled', () => {
+    const wrapper = mount(StatusBar, {
+      props: { ...base, nextVolumeTitle: 'vol02', nextVolumeDisabled: true },
+      global: { plugins: [i18n] },
+    });
+    expect(wrapper.find('[data-test="statusbar-next-volume"]').attributes('disabled')).toBeDefined();
+  });
+});

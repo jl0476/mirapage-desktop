@@ -179,6 +179,9 @@ export default {
       items: '{count} items',
       selected: '{count} selected',
       path: 'Current path',
+      // v0.1.0-module3.1.1 (Task 2): statusbar right next-volume (feature B display layer)
+      nextVolume: 'Next volume: {title}',
+      noNextVolume: 'Already last volume',
     },
   },
   library: {
