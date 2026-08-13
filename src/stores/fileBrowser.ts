@@ -19,6 +19,7 @@ import { log } from '@/lib/logger';
 import { sortEntries, type SortField } from '@/lib/fileSort';
 import { getSetting, setSetting } from '@/lib/tauri';
 import { useDirectorySortStore } from '@/stores/directorySort';
+import { useShortcutsStore } from '@/stores/shortcuts';
 import { validateSourceRelativePath } from '@/lib/relativePath';
 import type { MediaEntry, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
@@ -31,6 +32,15 @@ export type FileBrowserError =
 // 老值 list/grid 仅用于历史持久化兼容 (loadLayout fallback → details).
 // UI 彻底清理 (删 grid/list 分支 + ViewModeDropdown) 留 E2-E4.
 export type ViewMode = 'details' | 'masonry';
+
+// ─── v0.1.0-module3.0.10: likes「浏览」跳转意图（一次性）───
+// Likes.vue 点「浏览」→ requestOpenLocation + push('/')；FileBrowser.onMounted
+// 在 loadLayout 之后 consume（spec §4.3：消费点后置让 setViewMode('masonry')
+// 不被 loadLayout 读到的旧持久化值覆盖）。
+export interface PendingOpenLocation {
+  rootPath: string;
+  relPath: string;
+}
 
 // ─── v0.1.0-module3.0.4-virtuallist Phase 3 ───
 // FileList 组件实例方法 scrollToPath 通过模块级 callback 注册机制反向传给 store.
@@ -217,6 +227,27 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       await navigate(normPath);
     }
     return true;
+  }
+
+  // ─── v0.1.0-module3.0.10: likes「浏览」跳转意图（一次性）───
+  // 类型 PendingOpenLocation 定义在模块顶层（函数体内不允许 export 声明）。
+  const pendingOpenLocation = ref<PendingOpenLocation | null>(null);
+
+  function requestOpenLocation(rootPath: string, relPath: string): void {
+    pendingOpenLocation.value = { rootPath, relPath };
+    // 显式新意图取代两类陈旧导航意图（spec 审查必须修复项）：
+    // 1. reader 残留的 savedNavigationContext —— 否则本跳转 early-return 跳过
+    //    restoreNavigationContext 后旧上下文滞留 store，下次挂载 '/' 会把用户拽回旧目录
+    savedNavigationContext.value = null;
+    // 2. shortcuts.activeId —— lastOpenedShortcutId 是 FileBrowser 组件局部变量，
+    //    重挂载即重置失效；不清 activeId 的话离开再回 '/' 会重放旧快捷方式
+    useShortcutsStore().clearActive();
+  }
+
+  function consumePendingOpenLocation(): PendingOpenLocation | null {
+    const p = pendingOpenLocation.value;
+    pendingOpenLocation.value = null;
+    return p;
   }
 
   // ─── v0.1.0-module1.22: sort/viewMode/hideFinished actions ──
@@ -434,6 +465,10 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     // v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复
     saveNavigationContext,
     restoreNavigationContext,
+    // v0.1.0-module3.0.10: likes「浏览」跳转意图（一次性）
+    pendingOpenLocation,
+    requestOpenLocation,
+    consumePendingOpenLocation,
     // sort/viewMode/hideFinished
     setSortField,
     toggleSortOrder,

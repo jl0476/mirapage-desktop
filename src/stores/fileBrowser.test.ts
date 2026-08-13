@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useFileBrowserStore, setScrollToIndexCallback } from './fileBrowser';
 import { listDirectory, getSetting, setSetting } from '@/lib/tauri';
+import { useShortcutsStore } from '@/stores/shortcuts';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 vi.mock('@/lib/tauri', async () => {
@@ -766,5 +767,41 @@ describe('fileBrowser store — pathIndex 暴露 + scrollToPath action + setScro
     setScrollToIndexCallback(cb);
     fb.scrollToPath('nonexistent');
     expect(cb).not.toHaveBeenCalled();
+  });
+});
+
+describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+  });
+
+  it('requestOpenLocation 写入 → consume 返回并清空（一次性）', () => {
+    const store = useFileBrowserStore();
+    store.requestOpenLocation('C:/comics', 'VOL.11');
+    expect(store.consumePendingOpenLocation()).toEqual({ rootPath: 'C:/comics', relPath: 'VOL.11' });
+    expect(store.consumePendingOpenLocation()).toBeNull();
+  });
+
+  it('无意图时 consume 返回 null', () => {
+    const store = useFileBrowserStore();
+    expect(store.consumePendingOpenLocation()).toBeNull();
+  });
+
+  it('requestOpenLocation 清空 savedNavigationContext（新意图取代残留上下文）', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/old');
+    store.saveNavigationContext();
+    store.requestOpenLocation('C:/comics', '');
+    expect(await store.restoreNavigationContext()).toBe(false);
+  });
+
+  it('requestOpenLocation 清空 shortcuts.activeId（防重挂载重放旧快捷方式）', () => {
+    const store = useFileBrowserStore();
+    const shortcuts = useShortcutsStore();
+    shortcuts.setActive(3);
+    store.requestOpenLocation('C:/comics', '');
+    expect(shortcuts.activeId).toBeNull();
   });
 });
