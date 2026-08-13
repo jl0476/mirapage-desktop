@@ -9,6 +9,7 @@ mod algorithm;
 mod commands;
 mod db;
 mod log;
+mod maintenance;
 mod source;
 pub mod thumbnail;
 
