@@ -878,4 +878,81 @@ describe('ReaderView.vue', () => {
     expect(setFavorite).toHaveBeenCalledTimes(2);
     expect(menu.props('isLiked')).toBe(false);
   });
+
+  // v0.1.0-module3.0.7 round-4 P1: 并发竞态修复
+  // 若无 in-flight guard,用户在 await setFavorite 期间再次点击会触发两次调用,
+  // 都基于同一个旧 isFavorite 计算 nextFav,写出重复值。
+  // 修复后 in-flight 期间第二次 emit 被静默忽略。
+  it('onToggleLike in-flight 期间第二次 emit 被忽略(setFavorite 只调 1 次)', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockResolvedValue({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+
+    // 关键: mock setFavorite 返回 pending promise,模拟慢 IPC(让第一次 onToggleLike 卡在 await)
+    let resolveFirst!: () => void;
+    vi.mocked(setFavorite).mockReset();
+    vi.mocked(setFavorite).mockImplementation(() => new Promise<void>((r) => { resolveFirst = r; }));
+
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const wrapper = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    const menu = wrapper.findComponent({ name: 'ReaderMainMenu' });
+
+    // 第一次 emit: 进入 onToggleLike → 跑到 await setFavorite(被 pending 卡住)
+    menu.vm.$emit('toggle-like');
+    await flushPromises();
+    expect(setFavorite).toHaveBeenCalledTimes(1);
+    expect(setFavorite).toHaveBeenCalledWith(7, true);
+    // book ref 还未更新(await 还没完成)
+    expect(menu.props('isLiked')).toBe(false);
+
+    // 第二次 emit(关键测试): in-flight guard 应忽略,setFavorite 不再被调
+    menu.vm.$emit('toggle-like');
+    await flushPromises();
+    expect(setFavorite).toHaveBeenCalledTimes(1);  // 仍然只 1 次
+
+    // resolve 第一次 IPC,onToggleLike 完成,book ref 同步
+    resolveFirst();
+    await flushPromises();
+    expect(setFavorite).toHaveBeenCalledTimes(1);  // 仍 1 次
+    expect(menu.props('isLiked')).toBe(true);  // 现在 book.isFavorite=true
+
+    // in-flight 已释放,可以再 toggle
+    vi.mocked(setFavorite).mockResolvedValue(undefined);
+    menu.vm.$emit('toggle-like');
+    await flushPromises();
+    expect(setFavorite).toHaveBeenCalledTimes(2);  // 现在第 2 次
+    expect(setFavorite).toHaveBeenNthCalledWith(2, 7, false);
+    expect(menu.props('isLiked')).toBe(false);
+  });
 });

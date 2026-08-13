@@ -63,6 +63,10 @@ const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
 // 需求4-C: 模板访问 book.isFavorite / book.id, loadBook 写入此 ref
 const book = ref<Awaited<ReturnType<typeof getBook>> | null>(null);
+// v0.1.0-module3.0.7 round-4 P1: onToggleLike 的 in-flight guard。
+// 防止用户快速重开菜单双击导致两次都基于旧 isFavorite 计算 nextFav,
+// 写出重复值(如 setFavorite(id,true) × 2)无法取消喜欢。
+const likeToggleInFlight = ref(false);
 // 需求4-A: 右键轻量上下文菜单
 const ctxMenu = ref({ visible: false, x: 0, y: 0 });
 // v0.1.0-module3.0.3-hotfix3 (Bug 4): back btn 视觉反馈, 防止双击 & 让用户知道在跳转
@@ -136,12 +140,23 @@ function onToggleSlideshowDirection(): void {
 // v0.1.0-module3.0.7: Reader 主菜单 ❤️ toggle handler。
 // 关键: IPC 成功后同步本地 book ref,否则同会话无法反复切换
 // (book 是 get_book 单次查的快照,不刷则下次点击仍读旧 isFavorite,
-//  第二次会再写 setFavorite(id, true),无法取消喜欢 — 代码审查 P1 反馈)。
+//  第二次会再写 setFavorite(id, true),无法取消喜欢 — round-1 P1 反馈)。
+//
+// round-4 P1 并发竞态修复: in-flight guard 防止重入。
+// 若无 guard,用户在 await setFavorite 期间再次点击,两次都基于同一个旧值
+// 计算 nextFav,会写出重复值。guard 让第二次点击被静默忽略(IPC 本地 ~10ms,
+// 用户从关菜单到再开菜单通常 >100ms,感知不到)。
 async function onToggleLike(): Promise<void> {
   if (!book.value?.id) return;
-  const nextFav = !book.value.isFavorite;
-  await setFavorite(book.value.id, nextFav);
-  book.value = { ...book.value, isFavorite: nextFav };
+  if (likeToggleInFlight.value) return;
+  likeToggleInFlight.value = true;
+  try {
+    const nextFav = !book.value.isFavorite;
+    await setFavorite(book.value.id, nextFav);
+    book.value = { ...book.value, isFavorite: nextFav };
+  } finally {
+    likeToggleInFlight.value = false;
+  }
 }
 
 // v0.1.0-reader-review: 跳页 dialog
