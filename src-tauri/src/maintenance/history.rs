@@ -107,29 +107,56 @@ struct Candidate {
     pinned: bool,
 }
 
-/// 取出保护窗口外、需要参与条数淘汰评分的候选行。
-/// `protect_cutoff`：保护窗口下界（last_visited_at >= protect_cutoff 的行受保护，不参与）。
+/// 取出保护窗口外、且**未过期**（不会被天数规则删除）的候选行，参与条数淘汰评分。
+///
+/// 审查修复（#4 重构引入的 bug）：候选必须排除过期行，否则
+/// ①过期记录本已把总数降到上限内，仍会按 count 多删未过期记录；
+/// ②被天数规则删掉的候选还会虚增 deleted_by_count。
+/// - `protect_cutoff`：保护窗口下界（last_visited_at >= 它的近期行受保护）
+/// - `days_cutoff`：天数规则上界（last_visited_at < 它的过期行会被天数删，排除）
 fn fetch_count_candidates(
     conn: &Connection,
     protect_cutoff: i64,
+    days_cutoff: Option<i64>,
 ) -> rusqlite::Result<Vec<Candidate>> {
-    let mut stmt = conn.prepare(
-        "SELECT bh.source_descriptor, bh.rel_path, bh.last_visited_at, bh.visit_count,
-                CASE WHEN EXISTS (
-                        SELECT 1 FROM shortcut
-                        WHERE shortcut.source_descriptor_json = bh.source_descriptor
-                          AND shortcut.rel_path = bh.rel_path)
-                      OR EXISTS (
-                        SELECT 1 FROM library
-                        WHERE library.source_descriptor = bh.source_descriptor
-                          AND library.absolute_path = bh.rel_path)
-                   THEN 1 ELSE 0 END AS pinned
-         FROM browse_history bh
-         WHERE bh.last_visited_at < ?1",
-    )?;
-    let rows = stmt
-        .query_map([protect_cutoff], map_candidate)?
-        .collect::<Result<Vec<_>, _>>()?;
+    // 候选 = 非保护（旧于 protect_cutoff）且 非过期（不旧于 days_cutoff，若有）
+    let (sql, params): (String, Vec<Box<dyn rusqlite::ToSql>>) = match days_cutoff {
+        Some(dc) => (
+            "SELECT bh.source_descriptor, bh.rel_path, bh.last_visited_at, bh.visit_count,
+                    CASE WHEN EXISTS (
+                            SELECT 1 FROM shortcut
+                            WHERE shortcut.source_descriptor_json = bh.source_descriptor
+                              AND shortcut.rel_path = bh.rel_path)
+                          OR EXISTS (
+                            SELECT 1 FROM library
+                            WHERE library.source_descriptor = bh.source_descriptor
+                              AND library.absolute_path = bh.rel_path)
+                         THEN 1 ELSE 0 END AS pinned
+             FROM browse_history bh
+             WHERE bh.last_visited_at < ?1 AND bh.last_visited_at >= ?2"
+                .to_string(),
+            vec![Box::new(protect_cutoff), Box::new(dc)],
+        ),
+        None => (
+            "SELECT bh.source_descriptor, bh.rel_path, bh.last_visited_at, bh.visit_count,
+                    CASE WHEN EXISTS (
+                            SELECT 1 FROM shortcut
+                            WHERE shortcut.source_descriptor_json = bh.source_descriptor
+                              AND shortcut.rel_path = bh.rel_path)
+                          OR EXISTS (
+                            SELECT 1 FROM library
+                            WHERE library.source_descriptor = bh.source_descriptor
+                              AND library.absolute_path = bh.rel_path)
+                         THEN 1 ELSE 0 END AS pinned
+             FROM browse_history bh
+             WHERE bh.last_visited_at < ?1"
+                .to_string(),
+            vec![Box::new(protect_cutoff)],
+        ),
+    };
+    let mut stmt = conn.prepare(&sql)?;
+    let p = rusqlite::params_from_iter(params.iter().map(|b| b.as_ref()));
+    let rows = stmt.query_map(p, map_candidate)?.collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -258,7 +285,20 @@ fn build_plan(
         return Ok(CleanupPlan { days_cutoff, candidates: vec![], count_over: 0, protected_exceeds: false });
     }
     let total = count_history(conn)?;
-    if total <= cfg.max_entries {
+    // 审查修复（#4 重构引入的 bug）：先扣掉将被天数规则删除的行数，得到「天数删除后」的
+    // 有效总量，再判断是否还需条数淘汰、删多少。否则过期记录本已够降数仍会多删未过期记录。
+    let days_candidates_count = if let Some(dc) = days_cutoff {
+        conn.query_row(
+            "SELECT COUNT(*) FROM browse_history WHERE last_visited_at < ?1",
+            [dc],
+            |r| r.get(0),
+        )?
+    } else {
+        0
+    };
+    let effective_total = total - days_candidates_count;
+    if effective_total <= cfg.max_entries {
+        // 天数删除已足够把总量降到上限内：无需条数淘汰
         return Ok(CleanupPlan { days_cutoff, candidates: vec![], count_over: 0, protected_exceeds: false });
     }
     let protect_cutoff = now - cfg.protect_days.saturating_mul(SECS_PER_DAY);
@@ -271,10 +311,9 @@ fn build_plan(
         // 保护记录已超上限：不删保护记录（spec §3.2）
         return Ok(CleanupPlan { days_cutoff, candidates: vec![], count_over: 0, protected_exceeds: true });
     }
-    // 天数规则会先删旧（旧的全在保护窗口外），但本规划在删除前计算；
-    // 按「删除前总量 - 上限」估 over，候选取保护窗口外的行，评分阶段挑最低分。
-    let over = total - cfg.max_entries;
-    let candidates = fetch_count_candidates(conn, protect_cutoff)?;
+    let over = effective_total - cfg.max_entries;
+    // 候选排除过期行（days_cutoff）——避免与天数规则重复删除 / 虚增计数
+    let candidates = fetch_count_candidates(conn, protect_cutoff, days_cutoff)?;
     Ok(CleanupPlan { days_cutoff, candidates, count_over: over, protected_exceeds: false })
 }
 
@@ -529,6 +568,63 @@ mod tests {
         assert!(history_exists(&db, "{\"type\":\"local\"}", "/c"), "/c 高频保留");
         assert!(history_exists(&db, "{\"type\":\"local\"}", "/d"), "/d 近期高频保留");
         assert_eq!(res.remaining, 2);
+    }
+
+    // —— 审查修复（#4 重构 bug）：天数删除与条数删除不可重叠 ——
+
+    #[test]
+    fn cleanup_days_deletion_alone_under_limit_skips_count() {
+        // 过期记录本已够把总量降到上限内 → 不应再按 count 删未过期记录
+        let db = test_db();
+        let now = 1_000_000_000i64;
+        // 3 条过期（100 天前）+ 2 条未过期且非保护（20 天前）
+        for r in ["/e1", "/e2", "/e3"] {
+            insert_history(&db, "{\"type\":\"local\"}", r, "E", now - 100 * 86400, 1);
+        }
+        for r in ["/n1", "/n2"] {
+            insert_history(&db, "{\"type\":\"local\"}", r, "N", now - 20 * 86400, 1);
+        }
+        let cfg = HistoryRetentionConfig { max_entries: 2, retention_days: 30, protect_days: 7 };
+        let res = run_history_cleanup(&db, now, &cfg).unwrap();
+        // 天数删 3 条过期 → 剩 2（n1,n2）≤ 上限 2 → 无需条数删
+        assert_eq!(res.deleted_by_days, 3, "3 条过期由天数规则删");
+        assert_eq!(res.deleted_by_count, 0, "已降到上限内，不应有条数删除");
+        assert_eq!(res.remaining, 2);
+        for r in ["/e1", "/e2", "/e3"] {
+            assert!(!history_exists(&db, "{\"type\":\"local\"}", r), "{r} 应被天数删");
+        }
+        for r in ["/n1", "/n2"] {
+            assert!(history_exists(&db, "{\"type\":\"local\"}", r), "{r} 未过期应保留");
+        }
+    }
+
+    #[test]
+    fn cleanup_count_deletion_does_not_count_expired_or_inflate() {
+        // 天数删不够时仍需条数删：count 只删未过期行，deleted_by_count 不含被天数删的
+        let db = test_db();
+        let now = 1_000_000_000i64;
+        // 2 条过期 + 3 条未过期非保护
+        for r in ["/e1", "/e2"] {
+            insert_history(&db, "{\"type\":\"local\"}", r, "E", now - 100 * 86400, 1);
+        }
+        for r in ["/n1", "/n2", "/n3"] {
+            insert_history(&db, "{\"type\":\"local\"}", r, "N", now - 20 * 86400, 1);
+        }
+        let cfg = HistoryRetentionConfig { max_entries: 1, retention_days: 30, protect_days: 7 };
+        let res = run_history_cleanup(&db, now, &cfg).unwrap();
+        // effective_total = 5 - 2(过期) = 3；max=1 → over=2；count 删 2 条未过期最低分
+        assert_eq!(res.deleted_by_days, 2, "2 条过期由天数删");
+        assert_eq!(res.deleted_by_count, 2, "条数删 2 条（不含过期，不虚增）");
+        assert_eq!(res.remaining, 1, "剩 1 条未过期");
+        for r in ["/e1", "/e2"] {
+            assert!(!history_exists(&db, "{\"type\":\"local\"}", r));
+        }
+        // n1..n3 中存活 1 条
+        let survivors = ["/n1", "/n2", "/n3"]
+            .iter()
+            .filter(|r| history_exists(&db, "{\"type\":\"local\"}", r))
+            .count();
+        assert_eq!(survivors, 1);
     }
 
     #[test]
