@@ -17,9 +17,9 @@ const router = createRouter({
       component: () => import('@/views/Shortcuts.vue'),
     },
     {
+      // v0.1.0-module3.0.7: Library 视图已删,旧链接重定向到 /likes(兼容 dev hot reload / 调试 / 未来 deep-link)
       path: '/library',
-      name: 'library',
-      component: () => import('@/views/Library.vue'),
+      redirect: '/likes',
     },
     {
       path: '/bookmarks',
