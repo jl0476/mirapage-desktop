@@ -22,7 +22,6 @@ export default {
   nav: {
     fileBrowser: '文件浏览器',
     shortcuts: '快捷方式',
-    library: '书库',
     bookmarks: '书签',
     likes: '喜欢',
     history: '阅览记录',
@@ -80,7 +79,6 @@ export default {
       currentTotal: '{current} / {total}',
       jump: '跳页',
       fileBrowser: '文件浏览器',
-      library: '书库',
       history: '历史',
       settings: '设置',
       mode: '单/双页',
@@ -136,16 +134,13 @@ export default {
     contextMenu: {
       resetProgress: '重置阅读进度',
       readNow: '立即阅读',
-      addToLibrary: '加入书库',
       regenerateThumbnail: '重新生成缩略图',
       regenerateThumbnailN: '重新生成 {n} 张缩略图',
       retryThumbnail: '重试缩略图',
       retryThumbnailN: '重试 {n} 张缩略图',
     },
-    // v0.1.0-module2.0: 触发阅读 / 加入书库 (不靠双击)
+    // v0.1.0-module2.0: 触发阅读 (不靠双击)
     readNow: '立即阅读',
-    addToLibrary: '加入书库',
-    inLibrary: '已在书库',
     downloadAll: '下载全部',
     downloadAllUnavailable: '本地文件无需下载',
     noImagesInFolder: '此目录没有图片',
@@ -169,20 +164,6 @@ export default {
       selected: '已选 {count} 项',
       path: '当前路径',
     },
-  },
-  library: {
-    title: '书库',
-    empty: '书库为空',
-    favorite: '收藏',
-    unfavorite: '取消收藏',
-    source: {
-      library: '书库',
-      bookmark: '书签',
-      history: '历史',
-      tag: '标签',
-    },
-    addFavorite: '加入收藏',
-    removeFavorite: '取消收藏',
   },
   bookmarks: {
     title: '书签',

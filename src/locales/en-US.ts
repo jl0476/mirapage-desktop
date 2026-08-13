@@ -21,7 +21,6 @@ export default {
   nav: {
     fileBrowser: 'File Browser',
     shortcuts: 'Shortcuts',
-    library: 'Library',
     bookmarks: 'Bookmarks',
     likes: 'Likes',
     history: 'History',
@@ -79,7 +78,6 @@ export default {
       currentTotal: '{current} / {total}',
       jump: 'Jump',
       fileBrowser: 'File browser',
-      library: 'Library',
       history: 'History',
       settings: 'Settings',
       mode: 'Page mode',
@@ -135,16 +133,13 @@ export default {
     contextMenu: {
       resetProgress: 'Reset reading progress',
       readNow: 'Read now',
-      addToLibrary: 'Add to library',
       regenerateThumbnail: 'Regenerate thumbnail',
       regenerateThumbnailN: 'Regenerate {n} thumbnails',
       retryThumbnail: 'Retry thumbnail',
       retryThumbnailN: 'Retry {n} thumbnails',
     },
-    // v0.1.0-module2.0: read trigger / add to library (no double-click)
+    // v0.1.0-module2.0: read trigger (no double-click)
     readNow: 'Read now',
-    addToLibrary: 'Add to library',
-    inLibrary: 'In library',
     downloadAll: 'Download all',
     downloadAllUnavailable: 'Local files do not need download',
     noImagesInFolder: 'No images in this folder',
@@ -168,20 +163,6 @@ export default {
       selected: '{count} selected',
       path: 'Current path',
     },
-  },
-  library: {
-    title: 'Library',
-    empty: 'Library is empty',
-    favorite: 'Favorite',
-    unfavorite: 'Unfavorite',
-    source: {
-      library: 'Library',
-      bookmark: 'Bookmark',
-      history: 'History',
-      tag: 'Tag',
-    },
-    addFavorite: 'Add to favorites',
-    removeFavorite: 'Remove favorite',
   },
   bookmarks: {
     title: 'Bookmarks',
