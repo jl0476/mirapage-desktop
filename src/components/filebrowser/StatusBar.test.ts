@@ -1,5 +1,5 @@
 /**
- * StatusBar.test.ts — 3 段渲染
+ * StatusBar.test.ts — 3 段渲染 + 三段等宽布局
  */
 import { describe, it, expect } from 'vitest';
 import { mount } from '@vue/test-utils';
@@ -48,5 +48,35 @@ describe('StatusBar.vue', () => {
       global: { plugins: [i18n, createPinia()] },
     });
     expect(w.find('[data-test="statusbar-path"]').text()).toBe('C:/comics/chapter1');
+  });
+
+  it('三段等宽: 左/中/右各 flex-1, 中段 justify-center', () => {
+    const wrapper = mount(StatusBar, {
+      props: { total: 12, selectedCount: 0, selectionSizeBytes: 0, currentPath: 'D:/path' },
+      global: { plugins: [i18n] },
+    });
+    const footer = wrapper.find('[data-test="statusbar"]');
+    const children = footer.element.children;
+    // 三段
+    expect(children.length).toBe(3);
+    // 每段含 flex-1 class
+    for (const child of children) {
+      expect((child as HTMLElement).className).toContain('flex-1');
+    }
+    // 中段 justify-center
+    const center = children[1] as HTMLElement;
+    expect(center.className).toContain('justify-center');
+  });
+
+  it('无 nextVolumeTitle 时右段渲染空 div 保持对称', () => {
+    const wrapper = mount(StatusBar, {
+      props: { total: 12, selectedCount: 0, selectionSizeBytes: 0, currentPath: 'D:/path' },
+      global: { plugins: [i18n] },
+    });
+    const footer = wrapper.find('[data-test="statusbar"]');
+    const right = footer.element.children[2] as HTMLElement;
+    // 右段存在(flex-1)但无下一卷内容
+    expect(right.className).toContain('flex-1');
+    expect(right.querySelector('[data-test="statusbar-next-volume"]')).toBeNull();
   });
 });
