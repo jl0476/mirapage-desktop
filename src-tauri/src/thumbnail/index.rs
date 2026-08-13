@@ -8,7 +8,11 @@ use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-/// 建表（幂等）。生产由 migration 009 创建；测试/非 app 上下文用此函数确保 schema。
+/// 建表（幂等）。生产由 migration 009 + 012 创建；测试/非 app 上下文用此函数确保 schema。
+///
+/// v0.1.0-database-retention-and-cleanup：补建 `maintenance_state` + 稳定 LRU 索引
+/// （与 migration 012 后的 schema 一致），否则 `upsert`/`remove` 维护计数时
+/// `UPDATE maintenance_state` 会因表缺失报错。
 pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
@@ -30,8 +34,21 @@ pub fn ensure_schema(conn: &Connection) -> rusqlite::Result<()> {
           created_at         INTEGER NOT NULL,
           last_accessed_at   INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_lru
-            ON thumbnail_cache(last_accessed_at);
+        -- 旧单列索引若存在则替换为稳定排序索引（spec §6.2）
+        DROP INDEX IF EXISTS idx_thumbnail_cache_lru;
+        CREATE INDEX IF NOT EXISTS idx_thumbnail_cache_lru_key
+            ON thumbnail_cache(last_accessed_at ASC, cache_key ASC);
+
+        CREATE TABLE IF NOT EXISTS maintenance_state (
+          key TEXT PRIMARY KEY,
+          integer_value INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        -- 首次创建时以 SUM 回填计数（幂等：已存在则不动）
+        INSERT OR IGNORE INTO maintenance_state (key, integer_value, updated_at)
+        SELECT 'thumbnail_cache_total_bytes',
+               COALESCE((SELECT SUM(byte_size) FROM thumbnail_cache), 0),
+               0;
         "#,
     )?;
     Ok(())
@@ -103,14 +120,44 @@ pub fn get(conn: &Connection, cache_key: &str) -> rusqlite::Result<Option<Thumbn
 }
 
 /// 插入或替换一行。
+///
+/// v0.1.0-database-retention-and-cleanup（spec §6.2）：`INSERT OR REPLACE` 改为
+/// `ON CONFLICT(cache_key) DO UPDATE`，以便在同一事务准确计算旧/新 `byte_size` 差额
+/// 并同步维护 `maintenance_state.thumbnail_cache_total_bytes`（避免 REPLACE 的
+/// 删除再插入语义导致计数漂移）。
 pub fn upsert(conn: &Connection, row: &ThumbnailCacheRow) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT OR REPLACE INTO thumbnail_cache (
+    let tx = conn.unchecked_transaction()?;
+    // 先取旧行 byte_size（冲突时计差额；无冲突则 0）
+    let old_bytes: Option<i64> = tx
+        .query_row(
+            "SELECT byte_size FROM thumbnail_cache WHERE cache_key = ?1",
+            params![row.cache_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    tx.execute(
+        "INSERT INTO thumbnail_cache (
             cache_key, source_key, rel_path, source_size, source_modified_at,
             source_width, source_height, orientation, target_bucket, quality,
             cache_rel_path, output_width, output_height, byte_size, created_at,
             last_accessed_at
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+        ON CONFLICT(cache_key) DO UPDATE SET
+            source_key = excluded.source_key,
+            rel_path = excluded.rel_path,
+            source_size = excluded.source_size,
+            source_modified_at = excluded.source_modified_at,
+            source_width = excluded.source_width,
+            source_height = excluded.source_height,
+            orientation = excluded.orientation,
+            target_bucket = excluded.target_bucket,
+            quality = excluded.quality,
+            cache_rel_path = excluded.cache_rel_path,
+            output_width = excluded.output_width,
+            output_height = excluded.output_height,
+            byte_size = excluded.byte_size,
+            created_at = excluded.created_at,
+            last_accessed_at = excluded.last_accessed_at",
         params![
             row.cache_key, row.source_key, row.rel_path, row.source_size,
             row.source_modified_at, row.source_width, row.source_height, row.orientation,
@@ -118,41 +165,104 @@ pub fn upsert(conn: &Connection, row: &ThumbnailCacheRow) -> rusqlite::Result<()
             row.output_height, row.byte_size, row.created_at, row.last_accessed_at,
         ],
     )?;
+    let delta = row.byte_size - old_bytes.unwrap_or(0);
+    bump_total(&tx, delta)?;
+    tx.commit()?;
     Ok(())
 }
 
-/// 删除一行索引（不删文件，文件由调用方处理）。
+/// 删除一行索引（不删文件，文件由调用方处理）。同步扣减总字节计数。
 pub fn remove(conn: &Connection, cache_key: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "DELETE FROM thumbnail_cache WHERE cache_key = ?1",
-        params![cache_key],
-    )?;
+    let tx = conn.unchecked_transaction()?;
+    let bytes: Option<i64> = tx
+        .query_row(
+            "SELECT byte_size FROM thumbnail_cache WHERE cache_key = ?1",
+            params![cache_key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(b) = bytes {
+        tx.execute(
+            "DELETE FROM thumbnail_cache WHERE cache_key = ?1",
+            params![cache_key],
+        )?;
+        bump_total(&tx, -b)?;
+    }
+    tx.commit()?;
     Ok(())
+}
+
+/// 批量删除索引行（单事务）。返回释放的字节总数。文件删除由调用方处理。
+///
+/// spec §6.2：淘汰每批最多 256 项，避免逐行开事务长期占用 SQLite Mutex。
+pub fn remove_batch(conn: &Connection, cache_keys: &[String]) -> rusqlite::Result<i64> {
+    if cache_keys.is_empty() {
+        return Ok(0);
+    }
+    let tx = conn.unchecked_transaction()?;
+    let mut freed = 0i64;
+    {
+        let mut sel = tx.prepare("SELECT byte_size FROM thumbnail_cache WHERE cache_key = ?1")?;
+        let mut del = tx.prepare("DELETE FROM thumbnail_cache WHERE cache_key = ?1")?;
+        for k in cache_keys {
+            let b: Option<i64> = sel.query_row(params![k], |r| r.get(0)).optional()?;
+            if let Some(b) = b {
+                del.execute(params![k])?;
+                freed += b;
+            }
+        }
+    }
+    if freed != 0 {
+        bump_total(&tx, -freed)?;
+    }
+    tx.commit()?;
+    Ok(freed)
 }
 
 /// 全表缓存字节数。
+///
+/// v0.1.0-database-retention-and-cleanup（spec §6.1）：读取维护态计数，不再每次全表 SUM。
+/// 防御：若计数行不存在（未跑 migration 012），回退一次 SUM。
 pub fn total_bytes(conn: &Connection) -> rusqlite::Result<i64> {
-    conn.query_row("SELECT COALESCE(SUM(byte_size), 0) FROM thumbnail_cache", [], |row| {
-        row.get(0)
-    })
+    let v: Option<i64> = conn
+        .query_row(
+            "SELECT integer_value FROM maintenance_state WHERE key = 'thumbnail_cache_total_bytes'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match v {
+        Some(n) => Ok(n),
+        None => conn.query_row(
+            "SELECT COALESCE(SUM(byte_size), 0) FROM thumbnail_cache",
+            [],
+            |row| row.get(0),
+        ),
+    }
 }
 
-/// 返回需要驱逐的最旧行（`last_accessed_at ASC`），使剩余总字节 <= `keep_bytes`。
+/// 返回需要驱逐的最旧行，使剩余总字节 <= `keep_bytes`。
+/// 稳定排序：`last_accessed_at ASC, cache_key ASC`（spec §6.2）。
 /// 若当前总量已 <= `keep_bytes`，返回空。
+///
+/// v0.1.0-database-retention-and-cleanup：单次最多扫描 256 行（spec §6.2「每批最多 256 项，
+/// 避免一次传递大量行到 Rust 内存」），到 `freed >= need_to_free` 即停；超大缓存由
+/// `evict_to_limit` 循环调用逐批回收。
 pub fn oldest_until_bytes(
     conn: &Connection,
     keep_bytes: i64,
 ) -> rusqlite::Result<Vec<ThumbnailCacheRow>> {
+    const SCAN_CAP: i64 = 256;
     let total = total_bytes(conn)?;
     if total <= keep_bytes {
         return Ok(vec![]);
     }
     let need_to_free = total - keep_bytes;
     let sql = format!(
-        "SELECT {ALL_COLUMNS} FROM thumbnail_cache ORDER BY last_accessed_at ASC"
+        "SELECT {ALL_COLUMNS} FROM thumbnail_cache ORDER BY last_accessed_at ASC, cache_key ASC LIMIT ?1"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], row_from_db)?;
+    let rows = stmt.query_map(params![SCAN_CAP], row_from_db)?;
     let mut result = Vec::new();
     let mut freed: i64 = 0;
     for r in rows {
@@ -164,6 +274,25 @@ pub fn oldest_until_bytes(
         }
     }
     Ok(result)
+}
+
+/// 维护态计数原子增减（私用）。delta 可正可负。假定 key 行已由 migration 012 创建。
+fn bump_total(conn: &Connection, delta: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE maintenance_state
+            SET integer_value = integer_value + ?1,
+                updated_at = ?2
+          WHERE key = 'thumbnail_cache_total_bytes'",
+        params![delta, now_secs()],
+    )?;
+    Ok(())
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// 批量刷新访问时间（§9.6）。单事务提交，降低 SQLite 写放大。
@@ -184,10 +313,56 @@ pub fn touch_many(conn: &Connection, cache_keys: &[String], now: i64) -> rusqlit
     Ok(())
 }
 
-/// 清空全部索引行（不删文件）。
+/// 清空全部索引行（不删文件）。总字节计数同步归零。
 pub fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM thumbnail_cache", [])?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM thumbnail_cache", [])?;
+    tx.execute(
+        "UPDATE maintenance_state SET integer_value = 0, updated_at = ?1
+         WHERE key = 'thumbnail_cache_total_bytes'",
+        params![now_secs()],
+    )?;
+    tx.commit()?;
     Ok(())
+}
+
+/// 脏索引抽样清理（spec §6.3）。
+///
+/// 取最近访问 + 最旧访问两端各最多 `per_end` 条，删除磁盘文件缺失/为空的索引行
+/// （处理外部删除留下的脏索引）。不扫描整个缓存目录。返回清理行数。
+pub fn sample_and_clean_dirty(
+    conn: &Connection,
+    cache_root: &Path,
+    per_end: i64,
+) -> rusqlite::Result<usize> {
+    use std::collections::HashSet;
+    let mut dirty: HashSet<String> = HashSet::new();
+    // 两端各 per_end 条：最近访问（DESC）+ 最旧访问（ASC），cache_key ASC 做稳定 tiebreaker
+    for dir in ["DESC", "ASC"] {
+        let sql = format!(
+            "SELECT cache_key, cache_rel_path FROM thumbnail_cache
+             ORDER BY last_accessed_at {dir}, cache_key ASC LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![per_end], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        for r in rows {
+            let (key, rel) = r?;
+            let file = cache_root.join(&rel);
+            let ok = std::fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false);
+            if !ok {
+                dirty.insert(key);
+            }
+        }
+    }
+    if dirty.is_empty() {
+        return Ok(0);
+    }
+    let keys: Vec<String> = dirty.into_iter().collect();
+    let n = keys.len();
+    remove_batch(conn, &keys)?;
+    Ok(n)
 }
 
 /// 读取并校验缓存文件存在且非空：命中返回行；文件缺失则删除脏行并返回 None。
@@ -404,5 +579,124 @@ mod tests {
         let got = get_verified(&conn, "abcd", dir.path()).unwrap();
         assert!(got.is_none(), "empty file -> miss");
         assert!(get(&conn, "abcd").unwrap().is_none(), "dirty row removed");
+    }
+
+    // —— v0.1.0-database-retention-and-cleanup：容量元数据计数维护（spec §6.1/§6.2）——
+
+    /// 直接读 SUM 作为对照基准（计数应与之一致）。
+    fn sum_bytes(conn: &Connection) -> i64 {
+        conn.query_row::<i64, _, _>(
+            "SELECT COALESCE(SUM(byte_size), 0) FROM thumbnail_cache",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn total_bytes_counter_equals_actual_sum() {
+        let conn = open();
+        upsert(&conn, &sample_row("aa00", 1, 100)).unwrap();
+        upsert(&conn, &sample_row("bb00", 2, 250)).unwrap();
+        upsert(&conn, &sample_row("cc00", 3, 50)).unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 400);
+        assert_eq!(total_bytes(&conn).unwrap(), sum_bytes(&conn), "计数应 == 实际 SUM");
+    }
+
+    #[test]
+    fn upsert_replace_adjusts_total_by_diff() {
+        let conn = open();
+        upsert(&conn, &sample_row("abcd", 10, 5000)).unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 5000);
+        let mut updated = sample_row("abcd", 20, 9000);
+        updated.byte_size = 9000;
+        upsert(&conn, &updated).unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 9000, "替换同 key 按差额 +4000");
+        assert_eq!(total_bytes(&conn).unwrap(), sum_bytes(&conn));
+    }
+
+    #[test]
+    fn remove_decrements_total() {
+        let conn = open();
+        upsert(&conn, &sample_row("aa00", 1, 300)).unwrap();
+        upsert(&conn, &sample_row("bb00", 2, 700)).unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 1000);
+        remove(&conn, "aa00").unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 700, "remove 扣减对应字节");
+        assert_eq!(total_bytes(&conn).unwrap(), sum_bytes(&conn));
+    }
+
+    #[test]
+    fn remove_batch_decrements_total() {
+        let conn = open();
+        upsert(&conn, &sample_row("aa00", 1, 100)).unwrap();
+        upsert(&conn, &sample_row("bb00", 2, 200)).unwrap();
+        upsert(&conn, &sample_row("cc00", 3, 300)).unwrap();
+        let freed = remove_batch(&conn, &["aa00".to_string(), "cc00".to_string()]).unwrap();
+        assert_eq!(freed, 400, "返回释放字节");
+        assert_eq!(total_bytes(&conn).unwrap(), 200, "计数只余 bb00");
+        assert_eq!(total_bytes(&conn).unwrap(), sum_bytes(&conn));
+    }
+
+    #[test]
+    fn clear_all_resets_total_to_zero() {
+        let conn = open();
+        upsert(&conn, &sample_row("aa00", 1, 100)).unwrap();
+        upsert(&conn, &sample_row("bb00", 2, 200)).unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 300);
+        clear_all(&conn).unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 0, "clear 后计数归零");
+    }
+
+    #[test]
+    fn get_verified_dirty_delete_decrements_total() {
+        let conn = open();
+        upsert(&conn, &sample_row("abcd", 10, 5000)).unwrap();
+        assert_eq!(total_bytes(&conn).unwrap(), 5000);
+        let dir = tempfile::tempdir().unwrap();
+        // 不创建文件 -> miss -> 删脏行
+        let got = get_verified(&conn, "abcd", dir.path()).unwrap();
+        assert!(got.is_none());
+        assert_eq!(total_bytes(&conn).unwrap(), 0, "脏行删除应扣减计数");
+    }
+
+    #[test]
+    fn oldest_until_bytes_stable_order_with_cache_key_tiebreaker() {
+        // 同 last_accessed_at 时按 cache_key ASC 稳定排序（spec §6.2）
+        let conn = open();
+        upsert(&conn, &sample_row("cc00", 5, 100)).unwrap(); // t=5
+        upsert(&conn, &sample_row("aa00", 5, 100)).unwrap(); // t=5（同时间，key 靠前）
+        upsert(&conn, &sample_row("bb00", 5, 100)).unwrap(); // t=5
+        let evict = oldest_until_bytes(&conn, 0).unwrap(); // 全删
+        assert_eq!(evict[0].cache_key, "aa00");
+        assert_eq!(evict[1].cache_key, "bb00");
+        assert_eq!(evict[2].cache_key, "cc00");
+    }
+
+    #[test]
+    fn sample_and_clean_dirty_removes_missing_files() {
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        // 3 行：2 个文件存在，1 个文件缺失（脏）
+        let r1 = sample_row("aa00", 1, 100);
+        let r2 = sample_row("bb00", 2, 200);
+        let r3 = sample_row("cc00", 3, 300); // 将不创建文件 -> 脏
+        upsert(&conn, &r1).unwrap();
+        upsert(&conn, &r2).unwrap();
+        upsert(&conn, &r3).unwrap();
+        for r in [&r1, &r2] {
+            let f = dir.path().join(&r.cache_rel_path);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"x").unwrap();
+        }
+        // r3 文件不存在
+        assert_eq!(total_bytes(&conn).unwrap(), 600);
+
+        let n = sample_and_clean_dirty(&conn, dir.path(), 128).unwrap();
+        assert_eq!(n, 1, "应清理 1 个脏索引");
+        assert!(get(&conn, "cc00").unwrap().is_none(), "脏行 cc00 已删");
+        assert!(get(&conn, "aa00").unwrap().is_some(), "aa00 保留");
+        assert_eq!(total_bytes(&conn).unwrap(), 300, "脏行删除扣减计数");
+        assert_eq!(total_bytes(&conn).unwrap(), sum_bytes(&conn));
     }
 }

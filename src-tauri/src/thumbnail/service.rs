@@ -213,8 +213,13 @@ pub fn classify_item(
     Ok(ItemClass::Generate { task, cache_abs })
 }
 
-/// LRU 驱逐：把总量降到 `limit_bytes` 的 80%，跳过 protected_keys。
+/// LRU 驱逐：把总量降到 `limit_bytes` 的 80% 水位，跳过 protected_keys。
 /// 返回释放字节数。
+///
+/// v0.1.0-database-retention-and-cleanup（spec §6.2）：
+/// - 候选按 `last_accessed_at ASC, cache_key ASC` 稳定排序扫描；
+/// - 每批最多 256 项（`remove_batch`），避免逐行开事务长期占用 SQLite Mutex；
+/// - DB 索引删除（事务内，维护 `thumbnail_cache_total_bytes` 计数）先于磁盘文件删除。
 pub fn evict_to_limit(
     conn: &Connection,
     cache_root: &Path,
@@ -226,18 +231,38 @@ pub fn evict_to_limit(
         return Ok(0);
     }
     let target = (limit_bytes * 8 / 10) as i64; // 80% 水位
-    let candidates = index::oldest_until_bytes(conn, target)?;
-    let mut freed = 0u64;
-    for row in candidates {
-        if protected_keys.contains(&row.cache_key) {
-            continue;
+    let mut freed_total = 0u64;
+    loop {
+        if (index::total_bytes(conn)? as i64) <= target {
+            break;
         }
-        let file = cache_root.join(&row.cache_rel_path);
-        let _ = std::fs::remove_file(&file);
-        freed += row.byte_size as u64;
-        index::remove(conn, &row.cache_key)?;
+        // 候选：稳定排序，单批最多 256 行，到 need_to_free 即停
+        let batch = index::oldest_until_bytes(conn, target)?;
+        if batch.is_empty() {
+            break;
+        }
+        // 过滤 protected
+        let to_delete: Vec<&index::ThumbnailCacheRow> = batch
+            .iter()
+            .filter(|c| !protected_keys.contains(&c.cache_key))
+            .collect();
+        if to_delete.is_empty() {
+            // 本批全 protected：无法继续回收，退出避免死循环
+            break;
+        }
+        let keys: Vec<String> = to_delete.iter().map(|c| c.cache_key.clone()).collect();
+        // ① DB 索引删除（事务内，同步扣减 total_bytes 计数）
+        let freed = index::remove_batch(conn, &keys)? as u64;
+        // ② 文件删除（事务提交后）
+        for c in &to_delete {
+            let _ = std::fs::remove_file(cache_root.join(&c.cache_rel_path));
+        }
+        freed_total += freed;
+        if freed == 0 {
+            break;
+        }
     }
-    Ok(freed)
+    Ok(freed_total)
 }
 
 /// 生产用生成函数：读 Local 文件（blocking 线程内）-> generate_thumbnail。
@@ -1229,6 +1254,116 @@ mod tests {
         let freed = evict_to_limit(&conn, dir.path(), 200, &HashSet::new()).unwrap();
         assert!(freed >= 100, "should free at least one file");
         assert!(index::total_bytes(&conn).unwrap() <= 160);
+    }
+
+    #[test]
+    fn evict_to_limit_batched_stable_and_counter_consistent() {
+        // spec §6.2：600B 缓存 / 400B 上限 → 回收至 320B(80%) 或更小；
+        // 稳定排序 last_accessed_at ASC, cache_key ASC；每批 ≤256；计数 == 实际 SUM。
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        // 6 行各 100B，t=1..6（aa..ff），total=600
+        for (k, t) in [
+            ("aa00", 1i64),
+            ("bb00", 2),
+            ("cc00", 3),
+            ("dd00", 4),
+            ("ee00", 5),
+            ("ff00", 6),
+        ] {
+            let rel = key::cache_rel_path(k);
+            let abs = dir.path().join(&rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, b"x").unwrap();
+            let row = ThumbnailCacheRow {
+                cache_key: k.into(),
+                source_key: "s".into(),
+                rel_path: "p".into(),
+                source_size: None,
+                source_modified_at: None,
+                source_width: None,
+                source_height: None,
+                orientation: None,
+                target_bucket: 512,
+                quality: "high".into(),
+                cache_rel_path: rel,
+                output_width: 512,
+                output_height: 512,
+                byte_size: 100,
+                created_at: t,
+                last_accessed_at: t,
+            };
+            index::upsert(&conn, &row).unwrap();
+        }
+        assert_eq!(index::total_bytes(&conn).unwrap(), 600);
+
+        let freed = evict_to_limit(&conn, dir.path(), 400, &HashSet::new()).unwrap();
+        // 回收到 320B(80%) 或更小：需释放 ≥280B → 至少 3 行（300B）
+        let after = index::total_bytes(&conn).unwrap();
+        assert!(after <= 320, "应回收至 320B 或更小，实际 {after}");
+        assert!(freed >= 280, "应释放至少 280B，实际 {freed}");
+
+        // 计数 == 实际 SUM（一致性）
+        let sum: i64 = conn
+            .query_row(
+                "SELECT COALESCE(SUM(byte_size),0) FROM thumbnail_cache",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, sum, "维护态计数应与实际 SUM 一致");
+
+        // 稳定排序：最旧的 aa/bb/cc 应被删（t=1,2,3），dd/ee/ff 保留
+        for removed in ["aa00", "bb00", "cc00"] {
+            assert!(
+                index::get(&conn, removed).unwrap().is_none(),
+                "{removed} 应被淘汰"
+            );
+        }
+        for kept in ["dd00", "ee00", "ff00"] {
+            assert!(
+                index::get(&conn, kept).unwrap().is_some(),
+                "{kept} 应保留"
+            );
+        }
+    }
+
+    #[test]
+    fn evict_to_limit_skips_protected_keys() {
+        // protected_keys 中的 key 不被淘汰；若全 protected 且超限则不强删（避免死循环）
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        for (k, t) in [("aa00", 1i64), ("bb00", 2)] {
+            let rel = key::cache_rel_path(k);
+            let abs = dir.path().join(&rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(&abs, b"x").unwrap();
+            let row = ThumbnailCacheRow {
+                cache_key: k.into(),
+                source_key: "s".into(),
+                rel_path: "p".into(),
+                source_size: None,
+                source_modified_at: None,
+                source_width: None,
+                source_height: None,
+                orientation: None,
+                target_bucket: 512,
+                quality: "high".into(),
+                cache_rel_path: rel,
+                output_width: 512,
+                output_height: 512,
+                byte_size: 100,
+                created_at: t,
+                last_accessed_at: t,
+            };
+            index::upsert(&conn, &row).unwrap();
+        }
+        let mut protected = HashSet::new();
+        protected.insert("aa00".to_string());
+        protected.insert("bb00".to_string());
+        let freed = evict_to_limit(&conn, dir.path(), 100, &protected).unwrap();
+        assert_eq!(freed, 0, "全 protected 不应释放");
+        assert_eq!(index::total_bytes(&conn).unwrap(), 200, "两行都保留");
     }
 
     #[test]
