@@ -62,7 +62,6 @@ const emit = defineEmits<{
   (e: 'toggle-slideshow'): void;
   (e: 'toggle-slideshow-direction'): void;
   (e: 'navigate', path: string): void;
-  (e: 'add-to-library'): void;
   (e: 'toggle-like'): void;
   (e: 'add-bookmark'): void;
 }>();
@@ -98,7 +97,7 @@ function onToggleSlideshowDirection(): void { emit('toggle-slideshow-direction')
 interface NavItem { path: string; key: string }
 const NAV_ITEMS: NavItem[] = [
   { path: '/', key: 'nav.fileBrowser' },
-  { path: '/library', key: 'nav.library' },
+  { path: '/likes', key: 'nav.likes' },
   { path: '/history', key: 'nav.history' },
   { path: '/accounts', key: 'nav.accounts' },
   { path: '/settings', key: 'nav.settings' },
@@ -109,7 +108,6 @@ function onNav(path: string): void {
   emit('navigate', path);
 }
 
-function onAddToLibrary(): void { close(); emit('add-to-library'); }
 function onToggleLike(): void { close(); emit('toggle-like'); }
 function onAddBookmark(): void { close(); emit('add-bookmark'); }
 function onOpenBookmarks(): void {
@@ -227,11 +225,6 @@ function onOpenBookmarks(): void {
 
       <!-- 4. 书库工具组 (data-test 独立 id, 测试按 id 选而非 index) -->
       <section class="flex flex-col gap-1">
-        <button
-          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-          data-test="menu-lib-add"
-          @click="onAddToLibrary"
-        >{{ t('fileBrowser.addToLibrary') }}</button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="menu-lib-like"

@@ -4,13 +4,13 @@
  *  - 老的 emit 事件 (back / cycle-mode / cycle-direction / update:show)
  *  - 跳页改为 emit('open-jump-input') (父级打开 dialog)
  *  - 新增 PV 全套: 导航组(navigate) / 缩放下拉(scale-change) / 幻灯片(toggle-slideshow,
- *    toggle-slideshow-direction) / 书库工具组(add-to-library, toggle-like, add-bookmark,
+ *    toggle-slideshow-direction) / 书库工具组(toggle-like, add-bookmark,
  *    打开书签走 navigate(/bookmarks), show-touch-regions)
  *  + props + i18n + Teleport + 不自动 fade
  *
  * v0.1.0-reader-review:
  *  - jump 事件改为 open-jump-input (修复: 之前 emit('jump-page', 0) 总跳到封面)
- *  - 5 个 lib 按钮用独立 data-test id (menu-lib-add/like/bookmark/bookmarks/regions)
+ *  - 4 个 lib 按钮用独立 data-test id (menu-lib-like/bookmark/bookmarks/regions)
  *    测试按 id 取, 不再靠 positional index (reorder 安全)
  *  - aria-modal="true" 验证
  */
@@ -153,12 +153,12 @@ describe('ReaderMainMenu.vue', () => {
 
   // ─── 需求4-C PV 全套菜单 ───────────────────────────────────────────
 
-  it('渲染导航组 5 项 (fileBrowser/library/history/accounts/settings)', () => {
+  it('渲染导航组 5 项 (fileBrowser/likes/history/accounts/settings)', () => {
     mountMenu();
     const nav = findAllInBody('menu-nav');
     expect(nav.length).toBe(5);
     expect(nav[0].textContent).toContain('文件浏览器');
-    expect(nav[1].textContent).toContain('书库');
+    expect(nav[1].textContent).toContain('喜欢');
     expect(nav[2].textContent).toContain('阅览记录');
     expect(nav[3].textContent).toContain('网络账户');
     expect(nav[4].textContent).toContain('设置');
@@ -168,7 +168,7 @@ describe('ReaderMainMenu.vue', () => {
     const w = mountMenu();
     (findAllInBody('menu-nav')[1] as HTMLElement).click();
     await w.vm.$nextTick();
-    expect(w.emitted('navigate')?.[0]).toEqual(['/library']);
+    expect(w.emitted('navigate')?.[0]).toEqual(['/likes']);
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
@@ -179,22 +179,14 @@ describe('ReaderMainMenu.vue', () => {
     expect(w.emitted('navigate')?.[0]).toEqual(['/settings']);
   });
 
-  // v0.1.0-reader-review: 5 个 lib 按钮用独立 data-test id
-  it('渲染书库工具组 5 项 (独立 id: add/like/bookmark/bookmarks/regions)', () => {
+  // v0.1.0-module3.0.7: 删"加入书库"按钮(menu-lib-add),剩 4 个 lib 按钮
+  it('渲染书库工具组 4 项 (独立 id: like/bookmark/bookmarks/regions)', () => {
     mountMenu();
-    expect(findInBody('menu-lib-add')).toBeTruthy();
+    expect(findInBody('menu-lib-add')).toBeFalsy();
     expect(findInBody('menu-lib-like')).toBeTruthy();
     expect(findInBody('menu-lib-bookmark')).toBeTruthy();
     expect(findInBody('menu-lib-bookmarks')).toBeTruthy();
     expect(findInBody('menu-lib-regions')).toBeTruthy();
-  });
-
-  it('点加入书库 → emit add-to-library + 关闭', async () => {
-    const w = mountMenu();
-    (findInBody('menu-lib-add') as HTMLElement).click();
-    await w.vm.$nextTick();
-    expect(w.emitted('add-to-library')).toBeTruthy();
-    expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
   it('点喜欢 → emit toggle-like + 关闭', async () => {
