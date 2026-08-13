@@ -44,6 +44,7 @@ v0.1.0-module3.0.9（Library→Likes 合并）后，Likes 页是"喜欢"的唯�
 | 无图目录 | 不特判，依赖现有 watch 守卫自动回落 details | `FileBrowser.vue:162-166` 已有 |
 | 非 Local 书 | 「浏览」按钮不渲染（`sd.type !== 'local'` 防御） | 与 `History.vue:33` 同策略；当前库中实际只可能有 Local 书 |
 | 消费优先级 | `pendingOpenLocation` > `restoreNavigationContext` > LAST_ROOT_KEY | 显式新意图优先于 reader 残留上下文 |
+| 陈旧意图清理 | `requestOpenLocation` 写入时清 `savedNavigationContext` + `shortcuts.clearActive()` | 单点收口；防旧上下文滞留与 shortcut 重放（`lastOpenedShortcutId` 组件局部，重挂载失效） |
 | data-test | `btn-fav` → `btn-unlike`；新增 `btn-browse` | 语义清晰，测试同步改名 |
 | 孤儿 i18n | 删 `likes.toggleOn`（zh/en） | favorites 列表所有行必然已喜欢，toggleOn 无消费点 |
 
@@ -85,6 +86,10 @@ function requestOpenLocation(rootPath: string, relPath: string): void {
   // 显式新意图取代任何残留的 reader 导航上下文——否则本跳转 early-return 跳过
   // restoreNavigationContext 后，旧上下文滞留 store，下次挂载 '/' 会把用户拽回旧目录
   savedNavigationContext.value = null;
+  // 同时取代遗留的 shortcut 意图——否则 activeId 残留 + lastOpenedShortcutId 是
+  // FileBrowser 组件局部变量（重挂载重置），用户离开再回 '/' 时 onMounted 会
+  // 重放旧快捷方式，把用户从浏览目录拽回 shortcut 目录（审查必须修复项）
+  useShortcutsStore().clearActive();
 }
 
 function consumePendingOpenLocation(): PendingOpenLocation | null {
@@ -132,7 +137,9 @@ async function openPendingLocation(p: { rootPath: string; relPath: string }): Pr
 
 为什么消费点必须在 `loadLayout()` 之后：`loadLayout` 会从 DB 重读 `fb_view_mode` 覆盖内存 viewMode。若 Likes 端先切 masonry 再 push，挂载时被旧持久化值覆盖（写入与读取两个 IPC 的完成顺序无保证）。消费点后置让 setViewMode 成为最后一次写入，结构性消除竞争——这正是选方案 B 的主因。
 
-early-return 同时跳过 `restoreNavigationContext` 与 shortcuts 检查，均为有意优先级（显式新意图 > 残留上下文 > shortcut 重放）。shortcut 侧安全性由既有 `lastOpenedShortcutId` 去重守卫保证，不新增代码。
+early-return 同时跳过 `restoreNavigationContext` 与 shortcuts 检查，均为有意优先级（显式新意图 > 残留上下文 > shortcut 重放）。两层陈旧意图的清理都收口在 `requestOpenLocation` 写入时点（`savedNavigationContext` 清空 + `shortcuts.clearActive()`），而非消费时点——写入是单点，消费点可能增加（未来多入口复用 pending 机制）。shortcut 清理不放 FileBrowser 消费侧的另一原因：清理必须发生在 activeId watch 触发前才不会与重放守卫交互，request 时点天然早于挂载。
+
+依赖方向（已验证）：fileBrowser → shortcuts 单向（fileBrowser 已有 `useDirectorySortStore` store 间依赖先例；shortcuts 只依赖 `lib/tauri`），无循环。`useShortcutsStore()` 在 action 函数体内调用（Pinia 标准），不在 store 顶层同步调用。
 
 ### 4.4 Likes.vue「浏览」按钮 + 触发
 
@@ -182,6 +189,7 @@ function openInBrowser(book: BookItem): void {
 1. `requestOpenLocation` 写入 → `consumePendingOpenLocation` 返回该值且**清空**（二次 consume 得 null）
 2. 无意图时 consume 返回 null
 3. `requestOpenLocation` 清空已有 `savedNavigationContext`（新意图取代残留上下文）
+4. `requestOpenLocation` 清空 shortcuts.activeId（`setActive(3)` → request → `activeId === null`；防重挂载重放旧快捷方式）
 
 ### 5.2 `src/views/Likes.test.ts`
 
@@ -195,7 +203,9 @@ function openInBrowser(book: BookItem): void {
 1. mount 前 `requestOpenLocation('/root', 'VOL.11')` → mount 后 `fb.setRoot('/root')` / `fb.navigate('VOL.11')` / `fb.setViewMode('masonry')` 依序调用
 2. `relPath = ''`（root 级书）→ 仅 setRoot + setViewMode，不 navigate
 3. `relPath` 非法（如 `..\\evil`）→ 不 setRoot 不 navigate（log + 放弃）
-4. 无 pending → 走原 onMounted 逻辑（现有用例即回归，不新增）
+4. **优先级组合**：`savedNavigationContext` 与 pending 同时存在 → mount 导航到 pending 目标（restoreNavigationContext 不执行、其上下文已被 request 时点清空）
+5. **shortcut 重放回归**：`setActive(3)` + `requestOpenLocation` → mount 导航到 pending 目标且未执行 shortcut → unmount → 二次 mount（无新意图）→ 仍不重放 shortcut
+6. 无 pending → 走原 onMounted 逻辑（现有用例即回归，不新增）
 
 ## 6. 验收清单
 
@@ -203,5 +213,6 @@ function openInBrowser(book: BookItem): void {
 - [ ] Likes 行内「浏览」点击 → 文件浏览器定位到书所在目录 + 瀑布流视图
 - [ ] 目标目录无图片 → 自动回落 details（现有守卫，不新增代码）
 - [ ] 非 Local 书无「浏览」按钮
-- [ ] `npm run type-check` 0 error；`npm test` 全绿（新增 ~6 用例）
+- [ ] 有 active shortcut 时点「浏览」→ 之后离开再回 `/`，不重放旧快捷方式
+- [ ] `npm run type-check` 0 error；`npm test` 全绿（新增 ~8 用例）
 - [ ] zh/en i18n key 一致（删 toggleOn，增 browse/browseTitle）
