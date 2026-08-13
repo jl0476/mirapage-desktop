@@ -210,7 +210,11 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedList.mockResolvedValue([]);
+    // 必须含图片条目：FileBrowser.vue 有守卫 watch([viewMode, hasImages])——
+    // masonry + 无图目录会自动回落 details，空 mock 会让 viewMode 断言失败
+    mockedList.mockResolvedValue([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
     mockedShortcuts.mockResolvedValue([]);
   });
 
