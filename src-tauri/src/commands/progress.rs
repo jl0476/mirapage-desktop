@@ -109,6 +109,36 @@ pub(crate) fn list_progress_finished_inner(
     Ok(map)
 }
 
+/// v0.1.0-database-retention-and-cleanup（spec §7）：只查给定 `book_ids` 的 finished
+/// 状态，避免全表扫描 + 全量 HashMap（`readStatus.refresh(bookIds)` 调用）。
+/// 空切片返回空 map。
+pub(crate) fn list_progress_finished_for(
+    conn: &rusqlite::Connection,
+    book_ids: &[i64],
+) -> rusqlite::Result<HashMap<String, bool>> {
+    if book_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(book_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT book_id, finished FROM progress WHERE book_id IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let params = rusqlite::params_from_iter(book_ids.iter());
+    let rows = stmt.query_map(params, |row| {
+        let book_id: i64 = row.get(0)?;
+        let finished: i64 = row.get(1)?;
+        Ok((book_id.to_string(), finished != 0))
+    })?;
+    let mut map = HashMap::new();
+    for r in rows {
+        let (k, v) = r?;
+        map.insert(k, v);
+    }
+    Ok(map)
+}
+
 /// 内部 SQL helper：`mark_finished` 调它，测试也调它。
 ///
 /// v0.1.0-module3.0.8: 不动 image_name（spec §2.2.4 P0）——读者已读完末页时
@@ -182,11 +212,20 @@ pub fn mark_finished(
 /// 列出所有 progress.finished 映射，给前端 readStatus store 用。
 ///
 /// 返回 `{ book_id: finished_bool }`，key 是 i64 字符串。
+///
+/// v0.1.0-database-retention-and-cleanup（spec §7）：
+/// - `book_ids=None`（兼容）：全表 finished 状态。
+/// - `book_ids=Some(ids)`：只查这批（`readStatus.refresh(bookIds)` 传当前目录 entries 对应 id）。
 #[tauri::command]
 pub fn list_progress_finished(
+    book_ids: Option<Vec<i64>>,
     db: tauri::State<crate::db::Db>,
 ) -> Result<HashMap<String, bool>, String> {
-    list_progress_finished_inner(&*db.conn()).map_err(|e| e.to_string())
+    let conn = db.conn();
+    match book_ids {
+        None => list_progress_finished_inner(&conn).map_err(|e| e.to_string()),
+        Some(ids) => list_progress_finished_for(&conn, &ids).map_err(|e| e.to_string()),
+    }
 }
 
 fn chrono_now() -> i64 {
@@ -235,6 +274,26 @@ mod tests {
 
     fn list_finished_with_db(db: &crate::db::Db) -> HashMap<String, bool> {
         list_progress_finished_inner(&*db.conn()).expect("list_progress_finished_inner")
+    }
+
+    #[test]
+    fn list_progress_finished_for_scopes_to_given_ids() {
+        // spec §7：只查给定 book_ids 的 finished，不全表扫
+        let db = setup_db();
+        save_with_db(&db, 1, 5, "single", Some(true), None); // finished
+        save_with_db(&db, 2, 3, "single", Some(false), None); // not finished
+        save_with_db(&db, 3, 0, "single", Some(true), None); // finished
+
+        // 只查 [1, 2] —— 不应返回 3
+        let map = list_progress_finished_for(&*db.conn(), &[1, 2]).expect("scoped");
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("1"), Some(&true));
+        assert_eq!(map.get("2"), Some(&false));
+        assert!(map.get("3").is_none(), "未请求的 book_id 不应出现");
+
+        // 空切片 → 空 map
+        let empty = list_progress_finished_for(&*db.conn(), &[]).expect("empty");
+        assert!(empty.is_empty());
     }
 
     // ---- 4 SQL 语义组合 ----

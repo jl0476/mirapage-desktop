@@ -22,42 +22,105 @@ pub struct BookItem {
     pub is_favorite: bool,
 }
 
+fn map_book_row(row: &rusqlite::Row) -> rusqlite::Result<BookItem> {
+    let raw: String = row.get(2)?;
+    let source_descriptor: serde_json::Value =
+        serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+    Ok(BookItem {
+        id: row.get::<_, i64>(0)?,
+        title: row.get::<_, String>(1)?,
+        source_descriptor,
+        source_type: row.get::<_, String>(3)?,
+        absolute_path: row.get::<_, String>(4)?,
+        cover_entry_path: row.get::<_, Option<String>>(5)?,
+        cover_entry_name: row.get::<_, Option<String>>(6)?,
+        page_count: row.get::<_, i64>(7)?,
+        last_read_at: row.get::<_, Option<i64>>(8)?,
+        added_at: row.get::<_, i64>(9)?,
+        is_favorite: row.get::<_, i64>(10)? != 0,
+    })
+}
+
 #[tauri::command]
-pub fn list_library(db: tauri::State<crate::db::Db>) -> Result<Vec<BookItem>, String> {
+pub fn list_library(
+    db: tauri::State<crate::db::Db>,
+    limit: Option<i64>,
+    cursor: Option<String>,
+) -> Result<crate::commands::pagination::Paginated<BookItem>, String> {
+    use crate::commands::pagination::{decode_cursor, page_limit, Paginated};
     let conn = db.conn();
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, title, source_descriptor, source_type, absolute_path,
-                    cover_entry_path, cover_entry_name, page_count,
-                    last_read_at, added_at, is_favorite
-             FROM library
-             WHERE is_favorite = 1
-             ORDER BY last_read_at IS NULL, last_read_at DESC, added_at DESC",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            let raw: String = row.get(2)?;
-            let source_descriptor: serde_json::Value = serde_json::from_str(&raw)
-                .unwrap_or(serde_json::Value::Null);
-            Ok(BookItem {
-                id: row.get::<_, i64>(0)?,
-                title: row.get::<_, String>(1)?,
-                source_descriptor,
-                source_type: row.get::<_, String>(3)?,
-                absolute_path: row.get::<_, String>(4)?,
-                cover_entry_path: row.get::<_, Option<String>>(5)?,
-                cover_entry_name: row.get::<_, Option<String>>(6)?,
-                page_count: row.get::<_, i64>(7)?,
-                last_read_at: row.get::<_, Option<i64>>(8)?,
-                added_at: row.get::<_, i64>(9)?,
-                is_favorite: row.get::<_, i64>(10)? != 0,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    Ok(rows)
+    let base = "SELECT id, title, source_descriptor, source_type, absolute_path,
+                cover_entry_path, cover_entry_name, page_count,
+                last_read_at, added_at, is_favorite
+         FROM library WHERE is_favorite = 1";
+    // last_read_at IS NULL 把未读排末尾；加 id DESC 做确定性 tiebreaker（keyset 必需）
+    let order = "ORDER BY last_read_at IS NULL, last_read_at DESC, added_at DESC, id DESC";
+
+    if limit.is_none() && cursor.is_none() {
+        let mut stmt = conn.prepare(&format!("{base} {order}")).map_err(|e| e.to_string())?;
+        let items = stmt
+            .query_map([], map_book_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        return Ok(Paginated::all(items));
+    }
+
+    let lim = page_limit(limit);
+    // cursor = (last_read_at: Option, added_at, id) —— None 表示在未读(null)组
+    fn last_key(b: &BookItem) -> Option<String> {
+        serde_json::to_string(&(b.last_read_at, b.added_at, b.id)).ok()
+    }
+    let items = match &cursor {
+        None => {
+            let mut stmt = conn
+                .prepare(&format!("{base} {order} LIMIT ?1"))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![lim], map_book_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        }
+        Some(c) => {
+            let (lra, aa, id): (Option<i64>, i64, i64) = decode_cursor(c)?;
+            match lra {
+                // cursor 在已读组：续取更小的已读键 + 全部未读
+                Some(l0) => {
+                    let mut stmt = conn
+                        .prepare(&format!(
+                            "{base} AND (
+                               (last_read_at IS NOT NULL AND (last_read_at < ?1
+                                  OR (last_read_at = ?1 AND (added_at < ?2 OR (added_at = ?2 AND id < ?3)))))
+                               OR last_read_at IS NULL
+                             ) {order} LIMIT ?4"
+                        ))
+                        .map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(rusqlite::params![l0, aa, id, lim], map_book_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+                // cursor 在未读(null)组：只续取更小的 (added_at, id)
+                None => {
+                    let mut stmt = conn
+                        .prepare(&format!(
+                            "{base} AND last_read_at IS NULL
+                             AND (added_at < ?1 OR (added_at = ?1 AND id < ?2))
+                             {order} LIMIT ?3"
+                        ))
+                        .map_err(|e| e.to_string())?;
+                    let rows = stmt
+                        .query_map(rusqlite::params![aa, id, lim], map_book_row)
+                        .map_err(|e| e.to_string())?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| e.to_string())?
+                }
+            }
+        }
+    };
+    Ok(Paginated::from_page(items, lim, last_key))
 }
 
 #[tauri::command]

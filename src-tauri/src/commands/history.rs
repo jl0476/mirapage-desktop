@@ -14,32 +14,90 @@ pub struct BrowseHistoryEntry {
     pub book_id: Option<i64>,
 }
 
+fn map_history_row(row: &rusqlite::Row) -> rusqlite::Result<BrowseHistoryEntry> {
+    let sd_str: String = row.get(0)?;
+    let sd_value: serde_json::Value =
+        serde_json::from_str(&sd_str).unwrap_or(serde_json::Value::Null);
+    Ok(BrowseHistoryEntry {
+        source_descriptor: sd_value,
+        rel_path: row.get(1)?,
+        display_name: row.get(2)?,
+        last_visited_at: row.get(3)?,
+        book_id: row.get(4)?,
+    })
+}
+
 #[tauri::command]
-pub fn list_history(db: tauri::State<crate::db::Db>) -> Result<Vec<BrowseHistoryEntry>, String> {
-    let conn = db.conn();
-    let mut stmt = conn
-        .prepare(
-            "SELECT source_descriptor, rel_path, display_name, last_visited_at, book_id
-             FROM browse_history ORDER BY last_visited_at DESC",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            let sd_str: String = row.get(0)?;
-            let sd_value: serde_json::Value = serde_json::from_str(&sd_str)
-                .unwrap_or(serde_json::Value::Null);
-            Ok(BrowseHistoryEntry {
-                source_descriptor: sd_value,
-                rel_path: row.get(1)?,
-                display_name: row.get(2)?,
-                last_visited_at: row.get(3)?,
-                book_id: row.get(4)?,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    Ok(rows)
+pub fn list_history(
+    db: tauri::State<crate::db::Db>,
+    limit: Option<i64>,
+    cursor: Option<String>,
+) -> Result<crate::commands::pagination::Paginated<BrowseHistoryEntry>, String> {
+    list_history_inner(&db.conn(), limit, cursor)
+}
+
+/// 接 `&Connection` 的可测 inner（spec §7 keyset 分页）。
+pub(crate) fn list_history_inner(
+    conn: &rusqlite::Connection,
+    limit: Option<i64>,
+    cursor: Option<String>,
+) -> Result<crate::commands::pagination::Paginated<BrowseHistoryEntry>, String> {
+    use crate::commands::pagination::{decode_cursor, page_limit, Paginated};
+    // 稳定排序：加 source_descriptor/rel_path 做确定性 tiebreaker（keyset 必需）
+    let order = "ORDER BY last_visited_at DESC, source_descriptor DESC, rel_path DESC";
+    let cols = "SELECT source_descriptor, rel_path, display_name, last_visited_at, book_id FROM browse_history";
+
+    // 无参兼容：返回全部
+    if limit.is_none() && cursor.is_none() {
+        let mut stmt = conn.prepare(&format!("{cols} {order}")).map_err(|e| e.to_string())?;
+        let items = stmt
+            .query_map([], map_history_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        return Ok(Paginated::all(items));
+    }
+
+    let lim = page_limit(limit);
+    // cursor JSON = [last_visited_at, source_descriptor, rel_path]（上一页最后一条的键）
+    fn last_key(e: &BrowseHistoryEntry) -> Option<String> {
+        let sd = match &e.source_descriptor {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        serde_json::to_string(&(e.last_visited_at, sd, e.rel_path.clone())).ok()
+    }
+
+    let items = match &cursor {
+        None => {
+            let mut stmt = conn
+                .prepare(&format!("{cols} {order} LIMIT ?1"))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![lim], map_history_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        }
+        Some(c) => {
+            let (lva, sd, rp): (i64, String, String) = decode_cursor(c)?;
+            // DESC：after = 元组严格更小
+            let mut stmt = conn
+                .prepare(&format!(
+                    "{cols} WHERE last_visited_at < ?1
+                        OR (last_visited_at = ?1 AND source_descriptor < ?2)
+                        OR (last_visited_at = ?1 AND source_descriptor = ?2 AND rel_path < ?3)
+                     {order} LIMIT ?4"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![lva, sd, rp, lim], map_history_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        }
+    };
+    Ok(Paginated::from_page(items, lim, last_key))
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,5 +257,95 @@ mod tests {
         assert_eq!(name, "新名", "display_name 应刷新");
         assert_eq!(book_id, Some(42), "book_id 应刷新");
         assert_eq!(vc, 2);
+    }
+
+    // —— v0.1.0-database-retention-and-cleanup：keyset 分页（spec §7）——
+
+    fn seed_history(conn: &rusqlite::Connection, n: i64) {
+        for i in 0..n {
+            record_history_inner(
+                conn,
+                "{\"type\":\"local\"}",
+                &format!("/p{i:03}"),
+                &format!("P{i}"),
+                1000 + i, // last_visited_at 递增
+                None,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn list_history_no_args_returns_all_compat() {
+        let conn = test_db();
+        seed_history(&conn, 5);
+        let page = list_history_inner(&conn, None, None).unwrap();
+        assert_eq!(page.items.len(), 5);
+        assert!(page.next_cursor.is_none(), "无参 = 全量，无下一页");
+        // DESC：最新的（/p004, t=1004）在前
+        assert_eq!(page.items[0].rel_path, "/p004");
+        assert_eq!(page.items[4].rel_path, "/p000");
+    }
+
+    #[test]
+    fn list_history_default_limit_when_cursor_absent() {
+        // limit=None 但要分页（这里通过显式 Some 测 default 行为靠 page_limit）
+        let conn = test_db();
+        seed_history(&conn, 3);
+        let page = list_history_inner(&conn, Some(2), None).unwrap();
+        assert_eq!(page.items.len(), 2);
+        assert!(page.next_cursor.is_some(), "满页应有 nextCursor");
+        assert_eq!(page.items[0].rel_path, "/p002");
+        assert_eq!(page.items[1].rel_path, "/p001");
+    }
+
+    #[test]
+    fn list_history_max_limit_clamped_to_500() {
+        // page_limit 钳制；这里只验证不 panic 且返回全部（< 500）
+        let conn = test_db();
+        seed_history(&conn, 3);
+        let page = list_history_inner(&conn, Some(99999), None).unwrap();
+        assert_eq!(page.items.len(), 3, "limit>500 钳到 500，全部返回");
+    }
+
+    #[test]
+    fn list_history_pages_do_not_overlap_and_cover_all() {
+        // DESC（最新在前）：5 条 /p000..p004，limit 2 →
+        // p1=[p004,p003] p2=[p002,p001] p3=[p000]
+        let conn = test_db();
+        seed_history(&conn, 5);
+        let p1 = list_history_inner(&conn, Some(2), None).unwrap();
+        let cur1 = p1.next_cursor.clone().expect("p1 应有 nextCursor");
+        let p2 = list_history_inner(&conn, Some(2), Some(cur1)).unwrap();
+        let cur2 = p2.next_cursor.clone().expect("p2 应有 nextCursor");
+        let p3 = list_history_inner(&conn, Some(2), Some(cur2)).unwrap();
+
+        let keys: Vec<&String> = p1
+            .items
+            .iter()
+            .chain(p2.items.iter())
+            .chain(p3.items.iter())
+            .map(|e| &e.rel_path)
+            .collect();
+        // 无重复 + 覆盖全部 5 条
+        let mut sorted = keys.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 5, "三页合并应无重复");
+        assert_eq!(p1.items.len(), 2);
+        assert_eq!(p2.items.len(), 2);
+        assert_eq!(p3.items.len(), 1);
+        assert!(p3.next_cursor.is_none(), "末页无 nextCursor");
+        // 首页确实是最新的两条
+        assert_eq!(p1.items[0].rel_path, "/p004");
+        assert_eq!(p1.items[1].rel_path, "/p003");
+    }
+
+    #[test]
+    fn list_history_invalid_cursor_errors() {
+        let conn = test_db();
+        seed_history(&conn, 3);
+        let res = list_history_inner(&conn, Some(2), Some("not-a-valid-cursor".to_string()));
+        assert!(res.is_err(), "无效游标应返回参数错误");
     }
 }

@@ -72,7 +72,16 @@ export interface BrowseHistoryEntry {
   bookId: number | null;
 }
 export async function listHistory(): Promise<BrowseHistoryEntry[]> {
-  return invoke<BrowseHistoryEntry[]>('list_history');
+  // v0.1.0-database-retention-and-cleanup：后端 list_history 返回 Paginated 信封；
+  // 这里解包 .items 保持现有调用方不变（无参 = 全量，nextCursor=None）。
+  const r = await invoke<Paginated<BrowseHistoryEntry>>('list_history');
+  return r.items;
+}
+
+/** 分页信封（spec §7）。前端按需翻页用；无参调用 nextCursor 为 null。 */
+export interface Paginated<T> {
+  items: T[];
+  nextCursor: string | null;
 }
 /**
  * FileBrowser.fetch 成功后调 — upsert 到 browse_history（folder-level）
@@ -112,7 +121,8 @@ export interface BookItem {
   isFavorite: boolean;
 }
 export async function listLibrary(): Promise<BookItem[]> {
-  return invoke<BookItem[]>('list_library');
+  const r = await invoke<Paginated<BookItem>>('list_library');
+  return r.items;
 }
 export async function getBook(bookId: number): Promise<BookItem | null> {
   return invoke<BookItem | null>('get_book', { bookId });
@@ -408,8 +418,11 @@ export async function markFinished(bookId: number, finished: boolean): Promise<v
  * 返回所有 progress.finished 映射 { book_id: bool }。
  * key 是 i64 字符串 (与 Rust HashMap<String, bool> 一致)。
  */
-export async function listProgressFinished(): Promise<Record<string, boolean>> {
-  return invoke<Record<string, boolean>>('list_progress_finished');
+export async function listProgressFinished(bookIds?: number[]): Promise<Record<string, boolean>> {
+  // bookIds 省略 = 全表（兼容）；传当前目录 entries 的 book id 则只查这批（spec §7）
+  return invoke<Record<string, boolean>>('list_progress_finished', {
+    bookIds: bookIds ?? null,
+  });
 }
 
 // ─── Tags (Phase 4) ─────────────────────────────────────────────────────
@@ -491,7 +504,8 @@ export interface ShortcutItem {
   createdAt: number;
 }
 export async function listShortcuts(): Promise<ShortcutItem[]> {
-  return invoke<ShortcutItem[]>('list_shortcuts');
+  const r = await invoke<Paginated<ShortcutItem>>('list_shortcuts');
+  return r.items;
 }
 export async function createShortcut(
   sourceDescriptorJson: string,

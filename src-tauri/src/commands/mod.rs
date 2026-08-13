@@ -15,6 +15,7 @@ pub mod keep_screen_on;
 pub mod library;
 pub mod log;
 pub mod maintenance;
+pub mod pagination;
 pub mod progress;
 pub mod settings;
 pub mod shortcuts;

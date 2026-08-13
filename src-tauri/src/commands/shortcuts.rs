@@ -31,27 +31,69 @@ fn icon_hint_for(json: &str) -> String {
     }
 }
 
+fn map_shortcut_row(row: &rusqlite::Row) -> rusqlite::Result<ShortcutItem> {
+    Ok(ShortcutItem {
+        id: row.get::<_, i64>(0)?,
+        source_descriptor_json: row.get::<_, String>(1)?,
+        rel_path: row.get::<_, String>(2)?,
+        alias: row.get::<_, Option<String>>(3)?,
+        icon_hint: row.get::<_, String>(4)?,
+        created_at: row.get::<_, i64>(5)?,
+    })
+}
+
 #[tauri::command]
-pub fn list_shortcuts(db: tauri::State<crate::db::Db>) -> Result<Vec<ShortcutItem>, String> {
+pub fn list_shortcuts(
+    db: tauri::State<crate::db::Db>,
+    limit: Option<i64>,
+    cursor: Option<String>,
+) -> Result<crate::commands::pagination::Paginated<ShortcutItem>, String> {
+    use crate::commands::pagination::{decode_cursor, page_limit, Paginated};
     let conn = db.conn();
-    let mut stmt = conn
-        .prepare("SELECT id, source_descriptor_json, rel_path, alias, icon_hint, created_at FROM shortcut ORDER BY created_at DESC")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(ShortcutItem {
-                id: row.get::<_, i64>(0)?,
-                source_descriptor_json: row.get::<_, String>(1)?,
-                rel_path: row.get::<_, String>(2)?,
-                alias: row.get::<_, Option<String>>(3)?,
-                icon_hint: row.get::<_, String>(4)?,
-                created_at: row.get::<_, i64>(5)?,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    Ok(rows)
+    let base = "SELECT id, source_descriptor_json, rel_path, alias, icon_hint, created_at FROM shortcut";
+    // 加 id DESC 做确定性 tiebreaker（keyset 必需）
+    let order = "ORDER BY created_at DESC, id DESC";
+
+    if limit.is_none() && cursor.is_none() {
+        let mut stmt = conn.prepare(&format!("{base} {order}")).map_err(|e| e.to_string())?;
+        let items = stmt
+            .query_map([], map_shortcut_row)
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        return Ok(Paginated::all(items));
+    }
+
+    let lim = page_limit(limit);
+    fn last_key(s: &ShortcutItem) -> Option<String> {
+        serde_json::to_string(&(s.created_at, s.id)).ok()
+    }
+    let items = match &cursor {
+        None => {
+            let mut stmt = conn
+                .prepare(&format!("{base} {order} LIMIT ?1"))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![lim], map_shortcut_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        }
+        Some(c) => {
+            let (ca, id): (i64, i64) = decode_cursor(c)?;
+            let mut stmt = conn
+                .prepare(&format!(
+                    "{base} WHERE created_at < ?1 OR (created_at = ?1 AND id < ?2) {order} LIMIT ?3"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![ca, id, lim], map_shortcut_row)
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
+        }
+    };
+    Ok(Paginated::from_page(items, lim, last_key))
 }
 
 #[tauri::command]
