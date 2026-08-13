@@ -4,7 +4,8 @@
  * 覆盖:
  *  - 空 favorites 显示 empty state + 文案
  *  - favorites 渲染 list + 行内 ❤️ toggle + 打开按钮(用 name:'reader' + params,不用 query)
- *  - 行内 btn-fav 点击调 toggleFavorite(行消失)
+ *  - 行内 btn-unlike 文本按钮点击调 toggleFavorite（取消喜欢，行消失）
+ *  - 行内 btn-browse 点击写 pendingOpenLocation + 跳转 /
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
@@ -12,6 +13,7 @@ import { createRouter, createMemoryHistory } from 'vue-router';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import Likes from './Likes.vue';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
 
 vi.mock('@/lib/tauri', () => ({
   listLibrary: vi.fn(async () => []),
@@ -23,7 +25,7 @@ const i18n = createI18n({
   locale: 'zh-CN',
   messages: {
     'zh-CN': {
-      likes: { title: '喜欢', empty: '还没有喜欢的书', toggleOn: '喜欢', toggleOff: '取消喜欢' },
+      likes: { title: '喜欢', empty: '还没有喜欢的书', toggleOff: '取消喜欢', browse: '浏览', browseTitle: '在文件浏览器中打开（瀑布流视图）' },
       common: { back: '返回', open: '打开' },
       fileBrowser: { pickRoot: '选择根目录' },
     },
@@ -57,7 +59,7 @@ const FAV_BOOK = {
   isFavorite: true,
   sourceDescriptor: { type: 'local', rootPath: '/x' },
   sourceType: 'Local',
-  absolutePath: '/x',
+  absolutePath: 'VOL.11',
   coverEntryPath: null,
   coverEntryName: null,
   pageCount: 10,
@@ -89,13 +91,13 @@ describe('Likes.vue', () => {
     expect(openLink.attributes('href')).toBe('/reader/7');
   });
 
-  it('行内 btn-fav 点击调 setFavorite(7, false),book.isFavorite=false 后行消失', async () => {
+  it('行内 btn-unlike 点击调 setFavorite(7, false)，book.isFavorite=false 后行消失', async () => {
     const tauri = await import('@/lib/tauri');
     (tauri.listLibrary as any).mockResolvedValueOnce([FAV_BOOK]);
     const { wrapper } = await mountLikes();
     expect(wrapper.find('[data-test="row"]').exists()).toBe(true);
 
-    await wrapper.find('[data-test="btn-fav"]').trigger('click');
+    await wrapper.find('[data-test="btn-unlike"]').trigger('click');
     await flushPromises();
 
     // library.toggleFavorite 内部调 setFavorite(id, nextFav=!isFavorite=false)
@@ -104,5 +106,32 @@ describe('Likes.vue', () => {
     expect(wrapper.find('[data-test="row"]').exists()).toBe(false);
     // empty state 应出现
     expect(wrapper.find('[data-test="empty-state"]').exists()).toBe(true);
+  });
+
+  it('点击「浏览」→ 写入 pendingOpenLocation + 跳转 /', async () => {
+    const tauri = await import('@/lib/tauri');
+    (tauri.listLibrary as any).mockResolvedValueOnce([FAV_BOOK]);
+    const { wrapper, router } = await mountLikes();
+
+    await wrapper.find('[data-test="btn-browse"]').trigger('click');
+    await flushPromises();
+
+    const fb = useFileBrowserStore();
+    expect(fb.pendingOpenLocation).toEqual({ rootPath: '/x', relPath: 'VOL.11' });
+    expect(router.currentRoute.value.path).toBe('/');
+  });
+
+  it('非 Local 书不渲染「浏览」按钮（防御分支）', async () => {
+    const tauri = await import('@/lib/tauri');
+    const remote = {
+      ...FAV_BOOK,
+      id: 8,
+      sourceDescriptor: { type: 'webdav', accountId: 1, baseUrl: 'http://x', path: '/' },
+    };
+    (tauri.listLibrary as any).mockResolvedValueOnce([remote]);
+    const { wrapper } = await mountLikes();
+
+    expect(wrapper.find('[data-test="row"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="btn-browse"]').exists()).toBe(false);
   });
 });

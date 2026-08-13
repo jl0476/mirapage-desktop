@@ -191,8 +191,9 @@ export default {
   likes: {
     title: 'Likes',
     empty: 'No liked books yet',
-    toggleOn: 'Like',
     toggleOff: 'Unlike',
+    browse: 'Browse',
+    browseTitle: 'Open in file browser (masonry view)',
   },
   history: {
     title: 'History',

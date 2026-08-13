@@ -193,8 +193,9 @@ export default {
   likes: {
     title: '喜欢',
     empty: '还没有喜欢的书',
-    toggleOn: '喜欢',
     toggleOff: '取消喜欢',
+    browse: '浏览',
+    browseTitle: '在文件浏览器中打开（瀑布流视图）',
   },
   history: {
     title: '阅览记录',
