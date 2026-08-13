@@ -11,6 +11,7 @@ import {
   toRootRelativePath,
   captureMasonryViewportAnchor,
   restoreMasonryViewportAnchor,
+  computeAtBottom,
   type MasonryItem,
   type MasonryViewportAnchor,
 } from '@/composables/useMasonryLayout';
@@ -248,6 +249,17 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
   return true;
 }
 
+/** atBottom 三档规则(spec §2.1): layoutHeight 作响应式触发源(审查 P1), 判定读 el.scrollHeight.
+ *  - layout.totalHeight 是 computed, 缩略图尺寸收敛会变, 把它纳入依赖强制 atBottom 重算.
+ *  - 判定值仍读 el.scrollHeight(准), 不读 layout.value.totalHeight(可能是估算高度).
+ *  - 任务 7 只暴露 computed, 任务 8 才接进 useMasonryBrowsePosition. */
+const atBottom = computed(() => {
+  const el = containerRef.value;
+  if (!el) return false;
+  void layout.value.totalHeight;
+  return computeAtBottom(el.scrollHeight, el.clientHeight, el.scrollTop);
+});
+
 /** v0.1.0-module3.0.8 (任务 8): 浏览位置 composable（任务 7 实现）。
  *  - 监听 scrollTop + 300ms debounce 写入顶部可见图（progress image_name + page）
  *  - 进目录查 progress，可选自动 scrollToEntry（autoRestoreOnMount 开关）
@@ -285,6 +297,8 @@ defineExpose({
   // v0.1.0-module3.0.8 (任务 9): 跨卷前 flush — 立即清 debounce + 写入顶部图,
   // 不等剩余 300ms. spec §14.3 + §14.4. FileList.masonryFlushNow 转发到此.
   flushBrowsePosition: () => browsePosition.flushNow(),
+  // v0.1.0-module3.0.x (任务 7): atBottom 三档规则 computed, 任务 8 接进 browsePosition.
+  atBottom,
 });
 
 // 预读 header（v0.1.0-module3.0.8 fix: 接收明确 paths，不再读 needPrefetch/nextBatchPaths）

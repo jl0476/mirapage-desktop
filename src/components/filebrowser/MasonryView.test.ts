@@ -12,6 +12,36 @@ import { dirname, resolve } from 'node:path';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(resolve(__dirname, './MasonryView.vue'), 'utf8');
 
+import { computeAtBottom } from '@/composables/useMasonryLayout';
+
+describe('computeAtBottom 三档纯函数 (spec §2.1)', () => {
+  it('档1 不足一屏(sh<=ch): 返回 true', () => {
+    expect(computeAtBottom(600, 800, 0)).toBe(true);
+  });
+
+  it('档2 短目录(ch<sh<2ch) 顶部 st=0: false(防误判)', () => {
+    expect(computeAtBottom(1400, 800, 0)).toBe(false);
+  });
+
+  it('档2 短目录 滚动+贴底 st>0: true', () => {
+    // sh=1400 ch=800 nearBottom: st+800>=1400-64=1336 → st>=536
+    expect(computeAtBottom(1400, 800, 600)).toBe(true);
+  });
+
+  it('档3 长目录(sh>=2ch) 贴底: true', () => {
+    expect(computeAtBottom(2000, 800, 1200)).toBe(true);
+  });
+
+  it('档3 长目录 未贴底: false', () => {
+    expect(computeAtBottom(2000, 800, 100)).toBe(false);
+  });
+
+  it('档2 短目录 贴底但 st=0: false(须实际滚过)', () => {
+    // sh=1400 ch=800 st=0: nearBottom(0+800>=1336)=false, 且 st=0 → false
+    expect(computeAtBottom(1400, 800, 0)).toBe(false);
+  });
+});
+
 describe('MasonryView.vue 集成守卫', () => {
   it('不再构造 new Image() 预读原图（缩略图队列取代）', () => {
     expect(source).not.toMatch(/new\s+Image\s*\(/);
