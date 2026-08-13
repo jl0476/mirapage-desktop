@@ -225,13 +225,14 @@ pub fn evict_to_limit(
     cache_root: &Path,
     limit_bytes: u64,
     protected_keys: &HashSet<String>,
-) -> rusqlite::Result<u64> {
+) -> rusqlite::Result<(u64, Vec<PathBuf>)> {
     let total = index::total_bytes(conn)? as u64;
     if total <= limit_bytes {
-        return Ok(0);
+        return Ok((0, vec![]));
     }
     let target = (limit_bytes * 8 / 10) as i64; // 80% 水位
     let mut freed_total = 0u64;
+    let mut files_to_delete: Vec<PathBuf> = Vec::new();
     loop {
         if (index::total_bytes(conn)? as i64) <= target {
             break;
@@ -243,18 +244,19 @@ pub fn evict_to_limit(
             break; // 已无可删的非 protected 项
         }
         let keys: Vec<String> = batch.iter().map(|c| c.cache_key.clone()).collect();
-        // ① DB 索引删除（事务内，同步扣减 total_bytes 计数）
+        // DB 索引删除（事务内，同步扣减 total_bytes 计数）
         let freed = index::remove_batch(conn, &keys)? as u64;
-        // ② 文件删除（事务提交后）
+        // 只收集文件路径——**不在此删文件**（持 Db 锁删文件会冻 UI，spec §5.5；
+        // 调用方在释放 Db 锁后统一删）
         for c in &batch {
-            let _ = std::fs::remove_file(cache_root.join(&c.cache_rel_path));
+            files_to_delete.push(cache_root.join(&c.cache_rel_path));
         }
         freed_total += freed;
         if freed == 0 {
             break;
         }
     }
-    Ok(freed_total)
+    Ok((freed_total, files_to_delete))
 }
 
 /// 生产用生成函数：读 Local 文件（blocking 线程内）-> generate_thumbnail。
@@ -761,17 +763,22 @@ impl ThumbnailService {
 
     /// 立即触发一次 LRU 淘汰（维护「立即维护」按钮调用）。返回释放字节。
     /// 复用既有 `evict_to_limit`，跳过 protected（可见 + in-flight）。
+    /// 文件删除在 Db 锁外（spec §5.5）。
     pub fn evict_now(&self) -> u64 {
-        let db = self.app.state::<Db>();
-        let conn = db.conn();
         let root = self.cache_root();
         let limit = self.cache_limit_bytes();
-        let protected = self
-            .protected_keys
-            .lock()
-            .unwrap()
-            .clone();
-        evict_to_limit(&conn, &root, limit, &protected).unwrap_or(0)
+        let protected = self.protected_keys.lock().unwrap().clone();
+        // Db 锁内：删索引 + 收集待删文件
+        let (freed, files) = {
+            let db = self.app.state::<Db>();
+            let conn = db.conn();
+            evict_to_limit(&conn, &root, limit, &protected).unwrap_or((0, vec![]))
+        }; // conn/db 释放
+        // Db 锁外：删文件
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
+        freed
     }
 
     /// 脏索引抽样清理（spec §6.3）：两端各 `per_end` 条。返回清理行数。
@@ -816,10 +823,11 @@ impl ThumbnailService {
         self.scheduler.cancel_all();
         // 清空保护集合
         self.protected_keys.lock().unwrap().clear();
-        let db = self.app.state::<Db>();
-        let conn = db.conn();
-        // 取所有 rel_path，删文件
+        let root = self.cache_root();
+        // 短锁：读 rel_path 列表
         let rels: Vec<String> = {
+            let db = self.app.state::<Db>();
+            let conn = db.conn();
             let mut stmt = match conn.prepare("SELECT cache_rel_path FROM thumbnail_cache") {
                 Ok(s) => s,
                 Err(_) => return,
@@ -828,11 +836,17 @@ impl ThumbnailService {
                 .ok()
                 .map(|rows| rows.filter_map(Result::ok).collect())
                 .unwrap_or_default()
-        };
+        }; // conn/db 释放
+        // 锁外：删文件（spec §5.5；原实现持 Db 锁删数千文件会冻 UI）
         for rel in rels {
-            let _ = std::fs::remove_file(self.cache_root().join(rel));
+            let _ = std::fs::remove_file(root.join(rel));
         }
-        let _ = index::clear_all(&conn);
+        // 短锁：清空索引
+        {
+            let db = self.app.state::<Db>();
+            let conn = db.conn();
+            let _ = index::clear_all(&conn);
+        }
         let _ = self.app.emit(EVENT_CACHE_INFO, serde_json::json!({"bytes":0,"count":0}));
     }
 
@@ -974,72 +988,95 @@ fn spawn_completion(app: AppHandle, rx: tokio::sync::oneshot::Receiver<Outcome>,
         // pk remove 移入 Db 锁内统一锁顺序（Db -> pk），消除与 request（持 Db 后锁 pk）的交叉。
         let app_for_blocking = app.clone();
         let event = tokio::task::spawn_blocking(move || -> Option<StateEvent> {
-            let db = app_for_blocking.state::<Db>();
-            let conn = db.conn();
-            // 从 in-flight 保护集合移除（Db 锁内，统一锁顺序 Db -> pk）
-            {
-                let mut pk = meta.protected_keys.lock().unwrap();
-                pk.remove(&meta.cache_key);
+            // Db 锁内：写索引 + evict（删索引、收集待删文件）；文件删除延后到锁外（spec §5.5，
+            // 持 Db 锁删文件会冻 UI）
+            let (ev, files_to_delete): (Option<StateEvent>, Vec<std::path::PathBuf>) = {
+                let db = app_for_blocking.state::<Db>();
+                let conn = db.conn();
+                // 从 in-flight 保护集合移除（Db 锁内，统一锁顺序 Db -> pk）
+                {
+                    let mut pk = meta.protected_keys.lock().unwrap();
+                    pk.remove(&meta.cache_key);
+                }
+                match outcome {
+                    Outcome::Cached(g) => {
+                        // 写索引（完整元数据）
+                        let row = build_row(&meta, &g);
+                        let _ = index::upsert(&conn, &row);
+                        // P1-6: LRU 驱逐，保护可见 + 本次刚完成 key
+                        let mut protected = meta.protected_keys.lock().unwrap().clone();
+                        protected.insert(meta.cache_key.clone());
+                        let (_freed, files) = evict_to_limit(
+                            &conn,
+                            &meta.cache_root,
+                            meta.cache_limit,
+                            &protected,
+                        )
+                        .unwrap_or((0, vec![]));
+                        log::write_log(
+                            "INFO",
+                            "thumbnail",
+                            &format!(
+                                "completion CACHED cacheKey={} w={} h={} bytes={} epoch={}",
+                                meta.cache_key, g.width, g.height, g.byte_size, meta.epoch
+                            ),
+                        );
+                        (
+                            Some(StateEvent {
+                                epoch: meta.epoch,
+                                cache_key: meta.cache_key,
+                                path: meta.ui_path,
+                                state: "cached".into(),
+                                cache_path: Some(meta.cache_abs.to_string_lossy().into_owned()),
+                                output_width: Some(g.width),
+                                output_height: Some(g.height),
+                                message: None,
+                            }),
+                            files,
+                        )
+                    }
+                    Outcome::Failed(msg) => {
+                        log::write_log(
+                            "WARN",
+                            "thumbnail",
+                            &format!(
+                                "completion FAILED cacheKey={} msg={} epoch={}",
+                                meta.cache_key, msg, meta.epoch
+                            ),
+                        );
+                        (
+                            Some(StateEvent {
+                                epoch: meta.epoch,
+                                cache_key: meta.cache_key,
+                                path: meta.ui_path,
+                                state: "failed".into(),
+                                cache_path: None,
+                                output_width: None,
+                                output_height: None,
+                                message: Some(msg),
+                            }),
+                            vec![],
+                        )
+                    }
+                    Outcome::Stale => {
+                        // 旧 epoch：不发 UI 更新。
+                        log::write_log(
+                            "DEBUG",
+                            "thumbnail",
+                            &format!(
+                                "completion STALE cacheKey={} epoch={}",
+                                meta.cache_key, meta.epoch
+                            ),
+                        );
+                        (None, vec![])
+                    }
+                }
+            }; // conn/db 在此释放
+            // Db 锁外删文件
+            for f in files_to_delete {
+                let _ = std::fs::remove_file(f);
             }
-            match outcome {
-                Outcome::Cached(g) => {
-                    // 写索引（完整元数据）
-                    let row = build_row(&meta, &g);
-                    let _ = index::upsert(&conn, &row);
-                    // P1-6: LRU 驱逐，保护可见 + 本次刚完成 key
-                    let mut protected = meta.protected_keys.lock().unwrap().clone();
-                    protected.insert(meta.cache_key.clone());
-                    let _ = evict_to_limit(&conn, &meta.cache_root, meta.cache_limit, &protected);
-                    // P1-2: 事件 path 用 ui_path（前端 entry.path），而非绝对磁盘路径
-                    log::write_log(
-                        "INFO",
-                        "thumbnail",
-                        &format!(
-                            "completion CACHED cacheKey={} w={} h={} bytes={} epoch={}",
-                            meta.cache_key, g.width, g.height, g.byte_size, meta.epoch
-                        ),
-                    );
-                    Some(StateEvent {
-                        epoch: meta.epoch,
-                        cache_key: meta.cache_key,
-                        path: meta.ui_path,
-                        state: "cached".into(),
-                        cache_path: Some(meta.cache_abs.to_string_lossy().into_owned()),
-                        output_width: Some(g.width),
-                        output_height: Some(g.height),
-                        message: None,
-                    })
-                }
-                Outcome::Failed(msg) => {
-                    log::write_log(
-                        "WARN",
-                        "thumbnail",
-                        &format!(
-                            "completion FAILED cacheKey={} msg={} epoch={}",
-                            meta.cache_key, msg, meta.epoch
-                        ),
-                    );
-                    Some(StateEvent {
-                        epoch: meta.epoch,
-                        cache_key: meta.cache_key,
-                        path: meta.ui_path,
-                        state: "failed".into(),
-                        cache_path: None,
-                        output_width: None,
-                        output_height: None,
-                        message: Some(msg),
-                    })
-                }
-                Outcome::Stale => {
-                    // 旧 epoch：不发 UI 更新。
-                    log::write_log(
-                        "DEBUG",
-                        "thumbnail",
-                        &format!("completion STALE cacheKey={} epoch={}", meta.cache_key, meta.epoch),
-                    );
-                    None
-                }
-            }
+            ev
         })
         .await
         .ok()
@@ -1298,7 +1335,10 @@ mod tests {
             };
             index::upsert(&conn, &row).unwrap();
         }
-        let freed = evict_to_limit(&conn, dir.path(), 200, &HashSet::new()).unwrap();
+        let (freed, files) = evict_to_limit(&conn, dir.path(), 200, &HashSet::new()).unwrap();
+        for f in &files {
+            let _ = std::fs::remove_file(f);
+        }
         assert!(freed >= 100, "should free at least one file");
         assert!(index::total_bytes(&conn).unwrap() <= 160);
     }
@@ -1344,7 +1384,7 @@ mod tests {
         }
         assert_eq!(index::total_bytes(&conn).unwrap(), 600);
 
-        let freed = evict_to_limit(&conn, dir.path(), 400, &HashSet::new()).unwrap();
+        let (freed, _files) = evict_to_limit(&conn, dir.path(), 400, &HashSet::new()).unwrap();
         // 回收到 320B(80%) 或更小：需释放 ≥280B → 至少 3 行（300B）
         let after = index::total_bytes(&conn).unwrap();
         assert!(after <= 320, "应回收至 320B 或更小，实际 {after}");
@@ -1408,7 +1448,7 @@ mod tests {
         let mut protected = HashSet::new();
         protected.insert("aa00".to_string());
         protected.insert("bb00".to_string());
-        let freed = evict_to_limit(&conn, dir.path(), 100, &protected).unwrap();
+        let (freed, _files) = evict_to_limit(&conn, dir.path(), 100, &protected).unwrap();
         assert_eq!(freed, 0, "全 protected 不应释放");
         assert_eq!(index::total_bytes(&conn).unwrap(), 200, "两行都保留");
     }

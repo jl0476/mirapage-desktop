@@ -169,7 +169,7 @@ fn lru_skips_protected_keys() {
     // 保护最旧的 aa，limit 200 -> 不应删 aa
     let mut protected = HashSet::new();
     protected.insert("aa".to_string());
-    let freed = mirapage_desktop_lib::thumbnail::service::evict_to_limit(
+    let (freed, _files) = mirapage_desktop_lib::thumbnail::service::evict_to_limit(
         &conn, dir.path(), 200, &protected,
     ).unwrap();
     assert!(freed > 0);
@@ -193,5 +193,5 @@ fn key_cache(src: &[u8], bucket: u32) -> String {
 fn index_evict(conn: &Connection, root: &std::path::Path, limit: u64) -> u64 {
     mirapage_desktop_lib::thumbnail::service::evict_to_limit(
         conn, root, limit, &HashSet::new(),
-    ).unwrap_or(0)
+    ).unwrap_or((0, vec![])).0
 }
