@@ -775,11 +775,38 @@ impl ThumbnailService {
     }
 
     /// 脏索引抽样清理（spec §6.3）：两端各 `per_end` 条。返回清理行数。
+    ///
+    /// **三阶段、文件 IO 在 Db 锁外**（审查/调试修复）：原实现持 Db Mutex 跑最多 256 次
+    /// `fs::metadata`，冻死 UI。现：① 短锁读候选 (key,rel) → ② 释放锁逐个 stat → ③ 短锁 remove_batch。
     pub fn sample_dirty(&self, per_end: i64) -> usize {
+        let root = self.cache_root();
+        // ① 短锁：读两端候选键
+        let pairs = {
+            let db = self.app.state::<Db>();
+            let conn = db.conn();
+            index::sample_keys(&conn, per_end).unwrap_or_default()
+        };
+        // ② 无锁：文件存在性校验（两端在小缓存时会重叠 → HashSet 去重）
+        let dirty: Vec<String> = {
+            let set: std::collections::HashSet<String> = pairs
+                .into_iter()
+                .filter(|(_, rel)| {
+                    let file = root.join(rel);
+                    std::fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false) == false
+                })
+                .map(|(k, _)| k)
+                .collect();
+            set.into_iter().collect()
+        };
+        if dirty.is_empty() {
+            return 0;
+        }
+        // ③ 短锁：删脏索引
+        let n = dirty.len();
         let db = self.app.state::<Db>();
         let conn = db.conn();
-        let root = self.cache_root();
-        index::sample_and_clean_dirty(&conn, &root, per_end).unwrap_or(0)
+        let _ = index::remove_batch(&conn, &dirty);
+        n
     }
 
     /// 清空缓存：删全部文件 + 索引（不删根目录）。

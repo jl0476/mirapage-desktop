@@ -344,18 +344,13 @@ pub fn clear_all(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// 脏索引抽样清理（spec §6.3）。
+/// 脏索引抽样——只读取两端候选的 `(cache_key, cache_rel_path)`（spec §6.3）。
 ///
-/// 取最近访问 + 最旧访问两端各最多 `per_end` 条，删除磁盘文件缺失/为空的索引行
-/// （处理外部删除留下的脏索引）。不扫描整个缓存目录。返回清理行数。
-pub fn sample_and_clean_dirty(
-    conn: &Connection,
-    cache_root: &Path,
-    per_end: i64,
-) -> rusqlite::Result<usize> {
-    use std::collections::HashSet;
-    let mut dirty: HashSet<String> = HashSet::new();
-    // 两端各 per_end 条：最近访问（DESC）+ 最旧访问（ASC），cache_key ASC 做稳定 tiebreaker
+/// **只读、短持锁**：文件存在性校验（`fs::metadata`）与删除由调用方在**释放 Db 锁后**
+/// 执行（spec §5.5「磁盘操作在事务外」；否则 256 次 stat 持锁会冻死 UI——历史回归）。
+/// 取最近访问（DESC）+ 最旧访问（ASC）两端各最多 `per_end` 条，cache_key ASC 稳定 tiebreaker。
+pub fn sample_keys(conn: &Connection, per_end: i64) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut out: Vec<(String, String)> = Vec::new();
     for dir in ["DESC", "ASC"] {
         let sql = format!(
             "SELECT cache_key, cache_rel_path FROM thumbnail_cache
@@ -366,21 +361,10 @@ pub fn sample_and_clean_dirty(
             Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
         })?;
         for r in rows {
-            let (key, rel) = r?;
-            let file = cache_root.join(&rel);
-            let ok = std::fs::metadata(&file).map(|m| m.len() > 0).unwrap_or(false);
-            if !ok {
-                dirty.insert(key);
-            }
+            out.push(r?);
         }
     }
-    if dirty.is_empty() {
-        return Ok(0);
-    }
-    let keys: Vec<String> = dirty.into_iter().collect();
-    let n = keys.len();
-    remove_batch(conn, &keys)?;
-    Ok(n)
+    Ok(out)
 }
 
 /// 读取并校验缓存文件存在且非空：命中返回行；文件缺失则删除脏行并返回 None。
@@ -611,6 +595,11 @@ mod tests {
         .unwrap()
     }
 
+    fn count_rows(conn: &Connection) -> i64 {
+        conn.query_row::<i64, _, _>("SELECT COUNT(*) FROM thumbnail_cache", [], |r| r.get(0))
+            .unwrap()
+    }
+
     #[test]
     fn total_bytes_counter_equals_actual_sum() {
         let conn = open();
@@ -708,29 +697,65 @@ mod tests {
     }
 
     #[test]
-    fn sample_and_clean_dirty_removes_missing_files() {
+    fn sample_keys_returns_both_end_candidates_readonly() {
+        // sample_keys 只读两端候选 (key, rel)，不做文件 stat / 删除（spec §6.3；
+        // 文件 IO 已移到 service 层锁外，避免持 Db 锁冻 UI）
+        let conn = open();
+        upsert(&conn, &sample_row("aa00", 1, 100)).unwrap(); // 最旧
+        upsert(&conn, &sample_row("bb00", 2, 200)).unwrap();
+        upsert(&conn, &sample_row("cc00", 3, 300)).unwrap(); // 最新
+        let pairs = sample_keys(&conn, 1).unwrap();
+        let keys: Vec<_> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        // 两端各 1：最新 cc00（DESC 取 1）+ 最旧 aa00（ASC 取 1）
+        assert!(keys.contains(&"cc00"), "DESC 端应含最新 cc00");
+        assert!(keys.contains(&"aa00"), "ASC 端应含最旧 aa00");
+        // 只读：三行都在
+        assert_eq!(count_rows(&conn), 3);
+        // (key, rel) 配对正确
+        for (k, rel) in &pairs {
+            assert!(!rel.is_empty(), "rel_path 应非空 for {k}");
+        }
+    }
+
+    #[test]
+    fn dirty_cleanup_via_sample_keys_then_remove_batch() {
+        // 验证 service 层编排的等价逻辑（锁内读 → 锁外 stat → 锁内 remove）：
+        // 这里在测试层手动串起来（service.rs 的 sample_dirty 需 AppHandle，无法单测）。
         let conn = open();
         let dir = tempfile::tempdir().unwrap();
-        // 3 行：2 个文件存在，1 个文件缺失（脏）
         let r1 = sample_row("aa00", 1, 100);
-        let r2 = sample_row("bb00", 2, 200);
         let r3 = sample_row("cc00", 3, 300); // 将不创建文件 -> 脏
         upsert(&conn, &r1).unwrap();
-        upsert(&conn, &r2).unwrap();
+        upsert(&conn, &sample_row("bb00", 2, 200)).unwrap();
         upsert(&conn, &r3).unwrap();
-        for r in [&r1, &r2] {
+        for r in [&r1] {
             let f = dir.path().join(&r.cache_rel_path);
             std::fs::create_dir_all(f.parent().unwrap()).unwrap();
             std::fs::write(&f, b"x").unwrap();
         }
-        // r3 文件不存在
         assert_eq!(total_bytes(&conn).unwrap(), 600);
 
-        let n = sample_and_clean_dirty(&conn, dir.path(), 128).unwrap();
-        assert_eq!(n, 1, "应清理 1 个脏索引");
+        // 锁内读
+        let pairs = sample_keys(&conn, 128).unwrap();
+        // 锁外 stat → 脏键（bb00/cc00 无文件 = 脏；两端重叠用 HashSet 去重）
+        let dirty: Vec<String> = {
+            let set: std::collections::HashSet<String> = pairs
+                .into_iter()
+                .filter(|(_, rel)| {
+                    std::fs::metadata(dir.path().join(rel)).map(|m| m.len() > 0).unwrap_or(false)
+                        == false
+                })
+                .map(|(k, _)| k)
+                .collect();
+            set.into_iter().collect()
+        };
+        assert_eq!(dirty.len(), 2, "bb00+cc00 无文件 = 脏（去重后 2）");
+        // 锁内 remove
+        remove_batch(&conn, &dirty).unwrap();
+        assert!(get(&conn, "bb00").unwrap().is_none(), "脏行 bb00 已删");
         assert!(get(&conn, "cc00").unwrap().is_none(), "脏行 cc00 已删");
-        assert!(get(&conn, "aa00").unwrap().is_some(), "aa00 保留");
-        assert_eq!(total_bytes(&conn).unwrap(), 300, "脏行删除扣减计数");
+        assert!(get(&conn, "aa00").unwrap().is_some(), "aa00 文件存在保留");
+        assert_eq!(total_bytes(&conn).unwrap(), 100, "只剩 aa00=100");
         assert_eq!(total_bytes(&conn).unwrap(), sum_bytes(&conn));
     }
 }
