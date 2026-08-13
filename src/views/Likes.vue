@@ -1,10 +1,14 @@
 <script setup lang="ts">
 /**
- * Likes.vue — 喜欢列表 (收藏的书)
+ * Likes.vue — 喜欢列表 (v0.1.0-module3.0.7: Library→Likes 合并后重写)
  *
- * v0.1.0-module3.0.X-polish:
- *  - scoped CSS hardcoded hex → Tailwind utility class (对齐 Bookmarks.vue)
- *  - 行布局: heart icon (实心) + 标题 + 打开按钮
+ * 数据源:useLibraryStore.favorites(= items.filter(b => b.isFavorite))
+ * 行内 ❤️ toggle 调 library.toggleFavorite,取消后行消失(符合"取消喜欢 = 从列表移除")
+ * 打开 reader 用 name:'reader' + params(不用 query — 路由契约 /reader/:bookId)
+ *
+ * 跟旧版差异:
+ * - 旧 Likes.vue filter library.items(bug:不读 like 表)
+ * - 新 Likes.vue 直接用 library.favorites computed(语义明确)
  */
 import { onMounted } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -13,16 +17,18 @@ import { useLibraryStore } from '@/stores/library';
 
 const { t } = useI18n();
 const library = useLibraryStore();
-const { items } = storeToRefs(library);
-const liked = () => items.value.filter((b) => b.isFavorite);
+const { favorites } = storeToRefs(library);
 
 onMounted(() => {
   void library.refresh();
 });
 
+async function toggleFav(id: number) {
+  await library.toggleFavorite(id);
+}
+
 const ICON_HEART_FILLED = 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z';
 const ICON_OPEN = 'M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5';
-const ICON_HEART_BIG = 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z';
 </script>
 
 <template>
@@ -32,7 +38,7 @@ const ICON_HEART_BIG = 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 
         {{ t('likes.title') }}
       </h2>
       <RouterLink
-        to="/library"
+        to="/"
         class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
         data-test="back-link"
       >
@@ -42,12 +48,12 @@ const ICON_HEART_BIG = 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 
 
     <!-- 列表 -->
     <ul
-      v-if="liked().length > 0"
+      v-if="favorites.length > 0"
       class="list-none p-0 m-0 flex flex-col gap-2"
       data-test="list"
     >
       <li
-        v-for="book in liked()"
+        v-for="book in favorites"
         :key="book.id"
         class="flex items-center gap-4 p-3 px-4 bg-surface-1 xp-bd rounded-lg transition-colors duration-100 hover:border-accent hover:shadow-[0_0_10px_rgba(99,102,241,0.25)]"
         data-test="row"
@@ -62,8 +68,24 @@ const ICON_HEART_BIG = 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 
         <span class="flex-1 font-semibold text-sm text-text-primary truncate">
           {{ book.title }}
         </span>
+        <button
+          data-test="btn-fav"
+          class="p-1.5 rounded hover:bg-surface-2 transition-colors"
+          :aria-label="book.isFavorite ? t('likes.toggleOff') : t('likes.toggleOn')"
+          @click="toggleFav(book.id)"
+        >
+          <svg
+            width="16" height="16" viewBox="0 0 24 24"
+            :fill="book.isFavorite ? '#f472b6' : 'none'"
+            :stroke="book.isFavorite ? '#f472b6' : 'currentColor'"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path :d="ICON_HEART_FILLED" />
+          </svg>
+        </button>
         <RouterLink
-          :to="{ path: '/reader', query: { bookId: book.id } }"
+          :to="{ name: 'reader', params: { bookId: book.id } }"
           data-test="btn-open"
           class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent text-text-secondary no-underline hover:bg-surface-2 hover:text-text-primary transition-colors"
         >
@@ -87,22 +109,22 @@ const ICON_HEART_BIG = 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 
         class="w-16 h-16 rounded-2xl bg-surface-1 xp-bd flex items-center justify-center backdrop-blur-md"
       >
         <svg
-          width="32" height="32" viewBox="0 0 24 24"
-          fill="none" stroke="#f472b6" stroke-width="1.5" stroke-linecap="round"
+          width="32" height="32" viewBox="0 0 24 24" fill="none"
+          stroke="#f472b6" stroke-width="1.5" stroke-linecap="round"
           stroke-linejoin="round" aria-hidden="true"
         >
-          <path :d="ICON_HEART_BIG" />
+          <path :d="ICON_HEART_FILLED" />
         </svg>
       </div>
       <p class="text-text-tertiary text-sm m-0" data-test="empty-hint">
         {{ t('likes.empty') }}
       </p>
       <RouterLink
-        to="/library"
+        to="/"
         class="text-accent no-underline text-sm hover:text-accent-hover hover:underline transition-colors"
         data-test="link-to-filebrowser"
       >
-        {{ t('library.title') }} →
+        {{ t('fileBrowser.pickRoot') }} →
       </RouterLink>
     </div>
   </main>
