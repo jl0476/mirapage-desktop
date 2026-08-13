@@ -116,6 +116,143 @@ describe('fileBrowser store — 基础', () => {
     expect(store.error?.kind).toBe('io');
   });
 
+  // ─── 路径身份修复 (2026-08-12): navigate/fetch 拒绝越界路径 ───
+  // 绝对路径只允许出现在 rootPath; navigate 接收的 path 必须相对 root.
+  // 校验失败不改 currentPath、不发 IPC。
+
+  it('navigate 拒绝盘符绝对路径, currentPath 不变, 不发 IPC', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    vi.clearAllMocks(); // 清掉 setRoot 的 IPC
+    await store.navigate('F:/WallPaper');
+    expect(store.currentPath).toBe(''); // 未被改成 'F:/WallPaper'
+    expect(mockedList).not.toHaveBeenCalled();
+    expect(store.error?.kind).toBe('io');
+  });
+
+  it('navigate 拒绝反斜杠绝对路径', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    vi.clearAllMocks();
+    await store.navigate('F:\\WallPaper');
+    expect(store.currentPath).toBe('');
+    expect(mockedList).not.toHaveBeenCalled();
+  });
+
+  it('navigate 拒绝 .. 遍历', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    await store.navigate('sub');
+    vi.clearAllMocks();
+    await store.navigate('../etc');
+    // currentPath 应停在之前的 'sub' (校验失败不改 state)
+    expect(store.currentPath).toBe('sub');
+    expect(mockedList).not.toHaveBeenCalled();
+  });
+
+  it('navigate 接受根目录空串', async () => {
+    mockedList.mockResolvedValue(makeEntries('root_item'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue(makeEntries('root_item'));
+    await store.navigate('');
+    expect(store.currentPath).toBe('');
+    expect(mockedList).toHaveBeenCalledWith({ type: 'local', rootPath: 'C:/comics' }, '');
+  });
+
+  it('up() 在被污染的绝对 currentPath 下防御性拒绝, 留在原处', async () => {
+    // 模拟 currentPath 被历史污染成绝对路径（不应发生，但防御）
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    // 直接操纵 currentPath 模拟污染
+    store.currentPath = 'F:/WallPaper';
+    vi.clearAllMocks();
+    await store.up();
+    // up 计算 parent = 'F:' (盘符), 校验拒绝 → 不 fetch
+    expect(mockedList).not.toHaveBeenCalled();
+  });
+
+  it('restoreNavigationContext: 恢复被污染的绝对 currentPath → 停在根目录', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    await store.navigate('sub');
+    // 注入被污染的上下文（模拟旧版本写入的绝对路径）
+    store.saveNavigationContext();
+    // 直接改 store 内部状态模拟污染（restoreNavigationContext 读 savedNavigationContext）
+    // 通过 navigate 到一个合法路径后 save, 再模拟污染
+    store.currentPath = 'F:/WallPaper'; // 污染
+    store.saveNavigationContext();
+    store.currentPath = ''; // 重置
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue(makeEntries('root'));
+    const ok = await store.restoreNavigationContext();
+    expect(ok).toBe(true);
+    // currentPath 非法 → 停在根目录 ''
+    expect(store.currentPath).toBe('');
+  });
+
+  // ─── 路径身份修复 (2026-08-12): 异步导航身份防护 (spec §6.5) ───
+  // 跨 root/跨目录并发请求乱序返回时, 仅最新请求可回写 entries/lastFetchedPath.
+
+  it('fetch 乱序: 旧请求晚返回不覆盖最新 entries', async () => {
+    // 模拟: navigate('slow') 发出慢请求, navigate('fast') 发出快请求并先返回,
+    //       然后 slow 才返回 — slow 的回写必须被丢弃。
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+
+    // 用 deferred 手动控制两个请求的 resolve 顺序。
+    let resolveSlow!: (v: MediaEntry[]) => void;
+    let resolveFast!: (v: MediaEntry[]) => void;
+    const slowPromise = new Promise<MediaEntry[]>((r) => { resolveSlow = r; });
+    const fastPromise = new Promise<MediaEntry[]>((r) => { resolveFast = r; });
+
+    // 第一次调用返 slowPromise, 第二次返 fastPromise
+    let callCount = 0;
+    mockedList.mockImplementation(() => {
+      callCount += 1;
+      return callCount === 1 ? slowPromise : fastPromise;
+    });
+
+    const slowP = store.navigate('slow');
+    const fastP = store.navigate('fast');
+
+    // fast 先 resolve（最新请求）, slow 后 resolve（过期）
+    resolveFast(makeEntries('fast_item'));
+    await fastP;
+    resolveSlow(makeEntries('slow_item'));
+    await slowP;
+
+    // entries 必须是 fast 的, 不能被 slow 覆盖
+    expect(store.entries.map((e) => e.name)).toEqual(['fast_item']);
+    expect(store.lastFetchedPath).toBe('fast');
+    expect(store.currentPath).toBe('fast');
+  });
+
+  it('setRoot(null) 使在途 fetch 失效, 旧请求回写被丢弃', async () => {
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+
+    let resolveFetch!: (v: MediaEntry[]) => void;
+    const fetchPromise = new Promise<MediaEntry[]>((r) => { resolveFetch = r; });
+    mockedList.mockImplementation(() => fetchPromise);
+
+    const navP = store.navigate('sub');
+    // 在 fetch 完成前 setRoot(null) — 应失效在途请求
+    const setRootP = store.setRoot(null);
+    resolveFetch(makeEntries('should_not_appear'));
+    await Promise.all([navP, setRootP]);
+
+    // setRoot(null) 已清空 entries; 旧请求的回写不能让 entries 复活
+    expect(store.entries).toEqual([]);
+    expect(store.rootPath).toBeNull();
+  });
+
   // ─── 导航上下文保存/恢复 (v0.1.0-module3.0.3-hotfix Bug 2) ───
 
   it('saveNavigationContext → restoreNavigationContext: 嵌套路径保存恢复 (rootPath 不变, currentPath 恢复)', async () => {

@@ -88,6 +88,17 @@ export default {
       slideshowPause: '暂停',
       close: '关闭',
     },
+    // 2026-08-12 跨卷任务 8 (spec §16): reader 跨卷提示 toast + manual 胶囊。
+    // pushToast(key) 在 ReaderView 注入层 t(k) 翻译后调 useToast().push(message).
+    crossVolume: {
+      none: '无下一卷',
+      jumped: '已跳转《{title}》',
+      failed: '跳转失败',
+      progressSaveFailed: '进度保存失败，已继续跨卷',
+      continuePrompt: '继续读下一本《{title}》？',
+      jump: '跳转',
+      close: '关闭',
+    },
   },
   slideshow: {
     interval: '自动推进间隔（秒）',
@@ -152,6 +163,8 @@ export default {
     viewDetails: '详情',
     masonrySettings: '瀑布流设置',
     noImagesForMasonry: '该目录无图片，无法使用瀑布流视图',
+    // v0.1.0-module3.0.8 (任务 9): 工具栏下一卷按钮 (跨卷连续阅读 spec §14.1)
+    nextVolume: '下一卷',
     // v0.1.0-module3.0.8 (任务 10): masonry 浏览位置 toolbar 跳转
     jumpToLast: '跳到上次',
     noRecordedProgress: '此目录暂无浏览记录',
@@ -163,6 +176,9 @@ export default {
       items: '共 {count} 项',
       selected: '已选 {count} 项',
       path: '当前路径',
+      // v0.1.0-module3.1.1 (任务 2): 底栏右段下一卷 (功能 B 展示层)
+      nextVolume: '下一卷: {title}',
+      noNextVolume: '已是最后一卷',
     },
   },
   bookmarks: {
@@ -249,6 +265,7 @@ export default {
     ioError: '文件系统错误',
     unknown: '未知错误',
     pathTooLong: '路径过长（Windows MAX_PATH 限制，可尝试将根目录移近 C:\\ 或开启长路径支持）',
+    pathEscapesRoot: '路径越出数据源根',
   },
   lang: {
     system: '跟随系统',

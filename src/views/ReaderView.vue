@@ -15,17 +15,31 @@
  *  - ctx menu direction 从 settings.defaultReadDirection 派生 (之前误用 slideshow.direction)
  *  - 显示触控区 ref 接入 + 透传给 ReaderScreen
  *  - 错误返回按钮 border-white/10 → xp-bd (light 模式可见)
+ *
+ * 2026-08-12 跨卷任务 8 (spec §11): 编排层总装
+ *  - route watch immediate 唯一入口（删 onMounted loadBook）—— 不变量 2
+ *  - loadRouteBook 去重看 phase=ready（lastLoadedBookId + bookLoadPhase）—— 不变量 4
+ *  - 失败不保留旧卷（reader.closeBook + 清 refs + status=error）—— 不变量 3
+ *  - activeLoadSeq 非响应式局部变量（let）防 race —— P0-3
+ *  - commitBookSnapshot 原子提交 (sourceDescriptor/currentRelPath 写入 reader store)
+ *  - currentIdentity() 加载期返回 null (P1-1)
+ *  - useCrossVolume 8 opts 注入（identity/navigateToVolume/saveCurrentProgressNow/
+ *    pushToast/getContinueMode/pauseSlideshow/consumePendingNextVolume/canStart）
+ *  - 末页 → reader.setOnAtLastNextAttempt → slideshow.pendingNextVolume
+ *  - watch pendingNextVolume → crossVolume.maybeContinue(false, 'next')
+ *  - 9 宫格 folder-next (zoneActions.nextVolume) → crossVolume.maybeContinue(true, 'next')
+ *  - Alt+→ 经 useReaderHotkeys({ nextVolume: () => crossVolume.maybeContinue(true,'next') })
+ *  - ContinueNextVolumeToast 保留在 ReaderView (只 reader 场景显示, props 来自 crossVolume 实例)
+ *  - onUnmounted: setOnAtLastNextAttempt(null) + activeLoadSeq++ + saveCurrentProgressNow
+ *    兜底 + slideshow.pause + reader.closeBook
  */
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { convertFileSrc } from '@tauri-apps/api/core';
 import { useI18n } from 'vue-i18n';
-import { getBook, saveProgress, getProgress, listDirectory, addBookmark, setFavorite } from '@/lib/tauri';
+import { type BookItem, addBookmark, setFavorite } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
-import { useFileBrowserStore } from '@/stores/fileBrowser';
-import { useDirectorySortStore } from '@/stores/directorySort';
-import { sortEntries, type SortField } from '@/lib/fileSort';
+import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { useSlideshowStore } from '@/stores/slideshow';
 import { useSettingsStore } from '@/stores/settings';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
@@ -35,15 +49,21 @@ import {
   useReaderTouchZones,
   dispatchZoneAction,
 } from '@/composables/useReaderTouchZones';
-import { SpreadPlanner } from '@/lib/spreadPlanner';
-import { isImage } from '@/lib/mime';
+import {
+  useReaderBookLoader,
+  type BookIdentity,
+  type NextVolumeTarget,
+  type ReaderBookSnapshot,
+} from '@/composables/useReaderBookLoader';
+import { useCrossVolume } from '@/composables/useCrossVolume';
+import { useToast } from '@/composables/useToast';
 import { log } from '@/lib/logger';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
 import ReaderContextMenu from '@/components/reader/ReaderContextMenu.vue';
 import SlideshowToast from '@/components/reader/SlideshowToast.vue';
+import ContinueNextVolumeToast from '@/components/reader/ContinueNextVolumeToast.vue';
 import type { ScaleMode } from '@/lib/readerSettings';
-import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 const route = useRoute();
 const router = useRouter();
@@ -51,6 +71,8 @@ const reader = useReaderStore();
 const slideshow = useSlideshowStore();
 const settings = useSettingsStore();
 const { t } = useI18n();
+const loader = useReaderBookLoader();
+const toast = useToast();
 
 const status = ref('loading' as 'loading' | 'ready' | 'error');
 const errorMessage = ref('');
@@ -62,7 +84,7 @@ const imageNames = ref([] as string[]);
 const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
 // 需求4-C: 模板访问 book.isFavorite / book.id, loadBook 写入此 ref
-const book = ref<Awaited<ReturnType<typeof getBook>> | null>(null);
+const book = ref<BookItem | null>(null);
 // v0.1.0-module3.0.7 round-4 P1: onToggleLike 的 in-flight guard。
 // 防止用户快速重开菜单双击导致两次都基于旧 isFavorite 计算 nextFav,
 // 写出重复值(如 setFavorite(id,true) × 2)无法取消喜欢。
@@ -76,6 +98,17 @@ const jumpDialogRef = ref<HTMLDialogElement | null>(null);
 const jumpDialogValue = ref(1);
 // v0.1.0-reader-review: 触控区可视化 overlay
 const showTouchRegions = ref(false);
+
+// 2026-08-12 跨卷任务 8 (spec §11.1): route watch 唯一入口状态
+// lastLoadedBookId: 上次成功 load 的 bookId, 用于去重（phase=ready 时跳过）
+// bookLoadPhase: load 生命周期（idle/loading/ready/error）, canStart 依赖 ready
+// visibleReader: 模板控制, 加载期隐藏旧卷画面（不保留旧卷, 不变量 3）
+// activeLoadSeq: 非响应式局部变量（let, 非 const 非 ref）—— P0-3
+//   模板不消费; await 后若 seq !== activeLoadSeq 即丢弃; onUnmounted += 1 使在途失效。
+const lastLoadedBookId = ref<number | null>(null);
+const bookLoadPhase = ref<'idle' | 'loading' | 'ready' | 'error'>('idle');
+const visibleReader = ref(false);
+let activeLoadSeq = 0;
 
 function onContextMenu(e: MouseEvent): void {
   // 只在 ready 状态 + reader 容器内触发；阻止浏览器默认菜单
@@ -194,7 +227,8 @@ function onShowTouchRegions(): void {
   showTouchRegions.value = !showTouchRegions.value;
 }
 
-const bookId = computed(() => Number(route.params.bookId));
+// 2026-08-12 跨卷任务 8 (spec §11.1): 不再用 computed 包 route.params.bookId,
+// loadRouteBook 直接接 watch source 参数。
 
 // Cluster A: route.query.at 是双击图片 / 选中图片立即阅读时携带的起始图片名
 // (useReaderActions.readFromImage 写入). ReaderView 优先用此图所在 spread,
@@ -204,282 +238,155 @@ const initialImageName = computed<string | null>(() => {
   return typeof v === 'string' ? decodeURIComponent(v) : null;
 });
 
-async function loadBook() {
-  status.value = 'loading';
-  errorMessage.value = '';
-  const id = bookId.value;
-  log('[ReaderView/loadBook] start, bookId=', id, 'route=', route.fullPath);
-  if (!id || isNaN(id)) {
-    log('[ReaderView/loadBook] invalid bookId, redirect to /');
-    void goBackToFileBrowser();
-    return;
-  }
+// 2026-08-12 跨卷任务 8 (spec §11.1): route watch 唯一入口 (替代 onMounted loadBook)
+// 首次挂载靠 immediate: true; bookId 变化 (跨卷) 靠 watcher 触发。
+// 删 onMounted(loadBook) 以避免双加载 (不变量 2)。
+watch(
+  () => Number(route.params.bookId),
+  (id) => void loadRouteBook(id),
+  { immediate: true },
+);
+
+async function loadRouteBook(bookId: number): Promise<void> {
+  // 不变量 4: 去重只看 phase='ready' (失败 / 取消后可重试)
+  if (bookId === lastLoadedBookId.value && bookLoadPhase.value === 'ready') return;
+
+  const seq = ++activeLoadSeq;
+  bookLoadPhase.value = 'loading';
+  visibleReader.value = false;  // 不变量 3: route 变即进 loading (失败不保留旧卷)
+
   try {
-    log('[ReaderView/loadBook] IPC[getBook] →', id);
-    book.value = await getBook(id);
-    const b = book.value;
-    log('[ReaderView/loadBook] IPC[getBook] ←', b ? {
-      id: b.id,
-      title: b.title,
-      absolutePath: b.absolutePath,
-      coverEntryPath: b.coverEntryPath,
-      coverEntryName: b.coverEntryName,
-      pageCount: b.pageCount,
-      lastReadAt: b.lastReadAt,
-      isFavorite: b.isFavorite,
-      sourceDescriptor: b.sourceDescriptor,
-      sourceType: b.sourceType,
-    } : 'null');
-    if (!b) {
-      status.value = 'error';
-      errorMessage.value = `找不到 bookId ${id}`;
-      log('[ReaderView/loadBook] ERROR: book is null for id', id);
-      return;
-    }
-    // v0.1.0-module3.0.2: H1 修复后 Rust 端 fields 是 serde_json::Value,
-    // IPC 边界自动拆成对象。Defensive parse 仍保留, 兼容老 DB 行 / 跨进程备份.
-    // SourceDescriptor 是判别联合, 只 Local 变体有 rootPath.
-    log('[ReaderView/loadBook] parseSourceDescriptor input type:', typeof b.sourceDescriptor);
-    const sd = parseSourceDescriptor(b.sourceDescriptor);
-    log('[ReaderView/loadBook] parseSourceDescriptor result:', sd);
-    if (!sd || sd.type !== 'local' || !sd.rootPath) {
-      status.value = 'error';
-      errorMessage.value = 'source descriptor 解析失败或非本地资源';
-      log('[ReaderView/loadBook] ERROR: sourceDescriptor invalid', { sd, rootPath: (sd as { rootPath?: string })?.rootPath });
-      return;
-    }
-    const path = sd.rootPath;
-    log('[ReaderView/loadBook] resolved rootPath=', path);
-    // v0.1.0-module3.0.2-hotfix5 (H10): b.absolutePath 是相对 rootPath 的子目录路径
-    // (useReaderActions 传 entry.path = 裸子目录名), 不是绝对路径. convertFileSrc
-    // 内部期望绝对路径 (Rust fs::read), 必须拼 rootPath 前缀.
-    // 兼容历史数据: 如果 absolutePath 已包含盘符 ('Q:\xxx'), 视为已绝对.
-    const rootPath = path.replace(/[\\/]+$/, '');
-    const isAlreadyAbs = b.absolutePath && /^[A-Za-z]:[\\/]/.test(b.absolutePath);
-    const absDir = b.absolutePath && b.absolutePath.length > 0
-      ? (isAlreadyAbs ? b.absolutePath : joinPath(rootPath, b.absolutePath))
-      : rootPath;
-    log('[ReaderView/loadBook] absDir computed:', {
-      rootPath,
-      absolutePath: b.absolutePath,
-      isAlreadyAbs,
-      absDir,
+    const snapshot = await loader.loadBookById(bookId, {
+      explicitImageName: initialImageName.value ?? undefined,
     });
-    // v0.1.0-module3.0.2-hotfix6 (H11): 删 setRoot (省 1 IPC)
-    // ReaderView 不需要 fileBrowser.entries (rootPath 根目录 entries 没用),
-    // 只列 absDir 子目录. setRoot 内部已经调 fetch('')=listDirectory(rootPath),
-    // 是冗余 IPC (~500ms round-trip + 458 entry 处理), 直接 listDirectory(absDir)
-    // 一次完成.
-    log('[ReaderView/loadBook] IPC[listDirectory] →', { descriptor: sd, path: absDir });
-    const targetEntries: MediaEntry[] = await listDirectory(sd, absDir);
-    log('[ReaderView/loadBook] IPC[listDirectory] ←', targetEntries.length, 'entries; first 3:', targetEntries.slice(0, 3).map((e) => `${e.name}(dir=${e.isDirectory},arc=${e.isArchive})`));
-    // v0.1.0-module3.0.2-reader-polish (issue: reader 排序应与 file browser 一致):
-    // 之前用 naturalSort(name) 硬编码字母序, 忽略用户在 file browser 改的排序 (modifiedAt / size, asc/desc).
-    // v0.1.0-module3.0.3-hotfix4: 不能用 fb.effectiveSortField —— 那是 fileBrowser
-    //   最后 fetch 的目录排序 (例如 output/ DESC), 不是 book 自身目录 (例如
-    //   output/260715 ASC). 用户反馈: 进入 260715 设 ASC 后立即阅读, reader 用
-    //   父目录 DESC, 错位. 修复: 直接用 directorySort.resolve(sd, b.absolutePath)
-    //   查 book 目录的 per-folder override; fallback 到 settings (sortField / sortAscending).
-    const fb = useFileBrowserStore();
-    const dsStore = useDirectorySortStore();
-    let bookSortField: SortField = fb.sortField;
-    let bookSortAscending: boolean = fb.sortAscending;
-    try {
-      const override = await dsStore.resolve(sd, b.absolutePath);
-      if (override) {
-        bookSortField = override.sortField as SortField;
-        bookSortAscending = override.ascending;
-      }
-    } catch {
-      // 容错: 用 settings 默认
-    }
-    const imageEntries: MediaEntry[] = targetEntries
-      .filter((e) => !e.isDirectory && !e.isArchive && isImage(e.name));
-    const sortedEntries = sortEntries(imageEntries, bookSortField, bookSortAscending);
-    const sortedNames = sortedEntries.map((e) => e.name);
-    log('[ReaderView/loadBook] imageEntries', sortedNames.length, sortedNames.slice(0, 5), '(sort=', bookSortField, bookSortAscending, ', path=', b.absolutePath, ')');
-    // v0.1.0-module3.0.8: 同步注入 reader store imageNames + 局部 imageNames ref,
-    // 供 emitChanged (store) + currentReadImageName / resolveInitialSpreadIndex (本组件) 使用.
-    imageNames.value = sortedNames;
-    if (sortedNames.length === 0) {
-      status.value = 'error';
-      errorMessage.value = `${absDir} 下找不到图片`;
-      log('[ReaderView/loadBook] ERROR: no images at', absDir);
-      return;
-    }
-    // v0.1.0-module3.0.2-hotfix4 (H9): convertFileSrc 内部已经 encode, 不 pre-encode
-    // v0.1.0-module3.0.2-hotfix7 (H13): singlePage mode 参数
-    // 单页模式 spread 大小 = 1 (除 cover), 滚轮一次跳 1 张图.
-    // 双页模式 spread 大小 = 2 (除 cover + 末张), 跳 2 张.
-    const isSinglePage = settings.readerDefaultMode === 'single';
-    log('[ReaderView/loadBook] spread mode=', isSinglePage ? 'single' : 'double');
-    pageUrls.value = sortedNames.map((name) => convertFileSrc(joinPath(absDir, name)));
-    log('[ReaderView/loadBook] pageUrls sample', pageUrls.value[0]);
-    log('[ReaderView/loadBook] IPC[getProgress] →', id);
-    const initialSpreadIndex = await resolveInitialSpreadIndex(id, sortedNames.length, isSinglePage, sortedNames);
-    log('[ReaderView/loadBook] initialSpreadIndex=', initialSpreadIndex, '(pageCount=', sortedNames.length, ')');
-    log('[ReaderView/loadBook] reader.openBook →', { bookId: id, title: b.title, pages: pageUrls.value.length, initialSpreadIndex, isSinglePage });
-    reader.openBook({
-      bookId: id,
-      title: b.title || '无标题',
-      pages: pageUrls.value,
-      spreads: SpreadPlanner.plan(pageUrls.value.length, true, isSinglePage),
-      initialSpreadIndex,
-    });
-    // v0.1.0-module3.0.8: openBook payload 未带 imageNames (spec §3.2 OpenBookPayload 保持稳定),
-    // 改在 openBook 后注入 store. closeBook 时 store 已重置 imageNames=[].
-    reader.imageNames = sortedNames;
-    log('[ReaderView/loadBook] reader.openBook done, status=ready');
+    // P0-3: 旧卷晚返回丢弃 (activeLoadSeq 自增后, 旧 seq 不再匹配)
+    if (seq !== activeLoadSeq) return;
+    commitBookSnapshot(snapshot);
+    lastLoadedBookId.value = bookId;
+    bookLoadPhase.value = 'ready';
     status.value = 'ready';
-  } catch (e) {
-    log('[ReaderView/loadBook] EXCEPTION:', e, 'stack:', e instanceof Error ? e.stack : '');
-    errorMessage.value = e instanceof Error ? e.message : String(e);
+    visibleReader.value = true;
+    log('[ReaderView/loadRouteBook] committed, bookId=', bookId, 'seq=', seq);
+  } catch (error) {
+    if (seq !== activeLoadSeq) return;
+    // 不变量 3: 失败不保留旧卷 (route 已是新 bookId, 不该展示旧画面)
+    reader.closeBook();
+    pageUrls.value = [];
+    imageNames.value = [];
+    book.value = null;
+    bookLoadPhase.value = 'error';
     status.value = 'error';
+    errorMessage.value = error instanceof Error ? error.message : String(error);
+    log('[ReaderView/loadRouteBook] FAILED, bookId=', bookId, 'seq=', seq, 'err=', error);
   }
 }
 
 /**
- * v0.1.0-module3.0.2: 防御性解析 sourceDescriptor
- *  - 新数据 (Rust serde_json::Value): 直接是 SourceDescriptor 对象
- *  - 老数据 (Rust String raw blob): JSON.parse 拆
- *  - 都坏了: 返回 null (上层走 error 路径)
+ * v0.1.0-module3.0.8: 原子提交 Loader 返回的不可变 Snapshot.
+ * 2026-08-12 跨卷任务 8: 加 sourceDescriptor / currentRelPath 写入 reader.openBook
+ * (跨卷 CrossVolumeController.identity() 依赖这 2 字段).
  */
-function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
-  if (raw == null) return null;
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' && 'rootPath' in parsed
-        ? (parsed as SourceDescriptor)
-        : null;
-    } catch {
-      return null;
-    }
-  }
-  if (typeof raw === 'object' && 'rootPath' in raw && typeof (raw as { rootPath: unknown }).rootPath === 'string') {
-    return raw as SourceDescriptor;
-  }
-  return null;
+function commitBookSnapshot(snapshot: ReaderBookSnapshot): void {
+  book.value = snapshot.book;
+  pageUrls.value = snapshot.pageUrls;
+  imageNames.value = snapshot.imageNames;
+  reader.openBook({
+    bookId: snapshot.book.id,
+    title: snapshot.book.title || '无标题',
+    pages: snapshot.pageUrls,
+    spreads: snapshot.spreads,
+    initialSpreadIndex: snapshot.initialSpreadIndex,
+    sourceDescriptor: snapshot.descriptor,
+    currentRelPath: snapshot.relPath,
+  });
+  reader.imageNames = snapshot.imageNames;
+}
+
+/** 显式重试（失败 / 取消后）。lastLoadedBookId 置 null 跳过 ready 去重。
+ *  本版 UI 未挂重试按钮, 但保留为公开函数 (暴露给未来 error UI 或调试用)。
+ *  当前通过 defineExpose 暴露 (vm.retryCurrentBook 可调)。 */
+async function retryCurrentBook(): Promise<void> {
+  lastLoadedBookId.value = null;
+  await loadRouteBook(Number(route.params.bookId));
+}
+
+defineExpose({ retryCurrentBook });
+
+/**
+ * 2026-08-12 跨卷任务 8 (spec §11.2): Controller 注入的 navigateToVolume.
+ * 步骤 ⑤⑥: loader.ensureBookId (DB UPSERT) + router.replace (at 清空).
+ * 步骤 ①②③④ 已在 Controller.navigateResolvedTarget 完成 (identity 校验 + trySave + slideshow.pause + 再校验).
+ */
+async function navigateToVolume(target: NextVolumeTarget): Promise<void> {
+  const bookId = await loader.ensureBookId(target);
+  await router.replace({ name: 'reader', params: { bookId }, query: {} });
 }
 
 /**
- * v0.1.0-module3.0.2-hotfix5: 跨平台 path join (Windows '\\' / POSIX '/')
- *  - 用于 rootPath + absolutePath 或 absolutePath + filename 拼接
- *  - 保留 Windows '\\' 分隔符, 让 convertFileSrc encode 后 Rust fs::read 正确处理
- *  - 不 trim 各 segment 内部分隔符 (例如 absolutePath 'root/漫画' 中的 '/' 不动),
- *    只在 segment 边界加 1 个 '\\'
+ * 2026-08-12 跨卷任务 8 (spec §11.2 P1-1): 当前卷身份.
+ * 加载期 (bookLoadPhase !== 'ready') 或 reader store 与 route 不一致时返回 null.
+ * Controller.canStart + identity 双重保护：加载期 maybeContinue 直接 return,
+ * 即使 hotkey/9宫格/watch 绕过 UI busy 检查也无法发起跨卷.
  */
-function joinPath(...parts: string[]): string {
-  const cleaned = parts
-    .filter((s) => s && s.length > 0)
-    .map((s) => s.replace(/[\\/]+$/, ''));  // 只去尾部分隔符
-  return cleaned.join('\\');
+function currentIdentity(): BookIdentity | null {
+  if (bookLoadPhase.value !== 'ready') return null;
+  if (reader.bookId === null || reader.sourceDescriptor === null) return null;
+  if (reader.bookId !== Number(route.params.bookId)) return null;
+  return {
+    descriptor: reader.sourceDescriptor,
+    relPath: reader.currentRelPath,
+    bookId: reader.bookId,
+  };
 }
 
 /**
- * v0.1.0-module3.0.2-hotfix3 (H8): percent-encode path segments
- *  - 老 pageUrls = convertFileSrc('Q:\\dir\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg')
- *    生成 'http://asset.localhost/Q:\\...\\(林星阑) - ...\\c (1).jpg'
- *  - 括号 / 空格 / 中文未 encode, WebView2 fetch asset:// 路径解析失败
- *    OSD tile-load-failed, 翻页后图片不显示
- *  - 修: encodeURIComponent 每段, 保留分隔符 (Windows '\\' / POSIX '/')
- *  - 注意: drive letter 'Q:' 必须保留, 所以 split '\\' / '/' 后只 encode
- *    非 drive-letter 段
+ * 2026-08-12 跨卷任务 8 (spec §11.3): CrossVolumeController 实例化.
+ * 10 个 opts 全注入（identity / navigateToVolume / saveCurrentProgressNow / pushToast /
+ * getContinueMode / pauseSlideshow / consumePendingNextVolume / canStart /
+ * isSlideshowPlaying / resumeSlideshow）.
+ * A7 修复: isSlideshowPlaying 在 maybeContinue 入口捕获 isPlaying 状态;
+ *          resumeSlideshow 是 slideshow.start() —— Controller 内部已用 wasSlideshowPlaying guard,
+ *          所以 ReaderView 这边直接调 start 即可.
+ * ReaderView 单实例所有权（Toast 不调 useCrossVolume, P0-2 修复）.
  */
-// v0.1.0-module3.0.2-hotfix3 撤回 — encodePathForUrl 不需要 (H9)
-// Tauri 2 的 convertFileSrc 内部已经 percent-encode path (调用了
-// encodeURI). 前端再 encode 会双重编码: '%2528' 解码一次是 '%28',
-// 不是 '(' — Tauri Rust 端拿 '%28...' 当字面字符串找不到文件.
-// 直接传 raw path 即可, 让 convertFileSrc 内部统一处理.
+const crossVolume = useCrossVolume({
+  identity: currentIdentity,
+  navigateToVolume,
+  saveCurrentProgressNow: () => reader.saveCurrentProgressNow(),
+  pushToast: (k, p?: Record<string, unknown>) => toast.push(t(k, p ?? {})),
+  getContinueMode: () => settings.continueToNextVolume,
+  pauseSlideshow: () => slideshow.pause(),
+  consumePendingNextVolume: () => slideshow.consumePendingNextVolume(),
+  canStart: () => bookLoadPhase.value === 'ready',
+  isSlideshowPlaying: () => slideshow.isPlaying,
+  resumeSlideshow: () => slideshow.start(),
+});
+
+// 末页跨卷意图 (spec §9 reader.nextPage atLast → onAtLastNextAttempt 回调):
+// 写 slideshow.pendingNextVolume → 下方统一 watch 消费。
+reader.setOnAtLastNextAttempt(() => { slideshow.pendingNextVolume = true; });
+
+// 单一 watch 消费 pendingNextVolume (手动末页 + slideshow 末页统一).
+watch(
+  () => slideshow.pendingNextVolume,
+  (v) => {
+    log('[ReaderView/watch] pendingNextVolume →', v);
+    if (v) void crossVolume.maybeContinue(false, 'next');  // 看模式
+  },
+);
+
+// v0.1.0-reader-review-fix-7: mode 切换重算 spreads (双页 ↔ 单页 size 不同)
+// + 加 log 验证 Pinia 反应. settings.$subscribe 也可作为 fallback 触发.
+watch(
+  () => settings.readerDefaultMode,
+  (newMode, oldMode) => {
+    log('[ReaderView/watch] readerDefaultMode', oldMode, '→', newMode);
+    recomputeSpreadsForMode();
+  },
+);
 
 /**
- * v0.1.0-module3.0.2 (H5): 恢复上次阅读位置
- *  - 调 getProgress(bookId) 拿 last read page
- *  - page→spread 映射 (SpreadPlanner.spreadIndexForPage)
- *  - 无 progress / 失败: 默认 0
- *
- * v0.1.0-module3.0.2-hotfix1 (N3): 末页钳位
- *  - 还原到末页会让 slideshow.tick() atLast() 立刻 pause + setPendingNextVolume,
- *    用户感知"刚开就跨卷".
- *  - 修法: 把 initialSpreadIndex 钳到 last - 1 (倒数第二页),
- *    让用户先正常翻页, 而不是看到跨卷 flag 触发.
- *  - 多 spread 的漫画钳到 last - 1; 单 spread 的极端情况不动 (无 last - 1).
- *
- * v0.1.0-module3.0.2-reader-polish (Cluster A): 优先 ?at=imageName
- *  - 双击图片 / 选中图片立即阅读时, 用 imageEntry.name 在 sortedNames 找 index
- *  - page→spread 映射同 saved progress 路径
- *  - 末页钳位仍生效
- */
-async function resolveInitialSpreadIndex(
-  bookId: number,
-  pageCount: number,
-  singlePage: boolean = false,
-  imageNames: string[] = [],
-): Promise<number> {
-  // 1. 优先: Cluster A 入口 (双击/选中图片) — 用户显式选择, 不做末页钳位
-  const atName = initialImageName.value;
-  if (atName && imageNames.includes(atName)) {
-    const idx = imageNames.indexOf(atName);
-    const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
-    const last = spreads.length - 1;
-    if (last < 0) return 0;
-    const target = SpreadPlanner.spreadIndexForPage(idx, spreads);
-    const clamped = Math.max(0, Math.min(target, last));
-    log('[ReaderView/resolveInitialSpreadIndex] from ?at=', atName, '→ idx=', idx, '→ spread=', clamped, '(last=', last, ') [no last-clamp for explicit choice]');
-    return clamped;
-  }
-  // 2. 缺省: 读 saved progress (H5)
-  try {
-    const progress = await getProgress(bookId);
-    if (!progress) return 0;
-    const spreads = SpreadPlanner.plan(pageCount, true, singlePage);
-    const last = spreads.length - 1;
-    if (last < 0) return 0;
-    // v0.1.0-module3.0.8: imageName 优先（masonry 写入的 anchor）.
-    // 命中走 imageNames.indexOf，末页钳位保留（spec §4.1）.
-    if (progress.imageName) {
-      const nameIdx = imageNames.indexOf(progress.imageName);
-      if (nameIdx >= 0) {
-        const target = SpreadPlanner.spreadIndexForPage(nameIdx, spreads);
-        const clamped = Math.max(0, Math.min(target, last));
-        log('[ReaderView/resolveInitialSpreadIndex] from saved progress imageName=', progress.imageName, '→ idx=', nameIdx, '→ spread=', clamped, '(last=', last, ')');
-        return clamped >= last ? Math.max(0, last - 1) : clamped;
-      }
-      log('[ReaderView/resolveInitialSpreadIndex] imageName not found', progress.imageName, 'fallback to page');
-    }
-    // 3. fallback page（旧行 / 改名 / 换源）
-    const idx = SpreadPlanner.spreadIndexForPage(progress.page, spreads);
-    const clamped = Math.max(0, Math.min(idx, last));
-    log('[ReaderView/resolveInitialSpreadIndex] from saved progress page=', progress.page, '→ spread=', clamped, '(last=', last, ')');
-    return clamped >= last ? Math.max(0, last - 1) : clamped;
-  } catch (e) {
-    log('[ReaderView/resolveInitialSpreadIndex] fallback 0:', e);
-    return 0;
-  }
-}
-
-/**
- * v0.1.0-module3.0.2: H6 修复 — 入口立刻 consumePendingNextVolume
- * (不论 settings), 防止 flag 永远 true 死循环
- */
-async function onNextVolume() {
-  const flag = slideshow.pendingNextVolume;
-  log('[ReaderView/onNextVolume] entered, pendingNextVolume=', flag, 'continueToNextVolume=', settings.continueToNextVolume);
-  if (!slideshow.consumePendingNextVolume()) {
-    log('[ReaderView/onNextVolume] no flag set, skip');
-    return;
-  }
-  if (settings.continueToNextVolume !== 'auto') {
-    log('[ReaderView/onNextVolume] flag consumed but setting != auto, skip actual load');
-    return;
-  }
-  log('[ReaderView/onNextVolume] cross-volume intent (TODO: load next volume)');
-  // v0.1.0-module2.0 暂未集成跨卷加载 — reader store 需扩展 sourceDescriptor / currentBookPath 字段.
-  // 末页已 pause, 用户手动按 next-volume 按钮 (9 宫格右下) 或菜单触发.
-}
-
-/**
- * v0.1.0-reader-review-fix-10: mode 切换时重算 spreads + 保持当前页码.
+ * v0.1.0-module3.0.2: M5 修复 — mode 切换时重算 spreads + 保持当前页码.
  *  - 双页 spreads = {0,1},{1,3},{3,5},... size=2
  *  - 单页 spreads = {0,1},{1,2},{2,3},... size=1
  *  - 不重算 → wheel nextPage 跳 2 张图 (spread 是双页 size)
@@ -502,66 +409,15 @@ function recomputeSpreadsForMode(): void {
   log('[ReaderView/recomputeSpreadsForMode] mode=', settings.readerDefaultMode, 'page=', currentPage0 + 1, '→ spreadIndex=', newIndex, '(spreads.length=', newSpreads.length, ')');
 }
 
-onMounted(async () => {
-  log('[ReaderView/onMounted] start');
-  await loadBook();
-  await slideshow.load();
-  log('[ReaderView/onMounted] done; reader.status=', reader.status);
+/**
+ * v0.1.0-module3.0.2: M5 修复 — 把写好的 useReaderWheel 实际挂上 (containerRef),
+ * preventDefault 阻止页面滚动 + OSD 内部滚轮缩放. ReaderScreen 那边 SinglePageViewer
+ * 已经 scrollToZoom=false, 此处 containerRef 接 wheel 接管翻页.
+ * 2026-08-12 跨卷任务 8: useReaderHotkeys 加 actions 参数 (nextVolume → crossVolume.maybeContinue).
+ */
+useReaderHotkeys({
+  nextVolume: () => { void crossVolume.maybeContinue(true, 'next'); },
 });
-
-// v0.1.0-module3.0.2: M2 修复 — store 防抖路径存 spreads[start] (page),
-// unmount 路径必须对齐, 否则末页前的 spread 恢复会被 spreadIndex 覆盖.
-function currentReadPage(): number {
-  const spread = reader.spreads[reader.currentSpreadIndex];
-  const page = spread?.start ?? reader.currentSpreadIndex;
-  log('[ReaderView/currentReadPage] spreadIndex=', reader.currentSpreadIndex, 'page=', page, 'spreads.length=', reader.spreads.length);
-  return page;
-}
-
-// v0.1.0-module3.0.8: 当前 spread 起始图的文件名（用于 progress.image_name 锚点）.
-// onUnmounted 显式双写到 saveProgress, 与 emitChanged 内部 saveProgress 形成冗余路径
-// (unmount 不等 debounce 500ms, 立刻同步写).
-function currentReadImageName(): string | null {
-  const idx = reader.currentSpreadIndex;
-  const sp = reader.spreads[idx];
-  if (!sp) return null;
-  return imageNames.value[sp.start] ?? null;
-}
-
-onUnmounted(() => {
-  log('[ReaderView/onUnmounted] start; bookId=', reader.bookId, 'currentSpreadIndex=', reader.currentSpreadIndex);
-  if (reader.bookId !== null) {
-    const page = currentReadPage();
-    const imageName = currentReadImageName();
-    log('[ReaderView/onUnmounted] IPC[saveProgress] →', { bookId: reader.bookId, page, mode: 'single', imageName });
-    void saveProgress(reader.bookId, page, 'single', undefined, imageName ?? undefined);
-  }
-  slideshow.pause();
-  reader.closeBook();
-  log('[ReaderView/onUnmounted] done');
-});
-
-const zoneActions = {
-  openMainMenu: () => { showMainMenu.value = true; slideshow.pause(); },
-  prevPage: () => { reader.prevPage(); slideshow.reset(); },
-  nextPage: () => { reader.nextPage(); slideshow.reset(); },
-  jumpToFirst: () => { reader.jumpToSpread(0); slideshow.reset(); },
-  jumpToLast: () => { reader.jumpToSpread(Math.max(0, reader.spreads.length - 1)); slideshow.reset(); },
-  toggleSlideshow: () => { slideshow.toggle(); },
-  prevVolume: () => { log('[ReaderView/zoneActions] prevVolume TODO (cross-volume prev)'); },
-  nextVolume: () => { onNextVolume(); },
-  // v0.1.0-module3.0: 新增 fit-width + open-file-browser 回调
-  fitWidth: () => {
-    // Cluster C: 调 setScaleMode 立即 apply + 持久化 (was: 只写 defaultScaleMode 下次生效)
-    void settings.setScaleMode('fit-width');
-  },
-  openFileBrowser: () => { void goBackToFileBrowser(); },
-};
-
-// v0.1.0-module3.0.2: M5 修复 — 把写好的 useReaderWheel 实际挂上 (containerRef),
-// preventDefault 阻止页面滚动 + OSD 内部滚轮缩放. ReaderScreen 那边 SinglePageViewer
-// 已经 scrollToZoom=false, 此处 containerRef 接 wheel 接管翻页.
-useReaderHotkeys();
 useReaderWheel({
   containerRef,
   onPrev: () => { reader.prevPage(); slideshow.reset(); },
@@ -579,23 +435,37 @@ useReaderTouchZones({
   onAction: (a) => dispatchZoneAction(a, zoneActions),
 });
 
-watch(
-  () => slideshow.pendingNextVolume,
-  (v) => {
-    log('[ReaderView/watch] pendingNextVolume →', v);
-    if (v) void onNextVolume();
-  },
-);
+// 2026-08-12 跨卷任务 8: onUnmounted 清理回调 + activeLoadSeq++ + saveCurrentProgressNow 兜底.
+// 不变量 10 + 11.
+onUnmounted(() => {
+  log('[ReaderView/onUnmounted] start; bookId=', reader.bookId, 'currentSpreadIndex=', reader.currentSpreadIndex);
+  reader.setOnAtLastNextAttempt(null);  // 不变量 11: 清理 Pinia store 持有的旧组件闭包
+  activeLoadSeq += 1;                    // P0-3: 使在途 Loader 失效, 卸载后不执行提交
+  if (reader.bookId !== null) {
+    void reader.saveCurrentProgressNow();  // 兜底 (不依赖 store 防抖, 立即 await)
+  }
+  slideshow.pause();
+  reader.closeBook();
+  log('[ReaderView/onUnmounted] done');
+});
 
-// v0.1.0-reader-review-fix-7: mode 切换重算 spreads (双页 ↔ 单页 size 不同)
-// + 加 log 验证 Pinia 反应. settings.$subscribe 也可作为 fallback 触发.
-watch(
-  () => settings.readerDefaultMode,
-  (newMode, oldMode) => {
-    log('[ReaderView/watch] readerDefaultMode', oldMode, '→', newMode);
-    recomputeSpreadsForMode();
+const zoneActions = {
+  openMainMenu: () => { showMainMenu.value = true; slideshow.pause(); },
+  prevPage: () => { reader.prevPage(); slideshow.reset(); },
+  nextPage: () => { reader.nextPage(); slideshow.reset(); },
+  jumpToFirst: () => { reader.jumpToSpread(0); slideshow.reset(); },
+  jumpToLast: () => { reader.jumpToSpread(Math.max(0, reader.spreads.length - 1)); slideshow.reset(); },
+  toggleSlideshow: () => { slideshow.toggle(); },
+  prevVolume: () => { log('[ReaderView/zoneActions] prevVolume TODO (cross-volume prev)'); },
+  // 2026-08-12 跨卷任务 8 (spec §11.3): 9 宫格 folder-next 显式跨卷 (force=true, 不看模式)
+  nextVolume: () => { void crossVolume.maybeContinue(true, 'next'); },
+  // v0.1.0-module3.0: 新增 fit-width + open-file-browser 回调
+  fitWidth: () => {
+    // Cluster C: 调 setScaleMode 立即 apply + 持久化 (was: 只写 defaultScaleMode 下次生效)
+    void settings.setScaleMode('fit-width');
   },
-);
+  openFileBrowser: () => { void goBackToFileBrowser(); },
+};
 </script>
 
 <template>
@@ -626,7 +496,7 @@ watch(
     </div>
 
     <ReaderScreen
-      v-else-if="status === 'ready' && reader.status === 'ready'"
+      v-else-if="status === 'ready' && reader.status === 'ready' && visibleReader"
       class="flex-1 min-h-0"
       :page-urls="pageUrls"
       :spreads="reader.spreads"
@@ -661,7 +531,7 @@ watch(
       @toggle-slideshow-direction="onToggleSlideshowDirection"
       @navigate="(p: string) => router.push(p)"
       @toggle-like="onToggleLike"
-      @add-bookmark="book?.id != null && addBookmark(book.id, currentReadPage(), null)"
+      @add-bookmark="book?.id != null && addBookmark(book.id, reader.currentSpreadIndex, null)"
     >
     </ReaderMainMenu>
 
@@ -721,5 +591,13 @@ watch(
 
     <!-- v0.1.0-module3.0.3: 幻灯片切换提示胶囊 (监听 isPlaying flip; 自带 1500ms auto-hide) -->
     <SlideshowToast />
+    <!-- 2026-08-12 跨卷任务 8: 跨卷 manual 模式底部胶囊 (纯 props/emits, 不调 useCrossVolume) -->
+    <!-- ToastHost 已上移到 App.vue 顶层 (跨卷审查 I1), 让 FileBrowser 跨卷 toast 也能渲染 -->
+    <ContinueNextVolumeToast
+      :target="crossVolume.pendingCrossVolume.value"
+      :loading="crossVolume.phase.value === 'navigating'"
+      @jump="() => crossVolume.confirmManual()"
+      @close="() => crossVolume.dismissManual()"
+    />
   </main>
 </template>

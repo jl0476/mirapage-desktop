@@ -29,6 +29,9 @@ pub enum MediaSourceError {
 
     #[error("其他错误: {0}")]
     Other(String),
+
+    #[error("路径越出数据源根: {0}")]
+    PathEscape(String),
 }
 
 pub type Result<T> = std::result::Result<T, MediaSourceError>;

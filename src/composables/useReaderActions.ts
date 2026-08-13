@@ -26,6 +26,7 @@ import { createBook, listDirectory, recordHistory, getProgress, type CreateBookA
 import { isImage } from '@/lib/mime';
 import { naturalCompare } from '@/lib/naturalSort';
 import { PathUtils } from '@/lib/path';
+import { validateSourceRelativePath } from '@/lib/relativePath';
 import { log } from '@/lib/logger';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 import type { Router } from 'vue-router';
@@ -38,9 +39,15 @@ export interface ReaderActionsOptions {
   /**
    * Cluster A: FileBrowser 当前已 fetch 的目录路径 (lastFetchedPath).
    * readFromImage 用此路径作为父目录,合成 MediaEntry 走 ensureBookId.
-   * 缺省或空字符串时 readFromImage 容错放弃 (不 router.push).
+   *
+   * 路径身份修复 (2026-08-12): 返回 `string | null` 区分三种状态:
+   *   - null  = 未加载 (rootPath 未设或未 fetch), readFromImage 安全 abort
+   *   - ''    = 根目录已加载 (合法), createBook/history 写 ''
+   *   - 'a/b' = 子目录已加载
+   * 旧实现 `string` + `if (!parentPath)` 把根目录 '' 误判为未加载而 abort,
+   * 或被 fallback 成绝对 rootPath 污染 library/history.
    */
-  getLastFetchedPath: () => string;
+  getLastFetchedPath: () => string | null;
   /**
    * v0.1.0-module3.0.3-hotfix: 当前列表所在的目录路径 (fb.currentPath, 相对 rootPath).
    * ensureBookId 用此值 + entry.path 拼出 absPath (相对 rootPath 的 IPC 路径).
@@ -129,6 +136,13 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     const rootPath = opts.resolveRootPath();
     const currentPath = parentPathOverride ?? opts.getCurrentPath?.() ?? '';
     const absPath = entry.path ? PathUtils.join(currentPath, entry.path) : currentPath;
+    // 路径身份修复 (2026-08-12): createBook 前校验 absPath 必须 source-relative。
+    // 非法（绝对/UNC/../NUL）则不写库，返回 null 中止。
+    const pathCheck = validateSourceRelativePath(absPath);
+    if (!pathCheck.ok) {
+      log('[useReaderActions/ensureBookId] absPath 越出数据源根, 拒绝 createBook', { absPath, reason: pathCheck.reason });
+      return { bookId: null, absPath: '' };
+    }
     log('[useReaderActions/ensureBookId] entry=', entry.name, 'rootPath=', rootPath, 'currentPath=', currentPath, 'absPath=', absPath, 'favorite=', favorite);
     const descriptor = opts.buildSourceDescriptor(rootPath);
     const sourceType = descriptor.type === 'local' ? 'Local' : capitalize(descriptor.type);
@@ -156,6 +170,28 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     }
   }
 
+  /**
+   * 路径身份修复 (2026-08-12): recordHistory 前校验 relPath 必须 source-relative。
+   * 非法则跳过 IPC（不写污染行），记 log。容错不抛。
+   */
+  async function safeRecordHistory(
+    descriptor: SourceDescriptor,
+    relPath: string,
+    displayName: string,
+    bookId: number | null,
+  ): Promise<void> {
+    const check = validateSourceRelativePath(relPath);
+    if (!check.ok) {
+      log('[useReaderActions/safeRecordHistory] relPath 越出数据源根, 跳过 recordHistory', { relPath, reason: check.reason });
+      return;
+    }
+    try {
+      await recordHistory(descriptor, check.normalized, displayName, bookId ?? undefined);
+    } catch (e) {
+      log('[useReaderActions/safeRecordHistory] recordHistory failed (容错)', e);
+    }
+  }
+
   async function readNow(entry: MediaEntry): Promise<void> {
     log('[useReaderActions] readNow called', entry.name, 'isDirectory=', entry.isDirectory);
     const { bookId, absPath } = await ensureBookId(entry, /*favorite=*/false);
@@ -165,13 +201,9 @@ export function useReaderActions(opts: ReaderActionsOptions) {
     }
     // v0.1.0-module3.0.1: 进入 reader 才记录阅览（Android BrowseHistoryRepository.record 行为）
     // —— 单纯文件夹浏览不进 history。bookId 关联 library, readStatus 据此派生 reading/finished。
-    try {
-      const rootPath = opts.resolveRootPath();
-      const descriptor = opts.buildSourceDescriptor(rootPath);
-      await recordHistory(descriptor, absPath, entry.name, bookId);
-    } catch (e) {
-      log('[useReaderActions] recordHistory failed (容错)', e);
-    }
+    const rootPath = opts.resolveRootPath();
+    const descriptor = opts.buildSourceDescriptor(rootPath);
+    await safeRecordHistory(descriptor, absPath, entry.name, bookId);
     if (opts.onLibraryChanged) {
       try {
         await opts.onLibraryChanged();
@@ -226,11 +258,17 @@ export function useReaderActions(opts: ReaderActionsOptions) {
   async function readFromImage(imageEntry: MediaEntry): Promise<void> {
     log('[useReaderActions] readFromImage called', imageEntry.name);
     const parentPath = opts.getLastFetchedPath();
-    if (!parentPath) {
-      log('[useReaderActions] readFromImage: no parent path (lastFetchedPath empty), abort');
+    // 路径身份修复 (2026-08-12): 只在 null (未加载) 时 abort;
+    // 根目录 '' 是合法值, 继续走 createBook/history 写 ''.
+    if (parentPath === null) {
+      log('[useReaderActions] readFromImage: no loaded directory (lastFetchedPath null), abort');
       return;
     }
-    const parentName = parentPath.split(/[\\/]/).filter(Boolean).pop() ?? imageEntry.name;
+    // 根目录 '' 时 parentName fallback 到 rootPath 最后一段; 子目录取最后一段.
+    const rootPath = opts.resolveRootPath();
+    const parentName = parentPath.split(/[\\/]/).filter(Boolean).pop()
+      ?? rootPath.split(/[\\/]/).filter(Boolean).pop()
+      ?? imageEntry.name;
     const parentDir: MediaEntry = {
       name: parentName,
       path: '',  // 改: 之前是 parentPath, 现在用空串走 ensureBookId fallback = currentPath
@@ -244,13 +282,8 @@ export function useReaderActions(opts: ReaderActionsOptions) {
       log('[useReaderActions] readFromImage: bookId is null, abort');
       return;
     }
-    try {
-      const rootPath = opts.resolveRootPath();
-      const descriptor = opts.buildSourceDescriptor(rootPath);
-      await recordHistory(descriptor, absPath, parentName, bookId);
-    } catch (e) {
-      log('[useReaderActions] readFromImage: recordHistory failed (容错)', e);
-    }
+    const descriptor = opts.buildSourceDescriptor(rootPath);
+    await safeRecordHistory(descriptor, absPath, parentName, bookId);
     if (opts.onLibraryChanged) {
       try {
         await opts.onLibraryChanged();
@@ -276,50 +309,32 @@ export function useReaderActions(opts: ReaderActionsOptions) {
   }
 
   /**
-   * v0.1.0-module3.0.8: 顶栏「立即阅读」无选中 entry 时的入口.
+   * v0.1.0-...: 顶栏「立即阅读」无选中 entry 时的入口.
    *
    * 流程:
-   * 1) FileBrowser 传 cachedProgress (从 fb store 取的 progress 缓存).
-   *    命中 (有 imageName) → 直接 router.push 带 ?at=imageName, 不走 IPC.
-   * 2) cachedProgress 未命中 → 用当前 currentPath / localRoot fallback
-   *    合成 dirEntry 调 ensureBookId(favorite=false), 取 bookId.
-   *    bookId null → abort.
-   * 3) ensureBookId 拿到的 bookId 调 getProgress(bookId). 仍无 imageName → abort.
-   * 4) 有 imageName → saveNavigationContext (容错) → router.push 带 ?at=imageName.
-   * 5) router 不存在 → 仅 log, 不抛 (测试场景友好).
+   * 1) readProgress 拿当前目录的阅读进度:
+   *    - cachedProgress 命中 (有 imageName) → 短路返回.
+   *    - 否则 → ensureBookId + getProgress 查后端.
+   * 2) 共享前置 (两条路径都要做): 写 history + 触发 readStatus.refresh.
+   *    - recordHistory 是 INSERT OR UPDATE, 幂等.
+   *    - 缺这一步会导致 readStatus.refresh 拿不到 history 行, 详情/瀑布流
+   *      不显示"阅读中" / "已读完" 徽章 (典型症状: '水淼 Aqua summer II').
+   * 3) progress 有 imageName → 从上次阅读的那张图进入 (router.push 带 ?at=).
+   * 4) progress 为 null (从未阅读) → 从第一张图开始 (走 readNow 同款链路).
+   * 5) bookId null → abort (测试场景或后端异常).
+   * 6) router 不存在 → 仅 log, 不抛 (测试场景友好).
    *
    * opts.getCurrentPath 缺省或根目录 currentPath='' 时, 用 localRoot (resolveRootPath)
    * 最后一段做 dirName fallback, 保证不 abort.
+   *
+   * 内部用 readProgress 拿进度 — 见 readProgress 注释。
    */
   async function readFromCurrentPath(
     args: { cachedProgress?: ProgressItem | null } = {},
   ): Promise<void> {
     log('[useReaderActions] readFromCurrentPath called');
-    const rootPath = opts.resolveRootPath();
-    const currentPath = opts.getCurrentPath?.() ?? '';
-    const descriptor = opts.buildSourceDescriptor(rootPath);
+    const progress = await readProgress(args.cachedProgress ?? null);
 
-    let progress = args.cachedProgress ?? null;
-    if (!progress?.imageName) {
-      const localRoot = descriptor.type === 'local' ? (descriptor as { rootPath: string }).rootPath : '';
-      const dirName =
-        currentPath.split(/[\\/]/).filter(Boolean).pop() ||
-        localRoot.split(/[\\/]/).filter(Boolean).pop() ||
-        'root';
-      const dirEntry: MediaEntry = {
-        name: dirName, path: '', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0,
-      };
-      const { bookId } = await ensureBookId(dirEntry, /*favorite=*/false);
-      if (bookId === null) {
-        log('[useReaderActions] readFromCurrentPath: bookId null, abort');
-        return;
-      }
-      progress = await getProgress(bookId);
-    }
-    if (!progress?.imageName) {
-      log('[useReaderActions] readFromCurrentPath: no progress.imageName, abort');
-      return;
-    }
     if (opts.saveNavigationContext) {
       try {
         opts.saveNavigationContext();
@@ -327,17 +342,107 @@ export function useReaderActions(opts: ReaderActionsOptions) {
         log('[useReaderActions] readFromCurrentPath: saveNavigationContext failed (容错)', e);
       }
     }
-    if (router) {
-      log('[useReaderActions] readFromCurrentPath: router.push /reader/' + progress.bookId, '?at=', progress.imageName);
+
+    // ─── 共享前置: 解析 bookId / absPath / displayName + 写 history + refresh ───
+    const rootPath = opts.resolveRootPath();
+    const currentPath = opts.getCurrentPath?.() ?? '';
+    const descriptor = opts.buildSourceDescriptor(rootPath);
+    const localRoot = descriptor.type === 'local'
+      ? (descriptor as { rootPath: string }).rootPath : '';
+
+    let bookId: number | null;
+    let absPath: string;
+    let displayName: string;
+    if (progress?.imageName) {
+      // 有上次记录: 复用 progress.bookId, absPath 用当前目录
+      bookId = progress.bookId;
+      absPath = currentPath;
+      displayName = currentPath.split(/[\\/]/).filter(Boolean).pop() || localRoot.split(/[\\/]/).filter(Boolean).pop() || 'root';
+    } else {
+      // 没记录: 走 ensureBookId 创建/获取 bookId
+      const dirName =
+        currentPath.split(/[\\/]/).filter(Boolean).pop() ||
+        localRoot.split(/[\\/]/).filter(Boolean).pop() ||
+        'root';
+      const dirEntry: MediaEntry = {
+        name: dirName, path: '', isDirectory: true,
+        isArchive: false, size: 0, modifiedAt: 0,
+      };
+      const result = await ensureBookId(dirEntry, /*favorite=*/false);
+      bookId = result.bookId;
+      absPath = result.absPath;
+      displayName = dirName;
+    }
+    if (bookId === null) {
+      log('[useReaderActions] readFromCurrentPath: bookId null, abort');
+      return;
+    }
+    await safeRecordHistory(descriptor, absPath, displayName, bookId);
+    if (opts.onLibraryChanged) {
+      try {
+        await opts.onLibraryChanged();
+      } catch (e) {
+        log('[useReaderActions] readFromCurrentPath: onLibraryChanged failed', e);
+      }
+    }
+
+    // ─── 跳路由 ───
+    if (!router) {
+      log('[useReaderActions] readFromCurrentPath: router unavailable, cannot navigate');
+      return;
+    }
+    if (progress?.imageName) {
+      // 有上次阅读 → 从该图进入
+      log('[useReaderActions] readFromCurrentPath: push with ?at=', progress.imageName);
       await router.push({
         name: 'reader',
-        params: { bookId: String(progress.bookId) },
+        params: { bookId: String(bookId) },
         query: { at: encodeURIComponent(progress.imageName) },
       });
-    } else {
-      log('[useReaderActions] readFromCurrentPath: router unavailable, cannot navigate');
+      return;
     }
+    // 没记录 → 从第一张开始
+    log('[useReaderActions] readFromCurrentPath: push to first page /reader/' + bookId);
+    await router.push(`/reader/${bookId}`);
   }
 
-  return { readNow, addToLibrary, readFromImage, readFromCurrentPath };
+  /**
+   * 纯查询版: 给 FileBrowser 在目录加载后读一次进度, 决定"立即阅读"按钮是否可点.
+   *
+   * 与 readFromCurrentPath 区别: 不跳路由、不调 saveNavigationContext、不依赖 router,
+   * 只返回阅读进度 (或 null). cachedProgress 有 imageName 时短路返回.
+   *
+   * 流程:
+   * 1) cachedProgress 有 imageName → 直接返回.
+   * 2) 否则 → 走 ensureBookId (获取/创建图书 ID) + getProgress.
+   * 3) bookId 为 null 或 getProgress.imageName 为 null → 返回 null.
+   */
+  async function readProgress(
+    cachedProgress: ProgressItem | null,
+  ): Promise<ProgressItem | null> {
+    log('[useReaderActions] readProgress called', cachedProgress?.imageName);
+    if (cachedProgress?.imageName) return cachedProgress;
+    const rootPath = opts.resolveRootPath();
+    const currentPath = opts.getCurrentPath?.() ?? '';
+    const descriptor = opts.buildSourceDescriptor(rootPath);
+    const localRoot = descriptor.type === 'local'
+      ? (descriptor as { rootPath: string }).rootPath : '';
+    const dirName =
+      currentPath.split(/[\\/]/).filter(Boolean).pop() ||
+      localRoot.split(/[\\/]/).filter(Boolean).pop() ||
+      'root';
+    const dirEntry: MediaEntry = {
+      name: dirName, path: '', isDirectory: true,
+      isArchive: false, size: 0, modifiedAt: 0,
+    };
+    const { bookId } = await ensureBookId(dirEntry, /*favorite=*/false);
+    if (bookId === null) {
+      log('[useReaderActions] readProgress: ensureBookId 返 null');
+      return null;
+    }
+    const progress = await getProgress(bookId);
+    return progress?.imageName ? progress : null;
+  }
+
+  return { readNow, addToLibrary, readFromImage, readFromCurrentPath, readProgress };
 }

@@ -333,3 +333,255 @@ describe('reader store — v0.1.0-module3.0.8 emitChanged imageName 锚点', () 
     expect(saveProgress).toHaveBeenCalledWith(3, 3, 'single', true, undefined);
   });
 });
+
+/**
+ * 2026-08-12 跨卷任务 4：reader store 扩展
+ * - saveCurrentProgressNow（构造当前快照 await 写入；P1-1 修复）
+ * - nextPage atLast 调 onAtLastNextAttempt（不翻页）
+ * - setOnAtLastNextAttempt(null) 清理（不变量 11）
+ * - sourceDescriptor / currentRelPath state + OpenBookPayload 扩展
+ */
+import type { SourceDescriptorLocal } from '@/lib/sourceDescriptor';
+
+describe('reader store — sourceDescriptor / currentRelPath state (跨卷任务 4)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('openBook 写入 sourceDescriptor + currentRelPath', () => {
+    const r = useReaderStore();
+    const desc: SourceDescriptorLocal = { type: 'local', rootPath: 'C:\\comics' };
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg'],
+      spreads: [{ start: 0, end: 1 }],
+      initialSpreadIndex: 0,
+      sourceDescriptor: desc,
+      currentRelPath: 'vol1',
+    });
+    expect(r.sourceDescriptor).toEqual(desc);
+    expect(r.currentRelPath).toBe('vol1');
+  });
+
+  it('openBook 不传 sourceDescriptor / currentRelPath 时 → null / ""', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg'],
+      spreads: [{ start: 0, end: 1 }],
+      initialSpreadIndex: 0,
+    });
+    expect(r.sourceDescriptor).toBeNull();
+    expect(r.currentRelPath).toBe('');
+  });
+
+  it('closeBook 清 sourceDescriptor + currentRelPath', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg'],
+      spreads: [{ start: 0, end: 1 }],
+      initialSpreadIndex: 0,
+      sourceDescriptor: { type: 'local', rootPath: 'C:\\comics' },
+      currentRelPath: 'vol1',
+    });
+    r.closeBook();
+    expect(r.sourceDescriptor).toBeNull();
+    expect(r.currentRelPath).toBe('');
+  });
+});
+
+describe('reader store — saveCurrentProgressNow (跨卷任务 4, P1-1)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.mocked(saveProgress).mockClear();
+  });
+
+  it('有 pending debounce 时取消 + 立即写（不依赖 timer 触发）', async () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg', 'b.jpg', 'c.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+        { start: 2, end: 3 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    r.imageNames = ['a.jpg', 'b.jpg', 'c.jpg'];
+
+    r.jumpToSpread(1); // 触发 debounce timer
+    expect(saveProgress).not.toHaveBeenCalled();
+    vi.mocked(saveProgress).mockClear();
+
+    await r.saveCurrentProgressNow();
+    // 立即写，未到 500ms 也写
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+    expect(saveProgress).toHaveBeenCalledWith(1, 1, 'single', undefined, 'b.jpg');
+
+    // 再 advance 500ms，timer 已被取消，不二次写
+    await vi.advanceTimersByTimeAsync(500);
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it('无 pending debounce（首页未翻页）也立即写 — finished=false, page=0', async () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 2,
+      title: 'demo',
+      pages: ['a.jpg', 'b.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    r.imageNames = ['a.jpg', 'b.jpg'];
+
+    await r.saveCurrentProgressNow();
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+    expect(saveProgress).toHaveBeenCalledWith(2, 0, 'single', undefined, 'a.jpg');
+  });
+
+  it('末页时 saveCurrentProgressNow 写 finished=true + imageName', async () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 3,
+      title: 'demo',
+      pages: ['a.jpg', 'b.jpg', 'c.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+        { start: 2, end: 3 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    r.imageNames = ['a.jpg', 'b.jpg', 'c.jpg'];
+    r.jumpToSpread(2); // last spread
+    vi.mocked(saveProgress).mockClear();
+
+    await r.saveCurrentProgressNow();
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+    expect(saveProgress).toHaveBeenCalledWith(3, 2, 'single', true, 'c.jpg');
+  });
+
+  it('await saveCurrentProgressNow 验证 saveProgress 异步结果可 await', async () => {
+    let resolveFn: () => void = () => {};
+    const pending = new Promise<void>((resolve) => { resolveFn = resolve; });
+    vi.mocked(saveProgress).mockReturnValueOnce(pending);
+
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 4,
+      title: 'demo',
+      pages: ['a.jpg'],
+      spreads: [{ start: 0, end: 1 }],
+      initialSpreadIndex: 0,
+    });
+
+    const awaited = r.saveCurrentProgressNow();
+    expect(saveProgress).toHaveBeenCalledTimes(1);
+    resolveFn();
+    await awaited;
+  });
+
+  it('status=idle（无 book）时不写', async () => {
+    const r = useReaderStore();
+    await r.saveCurrentProgressNow();
+    expect(saveProgress).not.toHaveBeenCalled();
+  });
+});
+
+describe('reader store — nextPage atLast 调 onAtLastNextAttempt (跨卷任务 4)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('末页再向下：调 onAtLastNextAttempt，不翻页', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg', 'b.jpg', 'c.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+        { start: 2, end: 3 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    r.jumpToSpread(2); // last
+    expect(r.currentSpreadIndex).toBe(2);
+
+    const calls = vi.fn();
+    r.setOnAtLastNextAttempt(calls);
+
+    r.nextPage();
+    expect(calls).toHaveBeenCalledTimes(1);
+    expect(r.currentSpreadIndex).toBe(2); // 不 ++
+  });
+
+  it('非末页正常 ++ 不调回调', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg', 'b.jpg', 'c.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+        { start: 2, end: 3 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    const calls = vi.fn();
+    r.setOnAtLastNextAttempt(calls);
+
+    r.nextPage();
+    expect(r.currentSpreadIndex).toBe(1);
+    expect(calls).not.toHaveBeenCalled();
+  });
+
+  it('setOnAtLastNextAttempt(null) 清理回调（不变量 11）', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg', 'b.jpg'],
+      spreads: [
+        { start: 0, end: 1 },
+        { start: 1, end: 2 },
+      ],
+      initialSpreadIndex: 0,
+    });
+    r.jumpToSpread(1); // last
+
+    const calls = vi.fn();
+    r.setOnAtLastNextAttempt(calls);
+    r.setOnAtLastNextAttempt(null);
+
+    r.nextPage();
+    expect(calls).not.toHaveBeenCalled();
+    expect(r.currentSpreadIndex).toBe(1);
+  });
+
+  it('从未注册回调：末页再向下不抛错', () => {
+    const r = useReaderStore();
+    r.openBook({
+      bookId: 1,
+      title: 'demo',
+      pages: ['a.jpg'],
+      spreads: [{ start: 0, end: 1 }],
+      initialSpreadIndex: 0,
+    });
+    // 单 spread → 既首又末
+    expect(r.currentSpreadIndex).toBe(0);
+    expect(() => r.nextPage()).not.toThrow();
+    expect(r.currentSpreadIndex).toBe(0);
+  });
+});

@@ -74,9 +74,14 @@ export const useShortcutsStore = defineStore('shortcuts', () => {
     activeId.value = id;
   }
 
+  /** 清空激活态（路径身份修复 2026-08-12: openShortcut 拒绝坏 shortcut 时调用）。 */
+  function clearActive(): void {
+    activeId.value = null;
+  }
+
   const active = computed<ShortcutItem | null>(() =>
     items.value.find((s) => s.id === activeId.value) ?? null,
   );
 
-  return { items, activeId, active, loading, refresh, add, remove, setActive };
+  return { items, activeId, active, loading, refresh, add, remove, setActive, clearActive };
 });

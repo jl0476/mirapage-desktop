@@ -3,15 +3,20 @@
  *
  * 状态机: idle → (openBook) → ready / error
  * 翻页: nextPage / prevPage / jumpToSpread
- * 跨卷触发累计: accumulateContinuePull (SWIPE 模式末页继续划)
  * 进度持久化防抖: 500ms debounce (DESIGN §12.4 进度保存策略)
  *
  * v0.1.0-module1.21: 末页翻到时持久化 finished=true (与 perfect-viewer 一致)
+ *
+ * 2026-08-12 跨卷任务 4: 加 saveCurrentProgressNow / nextPage atLast 回调 /
+ * setOnAtLastNextAttempt / sourceDescriptor / currentRelPath（spec §9）。
+ * 模块级 onAtLastNextAttempt 防止 Pinia store 持有旧组件闭包；ReaderView 卸载
+ * 调 setOnAtLastNextAttempt(null) 清理（不变量 11）。
  */
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import { saveProgress } from '@/lib/tauri';
 import { log } from '@/lib/logger';
+import type { SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 export type ReaderStatus = 'idle' | 'ready' | 'error';
 export type ReaderErrorKind =
@@ -27,6 +32,11 @@ export interface OpenBookPayload {
   pages: string[];
   spreads: Array<{ start: number; end: number }>;
   initialSpreadIndex: number;
+  /** 2026-08-12 跨卷任务 4: 当前卷的 SourceDescriptorLocal（仅 Local 目录卷，
+   *  跨卷路由身份 + CrossVolumeController identity 校验依赖此字段）。 */
+  sourceDescriptor?: SourceDescriptorLocal;
+  /** 2026-08-12 跨卷任务 4: 当前卷相对 rootPath 的完整路径（如 "comics/vol1"）。 */
+  currentRelPath?: string;
 }
 
 export interface PageChangeInfo {
@@ -43,6 +53,12 @@ type PageChangeListener = (info: PageChangeInfo) => void;
 
 const SAVE_DEBOUNCE_MS = 500;
 
+/** 2026-08-12 跨卷任务 4: 模块级末页再向下回调（spec §9）。
+ *  ReaderView 注入：在末页再 nextPage 时写 slideshow.pendingNextVolume，
+ *  卸载时 setOnAtLastNextAttempt(null) 清理（不变量 11）。
+ *  模块级避免 Pinia store 持有旧组件闭包。 */
+let onAtLastNextAttempt: (() => void) | null = null;
+
 export const useReaderStore = defineStore('reader', () => {
   const status = ref<ReaderStatus>('idle');
   const bookId = ref<number | null>(null);
@@ -57,6 +73,10 @@ export const useReaderStore = defineStore('reader', () => {
   // v0.1.0-module3.0.2 (L3): 删 continueSwipePull / accumulateContinuePull
   // 这两个字段/actions 0 引用, 跨卷 swip-pulling 进度语义未实现
   const errorKind = ref<ReaderErrorKind | null>(null);
+  // 2026-08-12 跨卷任务 4: 当前卷 SourceDescriptorLocal（openBook 时写入，closeBook 清）。
+  const sourceDescriptor = ref<SourceDescriptorLocal | null>(null);
+  // 2026-08-12 跨卷任务 4: 当前卷相对 rootPath 路径。
+  const currentRelPath = ref<string>('');
 
   /** 累计订阅器列表 — 翻页防抖最终触发回调 */
   const listeners = new Set<PageChangeListener>();
@@ -128,6 +148,8 @@ export const useReaderStore = defineStore('reader', () => {
     );
     chromeVisible.value = true;
     errorKind.value = null;
+    sourceDescriptor.value = payload.sourceDescriptor ?? null;
+    currentRelPath.value = payload.currentRelPath ?? '';
     status.value = 'ready';
   }
 
@@ -140,6 +162,8 @@ export const useReaderStore = defineStore('reader', () => {
     imageNames.value = [];
     currentSpreadIndex.value = 0;
     errorKind.value = null;
+    sourceDescriptor.value = null;
+    currentRelPath.value = '';
     if (debounceTimer !== null) {
       clearTimeout(debounceTimer);
       debounceTimer = null;
@@ -149,10 +173,13 @@ export const useReaderStore = defineStore('reader', () => {
 
   function nextPage() {
     if (status.value !== 'ready') return;
-    if (currentSpreadIndex.value < spreads.value.length - 1) {
-      currentSpreadIndex.value += 1;
-      emitChanged();
+    if (currentSpreadIndex.value >= spreads.value.length - 1) {
+      // 末页再向下（spec §1.2 / §9 末页触发时机）—— 不翻页，写跨卷意图
+      onAtLastNextAttempt?.();
+      return;
     }
+    currentSpreadIndex.value += 1;
+    emitChanged();
   }
 
   function prevPage() {
@@ -183,6 +210,36 @@ export const useReaderStore = defineStore('reader', () => {
     return () => listeners.delete(listener);
   }
 
+  /** 2026-08-12 跨卷任务 4 (P1-1 修复): 构造当前快照 await 写入。
+   *  - 取消 pending debounce timer（防旧卷延迟写跨卷后落盘）
+   *  - 读 store 自身状态（bookId/spreads/currentSpreadIndex/imageNames）构造 PageChangeInfo
+   *  - 末页判定 finished = currentSpreadIndex >= spreads.length - 1
+   *  - await saveProgress（spec 不变量 10：保存失败不阻断跨卷，但调用方可 await 结果） */
+  async function saveCurrentProgressNow(): Promise<void> {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    if (bookId.value === null || spreads.value.length === 0) return;
+    const spread = spreads.value[currentSpreadIndex.value];
+    const page = spread?.start ?? 0;
+    const imageName = spread ? (imageNames.value[spread.start] ?? null) : null;
+    const finished = currentSpreadIndex.value >= spreads.value.length - 1;
+    await saveProgress(
+      bookId.value,
+      page,
+      'single',
+      finished || undefined,
+      imageName ?? undefined,
+    );
+  }
+
+  /** 2026-08-12 跨卷任务 4: 设置末页再向下回调（ReaderView 注入）。
+   *  传 null 清理（不变量 11，组件卸载必调）。 */
+  function setOnAtLastNextAttempt(fn: (() => void) | null): void {
+    onAtLastNextAttempt = fn;
+  }
+
   return {
     // 状态
     status,
@@ -194,6 +251,8 @@ export const useReaderStore = defineStore('reader', () => {
     currentSpreadIndex,
     chromeVisible,
     errorKind,
+    sourceDescriptor,
+    currentRelPath,
     // 派生
     isAtFirstSpread,
     isAtLastSpread,
@@ -205,5 +264,7 @@ export const useReaderStore = defineStore('reader', () => {
     jumpToSpread,
     toggleChrome,
     onPageChanged,
+    saveCurrentProgressNow,
+    setOnAtLastNextAttempt,
   };
 });

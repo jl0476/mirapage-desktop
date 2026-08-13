@@ -11,6 +11,7 @@ import {
   toRootRelativePath,
   captureMasonryViewportAnchor,
   restoreMasonryViewportAnchor,
+  computeAtBottom,
   type MasonryItem,
   type MasonryViewportAnchor,
 } from '@/composables/useMasonryLayout';
@@ -116,8 +117,9 @@ onMounted(async () => {
   });
   ro.observe(containerRef.value);
   containerWidth.value = containerRef.value.clientWidth || 1;
-  // 首次预读
-  triggerPrefetch();
+  // 首次预读由 watch(dimensionPrefetchPaths, immediate) 触发（v0.1.0-module3.0.8 fix），
+  // 不再手动调 triggerPrefetch：旧逻辑依赖 needPrefetch false→true 翻转，
+  // 返回瀑布流深处时 needPrefetch 恒 true 不翻转 → watcher 停滞 → 视口附近图拿不到尺寸。
   // v0.1.0-module3.0.8 (任务 8): 启动浏览位置监听 + 查 progress + 可选自动滚
   await browsePosition.start();
 });
@@ -140,7 +142,7 @@ watch(
 // settings store 在 useMasonryLayout 之前声明（依赖其 thumbnail*Screens 字段）
 const settingsStore = useSettingsStore();
 
-const { layout, visibleRange, needPrefetch, nextBatchPaths, colWidth, thumbnailWindows } = useMasonryLayout({
+const { layout, visibleRange, colWidth, thumbnailWindows, dimensionPrefetchPaths } = useMasonryLayout({
   entries: entriesRef,
   containerWidth,
   containerHeight: viewportHeight,
@@ -247,6 +249,17 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
   return true;
 }
 
+/** atBottom 三档规则(spec §2.1): layoutHeight 作响应式触发源(审查 P1), 判定读 el.scrollHeight.
+ *  - layout.totalHeight 是 computed, 缩略图尺寸收敛会变, 把它纳入依赖强制 atBottom 重算.
+ *  - 判定值仍读 el.scrollHeight(准), 不读 layout.value.totalHeight(可能是估算高度).
+ *  - 任务 7 只暴露 computed, 任务 8 才接进 useMasonryBrowsePosition. */
+const atBottom = computed(() => {
+  const el = containerRef.value;
+  if (!el) return false;
+  void layout.value.totalHeight;
+  return computeAtBottom(el.scrollHeight, el.clientHeight, el.scrollTop);
+});
+
 /** v0.1.0-module3.0.8 (任务 8): 浏览位置 composable（任务 7 实现）。
  *  - 监听 scrollTop + 300ms debounce 写入顶部可见图（progress image_name + page）
  *  - 进目录查 progress，可选自动 scrollToEntry（autoRestoreOnMount 开关）
@@ -262,6 +275,11 @@ const browsePosition = useMasonryBrowsePosition({
   scrollTop,
   // v0.1.0-module3.0.8 fix19: resize 冷却依赖 colWidth 派生值（窗口尺寸变化 → 列宽重算）
   colWidth,
+  // 任务 8(原 8/9 合并): 接 atBottom 三档 computed(spec §2.1)。
+  // composable 内部 watch(atBottom) 处理翻转:
+  //   false→true 调 scheduleRecord(布局收敛贴底等价一次滚动事件)
+  //   true→false 调 clearStableTimer(任务 9 骨架, 留待任务 10 接入 finishedNow 判定)
+  atBottom,
   scrollToEntry,
   // v0.1.0-module3.0.8 (任务 14 闭环): 接入 settings 开关。
   // enabled=false → 不写 DB；autoRestoreOnMount=false → 进目录不自动跳（按钮仍可点）。
@@ -272,6 +290,9 @@ const browsePosition = useMasonryBrowsePosition({
 // 暴露给父级 FileBrowser：
 //  - 缩略图操作（右键菜单重建/重试）
 //  - 任务 8：scrollToEntry / jumpToLast / browsePosition（masonry 浏览位置）
+//  - 任务 9：flushBrowsePosition（跨卷前 flush 用，转发 browsePosition.flushNow）
+// 注: 任务 8 起 atBottom 不再 defineExpose — 内部状态机已被 composable 接管,
+//  暴露给父级会让 FileBrowser 误以为可独立消费(实际只是 MasonryView 内部 layout 反应)。
 defineExpose({
   regenerate: regenerateThumbnail,
   regenerateBatch: regenerateBatchFn,
@@ -280,17 +301,18 @@ defineExpose({
   scrollToEntry,
   jumpToLast: () => browsePosition.jumpToLast(),
   browsePosition,
+  // v0.1.0-module3.0.8 (任务 9): 跨卷前 flush — 立即清 debounce + 写入顶部图,
+  // 不等剩余 300ms. spec §14.3 + §14.4. FileList.masonryFlushNow 转发到此.
+  flushBrowsePosition: () => browsePosition.flushNow(),
 });
 
-// 预读 header
-async function triggerPrefetch() {
-  if (!needPrefetch.value) return;
-  const relPaths = nextBatchPaths.value;
+// 预读 header（v0.1.0-module3.0.8 fix: 接收明确 paths，不再读 needPrefetch/nextBatchPaths）
+// F1: entry.path 相对 currentPath(=lastFetchedPath); Rust read_file 期望相对 rootPath 的完整路径。
+// 拼 currentPath 前缀调 IPC; 返回的 dims.path 是 fullPath, 反查 relPath 作 measuredMap key
+// (与 entries e.path 一致, useMasonryLayout.inputs 用 e.path 查 measuredMap)。
+async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
   if (relPaths.length === 0) return;
   try {
-    // F1: entry.path 相对 currentPath(=lastFetchedPath); Rust read_file 期望相对 rootPath 的完整路径。
-    // 拼 currentPath 前缀调 IPC; 返回的 dims.path 是 fullPath, 反查 relPath 作 measuredMap key
-    // (与 entries e.path 一致, useMasonryLayout.inputs 用 e.path 查 measuredMap)。
     const fullByRel = new Map<string, string>();
     const fullPaths = relPaths.map((rp) => {
       const fp = toRootRelativePath(props.currentPath, rp);
@@ -305,10 +327,20 @@ async function triggerPrefetch() {
     }
     measuredMap.value = m;
   } catch (e) {
-    log('[MasonryView] prefetch failed', e);
+    log('[MasonryView] dimension prefetch failed', e);
   }
 }
-watch(needPrefetch, () => { void triggerPrefetch(); });
+// v0.1.0-module3.0.8 fix: watch 像素窗口中心的 dimensionPrefetchPaths（替代 needPrefetch 翻转触发）。
+// immediate 挂载即触发首次预读；flush:'post' 确保 layout 重排后触发。返回深处时第一批
+// 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。尺寸收敛期间的视觉
+// 跳动由 useMasonryBrowsePosition.scrollToEntry 渐进校正（watch layout.top）覆盖。
+watch(
+  dimensionPrefetchPaths,
+  (paths) => {
+    if (paths.length > 0) void triggerDimensionPrefetch(paths);
+  },
+  { immediate: true, flush: 'post' },
+);
 
 // 路径拼接（Windows \ 分隔符，ReaderView.joinPath 模式）
 function joinPath(...parts: string[]): string {

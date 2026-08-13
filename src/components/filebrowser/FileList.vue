@@ -296,6 +296,13 @@ watch(
 async function masonryJumpToLast(): Promise<void> {
   await masonryRef.value?.jumpToLast();
 }
+/** v0.1.0-module3.0.8 (任务 9): 转发 masonry flushBrowsePosition（FileBrowser
+ *  toolbar「下一卷」按钮 onCrossNextVolume 用，跨卷前 flush 当前浏览位置 — spec §14.2 + §14.4）。
+ *  masonry 视图转发到 MasonryView.flushBrowsePosition；details 视图 no-op（无浏览位置概念）。 */
+async function masonryFlushNow(): Promise<void> {
+  if (props.viewMode !== 'masonry') return;
+  await masonryRef.value?.flushBrowsePosition();
+}
 
 defineExpose({
   scrollToPath,
@@ -306,6 +313,7 @@ defineExpose({
   regenerateBatch,
   retryBatch,
   masonryJumpToLast,
+  masonryFlushNow,
   masonryLastBrowseProgress: computed(() => masonryLastBrowseProgress.value),
 });
 </script>

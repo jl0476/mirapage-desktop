@@ -87,6 +87,16 @@ export default {
       slideshowPause: 'Pause',
       close: 'Close',
     },
+    // 2026-08-12 跨卷任务 8 (spec §16): reader cross-volume toasts + manual capsule.
+    crossVolume: {
+      none: 'No next volume',
+      jumped: 'Jumped to 《{title}》',
+      failed: 'Jump failed',
+      progressSaveFailed: 'Progress save failed, continued anyway',
+      continuePrompt: 'Continue to next volume 《{title}》?',
+      jump: 'Jump',
+      close: 'Close',
+    },
   },
   slideshow: {
     interval: 'Auto-advance interval (seconds)',
@@ -151,6 +161,8 @@ export default {
     viewDetails: 'Details',
     masonrySettings: 'Masonry settings',
     noImagesForMasonry: 'No images in this folder; masonry view unavailable',
+    // v0.1.0-module3.0.8 (Task 9): toolbar next-volume button (cross-volume spec §14.1)
+    nextVolume: 'Next volume',
     // v0.1.0-module3.0.8 (Task 10): masonry browse position toolbar jump
     jumpToLast: 'Jump to last',
     noRecordedProgress: 'No recorded progress in this folder',
@@ -162,6 +174,9 @@ export default {
       items: '{count} items',
       selected: '{count} selected',
       path: 'Current path',
+      // v0.1.0-module3.1.1 (Task 2): statusbar right next-volume (feature B display layer)
+      nextVolume: 'Next volume: {title}',
+      noNextVolume: 'Already last volume',
     },
   },
   bookmarks: {
@@ -248,6 +263,7 @@ export default {
     ioError: 'File system error',
     unknown: 'Unknown error',
     pathTooLong: 'Path too long (Windows MAX_PATH limit; try moving root closer to C:\\ or enable long path support)',
+    pathEscapesRoot: 'Path escapes source root',
   },
   lang: {
     system: 'System',

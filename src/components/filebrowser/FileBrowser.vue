@@ -24,8 +24,11 @@ import { useReadStatusStore } from '@/stores/readStatus';
 import { useSettingsStore } from '@/stores/settings';
 import { useReaderActions } from '@/composables/useReaderActions';
 import { useMasonrySettings } from '@/composables/useMasonrySettings';
+import { useToast } from '@/composables/useToast';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
+import { validateSourceRelativePath } from '@/lib/relativePath';
+import { findNextVolume } from '@/lib/tauri';
 import FileList from './FileList.vue';
 import Breadcrumb from './Breadcrumb.vue';
 import RowContextMenu from './RowContextMenu.vue';
@@ -58,7 +61,15 @@ const readerActions = useReaderActions({
   // 立即变 output/260715, 但 fetch 9613 文件期间 entries 仍是 output/; 用户在 1.7s
   // 内点立即阅读, entry.path='260715' (相对 output/) 拼上 currentPath='output/260715'
   // → absPath='output/260715/260715' 错位). 用 lastFetchedPath 避免此竞争.
-  getLastFetchedPath: () => fb.lastFetchedPath || fb.rootPath || '',
+  //
+  // 路径身份修复 (2026-08-12): 删除 `|| fb.rootPath || ''` fallback.
+  //   旧实现把根目录合法的 '' 当 falsy 回退成绝对 rootPath, 经 readFromImage →
+  //   createBook.absolutePath / recordHistory.relPath 污染 library/history 表.
+  //   现在用 `fb.rootPath === null ? null : fb.lastFetchedPath` 区分:
+  //     - null  = 未加载 (readFromImage abort)
+  //     - ''    = 根目录已加载 (合法, createBook/history 写 '')
+  //     - 'a/b' = 子目录已加载
+  getLastFetchedPath: () => (fb.rootPath === null ? null : fb.lastFetchedPath),
   // ensureBookId 用 lastFetchedPath (entry.path 的基准) + entry.path 拼出 absPath
   getCurrentPath: () => fb.lastFetchedPath,
   // v0.1.0-module3.0.3-hotfix (Bug 2): reader 退出时恢复 currentPath.
@@ -177,6 +188,9 @@ function onMasonryPopupClose() {
 const showDetail = ref(false);
 watch(() => fb.viewMode, () => { showDetail.value = false; });
 watch(() => fb.currentPath, () => { showDetail.value = false; });
+// v0.1.0-...: 切视图时刷 readStatus — 瀑布流滚动写了 progress 但 marks 没刷新,
+// 切到详情视图时 readStatus 还是旧数据. 调 refresh 让 marks 立即反映当前状态.
+watch(() => fb.viewMode, () => { void readStatus.refresh(); });
 function toggleDetail() {
   showDetail.value = !showDetail.value;
 }
@@ -242,12 +256,26 @@ onMounted(async () => {
       // 静默回退: 显示 empty state
     }
   }
+  // 路径身份修复 (2026-08-12): shortcut 收敛后, Shortcuts.vue onOpen 只 setActive + push('/').
+  // FileBrowser 首次挂载时 watch 不触发 (activeId 在挂载前已设), 这里主动检查并执行打开。
+  if (shortcuts.activeId !== null) {
+    await openShortcut(shortcuts.activeId);
+  }
 });
 
 // v0.1.0-module3.0.4-virtuallist Task 3.4: 卸载清空 callback,
 // 防止 stale ref (下次 mount 前若再 scrollToPath 会调到已死的 vm).
+// 任务 6 审查修复 (2026-08-13): 卸载同时清 debounce timer + 失效在途预查请求 —
+// 否则已卸载组件的 300ms timer 仍会 fire, 对已卸载的 ref 调 findNextVolume 写 state
+// (也是 FileBrowser.test.ts 全文件跑偶发失败的根因: 泄漏 timer 消耗 mock once-queue)。
 onUnmounted(() => {
   setScrollToIndexCallback(null);
+  if (nextVolumeDebounce) {
+    clearTimeout(nextVolumeDebounce);
+    nextVolumeDebounce = null;
+  }
+  // 失效在途 prefetch: 晚到的响应不得再写已卸载组件的 state
+  ++nextVolumeRequestSeq;
 });
 
 // #1 rootPath 变化时持久化
@@ -264,29 +292,55 @@ watch(
   },
 );
 
-// v0.1.0-module3.0.5: shortcut 切换 → 解码 descriptor + 两步打开 (setRoot + navigate relPath)
-// 复用 History.vue openEntry 模式. Phase 1 只 Local; SMB/WebDAV 实装后扩展 TODO.
-// 注意: setRoot 无条件调 (不做 rootPath 相等守卫) — 否则同根不同 relPath 的 shortcut
-// 切换时 setRoot 被跳过, currentPath 残留旧路径, 列表不切到正确目录.
+// v0.1.0-module3.0.5: shortcut 打开的【唯一执行点】(spec §6.4 收敛).
+// Shortcuts.vue onOpen 只 setActive + router.push('/'); 实际 setRoot + navigate 在这里做.
+// Phase 1 只 Local; SMB/WebDAV 实装后扩展 TODO.
+//
+// 路径身份修复 (2026-08-12): 打开前校验 descriptor + relPath, 非法则清 activeId + log,
+// 不导航（防止坏 shortcut 把绝对路径灌进 navigate 持续污染）。
+// 去重守卫 lastOpenedShortcutId: 同 id 不重复执行（watch 在 setActive 同值时不触发,
+// 但 onMounted 主动检查会重复执行, 守卫避免）。
+let lastOpenedShortcutId: number | null = null;
+
+async function openShortcut(id: number): Promise<void> {
+  if (id === lastOpenedShortcutId) return; // 去重
+  const sc = shortcuts.items.find((s) => s.id === id);
+  if (!sc) return;
+  let desc: SourceDescriptor;
+  try {
+    desc = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;
+  } catch {
+    shortcuts.clearActive();
+    return;
+  }
+  if (desc.type !== 'local') {
+    // TODO Phase 7-8: SMB/WebDAV descriptor 打开
+    return;
+  }
+  // 校验 relPath（空串=根目录 合法；绝对/.. 非法拒绝）。
+  const relCheck = validateSourceRelativePath(sc.relPath);
+  if (!relCheck.ok) {
+    log('[FileBrowser] shortcut relPath 越界, 拒绝打开', { id, relPath: sc.relPath, reason: relCheck.reason });
+    shortcuts.clearActive();
+    return;
+  }
+  lastOpenedShortcutId = id;
+  // 注意: setRoot 无条件调 (不做 rootPath 相等守卫) — 否则同根不同 relPath 的 shortcut
+  // 切换时 setRoot 被跳过, currentPath 残留旧路径, 列表不切到正确目录.
+  await fb.setRoot(desc.rootPath);
+  if (relCheck.normalized) {
+    await fb.navigate(relCheck.normalized);
+  }
+}
+
 watch(
   () => shortcuts.activeId,
   async (id) => {
-    if (id === null) return;
-    const sc = shortcuts.items.find((s) => s.id === id);
-    if (!sc) return;
-    let desc: SourceDescriptor;
-    try {
-      desc = JSON.parse(sc.sourceDescriptorJson) as SourceDescriptor;
-    } catch {
+    if (id === null) {
+      lastOpenedShortcutId = null; // 重置守卫，允许同 id 下次再开
       return;
     }
-    if (desc.type === 'local') {
-      await fb.setRoot(desc.rootPath);
-      if (sc.relPath) {
-        await fb.navigate(sc.relPath);
-      }
-    }
-    // TODO Phase 7-8: SMB/WebDAV descriptor 打开
+    await openShortcut(id);
   },
 );
 
@@ -296,6 +350,9 @@ async function onUp() {
 
 async function onRefresh() {
   await fb.refresh();
+  // v0.1.0-...: 顶栏刷新按钮也要刷 readStatus — 否则目录 entries 重拉,
+  // 但 marks 还是旧数据, 详情视图看不到 reading/finished 徽章.
+  await readStatus.refresh();
 }
 
 async function onPickRoot() {
@@ -325,10 +382,18 @@ function onSaveCancel() {
 
 async function onSaveSubmit() {
   if (!fb.rootPath) return;
+  // 路径身份修复 (2026-08-12): 保存快捷方式前校验 currentPath 必须 source-relative。
+  // 防御性（currentPath 已在 navigate 时校验），非法则不写坏 shortcut。
+  const relCheck = validateSourceRelativePath(fb.currentPath);
+  if (!relCheck.ok) {
+    log('[FileBrowser] onSaveSubmit currentPath 越界, 拒绝保存快捷方式', { currentPath: fb.currentPath, reason: relCheck.reason });
+    showSaveDialog.value = false;
+    return;
+  }
   const label = saveLabel.value.trim() || null;
   // v0.1.0-module3.0.5: 存当前所在目录 (descriptor + currentPath 作 relPath), 支持子目录快捷方式
   const descriptor: SourceDescriptorLocal = { type: 'local', rootPath: fb.rootPath };
-  await shortcuts.add(descriptor, fb.currentPath, label);
+  await shortcuts.add(descriptor, relCheck.normalized, label);
   showSaveDialog.value = false;
   saveLabel.value = '';
 }
@@ -428,6 +493,8 @@ const ICON_ALERT = 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L
 // v0.1.0-module3.0.3-hotfix11: 加入书库 + 下载全部 移到 toolbar (一处可见, 跨视图复用).
 const ICON_LIBRARY_PLUS = 'M12 6v6M12 12H6M12 12h6M12 12v6M4 6h16v14H4zM16 6L9 6L7.5 4h-3A2 2 0 0 0 2.5 5.5v12A2.5 2.5 0 0 0 5 20h14a2 2 0 0 0 2-2v-3';
 const ICON_DOWNLOAD = 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3';
+// v0.1.0-module3.0.8 (任务 9): 下一卷按钮图标 (chevron-right + 加号, lucide skip-forward 风格)
+const ICON_NEXT_VOLUME = 'M5 4l10 8-10 8V4zM19 5v14';
 
 // v0.1.0-module2.0: emit 'open' 已废弃 (双击只进目录, 触发阅读走 useReaderActions)
 //  保留 emit 类型仅出于向后兼容 — 不再 emit
@@ -436,17 +503,14 @@ const ICON_DOWNLOAD = 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12
 // (v-html 渲染保留 fill + viewBox 0 0 1024 1024 原貌, 尺寸 12px 由 scoped CSS 限制).
 // 之前的 lucide path d 常量已被 SVG 资产替代 — 资产文件位于 src/icons/.
 
-// v0.1.0-module3.0.2-reader-polish (Cluster A): 选中图片时立即阅读按钮也可点 (issue #3)
-// v0.1.0-module3.0.8 (任务 10): 扩展 — 未选中时, 当前 masonry 目录有 progress 记录 → 启用
-// (走 readFromCurrentPath 带 cachedProgress, 不需 IPC).
-// masonryLastBrowseProgress 是 FileList defineExpose 的 ComputedRef.
-// Vue 3 `<script setup>` defineExpose 暴露的 ref/computed 在父级访问时
-// 自动 unwrap (proxyRefs 机制), 因此 fileListRef.value.masonryLastBrowseProgress
-// 直接是 ProgressItem | null, 不要再 .value.
 const canReadNow = computed(() => {
   const e = selectedEntry.value;
   if (e) return e.isDirectory === true || isImage(e.name);
-  return fileListRef.value?.masonryLastBrowseProgress?.imageName != null;
+  // 未选中: 详情视图看含图就亮（点击走 readFromCurrentPath 内部读取/创建进度 + 从上次/第一张进入）；
+  // 瀑布流视图看浏览位置（保持现状）。
+  return fb.viewMode === 'masonry'
+    ? fileListRef.value?.masonryLastBrowseProgress?.imageName != null
+    : hasImages.value;
 });
 
 // v0.1.0-module3.0.3-hotfix11: toolbar 加的「加入书库」/「下载全部」按钮
@@ -463,12 +527,11 @@ function onReadNowClick() {
     else void readerActions.readFromImage(e);
     return;
   }
-  // v0.1.0-module3.0.8 (任务 10): 未选中 + 当前目录有 progress → 走 readFromCurrentPath
-  // 传 cachedProgress 避免 IPC getProgress (useMasonryBrowsePosition 已查过).
-  log('[FileBrowser] onReadNowClick: no selection, use cachedProgress');
-  void readerActions.readFromCurrentPath({
-    cachedProgress: fileListRef.value?.masonryLastBrowseProgress ?? null,
-  });
+  // 未选中: 直接调 readFromCurrentPath 让它内部读进度/从上次图或第一张进入阅读器.
+  // 详情视图 + 有上次记录 → 跳到该图; 详情 + 没记录 → 跳到第一张.
+  // 瀑布流视图 → masonryLastBrowseProgress 已通过 canReadNow 守门, 走 IPC 拿进度.
+  log('[FileBrowser] onReadNowClick: no selection');
+  void readerActions.readFromCurrentPath();
 }
 
 /** v0.1.0-module3.0.8 (任务 10): toolbar「↶ 跳到上次」按钮 — 转发到 MasonryView.jumpToLast */
@@ -476,6 +539,93 @@ function onJumpToLastClick() {
   log('[FileBrowser] onJumpToLastClick fired');
   void fileListRef.value?.masonryJumpToLast();
 }
+
+/** v0.1.0-module3.0.8 (任务 9): 工具栏「下一卷」按钮 (跨卷连续阅读 spec §14.2)
+ *  流程:
+ *    1. 早捕获 lastFetchedPath + rootPath (双重陈旧校验 — P1-4 修复)
+ *    2. fileListRef.masonryFlushNow() → 立即 recordCurrentTop 保存当前浏览位置
+ *    3. findNextVolume(descriptor, lastFetchedPath, 'next') (无 filter 参数 — P1-3 修复)
+ *    4. 结果落地前校验 lastFetchedPath + rootPath 都没变 (用户可能切到另一根但有相同 relPath)
+ *    5. 成功 → fb.navigate(result.relPath) → MasonryView 重载 → 自动 restoreAndScroll
+ *  错误: toast 提示 + swapping 重置 (finally)
+ *  disabled: swapping || !rootPath || !lastFetchedPath (根目录自身不能作"卷"起点,
+ *    不绑 viewMode — P1-3 修复: 跳到无图目录自动回落 details 后仍可点)
+ *  Pinia store refs 自动解包, 不写 .value; descriptor 用 masonryDescriptor 而非 descriptor. */
+const { push: pushToast } = useToast();
+const swapping = ref(false);
+async function onCrossNextVolume() {
+  if (swapping.value) return;
+  const pathAtRequestStart = fb.lastFetchedPath;
+  const rootAtRequestStart = masonryDescriptor.value.rootPath;
+  if (!pathAtRequestStart || !rootAtRequestStart) return;
+  swapping.value = true;
+  try {
+    await fileListRef.value?.masonryFlushNow();
+    const result = await findNextVolume(masonryDescriptor.value, pathAtRequestStart, 'next');
+    if (fb.lastFetchedPath !== pathAtRequestStart || masonryDescriptor.value.rootPath !== rootAtRequestStart) return;
+    if (!result) {
+      pushToast(t('reader.crossVolume.none'));
+      return;
+    }
+    await fb.navigate(result.relPath);
+    pushToast(t('reader.crossVolume.jumped', { title: result.title }));
+    // 任务 6 (spec §3.6): 跨卷成功后刷新预查 — 新卷的下一卷候选变了
+    void prefetchNextVolume();
+  } catch (e) {
+    log('[FileBrowser] onCrossNextVolume failed', e);
+    pushToast(t('reader.crossVolume.failed'));
+  } finally {
+    swapping.value = false;
+  }
+}
+
+// ─── 任务 6 (功能 B 逻辑层): 底栏下一卷预查 (spec §3.5, 审查 P1-3 三分支陈旧校验) ───
+// watch fb.lastFetchedPath 变化 → debounce 300ms → prefetchNextVolume
+// 模块级 nextVolumeRequestSeq 在 try/catch/finally 三个分支都校验:
+//   - 成功:陈旧则丢弃,不覆盖新目录 title
+//   - 失败:陈旧则丢弃,不提前关 loading
+//   - finally:仅当仍是最新请求才关 loading
+const nextVolumeTitle = ref<string | null | undefined>(undefined);
+const nextVolumeLoading = ref(false);
+let nextVolumeDebounce: ReturnType<typeof setTimeout> | null = null;
+let nextVolumeRequestSeq = 0;
+
+async function prefetchNextVolume(): Promise<void> {
+  const path = fb.lastFetchedPath;
+  const root = masonryDescriptor.value.rootPath;
+  if (!path || !root) {
+    // 审查修复 (2026-08-13): 早返必须关 loading — watcher 切目录时同步置了 true,
+    // 若不清 false, 根目录 (lastFetchedPath='') 底栏右段会永远显示「…」
+    // (StatusBar nextVolumeLabel loading 优先于 null 判定) 而非「已是最后一卷」。
+    nextVolumeLoading.value = false;
+    nextVolumeTitle.value = null;
+    return;
+  }
+  const seq = ++nextVolumeRequestSeq;
+  nextVolumeLoading.value = true;
+  try {
+    const result = await findNextVolume(masonryDescriptor.value, path, 'next');
+    if (seq !== nextVolumeRequestSeq) return; // 成功:陈旧丢弃
+    nextVolumeTitle.value = result?.title ?? null;
+  } catch (e) {
+    if (seq !== nextVolumeRequestSeq) return; // 失败:陈旧丢弃
+    log('[FileBrowser] prefetchNextVolume failed', e);
+    nextVolumeTitle.value = null;
+  } finally {
+    if (seq === nextVolumeRequestSeq) {
+      // finally:仅最新请求关 loading
+      nextVolumeLoading.value = false;
+    }
+  }
+}
+
+watch(() => fb.lastFetchedPath, () => {
+  if (nextVolumeDebounce) clearTimeout(nextVolumeDebounce);
+  // 切目录立即置 loading(不设 undefined,右段显示「…」不闪空, spec §3.3 时序)
+  nextVolumeLoading.value = true;
+  nextVolumeDebounce = setTimeout(() => void prefetchNextVolume(), 300);
+});
+
 function onAddToLibraryClick() {
   log('[FileBrowser] onAddToLibraryClick fired', selectedEntry.value?.name);
   if (selectedEntry.value) {
@@ -614,6 +764,27 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
             <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
           </svg>
           {{ t('fileBrowser.jumpToLast') }}
+        </button>
+        <!-- v0.1.0-module3.0.8 (任务 9): 工具栏「下一卷」按钮 (跨卷连续阅读 spec §14.1)
+             P1-3 修复: 不绑 viewMode,details 回落后仍可点; disabled 不含 !hasImages,
+             无图目录仍可点跳过. 仅在 swapping / 无 rootPath / 无 lastFetchedPath 时禁用
+             (根目录自身不能作"卷"起点). -->
+        <button
+          data-test="btn-next-volume"
+          type="button"
+          class="tb-btn"
+          :disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"
+          :title="t('fileBrowser.nextVolume')"
+          @click="onCrossNextVolume"
+        >
+          <svg
+            width="12" height="12" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path :d="ICON_NEXT_VOLUME" />
+          </svg>
+          {{ t('fileBrowser.nextVolume') }}
         </button>
         <!-- v0.1.0-module3.0.3-hotfix11: 加入书库 / 下载全部 提到顶栏, 跨视图复用.
              详情 (details) 视图已把属性显示在列上, attribute panel 隐藏; 但这两个
@@ -807,13 +978,17 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
         {{ t('common.loading') }}
       </p>
 
-      <!-- StatusBar (v0.1.0-module1.22 新增) -->
+      <!-- StatusBar (v0.1.0-module1.22 新增, v0.1.0-module3.1.1 任务 6 接入预查) -->
       <StatusBar
         :total="fb.sortedEntries.length"
         :selected-count="fb.selectedCount"
         :selection-size-bytes="fb.selectionSizeBytes"
         :current-path="displayPath"
         :items-text="statusBarItemsText"
+        :next-volume-title="nextVolumeTitle"
+        :next-volume-loading="nextVolumeLoading"
+        :next-volume-disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"
+        @next-volume="onCrossNextVolume"
       />
 
       <!-- Save dialog -->

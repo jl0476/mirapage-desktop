@@ -127,13 +127,21 @@ pub struct CreateBookArgs {
 #[tauri::command]
 pub fn create_book(args: CreateBookArgs, db: tauri::State<crate::db::Db>) -> Result<i64, String> {
     let conn = db.conn();
-    let descriptor_str = serde_json::to_string(&args.source_descriptor).map_err(|e| e.to_string())?;
+    // 路径身份修复 (2026-08-12, spec §6.3): descriptor 反序列化为 SourceDescriptor
+    // 校验变体合法 + 重新序列化规范化; absolute_path 校验 source-relative。
+    // 绝对路径只允许出现在 rootPath; absolute_path 必须相对 root, 根目录为 "".
+    let descriptor: crate::source::descriptor::SourceDescriptor =
+        serde_json::from_value(args.source_descriptor.clone())
+            .map_err(|e| format!("source descriptor 非法: {}", e))?;
+    let descriptor_str = serde_json::to_string(&descriptor).map_err(|e| e.to_string())?;
+    let abs_path = crate::algorithm::validate_source_relative(&args.absolute_path)
+        .map_err(|_| format!("absolute_path 越出数据源根: {}", args.absolute_path))?;
 
     // 复用同 (sourceDescriptor, absolutePath) 的 row (Android LibraryRepository.importFromSource 行为)
     let existing: Option<(i64, bool)> = conn
         .query_row(
             "SELECT id, is_favorite FROM library WHERE source_descriptor = ?1 AND absolute_path = ?2",
-            rusqlite::params![descriptor_str, args.absolute_path],
+            rusqlite::params![descriptor_str, abs_path],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
         )
         .ok();
@@ -162,7 +170,7 @@ pub fn create_book(args: CreateBookArgs, db: tauri::State<crate::db::Db>) -> Res
             args.title,
             descriptor_str,
             args.source_type,
-            args.absolute_path,
+            abs_path,
             args.cover_entry_path,
             args.cover_entry_name,
             args.page_count,

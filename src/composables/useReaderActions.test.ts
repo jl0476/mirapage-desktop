@@ -218,13 +218,52 @@ describe('useReaderActions', () => {
     });
   });
 
-  it('readFromImage: getLastFetchedPath 为空 → 容错, 不 router.push', async () => {
+  it('readFromImage: 根目录 getLastFetchedPath="" → 继续阅读, createBook/history 写 ""', async () => {
+    // 路径身份修复 (2026-08-12): 根目录 '' 是合法值, 不再 abort.
+    // 旧实现 `getLastFetchedPath: () => fb.lastFetchedPath || fb.rootPath` 把 ''
+    // 当 falsy 回退成绝对 rootPath, 污染 library/history. 现在写 '' 才正确.
+    vi.mocked(listDirectory).mockResolvedValue([]);
+    vi.mocked(createBook).mockResolvedValue(1);
+    const actions = useReaderActions({
+      resolveRootPath: () => 'F:/WallPaper/normal',  // 根目录, fallback dirName='normal'
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',  // 根目录已加载
+      router: fakeRouter as never,
+    });
+    await actions.readFromImage({
+      name: 'a.jpg',
+      path: 'a.jpg',
+      isDirectory: false,
+      isArchive: false,
+      size: 0,
+      modifiedAt: 0,
+    });
+    // 继续走 createBook, absolutePath='' (根目录相对路径)
+    expect(createBook).toHaveBeenCalledWith(expect.objectContaining({
+      absolutePath: '',
+      favorite: false,
+    }));
+    // recordHistory 写 relPath=''
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'F:/WallPaper/normal' },
+      '',
+      'normal',  // parentName fallback 到 rootPath 最后一段
+      1,
+    );
+    expect(fakeRouter.push).toHaveBeenCalledWith({
+      path: '/reader/1',
+      query: { at: 'a.jpg' },
+    });
+  });
+
+  it('readFromImage: getLastFetchedPath=null (未加载) → 安全 abort, 不调 IPC', async () => {
+    // 路径身份修复: null 表示"未加载"(rootPath 未设或未 fetch), 区别于根目录 ''.
     vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(1);
     const actions = useReaderActions({
       resolveRootPath: () => '/manga',
       buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
-      getLastFetchedPath: () => '',
+      getLastFetchedPath: () => null,  // 未加载
       router: fakeRouter as never,
     });
     await actions.readFromImage({
@@ -473,7 +512,7 @@ describe('useReaderActions', () => {
   it('readFromCurrentPath: cachedProgress 命中 → 走 router.push, 不调 IPC (ensureBookId/getProgress)', async () => {
     const cached: ProgressItem = {
       bookId: 42, page: 5, imageName: 'p5.jpg',
-      readerMode: 'single', updatedAt: 0,
+      readerMode: 'single', updatedAt: 0, finished: false,
     };
     const router = { push: vi.fn() };
     const actions = useReaderActions({
@@ -488,6 +527,14 @@ describe('useReaderActions', () => {
     expect(getProgress).not.toHaveBeenCalled();
     expect(createBook).not.toHaveBeenCalled();
     expect(listDirectory).not.toHaveBeenCalled();
+    // v0.1.0-... 修复: 走 recordHistory 写 history, 否则退回 FileBrowser 时
+    // readStatus.refresh 拿不到 history 行, marks 空, "阅读中" / "已读完" 徽章不显示.
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/manga' },
+      'VOL.01',  // absPath = currentPath
+      'VOL.01',  // displayName = currentPath 末段
+      42,
+    );
     // router.push 用 { name, params, query } 形态
     expect(router.push).toHaveBeenCalledWith(expect.objectContaining({
       name: 'reader',
@@ -496,12 +543,40 @@ describe('useReaderActions', () => {
     }));
   });
 
+  it('readFromCurrentPath: cachedProgress 命中 (finished=true) → 仍调 recordHistory (与 reading 同链路)', async () => {
+    // 已读完目录: cachedProgress.finished=true, 走"有上次记录"分支也要写 history
+    // 否则 readStatus.refresh 拿不到 history 行, marks 空, "已读完" 徽章不显示.
+    const cached: ProgressItem = {
+      bookId: 50, page: 10, imageName: 'p10.jpg',
+      readerMode: 'single', updatedAt: 0, finished: true,
+    };
+    const router = { push: vi.fn() };
+    const actions = useReaderActions({
+      resolveRootPath: () => '/manga',
+      buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+      getLastFetchedPath: () => '',
+      getCurrentPath: () => 'VOL.02',
+      router: router as never,
+    });
+    await actions.readFromCurrentPath({ cachedProgress: cached });
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/manga' },
+      'VOL.02',
+      'VOL.02',
+      50,
+    );
+    expect(router.push).toHaveBeenCalledWith(expect.objectContaining({
+      params: { bookId: '50' },
+      query: { at: 'p10.jpg' },
+    }));
+  });
+
   it('readFromCurrentPath: cachedProgress 空 → 走 ensureBookId + getProgress, 取回 imageName 后 router.push', async () => {
     vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(77);
     vi.mocked(getProgress).mockResolvedValue({
       bookId: 77, page: 3, imageName: 'x.jpg',
-      readerMode: 'single', updatedAt: 1,
+      readerMode: 'single', updatedAt: 1, finished: false,
     });
     const router = { push: vi.fn() };
     const actions = useReaderActions({
@@ -529,12 +604,12 @@ describe('useReaderActions', () => {
     }));
   });
 
-  it('readFromCurrentPath: cachedProgress 空 + getProgress.imageName=null → noop, 不 router.push', async () => {
+  it('readFromCurrentPath: cachedProgress 空 + getProgress.imageName=null → 从第一张开始 (push 不带 ?at=)', async () => {
     vi.mocked(listDirectory).mockResolvedValue([]);
     vi.mocked(createBook).mockResolvedValue(77);
     vi.mocked(getProgress).mockResolvedValue({
-      bookId: 77, page: 3, imageName: null,  // 没浏览过, imageName=null
-      readerMode: 'single', updatedAt: 0,
+      bookId: 77, page: 3, imageName: null,  // 没浏览过
+      readerMode: 'single', updatedAt: 0, finished: false,
     });
     const router = { push: vi.fn() };
     const actions = useReaderActions({
@@ -545,14 +620,21 @@ describe('useReaderActions', () => {
       router: router as never,
     });
     await actions.readFromCurrentPath({ cachedProgress: null });
-    // noop: router.push 不调
-    expect(router.push).not.toHaveBeenCalled();
+    // 新行为: progress 为 null → 从第一张开始, push 不带 ?at=
+    expect(router.push).toHaveBeenCalledWith('/reader/77');
+    // 同步写 history（与 readNow 一致）
+    expect(recordHistory).toHaveBeenCalledWith(
+      { type: 'local', rootPath: '/manga' },
+      'VOL.01',
+      'VOL.01',
+      77,
+    );
   });
 
   it('readFromCurrentPath: router null (useRouter 返 null + opts 未传) → 不抛', async () => {
     const cached: ProgressItem = {
       bookId: 42, page: 5, imageName: 'p5.jpg',
-      readerMode: 'single', updatedAt: 0,
+      readerMode: 'single', updatedAt: 0, finished: false,
     };
     // 不传 router → useRouter() mock 返 null, opts.router 也无, router 最终为 null
     const actions = useReaderActions({
@@ -572,7 +654,7 @@ describe('useReaderActions', () => {
     vi.mocked(createBook).mockResolvedValue(5);
     vi.mocked(getProgress).mockResolvedValue({
       bookId: 5, page: 1, imageName: 'r.jpg',
-      readerMode: 'single', updatedAt: 0,
+      readerMode: 'single', updatedAt: 0, finished: false,
     });
     const router = { push: vi.fn() };
     const actions = useReaderActions({
@@ -593,5 +675,93 @@ describe('useReaderActions', () => {
       params: { bookId: '5' },
       query: { at: 'r.jpg' },
     }));
+  });
+
+  // ─── v0.1.0-...: readProgress（readFromCurrentPath 抽出的纯查询方法） ───
+  // 用途: FileBrowser 进含图目录时调用一次，结果缓存到组件局部状态，
+  //   决定"立即阅读"按钮是否可点；不跳路由、不调 router。
+
+  describe('readProgress（纯查询版）', () => {
+    it('已缓存有上次图 → 直接返回，不查后端', async () => {
+      const cached: ProgressItem = {
+        bookId: 42, page: 5, imageName: 'p5.jpg',
+        readerMode: 'single', updatedAt: 0, finished: false,
+      };
+      const actions = useReaderActions({
+        resolveRootPath: () => '/manga',
+        buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+        getLastFetchedPath: () => '',
+        getCurrentPath: () => 'VOL.01',
+      });
+      const result = await actions.readProgress(cached);
+      expect(result).toEqual(cached);
+      expect(getProgress).not.toHaveBeenCalled();
+      expect(createBook).not.toHaveBeenCalled();
+      expect(listDirectory).not.toHaveBeenCalled();
+    });
+
+    it('无缓存 → 走获取图书 + 读进度，返回查到的阅读进度', async () => {
+      vi.mocked(listDirectory).mockResolvedValue([]);
+      vi.mocked(createBook).mockResolvedValue(77);
+      vi.mocked(getProgress).mockResolvedValue({
+        bookId: 77, page: 3, imageName: 'x.jpg',
+        readerMode: 'single', updatedAt: 1, finished: false,
+      });
+      const actions = useReaderActions({
+        resolveRootPath: () => '/manga',
+        buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+        getLastFetchedPath: () => '',
+        getCurrentPath: () => 'VOL.01',
+      });
+      const result = await actions.readProgress(null);
+      expect(result).toEqual({
+        bookId: 77, page: 3, imageName: 'x.jpg',
+        readerMode: 'single', updatedAt: 1, finished: false,
+      });
+      expect(createBook).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'VOL.01',
+        absolutePath: 'VOL.01',
+        favorite: false,
+      }));
+      expect(getProgress).toHaveBeenCalledWith(77);
+    });
+
+    it('已缓存进度但 imageName 为 null（异常状态）→ 走 IPC 重查', async () => {
+      const cachedNoImage: ProgressItem = {
+        bookId: 7, page: 0, imageName: null,
+        readerMode: 'single', updatedAt: 0, finished: false,
+      };
+      vi.mocked(listDirectory).mockResolvedValue([]);
+      vi.mocked(createBook).mockResolvedValue(8);
+      vi.mocked(getProgress).mockResolvedValue(null);
+      const actions = useReaderActions({
+        resolveRootPath: () => '/manga',
+        buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+        getLastFetchedPath: () => '',
+        getCurrentPath: () => 'VOL.01',
+      });
+      const result = await actions.readProgress(cachedNoImage);
+      // 缓存有值但 imageName=null → 不短路, 走 IPC 重查, 后端返 null → readProgress 返 null
+      expect(result).toBeNull();
+      expect(createBook).toHaveBeenCalled();
+      expect(getProgress).toHaveBeenCalledWith(8);
+    });
+
+    it('读进度返 { imageName: null } → 返回 null', async () => {
+      vi.mocked(listDirectory).mockResolvedValue([]);
+      vi.mocked(createBook).mockResolvedValue(77);
+      vi.mocked(getProgress).mockResolvedValue({
+        bookId: 77, page: 3, imageName: null,
+        readerMode: 'single', updatedAt: 0, finished: false,
+      });
+      const actions = useReaderActions({
+        resolveRootPath: () => '/manga',
+        buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath } as never),
+        getLastFetchedPath: () => '',
+        getCurrentPath: () => 'VOL.01',
+      });
+      const result = await actions.readProgress(null);
+      expect(result).toBeNull();
+    });
   });
 });

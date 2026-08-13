@@ -3,12 +3,12 @@
  * 5 元素工具栏 (rootPath 有值时) + dropdown 切换 + dblclick + error + save dialog
  * 注意: 设计中 rootPath=null 时 empty-state 全屏,无 toolbar — Save 按钮不存在
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import FileBrowser from './FileBrowser.vue';
-import { listDirectory, listShortcuts, createShortcut } from '@/lib/tauri';
+import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -28,6 +28,10 @@ vi.mock('@/lib/tauri', () => ({
   // Cluster A 测试用
   createBook: vi.fn(async () => 42),
   recordHistory: vi.fn(async () => undefined),
+  // 详情视图「立即阅读」读进度用
+  getProgress: vi.fn(async () => null),
+  // v0.1.0-module3.0.x-cross-volume (任务 9): 瀑布流跨卷按钮
+  findNextVolume: vi.fn(async () => null),
 }));
 
 // Cluster A: spy on router.push
@@ -40,7 +44,25 @@ vi.mock('vue-router', () => ({
 const mockedList = vi.mocked(listDirectory);
 const mockedShortcuts = vi.mocked(listShortcuts);
 const mockedCreate = vi.mocked(createShortcut);
+const mockedFindNextVolume = vi.mocked(findNextVolume);
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
+
+// 审查修复 (2026-08-13): 跟踪 mountFileBrowser 挂载的 wrapper, 全局 afterEach 统一卸载.
+// navigate() 会触发 watch(lastFetchedPath) 调度真实 setTimeout(prefetchNextVolume, 300);
+// 用例不卸载时泄漏的 300ms timer 会在后续用例 (Task 6) 执行期 fire, 对 mock findNextVolume
+// 额外调用 — 消耗 once-queue + 打破 toHaveBeenCalledTimes, 是全文件偶发失败根因
+// (已用 B-T1 诊断断言捕获到来自 line-832 用例的泄漏调用 ['C:/comics','sub','next']).
+const _mountedWrappers: ReturnType<typeof mount>[] = [];
+
+// 全局卸载: 覆盖所有经 mountFileBrowser 挂载的组件（含 6 个 navigate 泄漏点 +
+// 未来新增用例）。二次 unmount 安全 — VTU app.unmount() 幂等（Vue render(null) 空容器 no-op，
+// 实测不抛错）；显式 wrapper.unmount() 的用例也走这里兜底。
+afterEach(() => {
+  for (const w of _mountedWrappers) {
+    w.unmount();
+  }
+  _mountedWrappers.length = 0;
+});
 
 // v0.1.0-module3.0.5: ShortcutItem mock helper (跨源 schema)
 function localJson(rootPath: string): string {
@@ -63,6 +85,7 @@ async function mountFileBrowser() {
     global: { plugins: [i18n] },
   });
   await flushPromises();
+  _mountedWrappers.push(wrapper);
   return wrapper;
 }
 
@@ -1187,7 +1210,7 @@ describe('FileBrowser — masonry 浏览位置接入 toolbar (Task 10)', () => {
     wrapper.unmount();
   });
 
-  it('canReadNow: 未选中 + masonryLastBrowseProgress 空 → 立即阅读按钮不可点', async () => {
+  it('canReadNow: masonry 视图下 + 未选 + masonryLastBrowseProgress 空 → 立即阅读按钮不可点', async () => {
     mockedList.mockResolvedValueOnce([
       { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
     ] as never);
@@ -1197,14 +1220,17 @@ describe('FileBrowser — masonry 浏览位置接入 toolbar (Task 10)', () => {
     const fb = useFileBrowserStore();
     await fb.setRoot('C:/comics');
     await flushPromises();
+    // 切到 masonry 视图, masonry 浏览位置为空 → 按钮不可点
+    fb.setViewMode('masonry');
+    await flushPromises();
 
-    // 立即阅读按钮: 未选中 + 无 progress → 不可点
+    // 立即阅读按钮: 未选 + masonry 视图 + 无 progress → 不可点
     const btn = wrapper.find('[data-test="btn-read-now"]');
     expect((btn.element as HTMLButtonElement).disabled).toBe(true);
     wrapper.unmount();
   });
 
-  it('canReadNow: 未选中 + masonryLastBrowseProgress.imageName = null → 立即阅读按钮不可点', async () => {
+  it('canReadNow: masonry 视图下 + 未选 + masonryLastBrowseProgress.imageName = null → 立即阅读按钮不可点', async () => {
     mockedList.mockResolvedValueOnce([
       { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
     ] as never);
@@ -1215,6 +1241,8 @@ describe('FileBrowser — masonry 浏览位置接入 toolbar (Task 10)', () => {
     await flushPromises();
     const fb = useFileBrowserStore();
     await fb.setRoot('C:/comics');
+    await flushPromises();
+    fb.setViewMode('masonry');
     await flushPromises();
 
     const btn = wrapper.find('[data-test="btn-read-now"]');
@@ -1288,15 +1316,13 @@ describe('FileBrowser — masonry 浏览位置接入 toolbar (Task 10)', () => {
     wrapper.unmount();
   });
 
-  it('onReadNowClick 未选中 + masonryLastBrowseProgress 有 imageName → 调 readFromCurrentPath (cachedProgress 透传)', async () => {
-    // 验证无选中 entry 调立即阅读按钮时, 走 readFromCurrentPath
-    // (而非 readNow / readFromImage)
+  it('onReadNowClick 未选中 → 调 readFromCurrentPath (走 IPC, 详情视图下从第一张开始)', async () => {
+    // 验证无选中 entry 调立即阅读按钮时, 走 readFromCurrentPath (而非 readNow / readFromImage).
+    // 详情视图下 readFromCurrentPath 内部读 progress (mock 返 null) → 走"从第一张开始"路径
+    // → router.push('/reader/42') (无 ?at=).
     mockedList.mockResolvedValueOnce([
       { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
     ] as never);
-    masonryLastBrowseProgressValue.current = {
-      bookId: 1, page: 0, imageName: 'p1.jpg', readerMode: 'single', updatedAt: 0,
-    };
     const wrapper = mountWithFileListStub();
     await flushPromises();
     const fb = useFileBrowserStore();
@@ -1308,16 +1334,48 @@ describe('FileBrowser — masonry 浏览位置接入 toolbar (Task 10)', () => {
     await btn.trigger('click');
     await flushPromises();
 
-    // router.push 应被 readFromCurrentPath 调 (cachedProgress 命中, 无需 IPC)
-    // 注意: readFromCurrentPath 用 name: 'reader' 而非 path: '/reader/:bookId'
-    // (name-based 路由 + params + query, 与 readFromImage 一致).
-    expect(routerPushSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        name: 'reader',
-        params: { bookId: '1' },
-        query: { at: 'p1.jpg' },
-      }),
-    );
+    // getProgress mock 返 null → readFromCurrentPath 走"从第一张开始"路径
+    // router.push 被调, 走 '/reader/42' (无 ?at=)
+    expect(routerPushSpy).toHaveBeenCalledWith('/reader/42');
+    // 同步走 createBook 链路 (与 readNow 一致)
+    expect(vi.mocked(createBook)).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+});
+
+// ─── v0.1.0-...: viewMode 变化刷 readStatus (瀑布流读后退详情能看到徽章) ───
+describe('FileBrowser — viewMode 变化刷 readStatus', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    routerPushSpy.mockClear();
+  });
+
+  it('切到 masonry → 切回 details → 详情视图的 marks 是新数据', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // mock readStatus.refresh 调用计数
+    const readStatusStore = useReadStatusStore();
+    const refreshSpy = vi.spyOn(readStatusStore, 'refresh');
+
+    // 切到 masonry 触发 refresh
+    fb.setViewMode('masonry');
+    await flushPromises();
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+
+    // 切回 details 也触发 refresh
+    fb.setViewMode('details');
+    await flushPromises();
+    expect(refreshSpy).toHaveBeenCalledTimes(2);
+
     wrapper.unmount();
   });
 });
@@ -1352,5 +1410,679 @@ describe('FileBrowser — canonicalImageNames 传给 FileList (Task 10)', () => 
     const names = fileList.props('canonicalImageNames') as string[];
     // 仅 3 个图片 (按 sortedEntries 顺序 — image_first 不排序, 自然顺序)
     expect(names).toEqual(['page1.jpg', 'page2.jpg', 'page3.jpg']);
+  });
+});
+
+// ─── v0.1.0-module3.0.8 (任务 9): 瀑布流跨卷工具栏「下一卷」按钮 ───
+//
+// spec: docs/superpowers/specs/2026-08-11-cross-volume-reading-design.md §14
+//  3 处改动:
+//   1. flushNow 转发链 (MasonryView.flushBrowsePosition → FileList.masonryFlushNow
+//      → FileBrowser.onCrossNextVolume via fileListRef)
+//   2. 工具栏「下一卷」按钮 (不绑 viewMode, P1-3 修复 — disabled 不含 !hasImages)
+//   3. onCrossNextVolume (findNextVolume + lastFetchedPath + 双重陈旧校验)
+describe('FileBrowser — 跨卷连续阅读 toolbar (Task 9)', () => {
+  let masonryFlushNowStub: ReturnType<typeof vi.fn>;
+  let masonryJumpToLastStub: ReturnType<typeof vi.fn>;
+  let masonryLastBrowseProgressValue: { current: { bookId: number; page: number; imageName: string | null; readerMode: 'single' | 'double'; updatedAt: number } | null };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    routerPushSpy.mockClear();
+    masonryFlushNowStub = vi.fn(async () => undefined);
+    masonryJumpToLastStub = vi.fn(async () => undefined);
+    masonryLastBrowseProgressValue = { current: null };
+  });
+
+  function mountWithFileListStub() {
+    const FileListStub = {
+      name: 'FileList',
+      setup(_: unknown, { expose }: { expose: (e: Record<string, unknown>) => void }) {
+        expose({
+          masonryJumpToLast: masonryJumpToLastStub,
+          masonryFlushNow: masonryFlushNowStub,
+          get masonryLastBrowseProgress() {
+            return masonryLastBrowseProgressValue.current;
+          },
+        });
+        return () => null;
+      },
+    };
+    return mount(FileBrowser, {
+      global: {
+        plugins: [i18n],
+        stubs: { FileList: FileListStub },
+      },
+      attachTo: document.body,
+    });
+  }
+
+  it('btn-next-volume 在 rootPath 设值 + 进子目录后启用 (swapping || !rootPath || !lastFetchedPath 守卫)', async () => {
+    // 初始 rootPath=null → toolbar 不渲染 (empty state), 按钮不存在
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    expect(wrapper.find('[data-test="toolbar"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="btn-next-volume"]').exists()).toBe(false);
+
+    // setRoot 后 toolbar 渲染 + 按钮可见; lastFetchedPath='' (根目录 fetch) → 禁用
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    let btn = wrapper.find('[data-test="btn-next-volume"]');
+    expect(btn.exists()).toBe(true);
+    // lastFetchedPath='' → 仍禁用 (根目录自身不能作"卷"起点)
+    expect((btn.element as HTMLButtonElement).disabled).toBe(true);
+
+    // 进子目录 → lastFetchedPath 有值 → 启用
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    await fb.navigate('vol02');
+    await flushPromises();
+    btn = wrapper.find('[data-test="btn-next-volume"]');
+    expect(fb.lastFetchedPath).toBe('vol02');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+
+    wrapper.unmount();
+  });
+
+  it('btn-next-volume: 进子目录 lastFetchedPath 有值 → 启用 (不绑 viewMode)', async () => {
+    // 验证: 在 details 视图 (非 masonry) 也显示 + 可点 (P1-3 修复)
+    mockedList
+      .mockResolvedValueOnce([{ name: 'vol02', path: 'vol02', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 }] as never) // setRoot fetch
+      .mockResolvedValueOnce([{ name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 }] as never); // navigate fetch
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    await fb.navigate('vol02');
+    await flushPromises();
+    expect(fb.lastFetchedPath).toBe('vol02');
+
+    // 默认 details 视图, 按钮仍可见 (不绑 viewMode)
+    const btn = wrapper.find('[data-test="btn-next-volume"]');
+    expect(btn.exists()).toBe(true);
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('onCrossNextVolume: masonryFlushNow → findNextVolume → navigate (双重陈旧校验通过)', async () => {
+    // 流程: 早捕获 path+root → masonryFlushNow → findNextVolume → 校验未变 → fb.navigate
+    mockedList
+      .mockResolvedValueOnce([{ name: 'vol02', path: 'vol02', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 }] as never) // setRoot
+      .mockResolvedValueOnce([{ name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 }] as never) // navigate vol02
+      .mockResolvedValueOnce([{ name: 'p2.jpg', path: 'p2.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 }] as never); // navigate vol03 (跨卷)
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'C:/comics' },
+      relPath: 'vol03',
+      title: 'vol03',
+    });
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    await fb.navigate('vol02');
+    await flushPromises();
+    expect(fb.lastFetchedPath).toBe('vol02');
+
+    // 点下一卷按钮
+    const btn = wrapper.find('[data-test="btn-next-volume"]');
+    await btn.trigger('click');
+    await flushPromises();
+
+    // masonryFlushNow 必调 (flush 当前浏览位置)
+    expect(masonryFlushNowStub).toHaveBeenCalledTimes(1);
+    // findNextVolume 调: descriptor + lastFetchedPath (无 filter 参数)
+    expect(mockedFindNextVolume).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'C:/comics' },
+      'vol02',
+      'next',
+    );
+    // fb.navigate 被调 — 跳到 vol03
+    expect(fb.currentPath).toBe('vol03');
+    wrapper.unmount();
+  });
+
+  it('onCrossNextVolume: findNextVolume 返回 null → 不 navigate (无下一卷)', async () => {
+    mockedList
+      .mockResolvedValueOnce([{ name: 'vol02', path: 'vol02', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 }] as never)
+      .mockResolvedValueOnce([{ name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 }] as never);
+    mockedFindNextVolume.mockResolvedValueOnce(null);
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    await fb.navigate('vol02');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-next-volume"]');
+    await btn.trigger('click');
+    await flushPromises();
+
+    // masonryFlushNow + findNextVolume 都被调
+    expect(masonryFlushNowStub).toHaveBeenCalledTimes(1);
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
+    // currentPath 不变 (仍在 vol02)
+    expect(fb.currentPath).toBe('vol02');
+    wrapper.unmount();
+  });
+
+  it('onCrossNextVolume: swapping 守卫 — 重复点不并发触发', async () => {
+    // 验证 swapping 守卫生效: 第一次 click 在飞时, 第二次 click 被忽略
+    let resolveNext!: (v: { descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null) => void;
+    mockedFindNextVolume.mockImplementationOnce(
+      () => new Promise<{ descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null>(
+        (r) => { resolveNext = r; },
+      ),
+    );
+    mockedList
+      .mockResolvedValueOnce([{ name: 'vol02', path: 'vol02', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 }] as never)
+      .mockResolvedValueOnce([{ name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 }] as never)
+      .mockResolvedValue([{ name: 'p2.jpg', path: 'p2.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 }] as never);
+    const wrapper = mountWithFileListStub();
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    await fb.navigate('vol02');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-next-volume"]');
+    // 第一次 click — 启动 swapping, findNextVolume 在飞
+    await btn.trigger('click');
+    await flushPromises();
+    // 第二次 click — swapping=true, onCrossNextVolume 入口 return
+    await btn.trigger('click');
+    await flushPromises();
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
+
+    // resolve 让第一次完成
+    resolveNext({ descriptor: { type: 'local', rootPath: 'C:/comics' }, relPath: 'vol03', title: 'vol03' });
+    await flushPromises();
+    wrapper.unmount();
+  });
+});
+
+// ─── v0.1.0-...: 详情视图「立即阅读」按钮读取上次阅读进度 ───
+// 新行为:
+//   - 详情视图 + 未选 + 含图 → 按钮可点 (点击调 readFromCurrentPath)
+//   - 详情视图 + 未选 + 不含图 → 按钮不可点
+//   - 瀑布流视图 → 保持 masonry 浏览位置判断 (不影响本次新增)
+describe('FileBrowser — 详情视图「立即阅读」按目录含图启用', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    routerPushSpy.mockClear();
+  });
+
+  it('详情视图 + 未选 + 目录含图 → 立即阅读按钮可点', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    // 默认 viewMode = 'details'; 不选任何行
+    expect(fb.viewMode).toBe('details');
+    expect(fb.selectedPaths.size).toBe(0);
+
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('详情视图 + 未选 + 目录不含图 → 立即阅读按钮不可点', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'notes.txt', path: 'notes.txt', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('详情视图 + 未选 + 点击 → 调 readFromCurrentPath (走 IPC 读进度 / 从上次或第一张进入)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+      { name: 'p2.jpg', path: 'p2.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    // 不选行, 直接点按钮
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    await btn.trigger('click');
+    await flushPromises();
+
+    // createBook 走的是 mock 默认值 42 (line 29). 详情视图无浏览记录, 走"从第一张开始"路径.
+    // router.push 会被调, push '/reader/42' (无 ?at=)
+    expect(routerPushSpy).toHaveBeenCalledWith('/reader/42');
+    // recordHistory 也被调 (与 readNow 一致)
+    expect(vi.mocked(createBook)).toHaveBeenCalled();
+  });
+
+  it('详情视图 + 选中图片 → 按钮可点 (保持现有行为, 不退化)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    const row = wrapper.find('[data-test="row"]');
+    await row.trigger('click');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('详情视图 + 选中目录 → 按钮可点 (保持现有行为)', async () => {
+    mockedList.mockResolvedValueOnce([
+      { name: 'VOL.01', path: 'VOL.01', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    const row = wrapper.find('[data-test="row"]');
+    await row.trigger('click');
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-read-now"]');
+    expect((btn.element as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+// ─── 路径身份修复 (2026-08-12, spec §6.4): shortcut 单一执行点 + relPath 校验 ───
+describe('FileBrowser — openShortcut 唯一执行点 + 路径校验', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('合法 shortcut: setActive 后 setRoot + navigate 正常执行', async () => {
+    mockedList.mockResolvedValue([]);
+    const sc = mkShortcut(5, 'C:/comics', '漫画A', 'sub/vol01');
+    mockedShortcuts.mockResolvedValue([sc]);
+    const wrapper = await mountFileBrowser();
+    expect(wrapper.exists()).toBe(true);
+    const fb = useFileBrowserStore();
+    const shortcuts = useShortcutsStore();
+    await flushPromises();
+    expect(shortcuts.items.length).toBe(1);
+
+    shortcuts.setActive(5);
+    await flushPromises();
+    await flushPromises();
+
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentPath).toBe('sub/vol01');
+
+    // 审查修复 (2026-08-13): 卸载清 nextVolumeDebounce — navigate 到子目录已调度 300ms
+    // 真实 timer, 不卸载会在后续 Task 6 用例执行期 fire, 产生多余的 findNextVolume 调用
+    // (消耗 mock once-queue / 打破 toHaveBeenCalledTimes 断言), 是全文件偶发失败根因之一。
+    wrapper.unmount();
+  });
+
+  it('坏 shortcut (绝对 relPath): setActive 后拒绝导航, currentPath 不被污染', async () => {
+    mockedList.mockResolvedValue([]);
+    const sc = mkShortcut(8, 'C:/normal', '坏快捷方式', 'F:/WallPaper');
+    mockedShortcuts.mockResolvedValue([sc]);
+    const wrapper = await mountFileBrowser();
+    expect(wrapper.exists()).toBe(true);
+    const fb = useFileBrowserStore();
+    const shortcuts = useShortcutsStore();
+    await flushPromises();
+
+    shortcuts.setActive(8);
+    await flushPromises();
+    await flushPromises();
+
+    // 拒绝: currentPath 不会被设成绝对路径
+    expect(fb.currentPath).toBe('');
+    // listDirectory 不应收到绝对路径
+    expect(mockedList).not.toHaveBeenCalledWith(expect.anything(), 'F:/WallPaper');
+
+    // 审查修复: 卸载清 nextVolumeDebounce (setRoot 重置 lastFetchedPath 也会调度 300ms timer)
+    wrapper.unmount();
+  });
+
+  it('根目录 shortcut (relPath=""): setActive 后 setRoot, 不 navigate', async () => {
+    mockedList.mockResolvedValue([]);
+    const sc = mkShortcut(1, 'C:/root', '根', '');
+    mockedShortcuts.mockResolvedValue([sc]);
+    const wrapper = await mountFileBrowser();
+    expect(wrapper.exists()).toBe(true);
+    const fb = useFileBrowserStore();
+    const shortcuts = useShortcutsStore();
+    await flushPromises();
+
+    shortcuts.setActive(1);
+    await flushPromises();
+    await flushPromises();
+
+    expect(fb.rootPath).toBe('C:/root');
+    expect(fb.currentPath).toBe(''); // 根目录, 不 navigate
+
+    // 审查修复: 卸载清 nextVolumeDebounce (setRoot 重置 lastFetchedPath 可能触发 watcher)
+    wrapper.unmount();
+  });
+});
+
+// ─── v0.1.0-module3.1.1 (任务 6 功能 B): 底栏下一卷预查 + StatusBar 绑定 ───
+//
+// spec: docs/superpowers/specs/2026-08-12-masonry-finished-and-statusbar-next-volume-design.md §3.5
+//  4 处改动:
+//   1. FileBrowser prefetchNextVolume (请求序号三分支陈旧校验)
+//   2. watch fb.lastFetchedPath → debounce 300ms → 预查
+//   3. onCrossNextVolume 成功后调 prefetchNextVolume 刷新
+//   4. StatusBar 绑 nextVolumeTitle/nextVolumeLoading/nextVolumeDisabled + @next-volume
+//
+// 测试策略: 复用现有 vi.mock('@/lib/tauri', ...) + mockedFindNextVolume 控制返回.
+// 用 fake timers + advanceTimersByTime 推进 debounce. 不依赖 DOM (StatusBar props via findComponent).
+describe('FileBrowser — 底栏 StatusBar 下一卷预查 (Task 6)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // 审查修复 (2026-08-13): clearAllMocks 不清 mockResolvedValueOnce/mockImplementationOnce
+    // once-queue — B-T7 泄漏的 never-resolving mockImplementationOnce 会被 B-T8 第一次预查消费,
+    // 导致 title 永远 undefined。mockReset 清空 once-queue + 默认实现, 再重设默认。
+    mockedFindNextVolume.mockReset();
+    setActivePinia(createPinia());
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    // 默认无下一卷 (mockResolvedValue 影响所有调用; 个例用 mockResolvedValueOnce/mockImplementationOnce 覆盖)
+    mockedFindNextVolume.mockResolvedValue(null);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Mount helper: 模拟用户 setRoot(root) 后 navigate(path) 到达 lastFetchedPath.
+   * setRoot + navigate 各触发一次 listDirectory, 都 mock 成空 entries.
+   * 返回的 wrapper + fb 都可被测试继续操作.
+   */
+  async function mountFileBrowserWithRoot(root: string, lastFetchedPath: string) {
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    // setRoot 触发 fetch('')
+    await fb.setRoot(root);
+    await flushPromises();
+    if (lastFetchedPath !== '') {
+      // navigate 触发 fetch(lastFetchedPath)
+      await fb.navigate(lastFetchedPath);
+      await flushPromises();
+    }
+    return wrapper;
+  }
+
+  /** 切到新目录: 同步改 fb.lastFetchedPath (走 store.fetch). 等价用户 navigate 行为. */
+  async function setLastFetchedPath(wrapper: ReturnType<typeof mount>, path: string) {
+    const fb = useFileBrowserStore();
+    await fb.navigate(path);
+    await flushPromises();
+    return wrapper;
+  }
+
+  it('B-T1: lastFetchedPath 变化 → debounce 300ms → findNextVolume 返回 title → StatusBar 收到', async () => {
+    mockedFindNextVolume.mockResolvedValue({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol02',
+      title: 'vol02',
+    });
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    // 推进 debounce 300ms (setTimeout(prefetchNextVolume, 300))
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // findNextVolume 应被调: descriptor + 'vol01' + 'next' (仅预查 1 次 — 泄漏 timer 已修)
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
+    expect(mockedFindNextVolume).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'D:/comics' },
+      'vol01',
+      'next',
+    );
+    // StatusBar 收到 nextVolumeTitle = 'vol02'
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.exists()).toBe(true);
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+  });
+
+  it('B-T2: findNextVolume 返回 null → nextVolumeTitle=null (无下一卷)', async () => {
+    // 默认 mockedFindNextVolume.mockResolvedValue(null) → null
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe(null);
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+  });
+
+  it('B-T3: 旧请求晚返回失败不覆盖新目录(请求序号陈旧校验, 审查 P1-3)', async () => {
+    // vol01 预查: 挂起(返回可控 promise)
+    let rejectVol01: (e: Error) => void = () => { /* noop */ };
+    mockedFindNextVolume.mockImplementationOnce(
+      () => new Promise<{ descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null>(
+        (_, rej) => { rejectVol01 = rej; },
+      ),
+    );
+    // vol02 预查: 成功返回 title 'vol03'
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol03',
+      title: 'vol03',
+    });
+
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    // 推进 300ms → vol01 预查发出(挂起, seq=1)
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 切到 vol02: 新 fetch + 新预查 (seq=2)
+    await setLastFetchedPath(wrapper, 'vol02');
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 此时 vol02 预查完成: title='vol03', loading=false
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+
+    // vol01 旧请求现在失败返回(陈旧)
+    rejectVol01(new Error('network'));
+    await flushPromises();
+
+    // vol01 失败不该把 vol02 的 title 覆盖成 null, loading 不该被提前关
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+  });
+
+  it('B-T4: 旧请求晚返回成功也不覆盖新目录 title (陈旧成功路径校验)', async () => {
+    // vol01 预查: 挂起
+    let resolveVol01!: (v: { descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null) => void;
+    mockedFindNextVolume.mockImplementationOnce(
+      () => new Promise<{ descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null>(
+        (r) => { resolveVol01 = r; },
+      ),
+    );
+    // vol02 预查: 成功 'vol03'
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol03',
+      title: 'vol03',
+    });
+
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    await setLastFetchedPath(wrapper, 'vol02');
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+
+    // vol01 旧请求晚成功返回 (title='vol01Next')
+    resolveVol01({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol01Next',
+      title: 'vol01Next',
+    });
+    await flushPromises();
+
+    // 陈旧成功不该覆盖 vol02 的 title='vol03'
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+  });
+
+  it('B-T5: StatusBar @next-volume 触发 onCrossNextVolume (复用跳转逻辑)', async () => {
+    // 预查 + 点击 → 触发 onCrossNextVolume
+    mockedList
+      .mockResolvedValueOnce([]) // setRoot fetch
+      .mockResolvedValueOnce([]) // navigate vol01
+      .mockResolvedValueOnce([]); // navigate vol02 (跨卷)
+    mockedFindNextVolume
+      .mockResolvedValueOnce({
+        descriptor: { type: 'local', rootPath: 'D:/comics' },
+        relPath: 'vol02',
+        title: 'vol02',
+      }) // 1. 预查 vol01 (mount 时)
+      .mockResolvedValueOnce({
+        descriptor: { type: 'local', rootPath: 'D:/comics' },
+        relPath: 'vol02',
+        title: 'vol02',
+      }) // 2. onCrossNextVolume 内的 findNextVolume
+      .mockResolvedValueOnce({
+        descriptor: { type: 'local', rootPath: 'D:/comics' },
+        relPath: 'vol03',
+        title: 'vol03',
+      }); // 3. 跨卷成功后显式 prefetchNextVolume (spec §3.6)
+
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 预查到 title='vol02'
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+
+    // 点 StatusBar 右段 (StatusBar.vue data-test="statusbar-next-volume")
+    const nextBtn = wrapper.find('[data-test="statusbar-next-volume"]');
+    expect(nextBtn.exists()).toBe(true);
+    await nextBtn.trigger('click');
+    await flushPromises();
+
+    // onCrossNextVolume 应调 findNextVolume (第二次) + fb.navigate('vol02') + 跨卷后显式预查 (第三次)
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(3);
+    const fb = useFileBrowserStore();
+    expect(fb.currentPath).toBe('vol02');
+    // 跨卷成功后,显式 prefetchNextVolume 已更新右段为新卷 vol02 的下一卷 'vol03'
+    expect(sb.props('nextVolumeTitle')).toBe('vol03');
+  });
+
+  it('B-T6: 根目录 lastFetchedPath="" → prefetchNextVolume 早返, 不查 IPC', async () => {
+    // 只 setRoot 不 navigate → lastFetchedPath = ''
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', '');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // findNextVolume 不应被调(根目录无"卷"起点)
+    expect(mockedFindNextVolume).not.toHaveBeenCalled();
+    // StatusBar nextVolumeDisabled = true (无 lastFetchedPath)
+    const sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeDisabled')).toBe(true);
+  });
+
+  it('B-T7: 切目录瞬间 nextVolumeLoading=true (右段不闪空, spec §3.3)', async () => {
+    // 第一次预查返回 'vol02' → title 已设
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol02',
+      title: 'vol02',
+    });
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+
+    // 切到 vol02 (新挂起的请求)
+    mockedFindNextVolume.mockImplementationOnce(
+      () => new Promise<{ descriptor: { type: 'local'; rootPath: string }; relPath: string; title: string } | null>(
+        () => { /* never resolves */ },
+      ),
+    );
+    await setLastFetchedPath(wrapper, 'vol02');
+    // 切目录后立刻 (debounce 未到) → loading 已置 true, title 保持旧值(不闪空)
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeLoading')).toBe(true);
+    expect(sb.props('nextVolumeTitle')).toBe('vol02'); // 保持, 不闪空
+  });
+
+  it('B-T8: 子目录切回根目录 → 早返清 loading, StatusBar 显示「已是最后一卷」而非「…」', async () => {
+    // 审查修复 (2026-08-13): 早返分支漏关 loading — watcher 切目录同步置 true,
+    // 根目录 (lastFetchedPath='') 早返后 loading 永久 true, 右段永远「…」。
+    // 先有子目录 title ('vol02'), 再切回根目录模拟转换 (B-T6 初始即根测不到)。
+    mockedFindNextVolume.mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: 'D:/comics' },
+      relPath: 'vol02',
+      title: 'vol02',
+    });
+    const wrapper = await mountFileBrowserWithRoot('D:/comics', 'vol01');
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+
+    // 子目录预查完成: title='vol02', loading=false
+    let sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeTitle')).toBe('vol02');
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+    expect(wrapper.find('[data-test="statusbar-next-volume"]').text()).toBe('下一卷: vol02');
+
+    // 切回根目录: lastFetchedPath='' → watcher 置 loading=true, debounce 300ms
+    await setLastFetchedPath(wrapper, '');
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeLoading')).toBe(true); // 过渡态
+
+    // 300ms 后 prefetchNextVolume 早返 → loading=false, title=null (修复点)
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    sb = wrapper.findComponent({ name: 'StatusBar' });
+    expect(sb.props('nextVolumeLoading')).toBe(false);
+    expect(sb.props('nextVolumeTitle')).toBe(null);
+    // 右段渲染「已是最后一卷」而非「…」
+    expect(wrapper.find('[data-test="statusbar-next-volume"]').text()).toBe('已是最后一卷');
+    // 根目录无"卷"起点, 不查 IPC (只有 vol01 那一次预查)
+    expect(mockedFindNextVolume).toHaveBeenCalledTimes(1);
   });
 });

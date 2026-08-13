@@ -27,6 +27,23 @@ export function computeColWidth(containerWidth: number, cols: number, hGap: numb
   return Math.floor((containerWidth - (cols - 1) * hGap) / cols);
 }
 
+/** atBottom 三档规则常量(spec §2.1) */
+export const BOTTOM_THRESHOLD_PX = 64;
+
+/**
+ * 计算「是否滚到底」三档规则(spec §2.1, 审查 P1-b + P2)。
+ * - 档1 不足一屏(sh<=ch): true(停留即可,滚不动)
+ * - 档2 短目录(ch<sh<2ch): nearBottom && st>0(须实际滚过防顶部误判)
+ * - 档3 长目录(sh>=2ch): nearBottom
+ * 纯函数, 可独立单测(MasonryView atBottom computed 调它)。
+ */
+export function computeAtBottom(sh: number, ch: number, st: number): boolean {
+  const nearBottom = st + ch >= sh - BOTTOM_THRESHOLD_PX;
+  if (sh <= ch) return true;
+  if (sh < 2 * ch) return nearBottom && st > 0;
+  return nearBottom;
+}
+
 /**
  * entry.path 相对 currentPath（= lastFetchedPath），但 Rust list_image_dimensions → read_file
  * 期望相对 rootPath 的完整路径。拼接 currentPath 前缀（'/' 分隔，LocalMediaSource 接受 '/'）。
@@ -262,8 +279,6 @@ export interface MasonryLayoutOutput {
   layout: ComputedRef<MasonryLayoutResult>;
   visibleRange: ComputedRef<{ start: number; end: number }>;
   measuredCount: ComputedRef<number>;
-  needPrefetch: ComputedRef<boolean>;
-  nextBatchPaths: ComputedRef<string[]>;
   /**
    * 预读区 paths (visibleRange 前后各 PREFETCH_BUFFER 屏行)。
    * MasonryView 对这些 paths 调 new Image(src) 提前 fetch + decode 进浏览器缓存,
@@ -276,17 +291,28 @@ export interface MasonryLayoutOutput {
    * 默认 balanced 预设（ahead 1.5 / behind 0.5 / idle 1）；任务 8/11 接 settings。
    */
   thumbnailWindows: ComputedRef<ThumbnailWindows>;
+  /**
+   * 尺寸预读 paths（像素窗口中心，过滤已测量，截断到 DIMENSION_BATCH_SIZE）。
+   * MasonryView watch 它触发 listImageDimensions。
+   * v0.1.0-module3.0.8 fix: 替代旧 nextBatchPaths（measuredCount 连续前缀）——
+   * reader 返回深处时 measuredMap 空，旧逻辑从 p0 读导致深处图永远拿不到真实尺寸。
+   */
+  dimensionPrefetchPaths: ComputedRef<string[]>;
 }
 
-const PREFETCH_SCREENS = 3;
 const VISIBLE_BUFFER = 2;
 /** 图片字节预读区: 视口前后各 PREFETCH_BUFFER 屏行 (new Image 缓存) */
 const PREFETCH_BUFFER = 2;
+/**
+ * 尺寸（header）预读 batch 上限：像素窗口内未测量 paths 一次请求的上限。
+ * v0.1.0-module3.0.8 fix: 视口附近未测量图一次性请求真实尺寸，避免估算偏差。
+ */
+const DIMENSION_BATCH_SIZE = 80;
 
 /**
  * 响应式瀑布流 composable 主体。把 C1/C2 纯函数接成响应式数据流，
- * 输出 colWidth / layout / visibleRange / measuredCount / needPrefetch / nextBatchPaths 给 MasonryView 消费。
- * 本 composable 不直接调 IPC（listImageDimensions）——预读由 MasonryView watch(needPrefetch) 触发。
+ * 输出 colWidth / layout / visibleRange / measuredCount / dimensionPrefetchPaths 给 MasonryView 消费。
+ * 本 composable 不直接调 IPC（listImageDimensions）——预读由 MasonryView watch(dimensionPrefetchPaths) 触发。
  */
 export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutput {
   const colWidth = computed(() =>
@@ -338,25 +364,6 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
 
   const measuredCount = computed(() => params.measuredMap.value.size);
 
-  // 预读触发：visibleRange.end 接近已测量边界
-  const needPrefetch = computed(() => {
-    const entries = params.entries.value;
-    if (entries.length === 0) return false;
-    const cw = colWidth.value;
-    const estItemH = cw / DEFAULT_ASPECT_RATIO;
-    const oneScreen = Math.max(1, Math.ceil(params.colCount.value * (params.containerHeight.value / estItemH)));
-    return visibleRange.value.end + oneScreen > measuredCount.value;
-  });
-
-  const nextBatchPaths = computed(() => {
-    if (!needPrefetch.value) return [];
-    const batchSize = PREFETCH_SCREENS * Math.max(1, params.colCount.value) * 10;
-    const start = measuredCount.value;
-    return params.entries.value
-      .slice(start, start + batchSize)
-      .map((e) => e.path);
-  });
-
   // 预读区: 视口前后各 PREFETCH_BUFFER 屏行. MasonryView 用来 new Image() 提前缓存.
   const prefetchPaths = computed(() => {
     const r = visibleRange.value;
@@ -387,5 +394,33 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
     );
   });
 
-  return { colWidth, layout, visibleRange, measuredCount, needPrefetch, nextBatchPaths, prefetchPaths, thumbnailWindows };
+  /**
+   * 尺寸预读 paths（v0.1.0-module3.0.8 fix）：以 thumbnailWindows 像素窗口为中心
+   * （visible+ahead+behind），过滤已测量，截断到 DIMENSION_BATCH_SIZE。
+   *
+   * 旧 nextBatchPaths 用 measuredMap.size 当连续前缀起点，reader 返回瀑布流深处时
+   * measuredMap 清空 → 仍从 p0 读 → 视口附近的图永远拿不到真实尺寸 → 用偏纵向的
+   * avgRatio 估算 → 横向图被估算成纵向高度（如 447×760）→ 大片纵向空白。
+   *
+   * 新方案不依赖 measuredCount 连续前缀，直接读像素窗口——返回深处时第一批尺寸
+   * 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。配合 useMasonryLayout
+   * 的 resize viewport anchor，尺寸收敛期间的视觉跳动也被锚定恢复。
+   */
+  const dimensionPrefetchPaths = computed<string[]>(() => {
+    const w = thumbnailWindows.value;
+    const candidates = [...w.visible, ...w.ahead, ...w.behind];
+    const measured = params.measuredMap.value;
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const p of candidates) {
+      if (seen.has(p)) continue;
+      seen.add(p);
+      if (measured.has(p)) continue;
+      out.push(p);
+      if (out.length >= DIMENSION_BATCH_SIZE) break;
+    }
+    return out;
+  });
+
+  return { colWidth, layout, visibleRange, measuredCount, prefetchPaths, thumbnailWindows, dimensionPrefetchPaths };
 }

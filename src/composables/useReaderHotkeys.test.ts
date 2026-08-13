@@ -190,4 +190,52 @@ describe('useReaderHotkeys', () => {
     keyHandler!(new KeyboardEvent('keydown', { key: 'm' }) as unknown as KeyboardEvent);
     expect(r.chromeVisible).toBe(!true);  // toggle 一次, 从 true → false
   });
+
+  // ─── 2026-08-12 跨卷任务 8 (P1-2): actions 参数 + folderNext/folderPrev 派发 ───
+  // 不传 actions (向后兼容) → folderNext/folderPrev 静默 no-op, 不抛.
+  // actions.nextVolume/prevVolume 注入 → Alt+ArrowRight / Alt+ArrowLeft 派发对应回调.
+  // 用例顺序: 4 个 (向后兼容默认 / nextVolume 调 / prevVolume 调 / 不传不抛).
+
+  it('不传 actions 参数 (向后兼容): folderNext/folderPrev 静默 no-op 不抛', () => {
+    expect(() => useReaderHotkeys()).not.toThrow();
+    // Alt+ArrowRight / Alt+ArrowLeft 应被接受为有效 hotkey, 静默 no-op
+    expect(() => keyHandler!(new KeyboardEvent('keydown', {
+      key: 'ArrowRight', altKey: true,
+    } as unknown as KeyboardEvent))).not.toThrow();
+    expect(() => keyHandler!(new KeyboardEvent('keydown', {
+      key: 'ArrowLeft', altKey: true,
+    } as unknown as KeyboardEvent))).not.toThrow();
+  });
+
+  it('actions.nextVolume 注入: Alt+ArrowRight (folderNext) 派发该回调', () => {
+    const nextVolume = vi.fn();
+    const prevVolume = vi.fn();
+    useReaderHotkeys({ nextVolume, prevVolume });
+    keyHandler!(new KeyboardEvent('keydown', {
+      key: 'ArrowRight', altKey: true,
+    } as unknown as KeyboardEvent));
+    expect(nextVolume).toHaveBeenCalledTimes(1);
+    expect(prevVolume).not.toHaveBeenCalled();
+  });
+
+  it('actions.prevVolume 注入: Alt+ArrowLeft (folderPrev) 派发该回调', () => {
+    const nextVolume = vi.fn();
+    const prevVolume = vi.fn();
+    useReaderHotkeys({ nextVolume, prevVolume });
+    keyHandler!(new KeyboardEvent('keydown', {
+      key: 'ArrowLeft', altKey: true,
+    } as unknown as KeyboardEvent));
+    expect(prevVolume).toHaveBeenCalledTimes(1);
+    expect(nextVolume).not.toHaveBeenCalled();
+  });
+
+  it('actions 局部字段缺失: 仅注入 nextVolume 时 prevVolume 不被调, Alt+ArrowLeft 静默 no-op', () => {
+    const nextVolume = vi.fn();
+    useReaderHotkeys({ nextVolume });
+    // folderPrev 没注入 → 应静默 no-op, 不抛
+    expect(() => keyHandler!(new KeyboardEvent('keydown', {
+      key: 'ArrowLeft', altKey: true,
+    } as unknown as KeyboardEvent))).not.toThrow();
+    expect(nextVolume).not.toHaveBeenCalled();
+  });
 });

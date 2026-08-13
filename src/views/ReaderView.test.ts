@@ -228,6 +228,7 @@ describe('ReaderView.vue', () => {
       imageName: null,
       readerMode: 'single',
       updatedAt: 100,
+      finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -310,12 +311,14 @@ describe('ReaderView.vue', () => {
   // 测法: 给含特殊字符的 path, pageUrls 应是单层 encode (Tauri 自己处理),
   // 不应看到 '%25' (那意味着双重 encode).
   it('pageUrls 文件名/目录含特殊字符时, URL 应单层 encode (Tauri convertFileSrc 内部处理)', async () => {
+    // 路径身份修复 (2026-08-12): absolutePath 用 source-relative (相对 rootPath),
+    // 不再用绝对盘符路径 (那是污染数据格式, 会被新校验拒绝)。
     vi.mocked(getBook).mockResolvedValueOnce({
       id: 99,
       title: '(林星阑) - 秀人网模特 红衣黑丝',
       sourceDescriptor: { type: 'local', rootPath: 'Q:\\00down\\2603' },
       sourceType: 'Local',
-      absolutePath: 'Q:\\00down\\2603\\(林星阑) - 秀人网模特 红衣黑丝',
+      absolutePath: '(林星阑) - 秀人网模特 红衣黑丝',
       coverEntryPath: null,
       coverEntryName: null,
       pageCount: 85,
@@ -324,11 +327,12 @@ describe('ReaderView.vue', () => {
       isFavorite: true,
     } as never);
     vi.mocked(listDirectory).mockImplementation(async (_sd, p) => {
+      // loadBookById 用 joinPath(rootPath, 'manga名') 调 listDirectory
       if (p === '' || p === 'Q:\\00down\\2603') {
         return [] as never;
       }
       return [
-        { name: 'c (1).jpg', path: 'Q:\\00down\\2603\\(林星阑) - 秀人网模特 红衣黑丝\\c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+        { name: 'c (1).jpg', path: 'c (1).jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
       ] as never;
     });
     const fb = useFileBrowserStore();
@@ -417,7 +421,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // saved progress = page 0
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 0, imageName: null, readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 0, imageName: null, readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -615,7 +619,7 @@ describe('ReaderView.vue', () => {
     // imageName='b.jpg' (index=1) 应胜出; page=0 → spread=0 (与 imageName 不同,
     // 旧实现走 page 会得到 0; 新实现命中 imageName 应得到 1 — 这是 RED 测试)
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 0, imageName: 'b.jpg', readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 0, imageName: 'b.jpg', readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -658,7 +662,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // imageName='deleted.jpg' 不在 imageNames (a/b/c) 中 → 走 page=1
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 1, imageName: 'deleted.jpg', readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 1, imageName: 'deleted.jpg', readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -701,7 +705,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // imageName=null（旧行 image_name=NULL, migration 010 之前）
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 1, imageName: null, readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 1, imageName: null, readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -744,7 +748,7 @@ describe('ReaderView.vue', () => {
     } as never);
     // progress.imageName='a.jpg' (index=0), 但 ?at='c.jpg' 应胜出
     vi.mocked(getProgress).mockResolvedValueOnce({
-      bookId: 7, page: 0, imageName: 'a.jpg', readerMode: 'single', updatedAt: 100,
+      bookId: 7, page: 0, imageName: 'a.jpg', readerMode: 'single', updatedAt: 100, finished: false,
     });
     const fb = useFileBrowserStore();
     fb.entries = [
@@ -768,31 +772,32 @@ describe('ReaderView.vue', () => {
 
   // v0.1.0-module3.0.3-hotfix4: book 目录排序独立于 fileBrowser 上次 fetch.
   // 之前用 effectiveSortField (fileBrowser 上次 fetch 的目录排序), 错把父目录排序
-  // 应用到子目录 book. 现在直接用 directorySort.resolve(book 目录的绝对路径).
+  // 应用到子目录 book. 现在直接用 directorySort.resolve(book 目录的 relPath).
+  // 路径身份修复 (2026-08-12): mock 数据用 source-relative (rootPath=/test, absolutePath=manga).
   it('reader 排序使用 book 目录的 per-folder override (与 fileBrowser 上次 fetch 无关)', async () => {
     vi.mocked(listDirectory).mockReset();
     vi.mocked(listDirectory).mockResolvedValue([
-      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
-      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
-      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
+      { name: 'a.jpg', path: 'manga/a.jpg', isDirectory: false, isArchive: false, size: 100, modifiedAt: 300 },
+      { name: 'b.jpg', path: 'manga/b.jpg', isDirectory: false, isArchive: false, size: 300, modifiedAt: 100 },
+      { name: 'c.jpg', path: 'manga/c.jpg', isDirectory: false, isArchive: false, size: 200, modifiedAt: 200 },
     ] as never);
     vi.mocked(getBook).mockReset();
     vi.mocked(getBook).mockResolvedValue({
       id: 7,
       title: 'manga',
-      absolutePath: '/test/manga',  // book 目录是 /test/manga
+      absolutePath: 'manga',  // book 目录相对 rootPath=/test
       coverEntryPath: null,
       coverEntryName: null,
       pageCount: 3,
       lastReadAt: null,
       isFavorite: false,
-      sourceDescriptor: { type: 'local', rootPath: 'C:/root' },
+      sourceDescriptor: { type: 'local', rootPath: '/test' },
       sourceType: 'Local',
     } as never);
     const { useDirectorySortStore } = await import('@/stores/directorySort');
     const ds = useDirectorySortStore();
-    // 给 book 目录 /test/manga 设 ASC (覆盖默认)
-    await ds.set({ type: 'local', rootPath: 'C:/root' }, '/test/manga', { sortField: 'modifiedAt', ascending: true });
+    // 给 book 目录 manga 设 ASC (覆盖默认)
+    await ds.set({ type: 'local', rootPath: '/test' }, 'manga', { sortField: 'modifiedAt', ascending: true });
     // fb 默认 sortField 是 modifiedAt 倒序 — 模拟父目录的设置
     const fb = useFileBrowserStore();
     fb.sortField = 'modifiedAt';
@@ -814,6 +819,171 @@ describe('ReaderView.vue', () => {
     expect(urls[2]).toContain('a.jpg');
   });
 
+  // ─── 2026-08-12 跨卷任务 8: route watch immediate + loadRouteBook + commitBookSnapshot ───
+  // spec §11.1-§11.2 + §17.2. 不变量 2/3/5. 复用真实 loader (走 mocked tauri).
+
+  it('commitBookSnapshot 原子提交: loadBookById 成功后 reader.sourceDescriptor + currentRelPath 写入 (Controller.identity 依赖)', async () => {
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockResolvedValue({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: 'subdir',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 0,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(reader.status).toBe('ready');
+    // 跨卷 currentIdentity() 依赖这两个字段 (spec §11.2 P1-1)
+    expect(reader.sourceDescriptor).toEqual({ type: 'local', rootPath: '/test/manga' });
+    expect(reader.currentRelPath).toBe('subdir');
+  });
+
+  it('loadBookById 失败: status=error + reader.closeBook 调 (bookId/sourceDescriptor/currentRelPath 清) + 旧 refs 清空', async () => {
+    // 第一次 loadBookById 成功（给 reader store 写入数据以便验证失败时清空）
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockResolvedValueOnce({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 0,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never);
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(reader.status).toBe('ready');
+    expect(reader.bookId).toBe(7);
+
+    // 第二次跨到 /reader/99 时 getBook 拒绝 → loadBookById 抛 → 不保留旧卷
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockRejectedValue(new Error('找不到 bookId 99'));
+    // 加一条 /reader/99 路由（避免 push 报 No match）
+    router.addRoute({ path: '/reader/:bookId', name: 'reader', component: ReaderView });
+    await router.push('/reader/99');
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    // 不变量 3：失败不保留旧卷（route 已是新 bookId → reader.closeBook + 清 refs + error UI）
+    expect(reader.status).toBe('idle');   // reader store 已被 closeBook 重置为 idle
+    expect(reader.bookId).toBeNull();        // closeBook 调
+    expect(reader.sourceDescriptor).toBeNull();  // closeBook 调
+    expect(reader.currentRelPath).toBe('');  // closeBook 调
+    // 模板显示 error UI (ReaderView 自身 status=error, pageUrls/book/imageNames 清)
+    expect(w.find('[data-test="reader-error"]').exists()).toBe(true);
+  });
+
+  it('stale 丢弃: 第一次 loadRouteBook 晚于第二次返回 → 第一次结果不 commit, 最终状态是第二次', async () => {
+    // book 7 用 deferred promise（晚返回）, book 99 立即返回
+    let resolveBook7: (v: unknown) => void = () => undefined;
+    const deferredBook7 = new Promise<unknown>((resolve) => { resolveBook7 = resolve; });
+
+    vi.mocked(listDirectory).mockReset();
+    vi.mocked(listDirectory).mockResolvedValue([
+      { name: 'a.jpg', path: '/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    vi.mocked(getBook).mockReset();
+    vi.mocked(getBook).mockImplementation(((id: number) => {
+      if (id === 7) return deferredBook7 as Promise<ReturnType<typeof getBook>>;
+      if (id === 99) return Promise.resolve({
+        id: 99,
+        title: 'Manga 99',
+        sourceDescriptor: { type: 'local', rootPath: '/test/manga99' },
+        sourceType: 'Local',
+        absolutePath: '',
+        coverEntryPath: null,
+        coverEntryName: null,
+        pageCount: 0,
+        lastReadAt: null,
+        addedAt: 0,
+        isFavorite: false,
+      } as never);
+      return Promise.resolve(null as never);
+    }) as never);
+    vi.mocked(getProgress).mockReset();
+    vi.mocked(getProgress).mockResolvedValue(null);
+
+    const fb = useFileBrowserStore();
+    fb.entries = [];
+    const reader = useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();  // initial push /reader/7 → deferred
+    await router.isReady();
+    mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();  // 让 loadRouteBook(7) 启动并停在 await loader
+
+    // 立即跨到 /reader/99 → loadRouteBook(99) 启动并快速完成
+    await router.push('/reader/99');
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    // 此时 book 99 应已 commit（activeLoadSeq=2, seq=2）
+    expect(reader.bookId).toBe(99);
+
+    // 现在让 book 7 的 deferred resolve（应被 activeLoadSeq 守卫丢弃, seq=1 != 2）
+    resolveBook7({
+      id: 7,
+      title: 'Manga 7',
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 0,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    // 最终状态应是 99, 不是 7 (activeLoadSeq guard 丢弃旧卷晚返回)
+    expect(reader.bookId).toBe(99);
+    expect(reader.title).toBe('Manga 99');
+    expect(reader.sourceDescriptor).toEqual({ type: 'local', rootPath: '/test/manga99' });
+  });
+
   // v0.1.0-module3.0.7: Reader 主菜单 ❤️ toggle 连续切换
   // 验证: ① onToggleLike 调 setFavorite ② book ref 同步 ③ 同会话可反复切换
   // 这是代码审查 P1 反馈要求 — 原本 toggleLike 写 like 表 + book 快照不刷,无法取消喜欢
@@ -825,7 +995,6 @@ describe('ReaderView.vue', () => {
       { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
     ] as never);
     vi.mocked(getBook).mockReset();
-    // 初始 isFavorite=false
     vi.mocked(getBook).mockResolvedValue({
       id: 7,
       title: 'Manga 7',
@@ -857,21 +1026,16 @@ describe('ReaderView.vue', () => {
     await flushPromises();
     await flushPromises();
 
-    // 找到 ReaderMainMenu 子组件
     const menu = wrapper.findComponent({ name: 'ReaderMainMenu' });
     expect(menu.exists()).toBe(true);
-    // 初始 :is-liked=false(book.isFavorite=false)
     expect(menu.props('isLiked')).toBe(false);
 
-    // 第一次 toggle-like emit: false → true
     menu.vm.$emit('toggle-like');
     await flushPromises();
     expect(setFavorite).toHaveBeenCalledWith(7, true);
     expect(setFavorite).toHaveBeenCalledTimes(1);
-    // book ref 同步 → :is-liked=true
     expect(menu.props('isLiked')).toBe(true);
 
-    // 第二次 toggle-like emit: true → false(关键: 原本无法取消,现在可以)
     menu.vm.$emit('toggle-like');
     await flushPromises();
     expect(setFavorite).toHaveBeenCalledWith(7, false);
@@ -904,8 +1068,6 @@ describe('ReaderView.vue', () => {
       addedAt: 0,
       isFavorite: false,
     } as never);
-
-    // 关键: mock setFavorite 返回 pending promise,模拟慢 IPC(让第一次 onToggleLike 卡在 await)
     let resolveFirst!: () => void;
     vi.mocked(setFavorite).mockReset();
     vi.mocked(setFavorite).mockImplementation(() => new Promise<void>((r) => { resolveFirst = r; }));
@@ -928,30 +1090,25 @@ describe('ReaderView.vue', () => {
 
     const menu = wrapper.findComponent({ name: 'ReaderMainMenu' });
 
-    // 第一次 emit: 进入 onToggleLike → 跑到 await setFavorite(被 pending 卡住)
     menu.vm.$emit('toggle-like');
     await flushPromises();
     expect(setFavorite).toHaveBeenCalledTimes(1);
     expect(setFavorite).toHaveBeenCalledWith(7, true);
-    // book ref 还未更新(await 还没完成)
     expect(menu.props('isLiked')).toBe(false);
 
-    // 第二次 emit(关键测试): in-flight guard 应忽略,setFavorite 不再被调
     menu.vm.$emit('toggle-like');
     await flushPromises();
-    expect(setFavorite).toHaveBeenCalledTimes(1);  // 仍然只 1 次
+    expect(setFavorite).toHaveBeenCalledTimes(1);
 
-    // resolve 第一次 IPC,onToggleLike 完成,book ref 同步
     resolveFirst();
     await flushPromises();
-    expect(setFavorite).toHaveBeenCalledTimes(1);  // 仍 1 次
-    expect(menu.props('isLiked')).toBe(true);  // 现在 book.isFavorite=true
+    expect(setFavorite).toHaveBeenCalledTimes(1);
+    expect(menu.props('isLiked')).toBe(true);
 
-    // in-flight 已释放,可以再 toggle
     vi.mocked(setFavorite).mockResolvedValue(undefined);
     menu.vm.$emit('toggle-like');
     await flushPromises();
-    expect(setFavorite).toHaveBeenCalledTimes(2);  // 现在第 2 次
+    expect(setFavorite).toHaveBeenCalledTimes(2);
     expect(setFavorite).toHaveBeenNthCalledWith(2, 7, false);
     expect(menu.props('isLiked')).toBe(false);
   });

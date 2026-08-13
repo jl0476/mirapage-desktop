@@ -26,6 +26,7 @@ import {
 import type { ThumbnailWindows } from './useMasonryLayout';
 import { toRootRelativePath } from './useMasonryLayout';
 import { log } from '@/lib/logger';
+import { validateSourceRelativePath } from '@/lib/relativePath';
 
 const REQUEST_DEBOUNCE_MS = 80;
 /** 停止滚动后多久才允许提交 idle（§5.3）。 */
@@ -149,11 +150,19 @@ export function useMasonryThumbnails(
       const entry = entriesByPath.get(path);
       if (!entry) continue;
       const m = measured.get(path);
+      // 路径身份修复 (2026-08-12): sourceRelPath 必须 source-relative。
+      // params.currentPath 若被污染（绝对路径），toRootRelativePath 会拼出绝对
+      // sourceRelPath 污染 thumbnail_cache。校验失败跳过该 item（不发 IPC）。
+      const relPath = toRootRelativePath(params.currentPath.value, path);
+      if (!validateSourceRelativePath(relPath).ok) {
+        log('[useMasonryThumbnails] sourceRelPath 越界, 跳过缩略图请求', { relPath, currentPath: params.currentPath.value });
+        continue;
+      }
       // header 失败的图（m 为空）也请求：传 0 尺寸，Rust 生成器 decode 完整文件兜底
       // （decide_source 对 0 尺寸强制 Generate，不判 UseOriginal）
       items.push({
         path,
-        sourceRelPath: toRootRelativePath(params.currentPath.value, path),
+        sourceRelPath: relPath,
         fileSize: entry.size,
         modifiedAt: entry.modifiedAt ?? null,
         sourceWidth: m ? m.width : 0,
@@ -353,11 +362,17 @@ export function useMasonryThumbnails(
     // header 失败的图（m 为空）也允许 retry/regenerate：传 0 尺寸兜底
     const margin = THUMBNAIL_QUALITY_MARGIN[params.quality.value];
     const requiredWidth = Math.round(params.colWidth.value * params.dpr.value * margin);
+    // 路径身份修复: sourceRelPath 校验, 非法返 null（retry/regenerate 放弃该 item）。
+    const relPath = toRootRelativePath(params.currentPath.value, path);
+    if (!validateSourceRelativePath(relPath).ok) {
+      log('[useMasonryThumbnails/buildItem] sourceRelPath 越界, 放弃 retry/regenerate', { relPath });
+      return null;
+    }
     return {
       entry,
       item: {
         path,
-        sourceRelPath: toRootRelativePath(params.currentPath.value, path),
+        sourceRelPath: relPath,
         fileSize: entry.size,
         modifiedAt: entry.modifiedAt ?? null,
         sourceWidth: m ? m.width : 0,

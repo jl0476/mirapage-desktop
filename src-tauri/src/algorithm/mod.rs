@@ -16,5 +16,5 @@ pub mod spread_planner;
 pub use image_header::{image_dimensions, ImageDimensions};
 pub use mime::{is_archive, is_image, mime_from_name, supported_extensions};
 pub use natural_sort::{natural_compare, natural_sort};
-pub use path::{PathUtils, join, normalize, parent, segments};
+pub use path::{join, normalize, parent, segments, validate_source_relative, PathUtils, RelPathError};
 pub use spread_planner::SpreadPlanner;
