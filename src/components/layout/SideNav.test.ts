@@ -40,9 +40,8 @@ function makeRouter(): Router {
     routes: [
       { path: '/',          name: 'home',       component: { template: '<div />' } },
       { path: '/shortcuts', name: 'shortcuts',  component: { template: '<div />' } },
-      { path: '/library',   name: 'library',    component: { template: '<div />' } },
-      { path: '/bookmarks', name: 'bookmarks',  component: { template: '<div />' } },
       { path: '/likes',     name: 'likes',      component: { template: '<div />' } },
+      { path: '/bookmarks', name: 'bookmarks',  component: { template: '<div />' } },
       { path: '/history',   name: 'history',    component: { template: '<div />' } },
       { path: '/accounts',  name: 'accounts',   component: { template: '<div />' } },
       { path: '/settings',  name: 'settings',   component: { template: '<div />' } },
@@ -60,33 +59,31 @@ async function mountSideNav(initialRoute = '/'): Promise<{ wrapper: ReturnType<t
   return { wrapper, router };
 }
 
-describe('SideNav — 8 项导航', () => {
-  it('mount 渲染 8 个 RouterLink 指向 8 条路由', async () => {
+describe('SideNav — 7 项导航', () => {
+  it('mount 渲染 7 个 RouterLink 指向 7 条路由', async () => {
     const { wrapper } = await mountSideNav();
     const links = wrapper.findAllComponents(RouterLink);
-    expect(links.length).toBe(8);
+    expect(links.length).toBe(7);
 
     const hrefs = links.map((l) => l.props('to'));
     expect(hrefs).toEqual([
       '/',
       '/shortcuts',
-      '/library',
-      '/bookmarks',
       '/likes',
+      '/bookmarks',
       '/history',
       '/accounts',
       '/settings',
     ]);
   });
 
-  it('8 个项目的 label 通过 i18n key 渲染', async () => {
+  it('7 个项目的 label 通过 i18n key 渲染', async () => {
     const { wrapper } = await mountSideNav();
     const html = wrapper.html();
     expect(html).toContain('文件浏览');
     expect(html).toContain('快捷方式');
-    expect(html).toContain('书库');
-    expect(html).toContain('书签');
     expect(html).toContain('喜欢');
+    expect(html).toContain('书签');
     expect(html).toContain('阅览记录');
     expect(html).toContain('网络账户');
     expect(html).toContain('设置');
@@ -180,16 +177,16 @@ describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
     vi.mocked(setSetting).mockResolvedValue(undefined);
   });
 
-  it('当前路由 /library 时，/library 链接含 is-active + router-link-exact-active class', async () => {
-    const { wrapper } = await mountSideNav('/library');
+  it('当前路由 /likes 时，/likes 链接含 is-active + router-link-exact-active class', async () => {
+    const { wrapper } = await mountSideNav('/likes');
     await new Promise((r) => setTimeout(r, 0));
 
     const links = wrapper.findAllComponents(RouterLink);
-    const libraryLink = links.find((l) => l.props('to') === '/library');
-    expect(libraryLink).toBeTruthy();
+    const likesLink = links.find((l) => l.props('to') === '/likes');
+    expect(likesLink).toBeTruthy();
     // vue-router 4 exact match → 'is-active' (template active-class) + 'router-link-exact-active'
-    expect(libraryLink!.classes()).toContain('is-active');
-    expect(libraryLink!.classes()).toContain('router-link-exact-active');
+    expect(likesLink!.classes()).toContain('is-active');
+    expect(likesLink!.classes()).toContain('router-link-exact-active');
   });
 
   it('当前路由 /accounts 时仅 /accounts 高亮，其它无 is-active class', async () => {
@@ -203,8 +200,8 @@ describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
       .toContain('is-active');
   });
 
-  it('8 个 RouterLink 逐个点击 → router.push 按顺序被调 8 次', async () => {
-    const targets = ['/', '/shortcuts', '/library', '/bookmarks', '/likes', '/history', '/accounts', '/settings'];
+  it('7 个 RouterLink 逐个点击 → router.push 按顺序被调 7 次', async () => {
+    const targets = ['/', '/shortcuts', '/likes', '/bookmarks', '/history', '/accounts', '/settings'];
     const { wrapper, router } = await mountSideNav('/');
     await new Promise((r) => setTimeout(r, 0));
 
