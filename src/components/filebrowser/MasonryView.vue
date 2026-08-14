@@ -260,6 +260,19 @@ function onDocMouseDown(e: MouseEvent) {
 const SCROLL_CORRECTION_LIMIT = 5;
 const SCROLL_CORRECTION_TIMEOUT_MS = 3000;
 
+/**
+ * 程序化设 scrollTop（hotfix）：DOM `.scrollTop =` 不派发 scroll 事件，
+ * useVirtualList 的 scroll listener 不触发 → scrollTop ref 不更新 →
+ * thumbnailWindows watch 不触发 → 跳进度后可见区缩略图不加载。
+ * 显式同步 ref + 派发 scroll 接上 watch 链（与 resize 路径 :91-92 同模式）。
+ */
+function setScrollTopProgrammatic(top: number) {
+  if (!containerRef.value) return;
+  containerRef.value.scrollTop = top;
+  scrollTop.value = top;
+  containerRef.value.dispatchEvent(new Event('scroll'));
+}
+
 async function scrollToEntry(imageName: string): Promise<boolean> {
   const target = props.entries.find((e) => e.name === imageName);
   if (!target) {
@@ -278,7 +291,11 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
     log('[MasonryView] scrollToEntry: layout map missing after timeout', imageName);
     return false;
   }
-  if (containerRef.value) containerRef.value.scrollTop = item.top;
+  // hotfix：程序化设 DOM scrollTop 不派发 scroll 事件 → useVirtualList 的
+  // scrollTop ref 不更新 → thumbnailWindows watch 不触发 → 跳进度后可见区
+  // 缩略图不加载（用户实测：进目录跳到上次位置但图全空白）。
+  // 显式同步 ref + 派发 scroll，让 watch 链接上。
+  setScrollTopProgrammatic(item.top);
 
   // P1 修复：watch 目标图自身的 layout.top（不是 measuredMap 条目）。
   //   目标上方任意图片的尺寸到达都会改变目标的 layout.top，
@@ -304,7 +321,7 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
         return;
       }
       if (containerRef.value) {
-        containerRef.value.scrollTop = newTop;
+        setScrollTopProgrammatic(newTop);
         corrections += 1;
         // 自上次校正起算 timeout——重置
         if (timeoutId) clearTimeout(timeoutId);
