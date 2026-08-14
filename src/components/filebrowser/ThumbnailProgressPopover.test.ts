@@ -83,6 +83,40 @@ describe('ThumbnailProgressPopover.vue', () => {
     expect(w.find('.retry-btn').exists()).toBe(true);
   });
 
+  // 时间格式 + 口径（用户实测反馈：1485226ms 反人类 + decoding 显示含排队总时长误导）
+  it('耗时不显示裸毫秒：分钟级显示 Xm Ys，秒级显示 X.Xs', () => {
+    const w = mount(ThumbnailProgressPopover, {
+      props: mkProps({ state: gen('decoding', { decoding: 2000 }) }),
+      global: { plugins: [i18n] },
+    });
+    const text = w.text();
+    // 不允许 4 位以上数字直接跟 ms（裸毫秒）
+    expect(text).not.toMatch(/\d{4,}ms/);
+    // 顶部/时间线有秒级格式（X.Xs 或 Xm Ys）
+    expect(text).toMatch(/\d+(?:\.\d+)?s|\d+m \d+s/);
+  });
+
+  it('decoding 顶部已用时不显示含排队的总时长（当前阶段净耗时口径）', () => {
+    // startedAt 5 分钟前（含排队），但 decoding 2 秒前才开始
+    // generationStartedAt = Date.now() - 2000，timings.decoding = 0
+    const state = {
+      kind: 'generating' as const, cacheKey: 'ck', phase: 'decoding' as const,
+      startedAt: Date.now() - 5 * 60 * 1000,
+      generationStartedAt: Date.now() - 2000,
+      timings: { decoding: 0 },
+    };
+    const w = mount(ThumbnailProgressPopover, {
+      props: mkProps({ state }),
+      global: { plugins: [i18n] },
+    });
+    const headline = w.find('.pop-state.cur').text();
+    // 顶部应该是 ~2s（当前阶段净耗时），不是 ~5 分钟（含排队）
+    expect(headline).not.toMatch(/\d+m \d+s/);
+    expect(headline).toMatch(/\d+(?:\.\d+)?s/);
+    // 排队时长在时间线 queued 行单独显示（~5 分钟）
+    expect(w.text()).toMatch(/\d+m \d+s/);
+  });
+
   it('渲染根元素（position: fixed 容器）', () => {
     const pop = mount(ThumbnailProgressPopover, { props: mkProps(), global: { plugins: [i18n] }, attachTo: document.body });
     expect(pop.find('[data-test="thumb-popover"]').exists()).toBe(true);

@@ -64,9 +64,32 @@ onBeforeUnmount(() => {
 });
 
 const phaseText = (ph: ThumbnailPhase) => t(`thumbnail.phase.${ph}`);
-const totalElapsedMs = computed(() => {
+
+/** 耗时格式化（用户实测反馈：裸毫秒反人类）：<1s → "Xms"；<1min → "X.Xs"；≥1min → "Xm Ys"。 */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m ${s}s`;
+}
+
+/**
+ * 顶部"已用时"口径（用户实测反馈修正：贴在 phase 旁的耗时被理解为该阶段耗时，
+ * 含排队的总时长会误导——decoding 显示 26 分钟实际 decode 只有几秒）：
+ * - queued：排队等待（Date.now() - startedAt）
+ * - 其余阶段：当前阶段净耗时（Date.now() - generationStartedAt - timings[phase]，不含排队）
+ * 排队等待在时间线 queued 行单独展示。
+ */
+const headlineDurMs = computed(() => {
   void nowTick.value;
-  return props.state.kind === 'generating' ? Date.now() - props.state.startedAt : 0;
+  const s = props.state;
+  if (s?.kind !== 'generating') return 0;
+  if (s.phase === 'queued') return Math.max(0, Date.now() - s.startedAt);
+  const genStart = s.generationStartedAt;
+  if (genStart === undefined) return Math.max(0, Date.now() - s.startedAt);
+  const phaseStart = s.timings[s.phase] ?? 0;
+  return Math.max(0, Date.now() - genStart - phaseStart);
 });
 
 /** 时间线数据源：generating 态用自身；failed 态用快照（round-1 P1-6）。 */
@@ -76,7 +99,7 @@ const timeline = computed<ThumbnailProgressSnapshot | null>(() => {
   return props.snapshot ?? null;
 });
 
-/** 阶段时长（ms）：queued = 排队等待；已完成 = timings[next]-timings[this]；
+/** 阶段时长：queued = 排队等待；已完成 = timings[next]-timings[this]；
  * 当前 = Date.now()-generationStartedAt-timings[this]（实时）；未到/卡住 = '—'。 */
 function stepDuration(ph: ThumbnailPhase): string {
   const src = timeline.value;
@@ -86,8 +109,8 @@ function stepDuration(ph: ThumbnailPhase): string {
   if (ph === 'queued') {
     // 排队等待 = generate 实际开始 - 请求发出；未开始生成时实时跳动
     const genStart = src.generationStartedAt;
-    if (genStart === undefined) return `${Math.max(0, Date.now() - src.startedAt)}ms`;
-    return `${Math.max(0, genStart - src.startedAt)}ms`;
+    if (genStart === undefined) return formatDuration(Date.now() - src.startedAt);
+    return formatDuration(genStart - src.startedAt);
   }
   if (timings[ph] === undefined) return '—';
   const start = timings[ph] as number;
@@ -96,12 +119,12 @@ function stepDuration(ph: ThumbnailPhase): string {
     // round-1 P1-4：用 generationStartedAt（不含排队），不用 startedAt
     const genStart = src.generationStartedAt;
     if (genStart === undefined) return '—';
-    return `${Math.max(0, Date.now() - genStart - start)}ms`;
+    return formatDuration(Date.now() - genStart - start);
   }
   const idx = THUMBNAIL_PHASES.indexOf(ph);
   const nextPh = THUMBNAIL_PHASES[idx + 1];
   const end = nextPh && timings[nextPh] !== undefined ? (timings[nextPh] as number) : start;
-  return `${Math.max(0, end - start)}ms`;
+  return formatDuration(end - start);
 }
 function stepClass(ph: ThumbnailPhase): string {
   const src = timeline.value;
@@ -119,7 +142,7 @@ function stepClass(ph: ThumbnailPhase): string {
   <div ref="rootEl" class="thumb-popover" :class="`place-${placement}`" :style="{ left: pos.left + 'px', top: pos.top + 'px' }" data-test="thumb-popover">
     <div class="pop-title">{{ fileName }}</div>
     <template v-if="state.kind === 'generating'">
-      <div class="pop-state cur">{{ phaseText(state.phase) }} · {{ t('thumbnail.popover.elapsed', { ms: totalElapsedMs }) }}</div>
+      <div class="pop-state cur">{{ phaseText(state.phase) }} · {{ t('thumbnail.popover.elapsed', { dur: formatDuration(headlineDurMs) }) }}</div>
       <div class="psection">{{ t('thumbnail.popover.stages') }}</div>
       <div v-for="ph in THUMBNAIL_PHASES" :key="ph" class="tl-step" :class="stepClass(ph)">
         <span class="lbl"><span class="dot" />{{ phaseText(ph) }}</span>

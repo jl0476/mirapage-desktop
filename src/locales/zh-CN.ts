@@ -416,7 +416,7 @@ export default {
     phase: { queued: '排队中', decoding: '解码中', resizing: '缩放中', encoding: '编码中', writing: '写入中' },
     popover: {
       title: '缩略图生成',
-      elapsed: '已用时 {ms}ms',
+      elapsed: '已用时 {dur}',
       stages: '阶段',
       image: '图像',
       sourceImage: '原图',

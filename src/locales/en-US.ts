@@ -414,7 +414,7 @@ export default {
     phase: { queued: 'Queued', decoding: 'Decoding', resizing: 'Resizing', encoding: 'Encoding', writing: 'Writing' },
     popover: {
       title: 'Thumbnail generation',
-      elapsed: 'Elapsed {ms}ms',
+      elapsed: 'Elapsed {dur}',
       stages: 'Stages',
       image: 'Image',
       sourceImage: 'Source',
