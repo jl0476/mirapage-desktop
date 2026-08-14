@@ -42,6 +42,8 @@ interface TestProps {
   marks?: ReadStatusMap;
   selectedPaths?: Set<string>;
   viewMode?: 'details' | 'masonry';
+  /** 2026-08-14 hotfix: 子目录 mark 匹配测试用 */
+  currentPath?: string;
 }
 
 function mountList(
@@ -98,6 +100,43 @@ describe('FileList.vue', () => {
     await settle();
     const rows = w.findAll('[data-test="row"]');
     expect(rows[0].classes()).toContain('is-archive');
+    w.unmount();
+  });
+
+  // ─── 2026-08-14 hotfix: 子目录 mark 匹配 ───
+  // marks key 是 `${rootPath}|${相对根的 relPath}`（如 C:/comics|raw/vol1），
+  // entry.path 相对当前目录（vol1）。浏览子目录（currentPath='raw'）时必须
+  // 拼前缀才能命中 — 修复前子目录所有 mark 显示为 none。
+  it('子目录条目用 currentPath 前缀匹配 marks（data-status）', async () => {
+    const entries = [
+      entry('vol1', { isDirectory: true }),
+      entry('vol2', { isDirectory: true }),
+    ];
+    const marks: ReadStatusMap = {
+      'C:/comics|raw/vol1': 'finished',
+      'C:/comics|raw/vol2': 'reading',
+    };
+    const w = mountList(
+      { entries, marks, currentPath: 'raw' },
+      { attachTo: document.body },
+    );
+    await settle();
+    const rows = w.findAll('[data-test="row"]');
+    expect(rows[0].attributes('data-status')).toBe('finished');
+    expect(rows[1].attributes('data-status')).toBe('reading');
+    w.unmount();
+  });
+
+  it('根目录（currentPath 空）matches 行为不变', async () => {
+    const entries = [entry('vol1', { isDirectory: true })];
+    const marks: ReadStatusMap = { 'C:/comics|vol1': 'finished' };
+    const w = mountList(
+      { entries, marks, currentPath: '' },
+      { attachTo: document.body },
+    );
+    await settle();
+    const rows = w.findAll('[data-test="row"]');
+    expect(rows[0].attributes('data-status')).toBe('finished');
     w.unmount();
   });
 

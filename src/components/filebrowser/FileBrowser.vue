@@ -112,7 +112,7 @@ const displayedEntries = computed<MediaEntry[]>(() => {
   // single loop: 同时判断 hideFinished + searchQuery
   const result: MediaEntry[] = [];
   for (const e of sorted) {
-    if (hide && readStatus.isFinished(e)) continue;
+    if (hide && readStatus.isFinished(e, fb.lastFetchedPath)) continue;
     if (q && !e.name.toLowerCase().includes(q)) continue;
     result.push(e);
   }

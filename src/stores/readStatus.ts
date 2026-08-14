@@ -12,6 +12,7 @@
 import { defineStore } from 'pinia';
 import { ref, watch } from 'vue';
 import { listProgressFinished } from '@/lib/tauri';
+import { toRootRelativePath } from '@/composables/useMasonryLayout';
 import { useHistoryStore } from './history';
 
 export type ReadStatus = 'none' | 'reading' | 'finished';
@@ -85,13 +86,23 @@ export const useReadStatusStore = defineStore('readStatus', () => {
     const finishedMap = ids.length === 0 ? {} : await listProgressFinished(ids);
 
     const m: ReadStatusMap = {};
+    // 2026-08-14 hotfix: 同 key 重复 history 行（descriptor 双序列化格式遗留）取
+    // lastVisitedAt 最新的行 — 旧实现按迭代顺序后者覆盖，旧行的过期状态会盖掉新行。
+    // 语义与「无重复（正确 upsert）」世界一致：最新行即 upsert 后的唯一行。
+    const seenAt = new Map<string, number>();
     for (const h of history.items) {
       // v0.1.0-module3.0.1: 没 book_id 的 history 行（旧 migration 005 前或 bookId 未传）跳过
       if (h.bookId == null) continue;
       const bid = h.bookId.toString();
-      // history 命中 + progress 表里有 row 才 mark
+      const key = historyEntryKey(h);
+      const ts = h.lastVisitedAt ?? 0;
+      if (seenAt.has(key) && ts <= (seenAt.get(key) ?? 0)) continue;
+      seenAt.set(key, ts);
+      // history 命中 + progress 表里有 row 才 mark（最新行无 progress → 无 mark，不回退旧行）
       if (bid in finishedMap) {
-        m[historyEntryKey(h)] = finishedMap[bid] === true ? 'finished' : 'reading';
+        m[key] = finishedMap[bid] === true ? 'finished' : 'reading';
+      } else {
+        delete m[key];
       }
     }
     marks.value = m;
@@ -113,10 +124,17 @@ export const useReadStatusStore = defineStore('readStatus', () => {
    * 供 FileBrowser.displayedEntries 过滤用 — 在 store 内部访问 marks.value,
    * 避免消费侧 ref-unwrap 行为差异 (Pinia setup store return 的 ref 在 computed
    * 内直接读可能拿到 ref 对象而非 unwrap 值).
+   *
+   * 2026-08-14 hotfix: marks key 的 relPath 段是「相对根」的（如 raw/vol1），
+   * 而 entry.path 相对当前目录（如 vol1）。浏览子目录时传 currentRelPath
+   * （= fb.lastFetchedPath）拼前缀匹配；省略 = 根目录语义（现有调用兼容）。
    */
-  function isFinished(entry: { path: string; isDirectory: boolean; isArchive: boolean }): boolean {
+  function isFinished(
+    entry: { path: string; isDirectory: boolean; isArchive: boolean },
+    currentRelPath = '',
+  ): boolean {
     if (!entry.isDirectory && !entry.isArchive) return false;
-    return finishedSet.value.has(entry.path);
+    return finishedSet.value.has(toRootRelativePath(currentRelPath, entry.path));
   }
 
   return { marks, finishedSet, refresh, clear, rebuildFinishedSet, isFinished };

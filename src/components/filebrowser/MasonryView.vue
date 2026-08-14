@@ -441,9 +441,10 @@ function joinPath(...parts: string[]): string {
   return cleaned.join('\\');
 }
 
-// mark 查找：${rootPath}|${entry.path} 格式（readStatus 实际格式）
+// mark 查找：`${rootPath}|${相对根的 relPath}` 格式（readStatus 实际格式）。
+// 2026-08-14 hotfix: entry.path 相对当前目录，拼 currentPath 前缀（F1 同款）。
 function getMark(entry: MediaEntry): 'reading' | 'finished' | 'none' {
-  const key = `${props.rootPath}|${entry.path}`;
+  const key = `${props.rootPath}|${toRootRelativePath(props.currentPath, entry.path)}`;
   const v = props.marks[key];
   if (v === 'reading') return 'reading';
   if (v === 'finished') return 'finished';

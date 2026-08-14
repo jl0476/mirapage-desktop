@@ -762,6 +762,46 @@ describe('FileBrowser — 隐藏已读完', () => {
     const rows = wrapper.findAll('[data-test^="row"]');
     expect(rows.length).toBe(2);
   });
+
+  // ─── 2026-08-14 hotfix: 子目录 mark 匹配 + hideFinished ───
+  // marks key 是根相对 relPath（C:/comics|raw/vol1），子目录 entry.path 是 vol1。
+  // 修复前：子目录 mark 全显示 none + hideFinished 过滤失效。
+  it('子目录场景 mark 显示 + hideFinished 用 lastFetchedPath 前缀匹配', async () => {
+    // 根目录列表（setRoot fetch）
+    mockedList.mockResolvedValueOnce([
+      { name: 'raw', path: 'raw', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    // 子目录列表（navigate fetch）
+    mockedList.mockResolvedValueOnce([
+      { name: 'vol1', path: 'vol1', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'vol2', path: 'vol2', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    await fb.navigate('raw');
+    await flushPromises();
+
+    const rs = useReadStatusStore();
+    rs.marks = {
+      'C:/comics|raw/vol1': 'finished',
+      'C:/comics|raw/vol2': 'reading',
+    };
+    await wrapper.vm.$nextTick();
+
+    // mark 显示: vol1=finished / vol2=reading（修复前子目录全 none）
+    const rows = wrapper.findAll('[data-test^="row"]');
+    expect(rows[0].attributes('data-status')).toBe('finished');
+    expect(rows[1].attributes('data-status')).toBe('reading');
+
+    // hideFinished 过滤子目录 finished（修复前 isFinished 匹配不上 → 过滤失效）
+    fb.setHideFinished(true);
+    await wrapper.vm.$nextTick();
+    const after = wrapper.findAll('[data-test^="row"]');
+    expect(after.length).toBe(1);
+    expect(after[0].text()).toContain('vol2');
+  });
 });
 
 describe('FileBrowser — 内联搜索', () => {

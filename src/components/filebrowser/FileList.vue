@@ -16,7 +16,7 @@
 import { ref, computed, nextTick, onMounted, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useFileBrowserStore, type ViewMode } from '@/stores/fileBrowser';
-import { useReadStatusStore } from '@/stores/readStatus';
+import { toRootRelativePath } from '@/composables/useMasonryLayout';
 import { useVirtualList } from '@/composables/useVirtualList';
 import VirtualRow from './VirtualRow.vue';
 import MasonryView from './MasonryView.vue';
@@ -69,7 +69,6 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const fb = useFileBrowserStore();
-const readStatus = useReadStatusStore();
 
 /* ─── name-wrap tooltip 状态 ─── */
 const hoveredName = ref<string | null>(null);
@@ -137,25 +136,28 @@ onMounted(() => {
 
 /**
  * mark 预算: 父层一次性 O(n) 算 markByPath, 子 row 只接收单值 mark.
- * marks key 形如 `${descriptorId}|${entry.path}` — 用 lastIndexOf('|') 取 path 段.
- * finished 用 readStatus.finishedSet O(1) (Task 1.3); reading 仍走 marks map (readingSet 暂未实现).
+ * marks key 形如 `${descriptorId}|${相对根的 relPath}` — lastIndexOf('|') 取 path 段.
+ * reading/finished 都从 props.marks 构建 (2026-08-14: 修此前 reading 走 props.marks、
+ * finished 走 store.finishedSet 的数据源不一致).
+ * 2026-08-14 hotfix: entry.path 相对当前目录, marks key 相对根 — 子目录浏览时
+ * 用 toRootRelativePath(currentPath, entry.path) 拼前缀匹配 (修复前子目录 mark 全 none).
  * 优先级: reading > finished > none.
  */
 const markByPath = computed<Map<string, 'reading' | 'finished' | 'none'>>(() => {
   const m = new Map<string, 'reading' | 'finished' | 'none'>();
-  const finished = readStatus.finishedSet;
-  // reading 仍走 marks map (O(n*m) 但实际 marks 量小, 暂不优化)
   const readingPaths = new Set<string>();
+  const finishedPaths = new Set<string>();
   for (const [k, v] of Object.entries(props.marks)) {
-    if (v === 'reading') {
-      const idx = k.indexOf('|');
-      readingPaths.add(idx >= 0 ? k.slice(idx + 1) : k);
-    }
+    const idx = k.lastIndexOf('|');
+    const p = idx >= 0 ? k.slice(idx + 1) : k;
+    if (v === 'reading') readingPaths.add(p);
+    else if (v === 'finished') finishedPaths.add(p);
   }
   for (const e of props.entries) {
     if (e.isDirectory || e.isArchive) {
-      if (readingPaths.has(e.path)) m.set(e.path, 'reading');
-      else if (finished.has(e.path)) m.set(e.path, 'finished');
+      const full = toRootRelativePath(props.currentPath, e.path);
+      if (readingPaths.has(full)) m.set(e.path, 'reading');
+      else if (finishedPaths.has(full)) m.set(e.path, 'finished');
       else m.set(e.path, 'none');
     } else {
       m.set(e.path, 'none');
