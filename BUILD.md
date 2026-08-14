@@ -101,7 +101,7 @@ cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\src-tauri\\cargo-te
 ### 1.3 构建
 
 ```bash
-npm install                # 前端依赖
+npm ci                     # 按 lockfile 安装前端依赖（更新依赖时才用 npm install）
 npm run tauri:dev          # 开发模式（Vite :1420 + Tauri IPC）
 npm run tauri:build        # 生产构建（产出 MSI / NSIS 安装包）
 ```
@@ -196,18 +196,18 @@ cd src-tauri && cargo test     # 需完整 Tauri 环境（见 §1）
 cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\cargo-test.bat"
 ```
 
-**已知失败的 3 个测试**（v0.1.0-module1.21 实测，与新功能无关，先记着后续修）：
-- `algorithm::path::tests::test_crumbs`
-- `source::webdav_impl::tests::parse_propfind_extracts_collection_and_files`
-- `commands::shortcuts::tests::list_orders_by_created_at_desc`
+**已知失败的 1 个测试**（当前实测，与本模块无关，先记着后续修）：
+- `source::webdav_impl::tests::parse_propfind_extracts_collection_and_files`（预存在）
 
-CI 跑 release 不会因此失败（release 不跑 test），但本地 `cargo test` 会红 3 条。
+CI workflow 只跑 `cargo check`，不会因此失败；本地完整 `cargo test` 仍会红 1 条预存在用例。
 
 ### 4.3 前端
 
 ```bash
 npm test                       # Vitest + happy-dom
 npm run type-check             # vue-tsc
+npm run build                  # vue-tsc + Vite 生产构建
+cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 ---
@@ -221,7 +221,7 @@ npm run type-check             # vue-tsc
 | 方案 | 命令 | 产物 | 适用场景 |
 |------|------|------|---------|
 | **A. 安装包** | `npm run tauri:build` | MSI + NSIS 安装程序 | 正式分发、Start Menu 集成、卸载面板 |
-| **B. Portable** | `npm run tauri -- build --no-bundle` | 单 exe 自包含（~17 MB） | 朋友试用、截图分享、绿色运行 |
+| **B. Portable** | `npm run tauri -- build --no-bundle` | 单 exe 自包含（约 17–18 MB） | 朋友试用、截图分享、绿色运行 |
 
 两种方案都依赖 [§1 推荐环境](#1-推荐环境windows-原生)。
 
@@ -307,12 +307,12 @@ src-tauri/target/release/
 
 ### 5.4 CI 自动打包（GitHub Actions）
 
-`.github/workflows/` 下两个 workflow：
+`.github/workflows/` 下两个 workflow（当前前端基线为 74 个测试文件、965 个测试全部通过）：
 
 | Workflow | 触发器 | 用途 |
 |----------|--------|------|
 | `verify.yml` | push main / PR | 前端 type-check + test + build + 后端 `cargo check` 端到端验证 |
-| `release.yml` | push `v*` tag / workflow_dispatch | 完整 release 构建 + 上传 portable exe 到 GitHub Release |
+| `release.yml` | push `v*` tag / workflow_dispatch | `tauri -- build --no-bundle` 生成 portable exe；tag 触发上传 GitHub Release，手动触发仅上传 workflow artifact |
 
 **手动触发 release 测试产物：**
 
@@ -327,7 +327,7 @@ git tag v0.1.0
 git push github v0.1.0
 ```
 
-自动创建 GitHub Release,`mirapage-desktop.exe` 作为 asset 上传。
+仅 tag 触发会自动创建 GitHub Release 并上传 `mirapage-desktop.exe`；`workflow_dispatch` 只保留 workflow artifact。
 
 **当前已发布的 Release：**
 
@@ -345,13 +345,14 @@ git push github v0.1.0
 | `v0.1.0-module3.0.1` | `mirapage-desktop.exe` | 3 个反馈 bug 修复（history 仅 reader 触发 / readStatus 走 history∩progress / Library 路由 path param） |
 | `v0.1.0-module3.0-settings` | `mirapage-desktop.exe` | Settings 5 section + 9 宫格触控方案 + theme 切换 + i18n 45 keys |
 | `v0.1.0-module3.0.2-reader-polish` | `mirapage-desktop.exe` | 阅读器打磨 3 cluster：立即阅读入口（双击图片 + `?at=`）+ UI 修复（OSD nav 关闭 / ESC closeReader / chrome autoHide / pointer-events / 窗口 480×360）+ 6 种缩放 + reader 排序与 file browser 一致 |
+| `v0.1.0-module3.0.11-thumbnail-per-image-progress` | `mirapage-desktop.exe` | 单图缩略图生成阶段进度、详情 popover、失败快照与全局开关 |
 
 > **当前状态**：本地 `tauri -- build --no-bundle` 流程已端到端验证通过（17.95 MB / MD5 一致，参考 §5.1 末段命令）。后续模块首选本地构建验证，CI 作为最后一道关。
 >
 > **v0.1.0-module3.0.2-reader-polish 关键 fix 记录**：
 > - `8c04c34` 恢复 `status.value = 'ready'`（Cluster A 改动误删，导致"加载中...卡住"）
 > - `83cc3d0` reader 排序改用 `useFileBrowserStore().effectiveSortField` + `sortEntries`（与 file browser 完全一致，含 per-folder override）
-> - 单元测试：397 全过（393 + 4 新增 reader 排序测试）
+> - 前端单元测试：965 全过（含 module3.0.11 阶段进度与 hotfix 回归测试）
 > - 本地 exe MD5 `1f753a594d026a8c303697b4e375930c`
 
 ---

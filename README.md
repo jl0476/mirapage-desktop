@@ -4,7 +4,7 @@
 
 ## 状态
 
-**当前进度：Phase 1-8 主体完成，Phase 7（SMB）/ Phase 9（分发）待补**
+**当前进度：Phase 1-8 主体完成，Phase 7（SMB）/ Phase 9（分发）待补；v0.1.0-module3.0.11 已完成**
 
 | Phase | 内容 | 状态 |
 |---|---|---|
@@ -16,7 +16,7 @@
 | 6 | i18n（中 / 英） | ✅ |
 | 7 | SMB 协议层 | ❌ stub |
 | 8 | WebDAV 协议层 | ✅ 真实现 |
-| 9 | 跨平台分发 | ❌ |
+| 9 | 跨平台分发 | 🟡 CI 自动化 ✅；签名 / macOS DMG / Linux AppImage / 自动更新待补 |
 
 构建/打包/排错见 [`BUILD.md`](./BUILD.md)，完整设计见 [`DESIGN.md`](./DESIGN.md)。
 
@@ -42,7 +42,7 @@
 ## 功能清单（按优先级）
 
 P0：文件浏览器、阅读器、压缩包、书签、喜欢、阅读记录、书架收藏、i18n
-P1：标签、搜索、跨卷连续阅读、幻灯片
+P1：标签、搜索、跨卷连续阅读、幻灯片、瀑布流缩略图缓存与单图生成进度
 P2：SMB、WebDAV
 
 ## 开发环境要求
@@ -62,10 +62,10 @@ P2：SMB、WebDAV
 npm install
 
 # 启动开发模式（需 Rust 工具链）
-npm run tauri dev
+npm run tauri:dev
 
 # 构建发布版本
-npm run tauri build
+npm run tauri:build
 ```
 
 ## 项目结构
