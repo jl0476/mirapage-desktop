@@ -2,7 +2,7 @@
 
 - **日期**：2026-08-14
 - **模块**：v0.1.0-module3.0.11-thumbnail-per-image-progress
-- **状态**：待审查
+- **状态**：已修订（round-1：7 P1 + 1 P2；round-2：必修 1 + 建议 2；round-3：文档一致性 2 项，均已闭环，可实施）
 - **依赖模块**：v0.1.0-module3.0.7-masonry-thumbnail-cache（缩略图生成管线）、v0.1.0-module3.0.8-thumbnail-polish（事件/日志骨架）
 - **适用范围**：Local 数据源缩略图生成（与现有缩略图系统一致；Archive/SMB/WebDAV 接入时复用同一事件契约）
 
@@ -50,7 +50,8 @@ v0.1.0-module3.0.7 实现了按需缩略图缓存。前端单卡状态机（`src
 新增 `GenPhase` 枚举（`thumbnail/mod.rs` 或 `generator.rs`）：
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GenPhase {
     Queued,    // 已入队，等 worker（不经过 generate_thumbnail，见 §3.4）
     Decoding,  // read_orientation + load_from_memory
@@ -59,6 +60,8 @@ pub enum GenPhase {
     Writing,   // write_atomic + flush
 }
 ```
+
+> **P1 修复（round-1）**：必须 derive `serde::Serialize` + `#[serde(rename_all = "lowercase")]`——序列化契约测试（plan 任务 1）直接 `serde_json::to_string(&GenPhase::Queued)`，漏 derive 无法编译。模式对齐现有 `Priority`（`mod.rs:67`，同为单词型枚举走 lowercase）。
 
 前端镜像类型（`src/lib/thumbnail.ts`）：
 
@@ -81,6 +84,8 @@ pub struct GenerationJob {
 ```
 
 `scheduler.rs` 的测试构造 `GenerationJob` 处补 `on_progress: None`。
+
+> **P1 修复（round-1）**：`GenerationJob`（scheduler.rs:42）与 `QueuedTask`（:54，含 `job` 字段）现有 `#[derive(Debug, Clone)]`——`Arc<dyn Fn>` 不实现 `Debug`，加字段后两个 derive 都会编译失败。两处 derive 改为 `#[derive(Clone)]`（grep 确认 scheduler/service 无对这两类型的 `{:?}` 打印点；若实施时编译暴露使用点，改为手写 `Debug` impl 跳过 `on_progress` 字段）。
 
 ### 3.3 `generate_thumbnail` 加回调参数
 
@@ -152,7 +157,7 @@ progress 闭包在 `spawn_blocking` 线程内被调用（`scheduler.rs:442`）�
 
 ### 3.7 queued 阶段事件
 
-`queued`（已入队等 worker）不经过 `generate_thumbnail`，无回调点。前端在 `applyResults` 收到 IPC 返回 `status: 'queued'` 时直接 `setState(path, {kind:'generating', phase:'queued', ...})`（见 §4.2），无需 Rust 事件。worker 取出任务进入 `Decoding` 时第一个 progress 事件到达，前端从 `queued` 切到 `decoding`。
+`queued`（已入队等 worker）不经过 `generate_thumbnail`，无回调点。前端在 `applyResults` 收到 IPC 返回 `status: 'queued'` 时直接 `setState(path, {kind:'generating', phase:'queued', ...})`（带 §4.2 cacheKey 顺序守卫），无需 Rust 事件。worker 取出任务进入 `Decoding` 时第一个 progress 事件到达，前端从 `queued` 切到 `decoding`。
 
 ---
 
@@ -163,48 +168,108 @@ progress 闭包在 `spawn_blocking` 线程内被调用（`scheduler.rs:442`）�
 `src/lib/thumbnail.ts:177` 的 `generating` kind 扩展字段：
 
 ```ts
-| { kind: 'generating'; cacheKey: string; phase: ThumbnailPhase; startedAt: number; timings: Partial<Record<ThumbnailPhase, number>> }
+| { kind: 'generating'; cacheKey: string; phase: ThumbnailPhase; startedAt: number; generationStartedAt?: number; timings: Partial<Record<ThumbnailPhase, number>> }
 ```
 
-- `startedAt`：进入 generating 态的时间戳（`Date.now()`），popover 显示总耗时用。
-- `timings`：各阶段累计毫秒，由连续 progress 事件推算（见 §4.3）。
+- `startedAt`：进入 generating 态的墙钟时间戳（queued 回包 / retry 预置时的 `Date.now()`）——**含排队等待**，popover 顶部「已用时」用它。
+- `generationStartedAt`：首个 progress 事件应用时 `Date.now() - elapsedMs` 反推的 **generate 实际开始墙钟**——不含排队等待。阶段时长推算用它（P1 修复 round-1：若直接 `Date.now() - startedAt - timings[cur]`，排队时间会被算进 decoding 实时耗时）。反推是近似值（含事件投递延迟，毫秒级），UI 足够。
+- `timings`：各阶段开始的累计毫秒（`elapsedMs`，generate 相对时间），由连续 progress 事件推算（见 §4.3）。
 
 ### 4.2 `useMasonryThumbnails` 处理
 
-`applyResults`（:256）的 `case 'queued'` 改为：
+`applyResults`（:256）的 `case 'queued'` 改为（**cacheKey 顺序守卫**，P1 修复 round-1）：
 
 ```ts
-case 'queued':
-  setState(r.path, {
-    kind: 'generating', cacheKey: r.cacheKey ?? '',
-    phase: 'queued', startedAt: Date.now(), timings: {},
-  });
+case 'queued': {
+  const prev = state.value.get(r.path);
+  // 顺序守卫：Tauri 事件与 invoke 回包无先后保证。同一 cacheKey 的
+  // progress / 完成事件先于本回包到达时，保留事件写入的状态——否则
+  // (a) cached/failed 被降级回 generating → 永久 spinner（不再有事件来救）；
+  // (b) progress 已推进的 phase 被重置回 queued。cacheKey 不同（列宽/质量
+  // 变化后的重请求）则正常覆盖。
+  const raced = prev && 'cacheKey' in prev && prev.cacheKey === (r.cacheKey ?? '');
+  if (!raced) {
+    setState(r.path, {
+      kind: 'generating', cacheKey: r.cacheKey ?? '',
+      phase: 'queued', startedAt: Date.now(), timings: {},
+    });
+  }
+  // 消费先于回包缓冲的 progress 事件（decoding 已到但状态尚未建立）
+  const buffered = pendingProgress.get(r.path);
+  if (buffered && buffered.cacheKey === (r.cacheKey ?? '')) {
+    pendingProgress.delete(r.path);
+    applyProgressEvent(buffered);
+  }
   // pathToCacheKey 更新不变
+  break;
+}
 ```
 
-新增 `listen<ProgressEvent>('thumbnail://progress', ...)`（与现有 `state` 事件监听并列，:301 模式）：
+新增 progress 监听（与现有 `state` 事件监听并列，:301 模式）。progress 事件统一走 `applyProgressEvent`（直接到达与缓冲消费两条路径共用）：
 
 ```ts
+function applyProgressEvent(p: ThumbnailProgressEvent) {
+  const prev = state.value.get(p.path);
+  if (!prev || prev.kind !== 'generating' || prev.cacheKey !== p.cacheKey) return;
+  if (p.phase === prev.phase) return; // 幂等：同阶段事件不重复应用
+  const generationStartedAt = prev.generationStartedAt ?? (Date.now() - p.elapsedMs);
+  const timings = { ...prev.timings, [p.phase]: p.elapsedMs };
+  setState(p.path, { ...prev, phase: p.phase, generationStartedAt, timings });
+  // 进度快照：failed 事件会整体覆盖 generating 态，快照保住时间线明细（§4.4）
+  setSnapshot(p.path, { phase: p.phase, timings, startedAt: prev.startedAt, generationStartedAt });
+}
+
+let progressUnlisten: UnlistenFn | null = null;
+let disposed = false; // round-2：listen() 异步——unmount 先于 .then(fn) 到达时防泄漏
 void listen<ProgressEvent>('thumbnail://progress', (event) => {
   const p = event.payload;
   if (p.epoch !== epoch.value) return;  // epoch 过滤，同 state 事件
   const prev = state.value.get(p.path);
-  if (!prev || prev.kind !== 'generating') return;  // 非 generating 态忽略
-  // 推算上一阶段时长
-  const prevPhaseStart = prev.timings[prev.phase] ?? 0;
-  // timings[phase] 存「该阶段开始的累计 elapsed」；阶段时长 = 下一阶段 elapsed - 本阶段 elapsed
-  setState(p.path, { ...prev, phase: p.phase as ThumbnailPhase,
-    timings: { ...prev.timings, [p.phase]: p.elapsedMs } });
-});
+  if (prev?.kind === 'generating') {
+    applyProgressEvent(p);
+  } else if (!prev || prev.cacheKey !== p.cacheKey) {
+    // 事件先于 queued 回包到达（或旧 cacheKey 残留）：缓冲，回包到达后消费。
+    // prev 为同 cacheKey 终态（cached/failed 已先到）则丢弃——生成已结束。
+    pendingProgress.set(p.path, p);
+  }
+}).then((fn) => {
+  if (disposed) fn(); // 组件已卸载，立即解绑迟到的监听
+  else progressUnlisten = fn;
+})
+  .catch((err) => { if (isTauriEnv()) log('[useMasonryThumbnails] listen(thumbnail://progress) failed (unexpected in Tauri env)', err); });
 ```
 
-`happy-dom` 防御（`isTauriEnv()`）与 `.catch` 模式复用现有 `state` 事件监听。
+- `pendingProgress: Map<string, ThumbnailProgressEvent>`——回包竞态缓冲，每 path 只留最新。
+- **unlisten 清理**（round-1 P1-5 + round-2）：progress 监听与现有 state 监听同模式——`.then` 保存 unlisten，`onBeforeUnmount` 里与 state 的 unlisten 一起调用（现有清理点 useMasonryThumbnails.ts:414），且**先立 `disposed = true`**——`listen()` 是异步的，unmount 先于 `.then(fn)` 到达时 cleanup 已跑完、迟到的 unlisten 会泄漏，故 `.then` 内检查 disposed，已卸载则立即 `fn()`。漏存 unlisten 会在切目录/重挂载后累积监听器 + 重复状态更新。既有 state 监听同款迟到问题不在本模块修（手术边界）。
+- `bumpEpoch()` 同时清空 `pendingProgress` 与 `progressSnapshots`（旧目录缓冲/快照不再有效）。
+- `happy-dom` 防御（`isTauriEnv()`）与 `.catch` 模式复用现有 `state` 事件监听。
 
 ### 4.3 阶段时长推算
 
-`timings[phase]` = 该阶段开始的累计 elapsed_ms（来自 `ProgressEvent.elapsedMs`）。popover 渲染时：
-- 阶段 X 的时长 = `timings[nextPhase] - timings[X]`（nextPhase 是 X 之后的第一个已记录阶段）。
-- 当前进行阶段（`phase === prev.phase`）的时长 = `Date.now() - startedAt - timings[currentPhase]`（实时跳动）。
+`timings[phase]` = 该阶段开始的累计 elapsed_ms（来自 `ProgressEvent.elapsedMs`，generate 相对时间）。popover 渲染时：
+
+- **queued 阶段时长**（排队等待）= `generationStartedAt - startedAt`；`generationStartedAt` 未到时 = `Date.now() - startedAt`（实时跳动）。
+- 已完成阶段 X 的时长 = `timings[nextPhase] - timings[X]`（nextPhase 是 X 之后的第一个已记录阶段）。
+- **当前进行阶段的时长 = `Date.now() - generationStartedAt - timings[currentPhase]`**——必须用 `generationStartedAt`（generate 实际开始墙钟），不能用 `startedAt`（含排队，P1 修复 round-1）。
+- popover 顶部「已用时」= `Date.now() - startedAt`（自请求起，**含排队**，与阶段时长口径不同是有意的）。
+
+### 4.4 进度快照（失败态时间线）
+
+`thumbnail://state` 的 `failed` 事件把 generating 态整体替换为 `{kind:'failed',...}`（useMasonryThumbnails.ts:334 现状），`phase/timings/startedAt` 随之丢失——而 popover 失败分支要展示「卡在哪一步」的时间线（§6.3）。composable 维护独立快照（P1 修复 round-1）：
+
+```ts
+const progressSnapshots = shallowRef<Map<string, {
+  phase: ThumbnailPhase;                        // 卡住的阶段
+  timings: Partial<Record<ThumbnailPhase, number>>;
+  startedAt: number;
+  generationStartedAt?: number;
+}>>(new Map());
+```
+
+- `applyProgressEvent` 每次推进时写入（`setSnapshot` 复用 setState 的「new Map 整体替换」模式保响应性）。
+- `bumpEpoch()` 清空；`retry`/`regenerate` 预置 generating 时删除该 path 的旧快照（旧快照不喂给新一轮失败态）。
+- 通过 composable return 暴露 `progressSnapshots`；`MasonryView` 传给 popover `:snapshot="progressSnapshots.get(path)"`。
+- popover 失败分支用快照渲染时间线：快照 `phase` = 卡住步骤（error 标记），之前步骤 ✓ + 时长，之后步骤灰；**无快照**（未经生成即失败，如 `applyResults` 直接 failed）则不渲染时间线。
 
 ---
 
@@ -221,10 +286,11 @@ void listen<ProgressEvent>('thumbnail://progress', (event) => {
   - `encoding`：方框包裹（编码意象）
   - `writing`：保存/磁盘
 - 尺寸：约 18×14px 胶囊，`bg: accent/0.92`，`color: #fff`，与现有 `masonry-badge`（左上 reading/finished）风格一致但不占同位（左上 vs 顶中）。
+- **failed 错误角标**（round-2）：同位置同尺寸，error 色（`rgb(248 113 113 / 0.92)`）+ 感叹号三角图标，复用 `.phase-badge.fail` 样式；是失败态 popover 的**唯一主动入口**（卡片中央的错误区保留 retry 按钮，职责不变）。
 
 ### 5.2 显示时机
 
-仅 `generating` 态显示角标。`cached`/`original`（显图）、`failed`（走失败卡 `MasonryThumbnail.vue:117`）、`undefined`（尚未进入窗口）**均不显角标**。`queued` 阶段显沙漏图标（区分「排队」与「正在解码」）。
+`generating` 态显示阶段角标；**`failed` 态显示错误角标**（round-2 必修：同位置 error 色胶囊 + 感叹号图标，点击同样弹 popover——否则用户未在失败前打开 popover 时，失败时间线与 popover 内重试永远不可达）。`cached`/`original`（显图）、`undefined`（尚未进入窗口）**不显角标**。`queued` 阶段显沙漏图标（区分「排队」与「正在解码」）。
 
 ### 5.3 渲染位置
 
@@ -232,7 +298,7 @@ void listen<ProgressEvent>('thumbnail://progress', (event) => {
 
 ### 5.4 点击入口
 
-角标 `@click.stop`（阻止冒泡到 `MasonryRow` 的 row-click 选中）→ emit `show-progress` → `MasonryRow` 转发 → `MasonryView` 弹 popover。受全局开关控制（§7）：开关关时角标 `cursor: default`、不 emit。
+角标 `@click.stop`（阻止冒泡到 `MasonryRow` 的 row-click 选中）→ emit `show-progress` **携带角标 DOM 元素**（`e.currentTarget`）→ `MasonryRow` 补上 `entry` 转发 → `MasonryView` 用该元素的 `getBoundingClientRect()` 定位（P2 修复 round-1：**不走 `querySelector('[data-path="..."]')`**——路径含 `"` / `\` 等字符会注入选择器语法抛错；元素直传零转义负担）。受全局开关控制（§7）：开关关时角标 `cursor: default`、不 emit。
 
 ---
 
@@ -257,6 +323,10 @@ const GAP = 8;
 
 用 `position: fixed` + `getBoundingClientRect`，滚动/resize 时重算（`useVirtualList` 的 scroll watcher 触发）。不引依赖。
 
+> **P1 修复（round-1）**：`positionFor` 需要 `right/bottom`，但跨组件传递的 `anchorRect` 只含 `{left, top, width, height}`——popover 内 `reposition()` 补算 `right = left + width`、`bottom = top + height` 后再喂 `positionFor`（线格式保持 4 字段最小）。
+>
+> **P2 修复（round-1）**：滚动重算用 popoverState 存储的**角标元素引用**直接 `getBoundingClientRect()`（元素直传链见 §5.4）；虚拟滚动把卡片移出 DOM 后 `rect.width === 0` → 自动关闭 popover。
+
 ### 6.3 字段（选项 2，砍 cache_key）
 
 **生成中态**：
@@ -269,14 +339,16 @@ const GAP = 8;
 **失败态**：
 - 文件名
 - 错误信息（`ThumbnailState.failed.message`，`errorKind` 映射友好文案）
-- 阶段时间线（卡在哪步，之前步骤✓）
+- 阶段时间线（卡在哪步，之前步骤✓）——数据源是 `progressSnapshots.get(path)`（§4.4，P1 修复 round-1：failed 事件覆盖 generating 态后 phase/timings 已丢，必须靠独立快照）；无快照时省略时间线区块
 - 重试按钮（调 `useMasonryThumbnails.retry(path)`，与卡片 retry 按钮等效）
 
 > 失败态实际触发条件（用户反馈从未遇到）：异常 JPEG 变体、损坏文件头、WebP/AVIF/HEIC 等未充分测试格式、IO 错误。链路通（`Outcome::Failed` → emit `state:"failed"`），常见 JPEG/PNG/GIF/BMP 稳定故未触发。失败态作兜底保留。
+>
+> **可达入口（round-2 必修）**：失败态 popover 通过 §5.2 的**错误角标**打开——不能只依赖"失败前已打开"（popover 对已打开的卡片会随 failed 事件继续展示，但事后无法再打开，时间线与重试按钮不可达）。
 
 ### 6.4 关闭
 
-点 popover 外部（`mousedown` outside）/ ESC / 切目录 / 角标再点切换。`anchorPath` 置 null 即关闭。
+点 popover 外部（`mousedown` outside；**必须实现**，P2 修复 round-1——document mousedown 监听，target 不在 popover 根内且不在 `.phase-badge` 上时关闭；角标点击留给 click 处理器做 toggle）/ ESC / 切目录 / 角标再点切换（同 path toggle 关闭）。`anchorPath` 置 null 即关闭。监听器在 onMounted 挂、onUnmounted 解绑。
 
 ### 6.5 多选
 
@@ -298,7 +370,7 @@ const GAP = 8;
 - 开：点击角标弹 popover（默认）
 - 关：角标仍显示阶段（纯指示），`cursor: default`，点击无反应
 
-`MasonryView` 读 `settingsStore.thumbnailDetailPopover`，角标 `@click` 处守卫 `if (!settingsStore.thumbnailDetailPopover) return;`。
+实现契约（round-3）：开关值**以 prop 下传**——`MasonryView` 读 `settingsStore.thumbnailDetailPopover` → `MasonryRow` 透传 → `MasonryThumbnail` 的 `badgeInteractive` prop；角标 `<button :disabled="!badgeInteractive">`（disabled 天然 `cursor: default` 且不派发用户点击），`onBadgeClick` 内再加 `if (!badgeInteractive) return;` 守卫（happy-dom / 程序化 dispatchEvent 会绕过 disabled 派发，双保险）。`MasonryView.openProgressPopover` 的 `if (!settingsStore.thumbnailDetailPopover) return;` 保留为第二道防线。**不能只在 View 层忽略事件**——按钮仍手型可点，误导性可供性。
 
 ---
 
@@ -335,9 +407,10 @@ namespace 用 `thumbnail.*`（与 `fileBrowser.thumbnailRetry` 区分，新增�
 
 ### 9.2 前端
 
-- `useMasonryThumbnails.test.ts`：progress 事件处理 + epoch 过滤 + timings 推算 + 非 generating 态忽略。
-- `MasonryThumbnail.test.ts`：角标按 phase 渲染对应图标；非 generating 态无角标；`queued` 显沙漏。
-- `ThumbnailProgressPopover.test.ts`：定位 fallback（右→左→下→上，用 mock boundingRect）；字段渲染；失败态重试按钮 emit；关闭（外部点击/ESC）。
+- `useMasonryThumbnails.test.ts`：progress 事件处理 + epoch 过滤 + timings 推算 + 非 generating 态忽略；**竞态双例（round-1）**——progress 事件先于 queued 回包（缓冲消费，phase 不丢）、state 事件 cached/failed 先于 queued 回包（不降级覆盖，无永久 spinner）；**unmount 解绑两个监听**（state + progress 的 unlisten 均被调用）；**失败后快照保留**（`progressSnapshots` 不被 failed 覆盖）；`generationStartedAt` 反推设置。
+- `MasonryThumbnail.test.ts`：角标按 phase 渲染对应图标；非 generating 态无角标；`queued` 显沙漏；**failed 显错误角标且点击 emit（round-2 必修：失败详情可达）**；show-progress emit 携带角标元素；**badgeInteractive=false → disabled、点击不 emit（round-3）**。
+- `ThumbnailProgressPopover.test.ts`：定位 fallback（右→左→下→上，用 mock boundingRect）；字段渲染；**失败态用快照渲染时间线（卡住步骤 error 标记）/ 无快照省略时间线**；失败态重试按钮 emit；关闭（外部点击/ESC）。
+- `MasonryView.test.ts`（round-1）：外部 mousedown 关闭；角标再点 toggle 关闭；**特殊路径（含引号/反斜杠）不走 querySelector 直接弹 popover**。
 - `settings`：`thumbnailDetailPopover` 读写 + 角标点击守卫。
 
 ---
@@ -367,6 +440,12 @@ namespace 用 `thumbnail.*`（与 `fileBrowser.thumbnailRetry` 区分，新增�
 7. **全局开关默认开**：点击触发非自动弹，低打扰，让功能可发现。
 8. **`on_progress` 放 `GenerationJob` 不改 `GenerateFn` 签名**：`GenerateFn` 是 scheduler 核心契约，改签名波及所有调用点与测试；放 job 字段影响最小。
 9. **elapsed_ms 由 generate_thumbnail 传入闭包**（方案 B）：闭包无法访问 generate 内 `t0`，故回调签名 `Fn(GenPhase, u64)`，elapsed 精确反映 generate 实际开始后耗时，不受排队等待影响。
+10. **queued 回包 cacheKey 顺序守卫 + progress 事件缓冲**（round-1 P1）：Tauri 事件通道与 invoke 回包无先后保证——快速完成时 `cached/failed` state 事件可先于 queued 回包到达，无条件写回 generating 会造成永久 spinner；progress 事件先于回包到达时缓冲到 `pendingProgress`，回包建立 generating 态后消费，decoding 阶段不丢。守卫键用 cacheKey（同 key 视为同一次请求的竞态；列宽/质量变化的重请求 key 不同，正常覆盖）。
+11. **generationStartedAt 墙钟反推**（round-1 P1）：`startedAt`（含排队）与 `timings`（generate 相对时间）口径不同，当前阶段实时耗时 = `Date.now() - generationStartedAt - timings[cur]`，排队等待单列为 queued 阶段时长；popover 顶部「已用时」保留含排队口径（用户感知的是"从请求到现在"）。
+12. **失败态进度快照独立 map**（round-1 P1）：failed state 事件整体覆盖 generating 态是既有行为（不动），`progressSnapshots` 按 path 保最后快照喂给 popover 失败时间线；epoch 清空 + retry 删除防陈旧。
+13. **角标点击直传 DOM 元素 + popover 外点关闭**（round-1 P2）：emit `show-progress(el)` 链路避免 `querySelector` 拼接用户可控路径（特殊文件名注入选择器语法）；外部 mousedown 关闭跳过 `.phase-badge`（toggle 交给 click 处理器，避免 mousedown 先关 click 再开的抖动）。
+14. **failed 态保留错误角标作为 popover 入口**（round-2 必修）：仅 generating 显角标时，用户未在失败前打开 popover 则失败时间线/重试永不可达；失败角标（error 色 + 感叹号）与阶段角标同位同交互，卡片中央错误区的 retry 按钮职责不变。外点判定用 `e.target instanceof Element`（SVG 元素不是 HTMLElement，误判会导致点角标内 SVG 时 popover 抖动）。
+15. **progress 监听 disposed 守卫**（round-2）：`listen()` 异步——unmount 先于 `.then(fn)` 到达时 cleanup 已跑完、unlisten 后到即泄漏；`.then` 内检查 disposed 标志，已卸载则立即 `fn()`。既有 state 监听同模式问题**不在本模块修**（手术边界，留待后续统一）。
 
 ---
 
