@@ -26,16 +26,16 @@
 - 修改 `service.rs`：加 `EVENT_PROGRESS` + `ProgressEvent`；`production_generate_fn` 透传 job.on_progress；`classify_item` 的 `GenerationJob` 构造补 `on_progress: None`；`request`/`resubmit` 提交循环注入 progress 闭包；新增 service 集成测试（emit 收 events）。
 
 **前端协议（`src/lib/`）**
-- 修改 `thumbnail.ts`：加 `ThumbnailPhase` 类型 + `ThumbnailState.generating` 扩展字段（phase/startedAt/timings）+ `THUMBNAIL_PHASES` 常量。
+- 修改 `thumbnail.ts`：加 `ThumbnailPhase` 类型 + `ThumbnailState.generating` 扩展字段（phase/startedAt/**generationStartedAt**/timings）+ `ThumbnailProgressSnapshot`（失败时间线快照）+ `THUMBNAIL_PHASES` 常量。
 - 修改 `tauri.ts`：加 `ThumbnailProgressEvent` 接口（紧邻 `ThumbnailStateEvent` :238）。
 - 创建 `thumbnailPosition.ts`：`positionFor` 定位纯函数（右侧→左侧→下方→上方 fallback）+ 独立测试。
 
 **前端交互（`src/`）**
-- 修改 `composables/useMasonryThumbnails.ts`：`applyResults` queued 分支 → generating 态；新增 `thumbnail://progress` 监听（phase 推进 + timings 推算）；`retry` 预置 generating。
-- 修改 `components/filebrowser/MasonryThumbnail.vue`：渲染阶段角标（generating 态）+ `@click.stop` emit `show-progress`；phase 图标内嵌 SVG。
-- 修改 `components/filebrowser/MasonryRow.vue`：转发 `show-progress` emit。
-- 修改 `components/filebrowser/MasonryView.vue`：接入 popover（`anchorPath` state + 定位 + 关闭 + settings 守卫 + 阶段时长格式化）。
-- 创建 `components/filebrowser/ThumbnailProgressPopover.vue`：阶段时间线 + 原图/输出 + 失败重试 + 定位 fallback + 外部点击/ESC 关闭。
+- 修改 `composables/useMasonryThumbnails.ts`：`applyResults` queued 分支 → generating 态（**cacheKey 顺序守卫** + `pendingProgress` 缓冲消费）；新增 `thumbnail://progress` 监听（`applyProgressEvent` 统一应用 + `progressSnapshots` 快照 + unlisten 解绑）；`retry`/`regenerate` 预置 generating + 删旧快照；`bumpEpoch` 清缓冲/快照。
+- 修改 `components/filebrowser/MasonryThumbnail.vue`：渲染角标（generating 阶段角标 + **failed 错误角标**，round-2 必修）+ `@click.stop` emit `show-progress`（**携带角标 DOM 元素**）+ `badgeInteractive` prop（round-3）；phase 图标内嵌 SVG。
+- 修改 `components/filebrowser/MasonryRow.vue`：转发 `show-progress`（entry + 元素）+ 透传 `badgeInteractive`。
+- 修改 `components/filebrowser/MasonryView.vue`：接入 popover（`popoverState{path, anchorEl, rect, state}` + toggle + 定位 + 滚动 anchorEl 重测 + **外部 mousedown/ESC/切目录关闭** + settings 守卫 + 传 `:snapshot`）。
+- 创建 `components/filebrowser/ThumbnailProgressPopover.vue`：阶段时间线（generating 用自身 / **failed 用 snapshot**）+ 原图/输出 + 失败重试 + 定位 fallback（**anchorRect 补算 right/bottom**）+ 关闭。
 - 修改 `stores/settings.ts`：`thumbnailDetailPopover` ref + load key + setter（沿用 `fb_record_browse_position` 的 `'true'/'false'` 字符串语义 :99-100/:245-252）。
 - 修改 `views/Settings.vue` + `components/settings/ThumbnailCacheSettings.vue`：BooleanRow 接线（`data-test="thumbnail-detail-popover"`）。
 
@@ -88,7 +88,10 @@
 ```rust
 /// 单张缩略图生成的阶段步进（前端进度显示用，§3.1）。
 /// `Queued` 不经 generate_thumbnail（前端 IPC 返回即设置），故 generator 只发后 4 个。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Serialize + rename_all = "lowercase"（round-1 P1）：序列化契约测试直接
+/// `serde_json::to_string(&GenPhase::X)`，漏 derive 无法编译；模式对齐 `Priority`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum GenPhase {
     Queued,
     Decoding,
@@ -208,6 +211,8 @@ git commit -m "feat(thumbnail): GenPhase 枚举 + ProgressEvent 事件协议（m
 
 - [ ] **步骤 3：实现**
 
+`scheduler.rs:42` / `:54`：**两处 `#[derive(Debug, Clone)]` 改为 `#[derive(Clone)]`**（round-1 P1：`Arc<dyn Fn>` 不实现 Debug，`GenerationJob` 加 `on_progress` 后其自身与含 `job` 字段的 `QueuedTask` 的 Debug 派生都会编译失败。已 grep 确认 scheduler/service 无对这两类型的 `{:?}` 打印点；若编译暴露使用点，改为手写 `Debug` impl 跳过 `on_progress` 字段）。
+
 `scheduler.rs:43` `GenerationJob` 加字段：
 
 ```rust
@@ -235,7 +240,7 @@ git commit -m "feat(thumbnail): GenPhase 枚举 + ProgressEvent 事件协议（m
 - [ ] **步骤 4：运行测试验证通过**
 
 运行：`cargo test -p mirapage-desktop-lib`（thumbnail 全部）
-预期：PASS（含新增 on_progress 测试）。
+预期：PASS（含新增 on_progress 测试；若 Debug 移除引发编译错误，按步骤 3 的手写 Debug 兜底）。
 
 - [ ] **步骤 5：Commit**
 
@@ -480,10 +485,16 @@ git commit -m "feat(thumbnail): request/resubmit 注入 progress 闭包 emit 事
 ### 任务 5：前端 — 协议类型 + `useMasonryThumbnails` progress 监听（TDD）
 
 **文件：**
-- 修改：`src/lib/thumbnail.ts`（`ThumbnailPhase` + `generating` 扩展 + `THUMBNAIL_PHASES`）
+- 修改：`src/lib/thumbnail.ts`（`ThumbnailPhase` + `generating` 扩展（含 `generationStartedAt`）+ `ThumbnailProgressSnapshot` + `THUMBNAIL_PHASES`）
 - 修改：`src/lib/tauri.ts:238` 后（`ThumbnailProgressEvent` 接口）
-- 修改：`src/composables/useMasonryThumbnails.ts`（queued→generating、progress 监听、retry 预置）
+- 修改：`src/composables/useMasonryThumbnails.ts`（queued→generating（cacheKey 顺序守卫）、progress 监听 + `pendingProgress` 缓冲、`progressSnapshots` 快照、`applyProgressEvent`、unlisten 解绑、retry 预置）
 - 测试：`src/composables/useMasonryThumbnails.test.ts`
+
+> **round-1 修订**（本任务承载 P1-3/P1-4/P1-5/P1-6 前端侧）：
+> ① queued 回包与事件竞态——cacheKey 顺序守卫 + `pendingProgress` 缓冲；
+> ② 阶段耗时起点——`generationStartedAt` 墙钟反推，排队时间不混入 decoding 实时耗时；
+> ③ progress 监听 unlisten 保存 + unmount 解绑（对齐 state 监听既有模式 :350/:414）；
+> ④ 失败态时间线数据源——`progressSnapshots` 独立快照 map（failed 事件覆盖 generating 态后明细已丢）。
 
 - [ ] **步骤 1：写失败的测试** — `useMasonryThumbnails.test.ts` 追加（先建 mock 基础设施：现有 `eventHandler` 单通道只够 state 事件，需要**双通道**——改成 `Map<string, handler>`）：
 
@@ -581,12 +592,91 @@ it('非 generating 态收到 progress 事件被忽略', async () => {
   fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a.jpg', phase: 'decoding', elapsedMs: 2 });
   expect(result.stateMap.value.get('a.jpg')!.kind).toBe('cached');
 });
+
+// ─── round-1 竞态/泄漏/快照测试 ────────────────────────────────────────────
+
+it('progress 事件先于 queued 回包 → 缓冲消费，decoding 不丢', async () => {
+  const { result, windowsRef, entries } = setup();
+  entries.value = [mkEntry('a.jpg')];
+  windowsRef.value = { visible: ['a.jpg'], ahead: [], behind: [], idle: [] };
+  requestSpy.mockResolvedValue([{ path: 'a.jpg', status: 'queued', cacheKey: 'ckA' }]);
+  // 事件先到（状态未建立 → 进 pendingProgress 缓冲）
+  fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a.jpg', phase: 'decoding', elapsedMs: 1 });
+  await vi.advanceTimersByTimeAsync(80);
+  await flushPromises();
+  const s = result.stateMap.value.get('a.jpg');
+  expect(s?.kind).toBe('generating');
+  if (s?.kind === 'generating') {
+    expect(s.phase).toBe('decoding');           // 不是 queued——缓冲被消费
+    expect(s.timings.decoding).toBe(1);
+    expect(s.generationStartedAt).toBeDefined(); // 墙钟反推已设置
+  }
+});
+
+it('cached 完成事件先于 queued 回包 → 回包不降级覆盖（无永久 spinner）', async () => {
+  const { result, windowsRef, entries } = setup();
+  entries.value = [mkEntry('a.jpg')];
+  windowsRef.value = { visible: ['a.jpg'], ahead: [], behind: [], idle: [] };
+  requestSpy.mockResolvedValue([{ path: 'a.jpg', status: 'queued', cacheKey: 'ckA' }]);
+  // 回包在路上时完成事件先到（同 cacheKey）
+  fireState({
+    epoch: 0, state: 'cached', path: 'a.jpg', cacheKey: 'ckA',
+    cachePath: '/c/a.webp', outputWidth: 100, outputHeight: 100,
+  });
+  await vi.advanceTimersByTimeAsync(80);
+  await flushPromises();
+  expect(result.stateMap.value.get('a.jpg')?.kind).toBe('cached'); // 未被降级回 generating
+});
+
+it('failed 后 progressSnapshots 保留最后快照（失败时间线数据源）', async () => {
+  const { result, windowsRef, entries } = setup();
+  entries.value = [mkEntry('a.jpg')];
+  windowsRef.value = { visible: ['a.jpg'], ahead: [], behind: [], idle: [] };
+  requestSpy.mockResolvedValue([{ path: 'a.jpg', status: 'queued', cacheKey: 'ckA' }]);
+  await vi.advanceTimersByTimeAsync(80);
+  await flushPromises();
+  fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a.jpg', phase: 'decoding', elapsedMs: 5 });
+  fireState({ epoch: 0, state: 'failed', path: 'a.jpg', cacheKey: 'ckA', message: 'boom' });
+  expect(result.stateMap.value.get('a.jpg')?.kind).toBe('failed'); // generating 被覆盖
+  const snap = result.progressSnapshots.value.get('a.jpg');        // 但快照还在
+  expect(snap?.phase).toBe('decoding');
+  expect(snap?.timings.decoding).toBe(5);
+});
+
+it('unmount 同时解绑 state 与 progress 两个监听（防泄漏）', async () => {
+  unlistenSpy.mockClear();
+  const { scope } = setup(); // 若现有 setup 未返回 scope：用 effectScope() 包裹创建后返回
+  scope.stop();              // 触发 onBeforeUnmount
+  expect(unlistenSpy).toHaveBeenCalledTimes(2); // state + progress
+});
+
+it('unmount 先于 listen resolve → 迟到的 unlisten 立即调用（round-2 disposed 守卫）', async () => {
+  // listen 是异步的：用 deferred 让两个监听的 promise 都挂起，unmount 后再 resolve
+  // 第二个（progress 监听在 state 之后创建）。
+  // 注：`import { listen } from '@tauri-apps/api/event'` 放测试文件顶部（vi.mock 已接管）。
+  const defer = () => {
+    let resolve!: (fn: () => void) => void;
+    const promise = new Promise<() => void>((res) => { resolve = res; });
+    return { promise, resolve };
+  };
+  const d1 = defer();
+  const d2 = defer();
+  vi.mocked(listen)
+    .mockImplementationOnce(async () => d1.promise)  // state 监听
+    .mockImplementationOnce(async () => d2.promise); // progress 监听
+  const { scope } = setup();
+  scope.stop(); // disposed = true（unlisten 均未到手）
+  const lateUnlisten = vi.fn();
+  d2.resolve(lateUnlisten);
+  await flushPromises();
+  expect(lateUnlisten).toHaveBeenCalledTimes(1); // 不是存起来等下一次 unmount
+});
 ```
 
 - [ ] **步骤 2：运行测试验证失败**
 
 运行：`npx vitest run src/composables/useMasonryThumbnails.test.ts`
-预期：FAIL——现有 queued 分支仍设 `{kind:'queued'}`，progress 监听未实现（`ThumbnailPhase`/`ThumbnailProgressEvent` 未定义编译错）。
+预期：FAIL——现有 queued 分支仍设 `{kind:'queued'}`，progress 监听未实现（`ThumbnailPhase`/`ThumbnailProgressEvent`/`generationStartedAt`/`progressSnapshots` 未定义编译错；round-1 竞态/快照/解绑 4 测同样失败）。
 
 - [ ] **步骤 3：实现**
 
@@ -600,13 +690,27 @@ export type ThumbnailPhase = 'queued' | 'decoding' | 'resizing' | 'encoding' | '
 export const THUMBNAIL_PHASES: readonly ThumbnailPhase[] = [
   'queued', 'decoding', 'resizing', 'encoding', 'writing',
 ] as const;
+
+/**
+ * 进度快照（round-1 P1-6）：failed 事件会整体覆盖 generating 态，
+ * 快照按 path 保住最后的 phase/timings，喂给 popover 失败时间线。
+ */
+export interface ThumbnailProgressSnapshot {
+  phase: ThumbnailPhase;
+  timings: Partial<Record<ThumbnailPhase, number>>;
+  startedAt: number;
+  generationStartedAt?: number;
+}
 ```
 
-`ThumbnailState` 的 generating 分支（:177）改为：
+`ThumbnailState` 的 generating 分支（:177）改为（**注意 `generationStartedAt`**，round-1 P1-4）：
 
 ```ts
-  | { kind: 'generating'; cacheKey: string; phase: ThumbnailPhase; startedAt: number; timings: Partial<Record<ThumbnailPhase, number>> }
+  | { kind: 'generating'; cacheKey: string; phase: ThumbnailPhase; startedAt: number; generationStartedAt?: number; timings: Partial<Record<ThumbnailPhase, number>> }
 ```
+
+- `startedAt`：进入 generating（queued 回包 / retry 预置）的墙钟——**含排队**，popover「已用时」用。
+- `generationStartedAt`：首个 progress 事件应用时 `Date.now() - elapsedMs` 反推的 generate 实际开始墙钟——**不含排队**，阶段时长推算用。
 
 `src/lib/tauri.ts:238` 后加：
 
@@ -623,41 +727,104 @@ export interface ThumbnailProgressEvent {
 
 `src/composables/useMasonryThumbnails.ts`：
 
-- import 补 `ThumbnailPhase`, `THUMBNAIL_PHASES`（:19-25 块）+ `type ThumbnailProgressEvent`（:17）。
-- `applyResults` queued 分支（:273）改为：
+- import 补 `ThumbnailPhase`, `type ThumbnailProgressSnapshot`（:19-25 块）+ `type ThumbnailProgressEvent`（:17）。
+- composable 顶部（state 声明后）加：
 
 ```ts
-        case 'queued':
-          setState(r.path, {
-            kind: 'generating',
-            cacheKey: r.cacheKey ?? '',
-            phase: 'queued',
-            startedAt: Date.now(),
-            timings: {},
-          });
+  /** round-1 P1-3：progress 事件先于 queued 回包到达时的竞态缓冲（每 path 留最新）。 */
+  const pendingProgress = new Map<string, ThumbnailProgressEvent>();
+  /** round-1 P1-6：失败态时间线快照（failed 事件覆盖 generating 态后明细已丢）。 */
+  const progressSnapshots = shallowRef<Map<string, ThumbnailProgressSnapshot>>(new Map());
+
+  const setSnapshot = (path: string, snap: ThumbnailProgressSnapshot) => {
+    const next = new Map(progressSnapshots.value);
+    next.set(path, snap);
+    progressSnapshots.value = next;
+  };
+  const deleteSnapshot = (path: string) => {
+    if (!progressSnapshots.value.has(path)) return;
+    const next = new Map(progressSnapshots.value);
+    next.delete(path);
+    progressSnapshots.value = next;
+  };
 ```
 
-- 新增 progress 监听（`state` 事件监听后，:356 附近）：
+- `bumpEpoch()` 尾部追加（旧目录缓冲/快照不再有效）：
 
 ```ts
-  // 监听生成阶段步进事件（thumbnail://progress）
+    pendingProgress.clear();
+    progressSnapshots.value = new Map();
+```
+
+- `applyResults` queued 分支（:273）改为（**cacheKey 顺序守卫 + 缓冲消费**，round-1 P1-3）：
+
+```ts
+        case 'queued': {
+          const prev = state.value.get(r.path);
+          // 顺序守卫：Tauri 事件与 invoke 回包无先后保证。同 cacheKey 的
+          // progress/完成事件先到时保留事件写入的状态——否则 cached/failed
+          // 被降级回 generating（永久 spinner）或 phase 被重置回 queued。
+          // cacheKey 不同（列宽/质量变化后的重请求）正常覆盖。
+          const raced = prev && 'cacheKey' in prev && prev.cacheKey === (r.cacheKey ?? '');
+          if (!raced) {
+            setState(r.path, {
+              kind: 'generating',
+              cacheKey: r.cacheKey ?? '',
+              phase: 'queued',
+              startedAt: Date.now(),
+              timings: {},
+            });
+          }
+          // 消费先于回包缓冲的 progress 事件
+          const buffered = pendingProgress.get(r.path);
+          if (buffered && buffered.cacheKey === (r.cacheKey ?? '')) {
+            pendingProgress.delete(r.path);
+            applyProgressEvent(buffered);
+          }
+          if (r.cacheKey) {
+            const next = new Map(pathToCacheKey.value);
+            next.set(r.path, r.cacheKey);
+            pathToCacheKey.value = next;
+          }
+          break;
+        }
+```
+
+- progress 事件统一应用点 + 监听（`state` 事件监听后，:356 附近；**unlisten 保存**，round-1 P1-5）：
+
+```ts
+  // progress 事件统一应用（直接到达 / queued 回包后消费缓冲两条路径共用）
+  function applyProgressEvent(p: ThumbnailProgressEvent) {
+    const prev = state.value.get(p.path);
+    if (!prev || prev.kind !== 'generating' || prev.cacheKey !== p.cacheKey) return;
+    if (p.phase === prev.phase) return; // 幂等
+    const generationStartedAt = prev.generationStartedAt ?? (Date.now() - p.elapsedMs);
+    const timings = { ...prev.timings, [p.phase]: p.elapsedMs };
+    setState(p.path, { ...prev, phase: p.phase, generationStartedAt, timings });
+    setSnapshot(p.path, { phase: p.phase, timings, startedAt: prev.startedAt, generationStartedAt });
+  }
+
   let progressEventCount = 0;
+  let progressUnlisten: UnlistenFn | null = null;
+  let disposed = false; // round-2：listen() 异步——unmount 先于 .then(fn) 到达时防泄漏
   void listen<ThumbnailProgressEvent>('thumbnail://progress', (event) => {
     const p = event.payload;
     progressEventCount += 1;
     if (p.epoch !== epoch.value) return;
     const prev = state.value.get(p.path);
-    if (!prev || prev.kind !== 'generating') return;
-    if (p.phase !== prev.phase) {
-      setState(p.path, {
-        ...prev,
-        phase: p.phase,
-        timings: { ...prev.timings, [p.phase]: p.elapsedMs },
-      });
+    if (prev?.kind === 'generating') {
+      applyProgressEvent(p);
       if (progressEventCount <= 20 || progressEventCount % 50 === 0) {
         log('[thumbnail] progress event path=' + p.path + ' phase=' + p.phase + ' elapsedMs=' + p.elapsedMs);
       }
+    } else if (!prev || prev.cacheKey !== p.cacheKey) {
+      // round-1 P1-3：事件先于 queued 回包到达 → 缓冲，回包建立 generating 态后消费。
+      // prev 为同 cacheKey 终态（cached/failed 已先到）则丢弃——生成已结束。
+      pendingProgress.set(p.path, p);
     }
+  }).then((fn) => {
+    if (disposed) fn(); // round-2：组件已卸载，立即解绑迟到的监听
+    else progressUnlisten = fn;
   }).catch((err) => {
     if (isTauriEnv()) {
       log('[useMasonryThumbnails] listen(thumbnail://progress) failed (unexpected in Tauri env)', err);
@@ -665,20 +832,36 @@ export interface ThumbnailProgressEvent {
   });
 ```
 
-- `retry`（:386）/`regenerate`（:400）预置态改 generating：
+- `retry`（:386）/`regenerate`（:400）预置态改 generating + 删旧快照：
 
 ```ts
+    deleteSnapshot(path); // 旧失败快照不喂给新一轮
     setState(path, { kind: 'generating', cacheKey: pathToCacheKey.value.get(path) ?? '', phase: 'queued', startedAt: Date.now(), timings: {} });
 ```
 
-（两处 `setState(path, { kind: 'queued', ... })` 都改。）
+（两处都改。）
 
-> 注：`THUMBNAIL_PHASES` 在本任务只用于类型（时间线渲染在任务 7 用）；此处 import 若未用会触发 TS noUnusedLocals——**不要**在 composable import THUMBNAIL_PHASES，只 import `ThumbnailPhase`（timings 类型用）。时间线顺序在 popover 组件里用 `THUMBNAIL_PHASES`。
+- `onBeforeUnmount`（:414）追加 progress 解绑：
+
+```ts
+  onBeforeUnmount(() => {
+    disposed = true; // round-2：先立标志，迟到的 listen resolve 会立即自解绑
+    if (debounceTimer) clearTimeout(debounceTimer);
+    if (unlisten) unlisten();
+    if (progressUnlisten) progressUnlisten(); // round-1 P1-5：防监听器累积
+  });
+```
+
+> 既有 state 监听（:350 `.then(fn => unlisten = fn)`）存在同样的迟到解绑问题——**本模块不动**（手术边界），后续统一治理时一并加 disposed 守卫。
+
+- return 追加 `progressSnapshots: computed(() => progressSnapshots.value),`。
+
+> 注：`THUMBNAIL_PHASES` 本任务不 import（noUnusedLocals），时间线顺序在 popover 组件（任务 7）用。`UnlistenFn` 已在 :8 import。
 
 - [ ] **步骤 4：运行测试验证通过**
 
 运行：`npx vitest run src/composables/useMasonryThumbnails.test.ts`
-预期：PASS（新增 4 测试 + 既有 246 行全绿）。再跑 `npm run type-check` 确认无 unused。
+预期：PASS（新增 8 测试：queued→generating / progress 推进 / epoch 过滤 / 非 generating 忽略 + round-1 的竞态缓冲 / 终态不降级 / 失败快照 / 双 unlisten，加既有 246 行全绿）。再跑 `npm run type-check` 确认无 unused。
 
 - [ ] **步骤 5：Commit**
 
@@ -692,7 +875,7 @@ git commit -m "feat(thumbnail): 前端 generating 态 + thumbnail://progress 监
 ### 任务 6：前端 — MasonryThumbnail 阶段角标（TDD）
 
 **文件：**
-- 修改：`src/components/filebrowser/MasonryThumbnail.vue`（角标渲染 + emit `show-progress`）
+- 修改：`src/components/filebrowser/MasonryThumbnail.vue`（角标渲染 + emit `show-progress` + `badgeInteractive` prop）
 - 测试：`src/components/filebrowser/MasonryThumbnail.test.ts`
 
 - [ ] **步骤 1：写失败的测试** — `MasonryThumbnail.test.ts` 追加：
@@ -700,13 +883,16 @@ git commit -m "feat(thumbnail): 前端 generating 态 + thumbnail://progress 监
 ```ts
 import { mount, flushPromises } from '@vue/test-utils';
 
-it('generating(queued) 显角标（queued 图标），点击 emit show-progress', async () => {
+it('generating(queued) 显角标（queued 图标），点击 emit show-progress 携带角标元素', async () => {
   const w = mountThumb({ kind: 'generating', cacheKey: 'k', phase: 'queued', startedAt: Date.now(), timings: {} });
   const badge = w.find('.phase-badge');
   expect(badge.exists()).toBe(true);
   expect(w.find('.thumb-spinner').exists()).toBe(true);
   await badge.trigger('click');
-  expect(w.emitted('show-progress')).toBeTruthy();
+  const emitted = w.emitted('show-progress');
+  expect(emitted).toBeTruthy();
+  // round-1 P2：payload 是角标 DOM 元素（MasonryView 用它定位，不走 querySelector）
+  expect(emitted![0]![0]).toBeInstanceOf(HTMLElement);
 });
 
 it('generating(decoding) 角标图标切换 + click 不冒泡到根', async () => {
@@ -720,16 +906,40 @@ it('generating(decoding) 角标图标切换 + click 不冒泡到根', async () =
   expect(rootClick).not.toHaveBeenCalled(); // stopPropagation
 });
 
-it('cached / original / failed / undefined 均无角标', () => {
+it('cached / original / undefined 均无角标', () => {
   for (const st of [
     undefined,
     { kind: 'cached', cacheKey: 'k', path: 'asset://c.webp', width: 100, height: 100 },
     { kind: 'original', url: 'orig://a.jpg' },
-    { kind: 'failed', cacheKey: 'k', retryable: true, message: 'x' },
   ] as const) {
     const w = mountThumb(st as never);
     expect(w.find('.phase-badge').exists()).toBe(false);
   }
+});
+
+// round-2 必修：failed 也显角标（错误角标）——失败详情 popover 的唯一主动入口
+it('failed 显错误角标（error 色 + 感叹号图标），点击 emit show-progress 携带元素', async () => {
+  const w = mountThumb({ kind: 'failed', cacheKey: 'k', retryable: true, message: 'x' });
+  const badge = w.find('.phase-badge');
+  expect(badge.exists()).toBe(true);
+  expect(badge.classes()).toContain('fail');
+  await badge.trigger('click');
+  const emitted = w.emitted('show-progress');
+  expect(emitted).toBeTruthy();
+  expect(emitted![0]![0]).toBeInstanceOf(HTMLElement);
+});
+
+// round-3：开关关时角标纯指示——disabled + 不 emit（spec §7.2 实现契约）
+// 注：mountThumb 需支持附加 props 覆盖（或此处直接 mount 组件传 props）。
+it('badgeInteractive=false → 角标 disabled、点击不 emit（纯指示）', async () => {
+  const w = mountThumb(
+    { kind: 'generating', cacheKey: 'k', phase: 'queued', startedAt: Date.now(), timings: {} },
+    { badgeInteractive: false },
+  );
+  const badge = w.find('.phase-badge');
+  expect(badge.attributes('disabled')).toBeDefined();
+  await badge.trigger('click'); // dispatchEvent 会绕过 disabled，靠 handler 守卫兜底
+  expect(w.emitted('show-progress')).toBeUndefined();
 });
 ```
 
@@ -742,20 +952,38 @@ it('cached / original / failed / undefined 均无角标', () => {
 
 `MasonryThumbnail.vue`：
 
-- `defineEmits` 加 `(e: 'show-progress'): void;`。
+- `defineEmits` 加 `(e: 'show-progress', el: HTMLElement): void;`（round-1 P2：**携带角标元素**，MasonryView 用 `getBoundingClientRect()` 定位，杜绝 `querySelector` 拼接用户路径）。
+- props 改 `withDefaults` 加 `badgeInteractive`（round-3，spec §7.2 实现契约——开关值 prop 下传，不能只在 View 层忽略事件留手型死按钮）：
+
+```ts
+const props = withDefaults(defineProps<{
+  state?: ThumbnailState;
+  alt: string;
+  /** 角标是否可交互（MasonryView 绑 settingsStore.thumbnailDetailPopover 逐层下传）。
+   *  false = 纯指示：disabled（cursor: default、不派发用户点击）。 */
+  badgeInteractive?: boolean;
+}>(), {
+  badgeInteractive: true,
+});
+```
+
 - 模板 `.masonry-thumb` 内、`.thumb-spinner` 前加：
 
 ```vue
     <button
       v-if="showPhaseBadge"
       class="phase-badge"
+      :class="{ fail: props.state?.kind === 'failed' }"
       type="button"
+      :disabled="!badgeInteractive"
       :title="phaseLabel"
       :aria-label="phaseLabel"
-      @click.stop="emit('show-progress')"
+      @click.stop="onBadgeClick"
     >
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path v-if="props.state?.kind === 'generating' && props.state.phase === 'queued'" d="M12 6v6l4 2" />
+        <!-- round-2 必修：failed 错误角标（失败详情 popover 的唯一主动入口） -->
+        <path v-if="props.state?.kind === 'failed'" d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+        <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'queued'" d="M12 6v6l4 2" />
         <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'decoding'" d="M12 3v10m0 0-4-4m4 4 4-4" />
         <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'resizing'" d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
         <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'encoding'" d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2" />
@@ -770,15 +998,29 @@ it('cached / original / failed / undefined 均无角标', () => {
 const emit = defineEmits<{
   (e: 'retry'): void;
   (e: 'load-error'): void;
-  (e: 'show-progress'): void;
+  (e: 'show-progress', el: HTMLElement): void;
 }>();
 
-const showPhaseBadge = computed(() => props.state?.kind === 'generating');
+// round-1 P2：直传角标元素（currentTarget 在派发期间有效，须在 handler 内取）。
+// round-3：badgeInteractive=false 守卫——dispatchEvent 会绕过 disabled 派发（测试/
+// 程序化路径），handler 内再拦一道。
+function onBadgeClick(e: MouseEvent) {
+  if (!props.badgeInteractive) return;
+  const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+  if (el) emit('show-progress', el);
+}
+
+// round-2 必修：failed 也显角标（错误角标）——失败详情 popover 的唯一主动入口
+const showPhaseBadge = computed(() => {
+  const k = props.state?.kind;
+  return k === 'generating' || k === 'failed';
+});
 
 const phaseLabel = computed(() => {
   const s = props.state;
+  if (s?.kind === 'failed') return 'generation failed'; // 任务 9 换 i18n（thumbnail.popover.failed）
   if (s?.kind !== 'generating') return '';
-  return `thumbnail phase: ${s.phase}`;  // 具体 i18n 在任务 8 换 t()
+  return `thumbnail phase: ${s.phase}`;  // 具体 i18n 在任务 9 换 t()
 });
 ```
 
@@ -805,6 +1047,11 @@ const phaseLabel = computed(() => {
   line-height: 1;
 }
 .phase-badge:hover { background: rgb(99 102 241); }
+/* round-2 必修：failed 错误角标（失败详情 popover 入口） */
+.phase-badge.fail { background: rgb(248 113 113 / 0.92); }
+.phase-badge.fail:hover { background: rgb(248 113 113); }
+/* round-3：纯指示态（开关关）——disabled 按钮显式 default 光标（Chromium 默认即是，显式兜底） */
+.phase-badge:disabled { cursor: default; }
 ```
 
 - [ ] **步骤 4：运行测试验证通过**
@@ -879,6 +1126,27 @@ describe('ThumbnailProgressPopover.vue', () => {
     expect(w.find('.err-msg').text()).toContain('decode failed');
     await w.find('.retry-btn').trigger('click');
     expect(w.emitted('retry')).toBeTruthy();
+  });
+
+  it('failed 带 snapshot 渲染 5 步时间线（卡住步骤 error 标记）', () => {
+    const w = mount(ThumbnailProgressPopover, {
+      props: mkProps({
+        state: failed(),
+        snapshot: { phase: 'resizing', timings: { decoding: 2, resizing: 30 }, startedAt: Date.now() - 5000 },
+      }),
+      global: { plugins: [i18n] },
+    });
+    const steps = w.findAll('.tl-step');
+    expect(steps.length).toBe(5);
+    expect(w.find('.tl-step.fail').text()).toContain('缩放中'); // 卡在 resizing
+    expect(w.find('.err-msg').exists()).toBe(true);
+  });
+
+  it('failed 无 snapshot 省略时间线区块（保留错误信息 + 重试）', () => {
+    const w = mount(ThumbnailProgressPopover, { props: mkProps({ state: failed() }), global: { plugins: [i18n] } });
+    expect(w.findAll('.tl-step').length).toBe(0);
+    expect(w.find('.err-msg').exists()).toBe(true);
+    expect(w.find('.retry-btn').exists()).toBe(true);
   });
 
   it('定位 fallback：右侧空间不足 → 左侧；再不足 → 下方', async () => {
@@ -976,11 +1244,16 @@ function clamp(v: number, lo: number, hi: number): number {
 <script setup lang="ts">
 // ThumbnailProgressPopover.vue — 单张缩略图生成详情浮层（module3.0.11）
 // 阶段时间线（5 步）+ 原图/输出 + 失败重试。定位：角标右侧优先，右→左→下→上。
-// 阶段时长推算：timings[phase] = 该阶段开始的累计 elapsed；阶段 X 时长 =
-//   timings[nextPhase] - timings[X]（当前阶段 = Date.now() - startedAt - timings[X]）。
+// 阶段时长推算：timings[phase] = 该阶段开始的累计 elapsed（generate 相对时间）；
+//   已完成阶段 X = timings[next] - timings[X]；当前阶段 = Date.now() - generationStartedAt
+//   - timings[X]（round-1 P1-4：generationStartedAt 不含排队，startedAt 含排队，
+//   直接用 startedAt 会把排队时间算进 decoding 实时耗时）；
+//   queued 阶段 = generationStartedAt - startedAt（排队等待）。
+// 失败态时间线数据源 = snapshot（round-1 P1-6：failed 事件覆盖 generating 态后
+//   phase/timings 已丢，由 useMasonryThumbnails.progressSnapshots 提供）。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
-import type { ThumbnailPhase, ThumbnailState } from '@/lib/thumbnail';
+import type { ThumbnailPhase, ThumbnailProgressSnapshot, ThumbnailState } from '@/lib/thumbnail';
 import { THUMBNAIL_PHASES } from '@/lib/thumbnail';
 import { formatBytes } from '@/locales/helpers';
 import { positionFor, type PopoverPlacement } from '@/lib/thumbnailPosition';
@@ -993,6 +1266,8 @@ const props = defineProps<{
   sourceBytes: number;
   /** 角标在视口中的位置（父级点击时算好，滚动时父级更新）。 */
   anchorRect: { left: number; top: number; width: number; height: number };
+  /** 失败态时间线快照（round-1 P1-6；generating 态不用）。 */
+  snapshot?: ThumbnailProgressSnapshot;
 }>();
 
 const emit = defineEmits<{
@@ -1012,7 +1287,10 @@ function reposition() {
   const popEl = rootEl.value;
   if (!popEl) return;
   const popSize = { width: popEl.offsetWidth || 220, height: popEl.offsetHeight || 120 };
-  const p = positionFor(props.anchorRect, { width: vw, height: vh }, popSize);
+  // round-1 P1-7：anchorRect 线格式只有 4 字段，positionFor 需要 right/bottom——此处补算
+  const r = props.anchorRect;
+  const anchor = { ...r, right: r.left + r.width, bottom: r.top + r.height };
+  const p = positionFor(anchor, { width: vw, height: vh }, popSize);
   placement.value = p.placement;
   pos.value = { left: p.left, top: p.top };
 }
@@ -1034,27 +1312,46 @@ const totalElapsedMs = computed(() => {
   return props.state.kind === 'generating' ? Date.now() - props.state.startedAt : 0;
 });
 
-/** 阶段时长（ms）：已完成 = timings[next] - timings[this]；当前 = total - timings[this]；未到 = '—'。 */
+/** 时间线数据源：generating 态用自身；failed 态用快照（round-1 P1-6）。 */
+const timeline = computed<ThumbnailProgressSnapshot | null>(() => {
+  const s = props.state;
+  if (s?.kind === 'generating') return s;
+  return props.snapshot ?? null;
+});
+
+/** 阶段时长（ms）：queued = 排队等待；已完成 = timings[next]-timings[this]；
+ * 当前 = Date.now()-generationStartedAt-timings[this]（实时）；未到/卡住 = '—'。 */
 function stepDuration(ph: ThumbnailPhase): string {
-  if (props.state.kind !== 'generating') return '—';
+  const src = timeline.value;
+  if (!src) return '—';
   void nowTick.value;
-  const timings = props.state.timings;
-  const idx = THUMBNAIL_PHASES.indexOf(ph);
+  const timings = src.timings;
+  if (ph === 'queued') {
+    // 排队等待 = generate 实际开始 - 请求发出；未开始生成时实时跳动
+    const genStart = src.generationStartedAt;
+    if (genStart === undefined) return `${Math.max(0, Date.now() - src.startedAt)}ms`;
+    return `${Math.max(0, genStart - src.startedAt)}ms`;
+  }
   if (timings[ph] === undefined) return '—';
   const start = timings[ph] as number;
-  let end: number;
-  if (props.state.phase === ph) {
-    end = Date.now() - props.state.startedAt; // 实时跳动
-  } else {
-    const nextPh = THUMBNAIL_PHASES[idx + 1];
-    end = nextPh && timings[nextPh] !== undefined ? (timings[nextPh] as number) : start;
+  if (src.phase === ph) {
+    if (props.state.kind !== 'generating') return '—'; // 失败卡住：结束时间未知
+    // round-1 P1-4：用 generationStartedAt（不含排队），不用 startedAt
+    const genStart = src.generationStartedAt;
+    if (genStart === undefined) return '—';
+    return `${Math.max(0, Date.now() - genStart - start)}ms`;
   }
+  const idx = THUMBNAIL_PHASES.indexOf(ph);
+  const nextPh = THUMBNAIL_PHASES[idx + 1];
+  const end = nextPh && timings[nextPh] !== undefined ? (timings[nextPh] as number) : start;
   return `${Math.max(0, end - start)}ms`;
 }
 function stepClass(ph: ThumbnailPhase): string {
-  if (props.state.kind !== 'generating') return '';
+  const src = timeline.value;
+  if (!src) return '';
   const idx = THUMBNAIL_PHASES.indexOf(ph);
-  const curIdx = THUMBNAIL_PHASES.indexOf(props.state.phase);
+  const curIdx = THUMBNAIL_PHASES.indexOf(src.phase);
+  if (props.state.kind === 'failed' && idx === curIdx) return 'fail'; // 卡住的步骤
   if (idx < curIdx) return 'done';
   if (idx === curIdx) return 'cur';
   return 'pending';
@@ -1084,6 +1381,14 @@ function stepClass(ph: ThumbnailPhase): string {
     <template v-else-if="state.kind === 'failed'">
       <div class="pop-state fail">{{ t('thumbnail.popover.failed') }}</div>
       <div class="err-msg">{{ state.message }}</div>
+      <!-- round-1 P1-6：失败时间线用 snapshot（无快照——未经生成即失败——省略区块） -->
+      <template v-if="snapshot">
+        <div class="psection">{{ t('thumbnail.popover.stages') }}</div>
+        <div v-for="ph in THUMBNAIL_PHASES" :key="ph" class="tl-step" :class="stepClass(ph)">
+          <span class="lbl"><span class="dot" />{{ phaseText(ph) }}</span>
+          <span class="t">{{ stepDuration(ph) }}</span>
+        </div>
+      </template>
       <button class="retry-btn" type="button" @click="emit('retry')">{{ t('thumbnail.popover.retry') }}</button>
     </template>
   </div>
@@ -1121,6 +1426,7 @@ style（`.thumb-popover` `position: fixed`，`.place-*` 加箭头）：
 .tl-step .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-border-default); }
 .tl-step.done .dot { background: var(--color-success); }
 .tl-step.cur .dot { background: var(--color-accent); box-shadow: 0 0 0 2px rgb(99 102 241 / .3); }
+.tl-step.fail .dot { background: var(--color-error); }
 .tl-step .t { color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
 .prow { display: flex; justify-content: space-between; margin: 2px 0; }
 .prow .k { color: var(--color-text-muted); }
@@ -1150,7 +1456,7 @@ git commit -m "feat(thumbnail): ThumbnailProgressPopover 阶段时间线 + 定�
 
 **文件：**
 - 修改：`src/components/filebrowser/MasonryRow.vue`（转发 `show-progress`）
-- 修改：`src/components/filebrowser/MasonryView.vue`（anchorPath/rect state + 点击角标弹 popover + 滚动重算 + 关闭 + settings 守卫）
+- 修改：`src/components/filebrowser/MasonryView.vue`（popoverState{path, anchorEl, rect, state} + toggle + 滚动 anchorEl 重测 + 外部 mousedown/ESC/切目录关闭 + settings 守卫 + `:snapshot` 传递）
 - 测试：`src/components/filebrowser/MasonryRow.test.ts`、`src/components/filebrowser/MasonryView.test.ts`
 
 - [ ] **步骤 1：写失败的测试**
@@ -1158,14 +1464,17 @@ git commit -m "feat(thumbnail): ThumbnailProgressPopover 阶段时间线 + 定�
 `MasonryRow.test.ts` 追加：
 
 ```ts
-it('show-progress 转发到父级', async () => {
+it('show-progress 转发到父级（entry + 角标元素）', async () => {
   const w = mount(MasonryRow, {
     props: mkProps({ thumbState: { kind: 'generating', cacheKey: 'k', phase: 'decoding', startedAt: Date.now(), timings: {} } }),
     global: { plugins: [createPinia(), i18n] },
   });
   const badge = w.find('.phase-badge');
   await badge.trigger('click');
-  expect(w.emitted('show-progress')).toBeTruthy();
+  const emitted = w.emitted('show-progress');
+  expect(emitted).toBeTruthy();
+  // round-1 P2：转发链携带 entry + 角标 DOM 元素（MasonryView 不走 querySelector）
+  expect(emitted![0]![0]).toBeInstanceOf(HTMLElement);
 });
 ```
 
@@ -1174,11 +1483,13 @@ it('show-progress 转发到父级', async () => {
 ```ts
 const thumbnailsMock = vi.hoisted(() => ({
   stateMap: new Map<string, unknown>(),
+  progressSnapshots: new Map<string, unknown>(), // round-1 P1-6：popover 失败时间线数据源
 }));
 
 vi.mock('@/composables/useMasonryThumbnails', () => ({
   useMasonryThumbnails: () => ({
     stateMap: computed(() => thumbnailsMock.stateMap),
+    progressSnapshots: computed(() => thumbnailsMock.progressSnapshots),
     retry: vi.fn(),
     retryBatch: vi.fn(),
     regenerate: vi.fn(),
@@ -1204,12 +1515,21 @@ describe('MasonryView.popover (module3.0.11)', () => {
     ]);
   });
 
+  /** happy-dom 的 getBoundingClientRect 返回全 0，会触发 width===0 守卫——测试里 stub 非零 rect。 */
+  function stubBadgeRect(el: Element, r = { left: 100, top: 50, width: 18, height: 14 }) {
+    el.getBoundingClientRect = () => ({
+      ...r, x: r.left, y: r.top, right: r.left + r.width, bottom: r.top + r.height,
+      toJSON: () => ({}),
+    } as DOMRect);
+  }
+
   it('settings 开时点击角标 → 显示 popover', async () => {
     const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
     await flushPromises(); await nextTick();
     // 找到角标（在 MasonryRow 内 .phase-badge）
     const badge = w.find('.phase-badge');
     expect(badge.exists()).toBe(true);
+    stubBadgeRect(badge.element);
     await badge.trigger('click');
     await flushPromises();
     expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
@@ -1223,6 +1543,9 @@ describe('MasonryView.popover (module3.0.11)', () => {
     const w = mount(MasonryView, { props: baseProps, global: { plugins: [pinia, i18n] }, attachTo: document.body });
     await flushPromises(); await nextTick();
     const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    // round-3：prop 下传生效——按钮 disabled（cursor: default），不仅事件被忽略
+    expect(badge.attributes('disabled')).toBeDefined();
     await badge.trigger('click');
     await flushPromises();
     expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
@@ -1232,12 +1555,85 @@ describe('MasonryView.popover (module3.0.11)', () => {
   it('ESC 关闭 popover', async () => {
     const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
     await flushPromises(); await nextTick();
-    await w.find('.phase-badge').trigger('click');
+    const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
     await flushPromises();
     expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await flushPromises();
     expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('外部 mousedown 关闭；角标上的 mousedown 不关（toggle 交给 click）', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    // round-1 P2：角标 mousedown 跳过（否则 mousedown 先关、click 再开抖动）
+    badge.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    // 外部 mousedown：关闭（bubbles: true 才能到达 document 监听器）
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('角标再点 toggle 关闭（spec §6.4）', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('特殊路径（含引号/反斜杠）弹 popover——元素直传不走 querySelector', async () => {
+    const weird = 'a"b\\c.jpg';
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      [weird, { path: weird, width: 100, height: 100, top: 0, left: 0, col: 0 }],
+    ]);
+    thumbnailsMock.stateMap = new Map([
+      [weird, { kind: 'generating', cacheKey: 'ck', phase: 'decoding', startedAt: Date.now(), timings: {} }],
+    ]);
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    expect(badge.exists()).toBe(true);
+    stubBadgeRect(badge.element);
+    await badge.trigger('click'); // 旧实现此处 querySelector 语法错误
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    w.unmount();
+  });
+
+  it('failed 卡错误角标可打开失败详情 popover（round-2 必修：事后可达）', async () => {
+    thumbnailsMock.stateMap = new Map([
+      ['a.jpg', { kind: 'failed', cacheKey: 'ck', retryable: true, message: 'boom' }],
+    ]);
+    thumbnailsMock.progressSnapshots = new Map([
+      ['a.jpg', { phase: 'decoding', timings: { decoding: 3 }, startedAt: Date.now() - 1000 }],
+    ]);
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge.fail'); // 失败角标（非 generating）
+    expect(badge.exists()).toBe(true);
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    expect(w.find('.err-msg').exists()).toBe(true); // 失败详情渲染
     w.unmount();
   });
 });
@@ -1250,39 +1646,49 @@ describe('MasonryView.popover (module3.0.11)', () => {
 
 - [ ] **步骤 3：实现**
 
-`MasonryRow.vue`：defineEmits 加 `(e: 'show-progress', entry: MediaEntry): void;`，MasonryThumbnail 标签加 `@show-progress="$emit('show-progress', entry)"`。
+`MasonryRow.vue`：defineEmits 加 `(e: 'show-progress', entry: MediaEntry, el: HTMLElement): void`（round-1 P2：补 `el` 参数），MasonryThumbnail 标签加 `@show-progress="(el) => $emit('show-progress', entry, el)"`；props 加 `badgeInteractive?: boolean`（round-3 透传，默认 true）并绑 `:badge-interactive="badgeInteractive"`。
 
 `MasonryView.vue`：
 - import 加 `ThumbnailProgressPopover` + `useSettingsStore`（已有）+ `type ThumbnailState`。
-- 状态：
+- 状态（**round-1 P2：存 anchorEl 元素引用，杜绝 `querySelector` 拼接用户路径**）：
 
 ```ts
-// module3.0.11: popover 追踪（单张）
-const popoverState = ref<{ path: string; rect: { left: number; top: number; width: number; height: number }; state: ThumbnailState } | null>(null);
+// module3.0.11: popover 追踪（单张）。anchorEl 是角标 DOM 元素（点击事件直传）。
+interface PopoverState {
+  path: string;
+  anchorEl: HTMLElement;
+  rect: { left: number; top: number; width: number; height: number };
+  state: ThumbnailState;
+}
+const popoverState = ref<PopoverState | null>(null);
 
-function openProgressPopover(entry: MediaEntry) {
+function openProgressPopover(entry: MediaEntry, el: HTMLElement) {
   if (!settingsStore.thumbnailDetailPopover) return;
+  // 角标再点切换（spec §6.4 toggle）
+  if (popoverState.value?.path === entry.path) {
+    closeProgressPopover();
+    return;
+  }
   const s = thumbStateMap.value.get(entry.path);
   if (!s) return;
-  // 角标 DOM：从卡片里找（MasonryRow 的 .phase-badge，按 data-path 定位）
-  const card = containerRef.value?.querySelector(`[data-path="${entry.path}"] .phase-badge`);
-  const rect = card?.getBoundingClientRect();
-  if (!rect) return;
-  popoverState.value = {
-    path: entry.path,
-    rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
-    state: s,
-  };
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0) return;
+  popoverState.value = { path: entry.path, anchorEl: el, rect: rectOf(rect), state: s };
+}
+
+function rectOf(r: DOMRect): { left: number; top: number; width: number; height: number } {
+  return { left: r.left, top: r.top, width: r.width, height: r.height };
 }
 
 function closeProgressPopover() { popoverState.value = null; }
 
-// 滚动时重算 rect（角标随卡片移动）
+// 滚动时用存储的 anchorEl 重测 rect（元素直传链，无 querySelector）；
+// 虚拟滚动把卡片移出 DOM 后 rect.width === 0 → 自动关闭。
 function onContainerScroll() {
   if (!popoverState.value) return;
-  const card = containerRef.value?.querySelector(`[data-path="${popoverState.value.path}"] .phase-badge`);
-  const rect = card?.getBoundingClientRect();
-  if (rect) popoverState.value.rect = { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+  const rect = popoverState.value.anchorEl.getBoundingClientRect();
+  if (rect.width === 0) { closeProgressPopover(); return; }
+  popoverState.value.rect = rectOf(rect);
 }
 ```
 
@@ -1294,10 +1700,11 @@ function onContainerScroll() {
 watch(scrollTop, onContainerScroll);
 ```
 
-- MasonryRow 转发链（template :415 加）：
+- MasonryRow 转发链（template :415 加；**round-3：开关值随行下传**，spec §7.2 实现契约）：
 
 ```vue
-        @show-progress="(e) => openProgressPopover(e)"
+        :badge-interactive="settingsStore.thumbnailDetailPopover"
+        @show-progress="(entry, el) => openProgressPopover(entry, el)"
 ```
 
 - 关闭：ESC + 切目录（descriptor/currentPath watch 已有，加 `closeProgressPopover()`）：
@@ -1319,6 +1726,7 @@ watch(
     <ThumbnailProgressPopover
       v-if="popoverState"
       :state="popoverState.state"
+      :snapshot="progressSnapshots.get(popoverState.path)"
       :file-name="popoverState.path"
       :source-width="measuredMap.value.get(popoverState.path)?.width ?? 0"
       :source-height="measuredMap.value.get(popoverState.path)?.height ?? 0"
@@ -1328,6 +1736,8 @@ watch(
       @retry="retryThumbnail(popoverState.path); closeProgressPopover()"
     />
 ```
+
+> `progressSnapshots` 从 `useMasonryThumbnails` 解构（round-1 P1-6，失败态时间线数据源）；`retryThumbnail` 即现有解构的 `retry`（若重名按实际解构名调整）。
 
 > `file-name` 应为 entry.name（path 可能含目录前缀）。加 helper `fileNameOf(path)`：
 
@@ -1339,14 +1749,32 @@ function entriesByPath(path: string): MediaEntry | undefined {
 
 `:file-name="entriesByPath(popoverState.path)?.name ?? popoverState.path"`。
 
-- ESC 监听（onMounted/onUnmounted）：
+- ESC + 外部 mousedown 关闭（onMounted/onUnmounted）：
 
 ```ts
 function onKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') closeProgressPopover();
 }
-onMounted(() => window.addEventListener('keydown', onKeydown));
-onUnmounted(() => window.removeEventListener('keydown', onKeydown));
+// round-1 P2：外部点击关闭（spec §6.4）。跳过 popover 根与 .phase-badge——
+// 角标交互交给 click 处理器做 toggle，避免 mousedown 先关、click 再开的抖动。
+// round-2：用 instanceof Element——角标/popover 内的 SVG、path 不是 HTMLElement，
+// 误判 null 会把角标内 SVG 点击当成"外部点击"先关再开（抖动）。
+function onDocMouseDown(e: MouseEvent) {
+  if (!popoverState.value) return;
+  const target = e.target instanceof Element ? e.target : null;
+  if (!target) return;
+  if (target.closest('[data-test="thumb-popover"]')) return;
+  if (target.closest('.phase-badge')) return;
+  closeProgressPopover();
+}
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown);
+  document.addEventListener('mousedown', onDocMouseDown);
+});
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
+  document.removeEventListener('mousedown', onDocMouseDown);
+});
 ```
 
 > onMounted/onUnmounted 已存在（:104/:126），合并进现有函数体。
@@ -1606,9 +2034,30 @@ git commit -m "docs(AGENTS): 更新 module3.0.11 缩略图阶段进度状态表"
 **占位符扫描**：无 TODO/「待定」；所有代码步骤含完整代码块。任务 4 的「若现有测试构造 service 需补字段」是条件分支非占位符——实现时以编译错误为准。任务 7 的 `formatBytes` 导出名标注「读文件确认」——已给 fallback 说明。
 
 **类型一致性**：
-- `GenPhase`/`phase_str`（任务 1 定义）→ 任务 2/3/4 使用一致 ✅
-- `on_progress: Option<Arc<dyn Fn(GenPhase, u64) + Send + Sync>>` 全链路一致（GenerationJob / generate_thumbnail 的 `&dyn` / service 闭包）✅
+- `GenPhase`/`phase_str`（任务 1 定义）→ 任务 2/3/4 使用一致 ✅（GenPhase derive `Serialize` + lowercase，round-1 P1-1）
+- `on_progress: Option<Arc<dyn Fn(GenPhase, u64) + Send + Sync>>` 全链路一致（GenerationJob / generate_thumbnail 的 `&dyn` / service 闭包）✅；`GenerationJob`/`QueuedTask` derive 去 Debug（round-1 P1-2）
 - `ThumbnailPhase` 前端字面量 `'queued'|'decoding'|'resizing'|'encoding'|'writing'` 与 Rust `phase_str` 输出一致 ✅
-- `ThumbnailState.generating` 字段 `phase/startedAt/timings`：任务 5 定义 → 任务 6/7/8 使用一致 ✅
+- `ThumbnailState.generating` 字段 `phase/startedAt/generationStartedAt/timings`：任务 5 定义 → 任务 6/7/8 使用一致 ✅（generationStartedAt 口径：不含排队，round-1 P1-4）
+- `ThumbnailProgressSnapshot`：任务 5 composable 写入 → 任务 7 popover `:snapshot` 消费 → 任务 8 MasonryView 传递 ✅（round-1 P1-6）
 - `ThumbnailProgressEvent`（tauri.ts）字段与 Rust `ProgressEvent` camelCase 对齐（epoch/cacheKey/path/phase/elapsedMs）✅
-- popover props `anchorRect`：任务 7 组件定义 → 任务 8 MasonryView 传入一致 ✅
+- popover props `anchorRect`：任务 7 组件定义（4 字段线格式 + 组件内补算 right/bottom）→ 任务 8 MasonryView 传入一致 ✅（round-1 P1-7）
+- `show-progress` emit 链：任务 6 `(el)` → 任务 8 Row `(entry, el)` → MasonryView `openProgressPopover(entry, el)` ✅（round-1 P2，无 querySelector）
+
+**round-1 审查修订（8 项闭环）**：
+- P1-1 GenPhase 补 `Serialize` + `rename_all`（任务 1）
+- P1-2 `GenerationJob`/`QueuedTask` 去 Debug 派生（任务 2）
+- P1-3 queued 回包 cacheKey 顺序守卫 + `pendingProgress` 事件缓冲 + event-before-response / state-before-response 测试（任务 5）
+- P1-4 `generationStartedAt` 墙钟反推，排队时间不混入阶段实时耗时；queued 阶段时长单列（任务 5 + 任务 7 stepDuration）
+- P1-5 progress 监听 unlisten 保存 + unmount 解绑 + 双 unlisten 测试（任务 5）
+- P1-6 `progressSnapshots` 失败快照 + popover 失败时间线 + 快照测试（任务 5 + 任务 7 + 任务 8）
+- P1-7 popover reposition 补算 `right/bottom`（任务 7）
+- P2 角标点击直传 anchor 元素（消灭 `querySelector` 拼路径）+ 外部 mousedown 关闭 + toggle + 特殊路径测试（任务 6 + 任务 8）
+
+**round-2 审查修订（必修 1 + 建议 2，均已闭环）**：
+- [必修] failed 态保留**错误角标**（error 色 + 感叹号，`.phase-badge.fail`）作为失败详情 popover 的唯一主动入口——否则未在失败前打开 popover 的用户，失败时间线与 popover 内重试永不可达（任务 6 模板/script/CSS/测试 + 任务 8 可达性测试；spec §5.1/§5.2/§6.3 决策 14）
+- [建议] progress 监听 `disposed` 守卫——`listen()` 异步，unmount 先于 `.then(fn)` 到达时立即 `fn()` 防泄漏 + 迟到 unlisten 测试（任务 5）；既有 state 监听同模式问题不在本模块修（手术边界）
+- [建议] 外点判定 `e.target instanceof Element`（SVG/path 非 HTMLElement，误判会抖动）（任务 8）
+
+**round-3 审查修订（文档一致性 2 项，均已闭环）**：
+- [建议] spec §4.2 progress 监听片段同步 disposed 守卫（此前只有 plan 有——按 spec 实施会重新引入泄漏）
+- [建议] 开关关时角标交互落实 spec §7.2 `cursor: default` + 不 emit——`badgeInteractive` prop 三层下传（View 绑 settings → Row 透传 → Thumbnail disabled + handler 守卫，dispatchEvent 绕过 disabled 的双保险）；`openProgressPopover` 守卫保留为第二道防线（任务 6 + 任务 8）
