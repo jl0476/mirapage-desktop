@@ -17,7 +17,7 @@ use super::key::{self, CacheKeyInput};
 use super::migration::{self, MigrationMode, RealFs};
 use super::policy::{self, QualityPolicy, SourceDecision};
 use super::scheduler::{self, GenerateFn, GenerationJob, Outcome, QueuedTask, SchedulerConfig, SchedulerHandle};
-use super::{Priority, Quality, ThumbnailError, ThumbnailRequestItem, THUMBNAIL_ALGORITHM_VERSION};
+use super::{GenPhase, Priority, Quality, ThumbnailError, ThumbnailRequestItem, THUMBNAIL_ALGORITHM_VERSION};
 use crate::db::Db;
 use crate::log;
 use crate::source::descriptor::SourceDescriptor;
@@ -194,6 +194,8 @@ pub fn classify_item(
         clarity_floor_width: item.required_width.min(target_bucket),
         webp_quality: qp.webp_quality,
         cache_path: cache_abs.clone(),
+        // module3.0.11：request/resubmit 提交循环注入 progress 闭包（任务 4）
+        on_progress: None,
     };
     let task = QueuedTask {
         cache_key: cache_key.clone(),
@@ -304,7 +306,12 @@ fn production_generate_fn() -> GenerateFn {
             webp_quality: job.webp_quality,
             cache_path: &job.cache_path,
         };
-        let result = generate_thumbnail(req);
+        // module3.0.11：透传阶段进度回调。job 存 `Arc<dyn Fn + Send + Sync>`，
+        // generator 参数是裸 `&dyn Fn`——unsized 协变去 Send/Sync 界。
+        let result = generate_thumbnail(
+            req,
+            job.on_progress.as_deref().map(|cb| cb as &dyn Fn(GenPhase, u64)),
+        );
         let duration_ms = t0.elapsed().as_millis();
         match &result {
             Ok(g) => log::write_log(

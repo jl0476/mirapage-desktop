@@ -120,7 +120,7 @@ fn gen(
         webp_quality: quality,
         cache_path,
     };
-    generate_thumbnail(req).expect("generate should succeed")
+    generate_thumbnail(req, None).expect("generate should succeed")
 }
 
 fn decode_webp(bytes: &[u8]) -> DynamicImage {
@@ -311,7 +311,7 @@ fn atomic_write_failure_leaves_no_final_file() {
         webp_quality: 82.0,
         cache_path: &cache,
     };
-    let res = generate_thumbnail(req);
+    let res = generate_thumbnail(req, None);
     assert!(res.is_err(), "corrupt input must error");
     assert!(!cache.exists(), "no final file on failure");
     assert!(!tmp.exists(), "no .tmp left on failure");

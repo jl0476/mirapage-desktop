@@ -73,7 +73,7 @@ fn cold_generate_then_hot_hit_and_redecode() {
         webp_quality: 82.0,
         cache_path: &cache_abs,
     };
-    let out = generate_thumbnail(req).expect("generate");
+    let out = generate_thumbnail(req, None).expect("generate");
     assert!(out.byte_size > 0);
 
     // 写索引
@@ -120,7 +120,7 @@ fn bad_image_errors_does_not_block() {
         webp_quality: 82.0,
         cache_path: &cache_abs,
     };
-    let res = generate_thumbnail(req);
+    let res = generate_thumbnail(req, None);
     assert!(res.is_err(), "bad image should error");
     assert!(!cache_abs.exists(), "no partial file");
 
@@ -135,7 +135,7 @@ fn bad_image_errors_does_not_block() {
         webp_quality: 82.0,
         cache_path: &ok_path,
     };
-    assert!(generate_thumbnail(req2).is_ok(), "good image still works");
+    assert!(generate_thumbnail(req2, None).is_ok(), "good image still works");
 }
 
 #[test]

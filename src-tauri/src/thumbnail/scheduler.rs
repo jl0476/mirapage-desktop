@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::generator::GeneratedThumbnail;
-use super::{Priority, ThumbnailError};
+use super::{GenPhase, Priority, ThumbnailError};
 use crate::log;
 
 /// 默认老化阈值（等待超过此值的任务优先级提升）。
@@ -39,7 +39,9 @@ pub type GenerateFn =
 
 /// 一次生成的全部输入（owned，便于跨 spawn_blocking 边界）。
 /// Local 源走 `source_path`（blocking 线程内 std::fs::read）；其它源可填 `source_bytes`。
-#[derive(Debug, Clone)]
+/// 注意：不 derive Debug（round-1 P1-2）——`on_progress` 的 `Arc<dyn Fn>` 不实现
+/// Debug；手写 impl 跳过该字段（`ItemClass`/`QueuedTask` 的 Debug 派生依赖于此）。
+#[derive(Clone)]
 pub struct GenerationJob {
     pub source_bytes: Vec<u8>,
     pub source_path: Option<PathBuf>,
@@ -48,6 +50,27 @@ pub struct GenerationJob {
     pub clarity_floor_width: u32,
     pub webp_quality: f32,
     pub cache_path: PathBuf,
+    /// 阶段进度回调（generate 阶段边界调用）。None 时 generator 静默（测试用）。
+    /// 第一参 GenPhase 为当前阶段，第二参 u64 = generate 开始到本阶段的累计毫秒
+    /// （由 generate_thumbnail 内 t0 计算，见 spec §3.5 决策 B）。闭包内捕获
+    /// cache_key/ui_path/epoch/AppHandle 并 `let _ = app.emit(EVENT_PROGRESS, ...)`，
+    /// 禁止同步 IO / Db 锁（emit 非阻塞）。
+    pub on_progress: Option<Arc<dyn Fn(GenPhase, u64) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for GenerationJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenerationJob")
+            .field("source_bytes", &self.source_bytes.len())
+            .field("source_path", &self.source_path)
+            .field("target_width", &self.target_width)
+            .field("pixel_budget", &self.pixel_budget)
+            .field("clarity_floor_width", &self.clarity_floor_width)
+            .field("webp_quality", &self.webp_quality)
+            .field("cache_path", &self.cache_path)
+            .field("on_progress", &self.on_progress.is_some())
+            .finish()
+    }
 }
 
 /// 提交到调度器的任务。
@@ -574,6 +597,7 @@ mod tests {
             clarity_floor_width: 0,
             webp_quality: 82.0,
             cache_path: PathBuf::from(format!("/tmp/{key}.webp")),
+            on_progress: None,
         }
     }
 
@@ -601,6 +625,31 @@ mod tests {
             .await
             .expect("timeout waiting for job")
             .expect("channel closed")
+    }
+
+    /// module3.0.11：on_progress 闭包随 job 透传到 generate 闭包（scheduler 不吞字段）。
+    #[tokio::test]
+    async fn on_progress_closure_is_passed_to_generate() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        let mut t = task("prog", Priority::Visible, 1, 10);
+        let phase_log: Arc<std::sync::Mutex<Vec<u8>>> = Arc::default();
+        let log_cb = phase_log.clone();
+        t.job.on_progress = Some(Arc::new(move |_p: GenPhase, _el: u64| {
+            log_cb.lock().unwrap().push(1);
+        }));
+        let r = handle.submit(t);
+        let (job, reply) = recv_job(&mut rx).await;
+        // generate 闭包内触发 on_progress（模拟 scheduler 真实调用）
+        if let Some(cb) = &job.on_progress {
+            cb(GenPhase::Decoding, 0);
+        }
+        assert_eq!(phase_log.lock().unwrap().len(), 1);
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(r.await.unwrap(), Outcome::Cached(_)));
     }
 
     async fn assert_no_job(rx: &mut JobRx) {

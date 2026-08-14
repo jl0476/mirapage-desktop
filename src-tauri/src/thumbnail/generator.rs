@@ -12,7 +12,7 @@ use std::time::Instant;
 use image::{DynamicImage, ImageFormat};
 
 use super::orientation::{apply_orientation, read_orientation};
-use super::ThumbnailError;
+use super::{GenPhase, ThumbnailError};
 use crate::log;
 
 /// 一次缩略图生成请求。
@@ -40,8 +40,14 @@ pub struct GeneratedThumbnail {
 }
 
 /// 生成缩略图并原子写入 `cache_path`。
-pub fn generate_thumbnail(req: GenerateRequest) -> Result<GeneratedThumbnail, ThumbnailError> {
+/// `on_progress`：阶段边界回调（module3.0.11）；None 时静默。第二参 =
+/// generate 开始到本阶段开始的累计毫秒（t0 相对时间，不含排队等待）。
+pub fn generate_thumbnail(
+    req: GenerateRequest,
+    on_progress: Option<&dyn Fn(GenPhase, u64)>,
+) -> Result<GeneratedThumbnail, ThumbnailError> {
     let t0 = Instant::now();
+    let _ = on_progress; // 任务 3 接入 4 阶段边界调用
     log::write_log(
         "INFO",
         "thumbnail",
