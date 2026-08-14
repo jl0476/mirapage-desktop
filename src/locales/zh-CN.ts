@@ -414,6 +414,8 @@ export default {
   // module3.0.11：单图缩略图生成阶段进度（spec §8）
   thumbnail: {
     phase: { queued: '排队中', decoding: '解码中', resizing: '缩放中', encoding: '编码中', writing: '写入中' },
+    // 角标短词（round-4：角标加文字，区别于 popover 的「X中」）
+    badge: { queued: '排队', decoding: '解码', resizing: '缩放', encoding: '编码', writing: '写入', failed: '失败' },
     popover: {
       title: '缩略图生成',
       elapsed: '已用时 {dur}',

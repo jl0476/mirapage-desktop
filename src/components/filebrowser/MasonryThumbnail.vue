@@ -57,6 +57,14 @@ const phaseLabel = computed(() => {
   return t(`thumbnail.phase.${s.phase}`);
 });
 
+/** round-4：角标短文字标签（图标旁，i18n thumbnail.badge.*）。 */
+const badgeText = computed(() => {
+  const s = props.state;
+  if (s?.kind === 'failed') return t('thumbnail.badge.failed');
+  if (s?.kind !== 'generating') return '';
+  return t(`thumbnail.badge.${s.phase}`);
+});
+
 // round-1 P2：直传角标元素（currentTarget 在派发期间有效，须在 handler 内取）。
 // round-3：badgeInteractive=false 守卫——dispatchEvent 会绕过 disabled 派发
 //（测试/程序化路径），handler 内再拦一道。
@@ -101,6 +109,8 @@ function onError() {
         <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'encoding'" d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2" />
         <path v-else d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
       </svg>
+      <!-- round-4：角标加短文字（spec §5.1，i18n thumbnail.badge.*） -->
+      <span class="phase-badge-text">{{ badgeText }}</span>
     </button>
     <img
       v-if="imgSrc"
@@ -147,7 +157,7 @@ function onError() {
   transition: opacity 120ms ease-out;
 }
 
-/* module3.0.11：阶段角标——卡片顶部居中胶囊（spec §5.1） */
+/* module3.0.11：阶段角标——卡片顶部居中胶囊（spec §5.1，round-4 图标+文字） */
 .phase-badge {
   position: absolute;
   top: 2px;
@@ -156,9 +166,10 @@ function onError() {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
+  gap: 3px;
+  /* round-4：宽度由固定 18px 改 auto（容纳图标+短文字） */
   height: 14px;
-  padding: 0;
+  padding: 0 5px;
   border: none;
   border-radius: 3px;
   background: rgb(99 102 241 / 0.92);
@@ -166,6 +177,12 @@ function onError() {
   cursor: pointer;
   z-index: 3;
   line-height: 1;
+  white-space: nowrap;
+}
+.phase-badge-text {
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
 }
 .phase-badge:hover { background: rgb(99 102 241); }
 /* round-2 必修：failed 错误角标（失败详情 popover 入口） */

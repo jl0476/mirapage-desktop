@@ -278,15 +278,15 @@ const progressSnapshots = shallowRef<Map<string, {
 ### 5.1 视觉
 
 - 位置：卡片**顶部居中**（`top: 0` 边缘，水平居中），半圆/胶囊形贴顶。
-- 内容：阶段图标，**无进度环**（中心 `thumb-spinner` 已表达「进行中」，见 `MasonryThumbnail.vue:99`）。
+- 内容：**阶段图标 + 短文字**（如"⟳ 解码"），**无进度环**（中心 `thumb-spinner` 已表达「进行中」，见 `MasonryThumbnail.vue:99`）。文字用 i18n `thumbnail.phase.{queued|decoding|resizing|encoding|writing}` 的短词，与 popover 时间线同源。
 - 图标（内嵌 SVG path，遵循 AGENTS.md「不用 lucide 包」）：
   - `queued`：沙漏/三点
   - `decoding`：向下箭头入框（图像下载意象）
   - `resizing`：双向缩放箭头
   - `encoding`：方框包裹（编码意象）
   - `writing`：保存/磁盘
-- 尺寸：约 18×14px 胶囊，`bg: accent/0.92`，`color: #fff`，与现有 `masonry-badge`（左上 reading/finished）风格一致但不占同位（左上 vs 顶中）。
-- **failed 错误角标**（round-2）：同位置同尺寸，error 色（`rgb(248 113 113 / 0.92)`）+ 感叹号三角图标，复用 `.phase-badge.fail` 样式；是失败态 popover 的**唯一主动入口**（卡片中央的错误区保留 retry 按钮，职责不变）。
+- 尺寸：约 **auto 宽**（图标 + 短文字 + 内边距，约 50-64px）× 14px 胶囊，`bg: accent/0.92`，`color: #fff`，与现有 `masonry-badge`（左上 reading/finished）风格一致但不占同位（左上 vs 顶中）。
+- **failed 错误角标**（round-2）：同位置同尺寸，error 色（`rgb(248 113 113 / 0.92)`）+ 感叹号三角图标 + "失败"短文字，复用 `.phase-badge.fail` 样式；是失败态 popover 的**唯一主动入口**（卡片中央的错误区保留 retry 按钮，职责不变）。
 
 ### 5.2 显示时机
 
@@ -433,6 +433,7 @@ namespace 用 `thumbnail.*`（与 `fileBrowser.thumbnailRetry` 区分，新增�
 
 1. **进度粒度 = 5 阶段步进，非百分比**：decode 是 image crate 一次性阻塞调用，无逐行回调，百分比不可行（§1.1）。
 2. **角标无进度环**：中心 `thumb-spinner` 已表达「进行中」，角标只负责阶段标识，避免双环视觉冗余（用户决策）。
+3. **角标图标 + 短文字**（用户实测反馈 round-4）：纯图标辨识度不足（5 个相近 SVG 难分），加短文字标签（"解码"/"缩放"等）一眼可辨；popover 内完整时间线不变。
 3. **角标顶部居中，非右上角**：左上已被 reading/finished badge 占用；顶部居中与 badge 不冲突（用户决策）。
 4. **Popover 定位角标右侧优先**：用户指定；右侧不足自动翻转（右→左→下→上）。
 5. **字段砍 cache_key**：普通用户不关心，进日志不进 UI（选项 2，AGENTS.md「用 logger 不靠 UI 调试」）。

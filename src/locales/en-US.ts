@@ -412,6 +412,8 @@ export default {
   // module3.0.11: per-image thumbnail generation phases (spec §8)
   thumbnail: {
     phase: { queued: 'Queued', decoding: 'Decoding', resizing: 'Resizing', encoding: 'Encoding', writing: 'Writing' },
+    // badge short labels (round-4: badge text alongside icon)
+    badge: { queued: 'Queue', decoding: 'Decode', resizing: 'Resize', encoding: 'Encode', writing: 'Write', failed: 'Failed' },
     popover: {
       title: 'Thumbnail generation',
       elapsed: 'Elapsed {dur}',
