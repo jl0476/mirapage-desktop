@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { computed, nextTick, ref } from 'vue';
-import type { ThumbnailStateEvent } from '@/lib/tauri';
+import { computed, defineComponent, h, nextTick, ref } from 'vue';
+import { mount } from '@vue/test-utils';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type { ThumbnailProgressEvent, ThumbnailStateEvent } from '@/lib/tauri';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 import type { ThumbnailWindows } from './useMasonryLayout';
 
 // ─── mocks ─────────────────────────────────────────────────────────────
-let eventHandler: ((e: { payload: ThumbnailStateEvent }) => void) | null = null;
+// module3.0.11：state + progress 双事件通道（Map 按 event name 分发）
+const eventHandlers = new Map<string, (e: { payload: unknown }) => void>();
 const unlistenSpy = vi.fn();
 const requestSpy = vi.fn();
 const retrySpy = vi.fn();
@@ -14,8 +17,8 @@ const notifyEpochSpy = vi.fn();
 const notifyFastSpy = vi.fn();
 
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async (_evt: string, handler: (e: { payload: ThumbnailStateEvent }) => void) => {
-    eventHandler = handler;
+  listen: vi.fn(async (evt: string, handler: (e: { payload: unknown }) => void) => {
+    eventHandlers.set(evt, handler);
     return unlistenSpy;
   }),
 }));
@@ -40,6 +43,15 @@ function mkEntry(path: string, size = 1000): MediaEntry {
   return { name: path, path, isDirectory: false, isArchive: false, size, modifiedAt: 100 };
 }
 
+function fireState(payload: ThumbnailStateEvent) {
+  const h = eventHandlers.get('thumbnail://state');
+  if (h) h({ payload });
+}
+function fireProgress(payload: ThumbnailProgressEvent) {
+  const h = eventHandlers.get('thumbnail://progress');
+  if (h) h({ payload });
+}
+
 function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { width: number; height: number }> }) {
   const windows = opts?.windows ?? { visible: [], ahead: [], behind: [], idle: [] };
   const descriptor = ref<SourceDescriptor>(localDesc);
@@ -53,24 +65,35 @@ function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { wid
   const dpr = ref(1);
   const quality = ref<'standard' | 'high' | 'ultra'>('high');
   const scrollTop = ref(0);
-  const result = useMasonryThumbnails({
-    descriptor,
-    currentPath: ref(''),
-    entries,
-    thumbnailWindows: computed(() => windowsRef.value),
-    measuredMap,
-    colWidth,
-    dpr,
-    quality,
-    scrollTop,
-    originalUrlFor: (e) => `orig://${e.path}`,
+  // host 组件内调用：onBeforeUnmount 需要 active component instance（effectScope 不覆盖）
+  let result!: ReturnType<typeof useMasonryThumbnails>;
+  const Host = defineComponent({
+    setup() {
+      result = useMasonryThumbnails({
+        descriptor,
+        currentPath: ref(''),
+        entries,
+        thumbnailWindows: computed(() => windowsRef.value),
+        measuredMap,
+        colWidth,
+        dpr,
+        quality,
+        scrollTop,
+        originalUrlFor: (e) => `orig://${e.path}`,
+      });
+      return () => h('div');
+    },
   });
-  return { result, descriptor, entries, windowsRef, measuredMap, colWidthRef, dpr, quality, scrollTop };
+  const wrapper = mount(Host);
+  return {
+    result, descriptor, entries, windowsRef, measuredMap, colWidthRef, dpr, quality, scrollTop,
+    unmount: () => wrapper.unmount(),
+  };
 }
 
 beforeEach(() => {
   vi.useFakeTimers();
-  eventHandler = null;
+  eventHandlers.clear();
   unlistenSpy.mockClear();
   requestSpy.mockReset();
   retrySpy.mockReset();
@@ -169,8 +192,8 @@ describe('useMasonryThumbnails', () => {
     descriptor.value = { type: 'local', rootPath: 'D:/y' }; // epoch+1
     await nextTick();
     const curEpoch = result.epoch.value;
-    expect(eventHandler).not.toBeNull();
-    eventHandler!({ payload: { epoch: curEpoch - 1, cacheKey: 'k', path: 'a', state: 'cached', cachePath: '/c.webp', outputWidth: 1, outputHeight: 1, message: null } });
+    expect(eventHandlers.get('thumbnail://state')).toBeDefined();
+    fireState({ epoch: curEpoch - 1, cacheKey: 'k', path: 'a', state: 'cached', cachePath: '/c.webp', outputWidth: 1, outputHeight: 1, message: null });
     expect(result.stateMap.value.get('a')).toBeUndefined();
   });
 
@@ -178,7 +201,7 @@ describe('useMasonryThumbnails', () => {
     const { result } = setup();
     await nextTick();
     const curEpoch = result.epoch.value;
-    eventHandler!({ payload: { epoch: curEpoch, cacheKey: 'k', path: 'a', state: 'cached', cachePath: '/c.webp', outputWidth: 10, outputHeight: 8, message: null } });
+    fireState({ epoch: curEpoch, cacheKey: 'k', path: 'a', state: 'cached', cachePath: '/c.webp', outputWidth: 10, outputHeight: 8, message: null });
     expect(result.stateMap.value.get('a')?.kind).toBe('cached');
   });
 
@@ -194,7 +217,10 @@ describe('useMasonryThumbnails', () => {
     retrySpy.mockResolvedValue({ path: 'a', status: 'queued', cacheKey: 'ka' });
     result.retry('a');
     await nextTick();
-    expect(result.stateMap.value.get('a')?.kind).toBe('queued');
+    // module3.0.11：retry 预置 generating(queued)
+    const s = result.stateMap.value.get('a');
+    expect(s?.kind).toBe('generating');
+    if (s?.kind === 'generating') expect(s.phase).toBe('queued');
     // b 不受影响
     expect(result.stateMap.value.has('b')).toBe(false);
   });
@@ -216,7 +242,7 @@ describe('useMasonryThumbnails', () => {
     // listen 已在 setup 时注册 unlisten 句柄；此处验证 handler 已就绪
     await vi.runOnlyPendingTimersAsync();
     expect(unlistenSpy).not.toHaveBeenCalled(); // 还未卸载
-    expect(eventHandler).not.toBeNull();
+    expect(eventHandlers.get('thumbnail://state')).toBeDefined();
     void thumb;
   });
 
@@ -242,5 +268,142 @@ describe('useMasonryThumbnails', () => {
     const visibleKeys = args[3] as string[];
     expect(visibleKeys).toContain('ka');
     expect(visibleKeys).toContain('kb');
+  });
+});
+
+// ─── module3.0.11：generating 态 + progress 事件（round-1/2/3 修订全覆盖）──────
+describe('useMasonryThumbnails progress (module3.0.11)', () => {
+  it('queued IPC 返回 → generating(queued) 态 + 缓存 cacheKey', async () => {
+    const { result, entries, windowsRef } = setup();
+    entries.value = [mkEntry('a')];
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    await vi.runOnlyPendingTimersAsync();
+    const s = result.stateMap.value.get('a');
+    expect(s).toBeDefined();
+    expect(s!.kind).toBe('generating');
+    if (s!.kind === 'generating') {
+      expect(s!.phase).toBe('queued');
+      expect(s!.cacheKey).toBe('ckA');
+    }
+  });
+
+  it('progress 事件推进 phase 且 timings 累计 elapsed', async () => {
+    const { result, entries, windowsRef } = setup();
+    entries.value = [mkEntry('a')];
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    await vi.runOnlyPendingTimersAsync();
+    const ev: ThumbnailProgressEvent = { epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 2 };
+    fireProgress(ev);
+    let s = result.stateMap.value.get('a');
+    expect(s!.kind).toBe('generating');
+    if (s!.kind === 'generating') {
+      expect(s!.phase).toBe('decoding');
+      expect(s!.timings.decoding).toBe(2);
+      expect(s!.generationStartedAt).toBeDefined();
+    }
+    fireProgress({ ...ev, phase: 'resizing', elapsedMs: 30 });
+    s = result.stateMap.value.get('a');
+    if (s!.kind === 'generating') {
+      expect(s!.phase).toBe('resizing');
+      expect(s!.timings.resizing).toBe(30);
+      expect(s!.timings.decoding).toBe(2);
+    }
+  });
+
+  it('progress 事件 epoch 不匹配被忽略', async () => {
+    const { result, entries, windowsRef } = setup();
+    entries.value = [mkEntry('a')];
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    await vi.runOnlyPendingTimersAsync();
+    fireProgress({ epoch: 999, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 2 });
+    const s = result.stateMap.value.get('a');
+    expect(s!.kind).toBe('generating');
+    if (s!.kind === 'generating') expect(s!.phase).toBe('queued');
+  });
+
+  it('非 generating 态收到 progress 事件被忽略', async () => {
+    const { result, entries, windowsRef } = setup();
+    entries.value = [mkEntry('a')];
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'cached', cacheKey: 'ckA', cachePath: '/c/a.webp', width: 100, height: 100 }]);
+    await vi.runOnlyPendingTimersAsync();
+    expect(result.stateMap.value.get('a')!.kind).toBe('cached');
+    fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 2 });
+    expect(result.stateMap.value.get('a')!.kind).toBe('cached');
+  });
+
+  // round-1 P1-3：事件先于 queued 回包 → 缓冲消费，decoding 不丢
+  it('progress 事件先于 queued 回包 → 缓冲消费，phase 不丢', async () => {
+    const { result, entries, windowsRef } = setup();
+    entries.value = [mkEntry('a')];
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 1 });
+    await vi.runOnlyPendingTimersAsync();
+    const s = result.stateMap.value.get('a');
+    expect(s?.kind).toBe('generating');
+    if (s?.kind === 'generating') {
+      expect(s.phase).toBe('decoding');
+      expect(s.timings.decoding).toBe(1);
+      expect(s.generationStartedAt).toBeDefined();
+    }
+  });
+
+  // round-1 P1-3：终态事件先于 queued 回包 → 回包不降级覆盖（无永久 spinner）
+  it('cached 完成事件先于 queued 回包 → 回包不降级覆盖', async () => {
+    const { result, entries, windowsRef } = setup();
+    entries.value = [mkEntry('a')];
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    fireState({ epoch: 0, state: 'cached', path: 'a', cacheKey: 'ckA', cachePath: '/c/a.webp', outputWidth: 100, outputHeight: 100, message: null });
+    await vi.runOnlyPendingTimersAsync();
+    expect(result.stateMap.value.get('a')?.kind).toBe('cached');
+  });
+
+  // round-1 P1-6：failed 覆盖 generating 后快照保留（失败时间线数据源）
+  it('failed 后 progressSnapshots 保留最后快照', async () => {
+    const { result, entries, windowsRef } = setup();
+    entries.value = [mkEntry('a')];
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    await vi.runOnlyPendingTimersAsync();
+    fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 5 });
+    fireState({ epoch: 0, state: 'failed', path: 'a', cacheKey: 'ckA', cachePath: null, outputWidth: null, outputHeight: null, message: 'boom' });
+    expect(result.stateMap.value.get('a')?.kind).toBe('failed');
+    const snap = result.progressSnapshots.value.get('a');
+    expect(snap?.phase).toBe('decoding');
+    expect(snap?.timings.decoding).toBe(5);
+  });
+
+  // round-1 P1-5：unmount 解绑两个监听
+  it('unmount 同时解绑 state 与 progress 两个监听（防泄漏）', async () => {
+    const { unmount } = setup();
+    await Promise.resolve(); // 让 listen 的 promise resolve 到 .then
+    unlistenSpy.mockClear();
+    unmount();
+    expect(unlistenSpy).toHaveBeenCalledTimes(2);
+  });
+
+  // round-2：unmount 先于 listen resolve → 迟到 unlisten 立即调用（disposed 守卫）
+  it('unmount 先于 listen resolve → 迟到的 unlisten 立即调用', async () => {
+    const defer = () => {
+      let resolve!: (fn: UnlistenFn) => void;
+      const promise = new Promise<UnlistenFn>((res) => { resolve = res; });
+      return { promise, resolve };
+    };
+    const d1 = defer();
+    const d2 = defer();
+    vi.mocked(listen)
+      .mockImplementationOnce(() => d1.promise)  // state 监听
+      .mockImplementationOnce(() => d2.promise); // progress 监听
+    const { unmount } = setup();
+    unmount(); // disposed = true（unlisten 均未到手）
+    const lateUnlisten = vi.fn();
+    d2.resolve(lateUnlisten);
+    await Promise.resolve();
+    expect(lateUnlisten).toHaveBeenCalledTimes(1); // 不是存起来等下一次 unmount
   });
 });

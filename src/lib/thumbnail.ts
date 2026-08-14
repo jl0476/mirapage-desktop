@@ -174,9 +174,38 @@ export type ThumbnailState =
   | { kind: 'original'; url: string }
   | { kind: 'cached'; cacheKey: string; path: string; width: number; height: number }
   | { kind: 'queued'; cacheKey: string }
-  | { kind: 'generating'; cacheKey: string }
+  | {
+      kind: 'generating';
+      cacheKey: string;
+      phase: ThumbnailPhase;
+      /** 进入 generating（queued 回包 / retry 预置）的墙钟——含排队，「已用时」用。 */
+      startedAt: number;
+      /** 首个 progress 事件 `Date.now() - elapsedMs` 反推的 generate 实际开始墙钟——
+       * 不含排队，阶段时长推算用（round-1 P1-4）。 */
+      generationStartedAt?: number;
+      timings: Partial<Record<ThumbnailPhase, number>>;
+    }
   | { kind: 'failed'; cacheKey: string; retryable: boolean; message: string }
   | { kind: 'unsupported' };
+
+/** 生成阶段（module3.0.11 §3.1）。queued 由前端 IPC 返回设置，其余 4 个由 thumbnail://progress 事件推进。 */
+export type ThumbnailPhase = 'queued' | 'decoding' | 'resizing' | 'encoding' | 'writing';
+
+/** 阶段推进顺序（时间线渲染用）。 */
+export const THUMBNAIL_PHASES: readonly ThumbnailPhase[] = [
+  'queued', 'decoding', 'resizing', 'encoding', 'writing',
+] as const;
+
+/**
+ * 进度快照（round-1 P1-6）：failed 事件会整体覆盖 generating 态，
+ * 快照按 path 保住最后的 phase/timings，喂给 popover 失败时间线。
+ */
+export interface ThumbnailProgressSnapshot {
+  phase: ThumbnailPhase;
+  timings: Partial<Record<ThumbnailPhase, number>>;
+  startedAt: number;
+  generationStartedAt?: number;
+}
 
 /**
  * Rust 批量请求的同步返回（§13.2）。请求当即能判定的状态：

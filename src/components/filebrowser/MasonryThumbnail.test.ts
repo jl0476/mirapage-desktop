@@ -43,7 +43,7 @@ describe('MasonryThumbnail.vue', () => {
   });
 
   it('generating：显示 spinner', () => {
-    const w = mountThumb({ kind: 'generating', cacheKey: 'k' });
+    const w = mountThumb({ kind: 'generating', cacheKey: 'k', phase: 'queued', startedAt: Date.now(), timings: {} });
     expect(w.find('.thumb-spinner').exists()).toBe(true);
   });
 

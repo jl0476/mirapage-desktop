@@ -246,6 +246,15 @@ export interface ThumbnailStateEvent {
   message: string | null;
 }
 
+/** thumbnail://progress 事件载荷（module3.0.11 生成阶段步进）。 */
+export interface ThumbnailProgressEvent {
+  epoch: number;
+  cacheKey: string;
+  path: string;
+  phase: 'decoding' | 'resizing' | 'encoding' | 'writing';
+  elapsedMs: number;
+}
+
 /** 批量请求缩略图状态（命中直返 cached/original，未命中 queued 后由事件通知）。 */
 export async function requestThumbnails(
   descriptor: SourceDescriptor,

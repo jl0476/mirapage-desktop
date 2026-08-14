@@ -13,12 +13,15 @@ import {
   requestThumbnails,
   retryThumbnail,
   thumbnailCacheUrl,
+  type ThumbnailProgressEvent,
   type ThumbnailStateEvent,
 } from '@/lib/tauri';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 import {
   THUMBNAIL_QUALITY_MARGIN,
+  type ThumbnailPhase,
   type ThumbnailPriority,
+  type ThumbnailProgressSnapshot,
   type ThumbnailQuality,
   type ThumbnailRequestItem,
   type ThumbnailState,
@@ -58,6 +61,8 @@ export interface UseMasonryThumbnailsParams {
 
 export interface UseMasonryThumbnailsReturn {
   stateMap: ComputedRef<Map<string, ThumbnailState>>;
+  /** module3.0.11：失败态时间线快照（failed 事件覆盖 generating 态后明细已丢）。 */
+  progressSnapshots: ComputedRef<Map<string, ThumbnailProgressSnapshot>>;
   retry: (path: string) => void;
   retryBatch: (paths: string[]) => void;
   regenerate: (path: string) => void;
@@ -91,6 +96,25 @@ export function useMasonryThumbnails(
   let unlisten: UnlistenFn | null = null;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /** round-1 P1-3：progress 事件先于 queued 回包到达时的竞态缓冲（每 path 留最新）。 */
+  const pendingProgress = new Map<string, ThumbnailProgressEvent>();
+  /** round-1 P1-6：失败态时间线快照（failed 事件覆盖 generating 态后明细已丢）。 */
+  const progressSnapshots = shallowRef<Map<string, ThumbnailProgressSnapshot>>(new Map());
+  /** round-2：listen() 异步——unmount 先于 .then(fn) 到达时防泄漏。 */
+  let disposed = false;
+
+  const setSnapshot = (path: string, snap: ThumbnailProgressSnapshot) => {
+    const next = new Map(progressSnapshots.value);
+    next.set(path, snap);
+    progressSnapshots.value = next;
+  };
+  const deleteSnapshot = (path: string) => {
+    if (!progressSnapshots.value.has(path)) return;
+    const next = new Map(progressSnapshots.value);
+    next.delete(path);
+    progressSnapshots.value = next;
+  };
+
   const setState = (path: string, s: ThumbnailState) => {
     const next = new Map(state.value);
     next.set(path, s);
@@ -101,6 +125,9 @@ export function useMasonryThumbnails(
   const bumpEpoch = () => {
     const old = epoch.value;
     epoch.value += 1;
+    // 旧目录的竞态缓冲/进度快照不再有效（round-1 P1-3/P1-6）
+    pendingProgress.clear();
+    progressSnapshots.value = new Map();
     void notifyThumbnailEpoch(epoch.value);
     log('[thumbnail] epoch changed old=' + old + ' new=' + epoch.value);
   };
@@ -270,14 +297,35 @@ export function useMasonryThumbnails(
             });
           }
           break;
-        case 'queued':
-          setState(r.path, { kind: 'queued', cacheKey: r.cacheKey ?? '' });
+        case 'queued': {
+          const prev = state.value.get(r.path);
+          // round-1 P1-3 顺序守卫：Tauri 事件与 invoke 回包无先后保证。同 cacheKey 的
+          // progress/完成事件先到时保留事件写入的状态——否则 cached/failed 被降级回
+          // generating（永久 spinner）或 phase 被重置回 queued。cacheKey 不同
+          // （列宽/质量变化后的重请求）正常覆盖。
+          const raced = prev && 'cacheKey' in prev && prev.cacheKey === (r.cacheKey ?? '');
+          if (!raced) {
+            setState(r.path, {
+              kind: 'generating',
+              cacheKey: r.cacheKey ?? '',
+              phase: 'queued',
+              startedAt: Date.now(),
+              timings: {},
+            });
+          }
+          // 消费先于回包缓冲的 progress 事件（decoding 等已到但状态尚未建立）
+          const buffered = pendingProgress.get(r.path);
+          if (buffered && buffered.cacheKey === (r.cacheKey ?? '')) {
+            pendingProgress.delete(r.path);
+            applyProgressEvent(buffered);
+          }
           if (r.cacheKey) {
             const next = new Map(pathToCacheKey.value);
             next.set(r.path, r.cacheKey);
             pathToCacheKey.value = next;
           }
           break;
+        }
         case 'failed':
           setState(r.path, {
             kind: 'failed',
@@ -355,6 +403,49 @@ export function useMasonryThumbnails(
     }
   });
 
+  // 监听生成阶段步进事件（module3.0.11）
+  // progress 事件统一应用点（直接到达 / queued 回包后消费缓冲两条路径共用）
+  function applyProgressEvent(p: ThumbnailProgressEvent) {
+    const prev = state.value.get(p.path);
+    if (!prev || prev.kind !== 'generating' || prev.cacheKey !== p.cacheKey) return;
+    if (p.phase === prev.phase) return; // 幂等：同阶段事件不重复应用
+    const generationStartedAt = prev.generationStartedAt ?? (Date.now() - p.elapsedMs);
+    const timings = { ...prev.timings, [p.phase]: p.elapsedMs };
+    setState(p.path, { ...prev, phase: p.phase as ThumbnailPhase, generationStartedAt, timings });
+    // 进度快照：failed 事件会整体覆盖 generating 态，快照保住时间线明细（round-1 P1-6）
+    setSnapshot(p.path, { phase: p.phase as ThumbnailPhase, timings, startedAt: prev.startedAt, generationStartedAt });
+  }
+
+  let progressEventCount = 0;
+  let progressUnlisten: UnlistenFn | null = null;
+  void listen<ThumbnailProgressEvent>('thumbnail://progress', (event) => {
+    const p = event.payload;
+    progressEventCount += 1;
+    if (p.epoch !== epoch.value) return;
+    const prev = state.value.get(p.path);
+    if (prev?.kind === 'generating') {
+      applyProgressEvent(p);
+      if (progressEventCount <= 20 || progressEventCount % 50 === 0) {
+        log('[thumbnail] progress event path=' + p.path + ' phase=' + p.phase + ' elapsedMs=' + p.elapsedMs);
+      }
+    } else {
+      // round-1 P1-3：事件先于 queued 回包到达 → 缓冲，回包建立 generating 态后消费。
+      // prev 为同 cacheKey 终态（cached/failed 已先到）则丢弃——生成已结束。
+      // original/unsupported 变体无 cacheKey，视为不匹配（缓冲）。
+      const prevKey = prev && 'cacheKey' in prev ? prev.cacheKey : undefined;
+      if (!prev || prevKey !== p.cacheKey) {
+        pendingProgress.set(p.path, p);
+      }
+    }
+  }).then((fn) => {
+    if (disposed) fn(); // round-2：组件已卸载，立即解绑迟到的监听
+    else progressUnlisten = fn;
+  }).catch((err) => {
+    if (isTauriEnv()) {
+      log('[useMasonryThumbnails] listen(thumbnail://progress) failed (unexpected in Tauri env)', err);
+    }
+  });
+
   const findEntry = (path: string): { entry: MediaEntry; item: ThumbnailRequestItem } | null => {
     const entry = params.entries.value.find((e) => e.path === path);
     if (!entry) return null;
@@ -386,7 +477,9 @@ export function useMasonryThumbnails(
   const retry = (path: string) => {
     const found = findEntry(path);
     if (!found) return;
-    setState(path, { kind: 'queued', cacheKey: pathToCacheKey.value.get(path) ?? '' });
+    // module3.0.11：预置 generating(queued)；删旧失败快照（不喂给新一轮）
+    deleteSnapshot(path);
+    setState(path, { kind: 'generating', cacheKey: pathToCacheKey.value.get(path) ?? '', phase: 'queued', startedAt: Date.now(), timings: {} });
     void retryThumbnail(params.descriptor.value, found.item, epoch.value).then((r) => {
       applyResults([r], new Map([[path, found.entry]]));
     });
@@ -400,7 +493,8 @@ export function useMasonryThumbnails(
   const regenerate = (path: string) => {
     const found = findEntry(path);
     if (!found) return;
-    setState(path, { kind: 'queued', cacheKey: pathToCacheKey.value.get(path) ?? '' });
+    deleteSnapshot(path);
+    setState(path, { kind: 'generating', cacheKey: pathToCacheKey.value.get(path) ?? '', phase: 'queued', startedAt: Date.now(), timings: {} });
     void regenerateThumbnail(params.descriptor.value, found.item, epoch.value).then((r) => {
       applyResults([r], new Map([[path, found.entry]]));
     });
@@ -412,12 +506,15 @@ export function useMasonryThumbnails(
   };
 
   onBeforeUnmount(() => {
+    disposed = true; // round-2：先立标志，迟到的 listen resolve 会立即自解绑
     if (debounceTimer) clearTimeout(debounceTimer);
     if (unlisten) unlisten();
+    if (progressUnlisten) progressUnlisten(); // round-1 P1-5：防监听器累积
   });
 
   return {
     stateMap: computed(() => state.value),
+    progressSnapshots: computed(() => progressSnapshots.value),
     retry,
     retryBatch,
     regenerate,

@@ -146,7 +146,7 @@ describe('thumbnail protocol', () => {
         { kind: 'original', url: 'asset://localhost/a.jpg' },
         { kind: 'cached', cacheKey: 'k1', path: 'C:/cache/v1/ab/k1.webp', width: 768, height: 576 },
         { kind: 'queued', cacheKey: 'k1' },
-        { kind: 'generating', cacheKey: 'k1' },
+        { kind: 'generating', cacheKey: 'k1', phase: 'queued', startedAt: 0, timings: {} },
         { kind: 'failed', cacheKey: 'k1', retryable: true, message: 'decode error' },
         { kind: 'unsupported' },
       ];
