@@ -369,3 +369,56 @@ describe('useVirtualList rowHeight: Ref<number>', () => {
     expect(visibleRange.value.end).toBe(10);
   });
 });
+
+// ─── scroll 事件同步（module3.0.11 期间发现的预存在 bug 修复）───────────────
+// 旧实现 rAF 节流两个缺陷：
+//  (a) `if (rafId !== null) return` —— pending rAF 未执行期间（页面不可见时 rAF
+//      暂停）所有 scroll 事件被丢弃，scrollTop.value 冻结 → thumbnailWindows
+//      computed 不再覆盖可见图 → 瀑布流卡片永久 spinner（快速滚动停滚后复现）
+//  (b) listener 绑 onMounted 时的元素快照，容器 DOM 被替换后失效
+// 修复：事件内直接同步赋值（Vue ref 赋值仅标记 dirty，computed/watcher 异步
+// 批处理，无每像素同步重算），并用 e.target 读值（自适应元素替换）。
+describe('useVirtualList scroll 同步（hotfix）', () => {
+  it('scroll 事件同步更新 scrollTop.value（不等 rAF）', async () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    let result!: ReturnType<typeof useVirtualList>;
+    const Host = defineComponent({
+      setup() {
+        result = useVirtualList(entries, { rowHeight: 29 });
+        return () => h('div', { ref: result.containerRef, style: 'height: 290px; overflow: auto;' }, [
+          h('div', { style: 'height: 2900px' }),
+        ]);
+      },
+    });
+    const w = mount(Host, { attachTo: document.body });
+    const el = result.containerRef.value!;
+    result.viewportHeight.value = 290;
+    el.scrollTop = 500;
+    el.dispatchEvent(new Event('scroll'));
+    // 同步断言：旧 rAF 实现此处 scrollTop.value 仍是 0（rAF 异步）
+    expect(result.scrollTop.value).toBe(500);
+    w.unmount();
+  });
+
+  it('连续快速 scroll 事件不丢最后一次的终点', () => {
+    const entries = ref(Array.from({ length: 100 }, (_, i) => mockEntry(`f${i}`)));
+    let result!: ReturnType<typeof useVirtualList>;
+    const Host = defineComponent({
+      setup() {
+        result = useVirtualList(entries, { rowHeight: 29 });
+        return () => h('div', { ref: result.containerRef, style: 'height: 290px; overflow: auto;' }, [
+          h('div', { style: 'height: 2900px' }),
+        ]);
+      },
+    });
+    const w = mount(Host, { attachTo: document.body });
+    const el = result.containerRef.value!;
+    result.viewportHeight.value = 290;
+    for (const v of [100, 300, 800, 1200, 1600]) {
+      el.scrollTop = v;
+      el.dispatchEvent(new Event('scroll'));
+    }
+    expect(result.scrollTop.value).toBe(1600);
+    w.unmount();
+  });
+});

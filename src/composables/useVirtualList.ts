@@ -143,8 +143,7 @@ export function useVirtualList(
   // - ResizeObserver 不可用时降级为 window.resize (兜底)
   // - onUnmounted 必须在 setup 顶层调用 (Vue 警告), 不能塞在 onMounted 内
   let ro: ResizeObserver | null = null;
-  let onScroll: (() => void) | null = null;
-  let rafId: number | null = null;
+  let onScroll: ((e: Event) => void) | null = null;
   let resizeFallback: (() => void) | null = null;
 
   onMounted(() => {
@@ -170,15 +169,17 @@ export function useVirtualList(
       window.addEventListener('resize', resizeFallback);
     }
 
-    // scroll → rAF 节流 → scrollTop
-    onScroll = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        if (containerRef.value) {
-          scrollTop.value = containerRef.value.scrollTop;
-        }
-        rafId = null;
-      });
+    // scroll → scrollTop 同步（hotfix：去掉 rAF 节流）
+    // 旧 rAF 实现两个缺陷：
+    //  (a) `if (rafId !== null) return` —— pending rAF 未执行期间（页面不可见
+    //      时 rAF 暂停）所有 scroll 事件被丢弃 → scrollTop.value 冻结 →
+    //      thumbnailWindows 不再覆盖可见图 → 瀑布流卡片永久 spinner
+    //      （快速滚动停滚后复现，module3.0.11 实测发现）
+    //  (b) listener 绑 onMounted 时的元素快照，容器 DOM 被替换后失效
+    // 直接同步赋值安全：Vue ref 赋值仅标记 dirty，computed/watcher 走异步
+    // 批处理，不会每像素同步重算；e.target 自适应元素替换。
+    onScroll = (e: Event) => {
+      scrollTop.value = (e.target as HTMLElement).scrollTop;
     };
     el.addEventListener('scroll', onScroll, { passive: true });
   });
@@ -210,10 +211,6 @@ export function useVirtualList(
     if (resizeFallback) {
       window.removeEventListener('resize', resizeFallback);
       resizeFallback = null;
-    }
-    if (rafId !== null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
     }
     if (onScroll) {
       containerRef.value?.removeEventListener('scroll', onScroll);
