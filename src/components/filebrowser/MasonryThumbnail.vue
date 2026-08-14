@@ -6,14 +6,20 @@
 import { computed, ref } from 'vue';
 import type { ThumbnailState } from '@/lib/thumbnail';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   state?: ThumbnailState;
   alt: string;
-}>();
+  /** 角标是否可交互（MasonryView 绑 settingsStore.thumbnailDetailPopover 逐层下传）。
+   *  false = 纯指示：disabled（cursor: default、不派发用户点击）。round-3 spec §7.2。 */
+  badgeInteractive?: boolean;
+}>(), {
+  badgeInteractive: true,
+});
 
 const emit = defineEmits<{
   (e: 'retry'): void;
   (e: 'load-error'): void;
+  (e: 'show-progress', el: HTMLElement): void;
 }>();
 
 const loaded = ref(false);
@@ -34,6 +40,29 @@ const showSpinner = computed(() => {
 
 const isFailed = computed(() => props.state?.kind === 'failed');
 
+// module3.0.11：阶段角标（generating）+ 错误角标（failed，round-2 必修——
+// 失败详情 popover 的唯一主动入口，否则事后无法再打开时间线/重试）。
+const showPhaseBadge = computed(() => {
+  const k = props.state?.kind;
+  return k === 'generating' || k === 'failed';
+});
+
+const phaseLabel = computed(() => {
+  const s = props.state;
+  if (s?.kind === 'failed') return 'generation failed'; // 任务 9 换 i18n（thumbnail.popover.failed）
+  if (s?.kind !== 'generating') return '';
+  return `thumbnail phase: ${s.phase}`;  // 具体 i18n 在任务 9 换 t()
+});
+
+// round-1 P2：直传角标元素（currentTarget 在派发期间有效，须在 handler 内取）。
+// round-3：badgeInteractive=false 守卫——dispatchEvent 会绕过 disabled 派发
+//（测试/程序化路径），handler 内再拦一道。
+function onBadgeClick(e: MouseEvent) {
+  if (!props.badgeInteractive) return;
+  const el = e.currentTarget instanceof HTMLElement ? e.currentTarget : null;
+  if (el) emit('show-progress', el);
+}
+
 function onRetry(e: MouseEvent) {
   e.stopPropagation();
   emit('retry');
@@ -50,6 +79,26 @@ function onError() {
 
 <template>
   <div class="masonry-thumb">
+    <button
+      v-if="showPhaseBadge"
+      class="phase-badge"
+      :class="{ fail: props.state?.kind === 'failed' }"
+      type="button"
+      :disabled="!badgeInteractive"
+      :title="phaseLabel"
+      :aria-label="phaseLabel"
+      @click.stop="onBadgeClick"
+    >
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <!-- round-2 必修：failed 错误角标（失败详情 popover 的唯一主动入口） -->
+        <path v-if="props.state?.kind === 'failed'" d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+        <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'queued'" d="M12 6v6l4 2" />
+        <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'decoding'" d="M12 3v10m0 0-4-4m4 4 4-4" />
+        <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'resizing'" d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+        <path v-else-if="props.state?.kind === 'generating' && props.state.phase === 'encoding'" d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2" />
+        <path v-else d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
+      </svg>
+    </button>
     <img
       v-if="imgSrc"
       :src="imgSrc"
@@ -94,6 +143,33 @@ function onError() {
   opacity: 1;
   transition: opacity 120ms ease-out;
 }
+
+/* module3.0.11：阶段角标——卡片顶部居中胶囊（spec §5.1） */
+.phase-badge {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: rgb(99 102 241 / 0.92);
+  color: #fff;
+  cursor: pointer;
+  z-index: 3;
+  line-height: 1;
+}
+.phase-badge:hover { background: rgb(99 102 241); }
+/* round-2 必修：failed 错误角标（失败详情 popover 入口） */
+.phase-badge.fail { background: rgb(248 113 113 / 0.92); }
+.phase-badge.fail:hover { background: rgb(248 113 113); }
+/* round-3：纯指示态（开关关）——disabled 按钮显式 default 光标（Chromium 默认即是，显式兜底） */
+.phase-badge:disabled { cursor: default; }
 
 /* spinner：仅 transform: rotate，无滤镜/模糊/box-shadow */
 .thumb-spinner {

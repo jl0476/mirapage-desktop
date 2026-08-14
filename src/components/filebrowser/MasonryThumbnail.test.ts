@@ -17,9 +17,9 @@ const i18n = createI18n({
   messages: { 'zh-CN': zhCN },
 });
 
-function mountThumb(state?: ThumbnailState) {
+function mountThumb(state?: ThumbnailState, extraProps: Record<string, unknown> = {}) {
   return mount(MasonryThumbnail, {
-    props: { state, alt: 'x.jpg' },
+    props: { state, alt: 'x.jpg', ...extraProps },
     global: { plugins: [i18n] },
   });
 }
@@ -93,5 +93,69 @@ describe('MasonryThumbnail.vue', () => {
     const img = w.find('img');
     expect(img.attributes('loading')).toBe('lazy');
     expect(img.attributes('decoding')).toBe('async');
+  });
+});
+
+// ─── module3.0.11：阶段角标（round-1/2/3 修订全覆盖）──────────────────────
+describe('MasonryThumbnail phase badge (module3.0.11)', () => {
+  beforeEach(() => setActivePinia(createPinia()));
+
+  it('generating(queued) 显角标，点击 emit show-progress 携带角标元素', async () => {
+    const w = mountThumb({ kind: 'generating', cacheKey: 'k', phase: 'queued', startedAt: Date.now(), timings: {} });
+    const badge = w.find('.phase-badge');
+    expect(badge.exists()).toBe(true);
+    expect(w.find('.thumb-spinner').exists()).toBe(true);
+    await badge.trigger('click');
+    const emitted = w.emitted('show-progress');
+    expect(emitted).toBeTruthy();
+    // round-1 P2：payload 是角标 DOM 元素（MasonryView 用它定位，不走 querySelector）
+    expect(emitted![0]![0]).toBeInstanceOf(HTMLElement);
+  });
+
+  it('generating(decoding) 角标存在 + click 不冒泡到根', async () => {
+    const w = mountThumb({ kind: 'generating', cacheKey: 'k', phase: 'decoding', startedAt: Date.now(), timings: {} });
+    const badge = w.find('.phase-badge');
+    expect(badge.exists()).toBe(true);
+    const rootClick = vi.fn();
+    w.element.addEventListener('click', rootClick);
+    await badge.trigger('click');
+    expect(w.emitted('show-progress')).toBeTruthy();
+    expect(rootClick).not.toHaveBeenCalled(); // stopPropagation
+  });
+
+  it('cached / original / undefined 均无角标', () => {
+    for (const st of [
+      undefined,
+      { kind: 'cached', cacheKey: 'k', path: 'asset://c.webp', width: 100, height: 100 },
+      { kind: 'original', url: 'orig://a.jpg' },
+    ] as const) {
+      const w = mountThumb(st as never);
+      expect(w.find('.phase-badge').exists()).toBe(false);
+    }
+  });
+
+  // round-2 必修：failed 态保留错误角标——否则未在失败前打开 popover 的用户，
+  // 失败时间线与 popover 内重试按钮永不可达（spec §5.2/§6.3 决策 14）。
+  it('failed 显错误角标（error 色 + 感叹号图标），点击 emit show-progress 携带元素', async () => {
+    const w = mountThumb({ kind: 'failed', cacheKey: 'k', retryable: true, message: 'x' });
+    const badge = w.find('.phase-badge');
+    expect(badge.exists()).toBe(true);
+    expect(badge.classes()).toContain('fail');
+    await badge.trigger('click');
+    const emitted = w.emitted('show-progress');
+    expect(emitted).toBeTruthy();
+    expect(emitted![0]![0]).toBeInstanceOf(HTMLElement);
+  });
+
+  // round-3：开关关时角标纯指示——disabled + 不 emit（spec §7.2 实现契约）
+  it('badgeInteractive=false → 角标 disabled、点击不 emit（纯指示）', async () => {
+    const w = mountThumb(
+      { kind: 'generating', cacheKey: 'k', phase: 'queued', startedAt: Date.now(), timings: {} },
+      { badgeInteractive: false },
+    );
+    const badge = w.find('.phase-badge');
+    expect(badge.attributes('disabled')).toBeDefined();
+    await badge.trigger('click'); // dispatchEvent 会绕过 disabled，靠 handler 守卫兜底
+    expect(w.emitted('show-progress')).toBeUndefined();
   });
 });
