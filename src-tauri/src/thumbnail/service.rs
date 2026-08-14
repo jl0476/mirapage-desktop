@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub const EVENT_STATE: &str = "thumbnail://state";
 pub const EVENT_CACHE_INFO: &str = "thumbnail://cache-info";
 pub const EVENT_MIGRATION_PROGRESS: &str = "thumbnail://migration-progress";
+pub const EVENT_PROGRESS: &str = "thumbnail://progress";
 
 const ORIENTATION_VERSION: u32 = 1;
 
@@ -354,6 +355,20 @@ pub struct StateEvent {
     pub output_width: Option<u32>,
     pub output_height: Option<u32>,
     pub message: Option<String>,
+}
+
+/// `thumbnail://progress` 事件载荷（生成阶段步进）。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProgressEvent {
+    pub epoch: u64,
+    pub cache_key: String,
+    /// UI key（entry.path，当前目录内相对）。
+    pub path: String,
+    /// "decoding" | "resizing" | "encoding" | "writing"。
+    pub phase: String,
+    /// 从 generate 开始到本阶段开始的累计毫秒。
+    pub elapsed_ms: u64,
 }
 
 pub struct ThumbnailService {

@@ -82,6 +82,31 @@ impl fmt::Display for Priority {
     }
 }
 
+/// 单张缩略图生成的阶段步进（前端进度显示用，§3.1）。
+/// `Queued` 不经 generate_thumbnail（前端 IPC 返回即设置），故 generator 只发后 4 个。
+/// Serialize + rename_all = "lowercase"（round-1 P1）：序列化契约测试直接
+/// `serde_json::to_string(&GenPhase::X)`，漏 derive 无法编译；模式对齐 `Priority`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GenPhase {
+    Queued,
+    Decoding,
+    Resizing,
+    Encoding,
+    Writing,
+}
+
+/// GenPhase → 事件字符串（与前端 `ThumbnailPhase` 字面量一致）。
+pub fn phase_str(p: GenPhase) -> &'static str {
+    match p {
+        GenPhase::Queued => "queued",
+        GenPhase::Decoding => "decoding",
+        GenPhase::Resizing => "resizing",
+        GenPhase::Encoding => "encoding",
+        GenPhase::Writing => "writing",
+    }
+}
+
 /// 一个资源预设的全部可调维度（§8.1）。Custom 模式无预设，由用户高级参数决定。
 /// 注意：含 `f32` 屏数，仅 `PartialEq`，不 derive `Eq`。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -183,6 +208,25 @@ mod tests {
         assert!(Priority::Visible < Priority::Ahead);
         assert!(Priority::Ahead < Priority::Behind);
         assert!(Priority::Behind < Priority::Idle);
+    }
+
+    /// 生成阶段枚举序列化字符串与前端 `src/lib/thumbnail.ts` 字面量字节级一致。
+    #[test]
+    fn gen_phase_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&GenPhase::Queued).unwrap(), r#""queued""#);
+        assert_eq!(serde_json::to_string(&GenPhase::Decoding).unwrap(), r#""decoding""#);
+        assert_eq!(serde_json::to_string(&GenPhase::Resizing).unwrap(), r#""resizing""#);
+        assert_eq!(serde_json::to_string(&GenPhase::Encoding).unwrap(), r#""encoding""#);
+        assert_eq!(serde_json::to_string(&GenPhase::Writing).unwrap(), r#""writing""#);
+    }
+
+    #[test]
+    fn gen_phase_str_roundtrip() {
+        assert_eq!(phase_str(GenPhase::Queued), "queued");
+        assert_eq!(phase_str(GenPhase::Decoding), "decoding");
+        assert_eq!(phase_str(GenPhase::Resizing), "resizing");
+        assert_eq!(phase_str(GenPhase::Encoding), "encoding");
+        assert_eq!(phase_str(GenPhase::Writing), "writing");
     }
 
     #[test]
