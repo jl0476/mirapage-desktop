@@ -304,6 +304,20 @@ impl Actor {
                     p.subscribers.len()
                 ),
             );
+            // 同 cache_key 重提交：只提升优先级（min，只升不降），不换 epoch/job ——
+            // 同 key 意味着参数等价；旧 epoch 的 pending 会被 new_epoch drain，不会
+            // 出现"旧 epoch pending 存活 + 新 epoch 同 key 重提交"的时序。
+            if task.priority < p.task.priority {
+                log::write_log(
+                    "INFO",
+                    "thumbnail",
+                    &format!(
+                        "scheduler submit PROMOTE cacheKey={} {} -> {}",
+                        task.cache_key, p.task.priority, task.priority
+                    ),
+                );
+                p.task.priority = task.priority;
+            }
             p.subscribers.push(reply);
             return;
         }
@@ -829,6 +843,51 @@ mod tests {
         let (_job, reply) = recv_job(&mut rx).await;
         let _ = reply.send(Ok(ok_thumb()));
         assert!(matches!(r.await.unwrap(), Outcome::Cached(_)));
+    }
+
+    #[tokio::test]
+    async fn dedup_pending_promotes_idle_to_visible_during_fast_scroll() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        let _holder = handle.submit(task("holder", Priority::Visible, 1, 10));
+        let (_holder_job, holder_reply) = recv_job(&mut rx).await;
+        handle.set_fast_scrolling(true);
+
+        let idle = handle.submit(task("same", Priority::Idle, 1, 10));
+        let visible = handle.submit(task("same", Priority::Visible, 1, 10));
+        let _ = holder_reply.send(Ok(ok_thumb()));
+
+        let (job, reply) = recv_job(&mut rx).await;
+        assert_eq!(job.cache_path.to_string_lossy(), "/tmp/same.webp");
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(idle.await.unwrap(), Outcome::Cached(_)));
+        assert!(matches!(visible.await.unwrap(), Outcome::Cached(_)));
+    }
+    #[tokio::test]
+    async fn dedup_pending_does_not_demote_visible_to_idle() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        let _holder = handle.submit(task("holder", Priority::Visible, 1, 10));
+        let (_holder_job, holder_reply) = recv_job(&mut rx).await;
+        handle.set_fast_scrolling(true);
+
+        let visible = handle.submit(task("same", Priority::Visible, 1, 10));
+        // 低优先级重提交不得把高优先级 pending 降级回去，
+        // 否则快速滚动下完全复现 Idle 卡死 bug。
+        let idle = handle.submit(task("same", Priority::Idle, 1, 10));
+        let _ = holder_reply.send(Ok(ok_thumb()));
+
+        let (job, reply) = recv_job(&mut rx).await;
+        assert_eq!(job.cache_path.to_string_lossy(), "/tmp/same.webp");
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(visible.await.unwrap(), Outcome::Cached(_)));
+        assert!(matches!(idle.await.unwrap(), Outcome::Cached(_)));
     }
 
     #[tokio::test]
