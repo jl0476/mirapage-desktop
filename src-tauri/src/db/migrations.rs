@@ -118,6 +118,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 13 {
+        apply_013_descriptor_canonical_dedupe(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (13, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -563,6 +571,221 @@ fn apply_012_maintenance_retention(conn: &Connection) -> anyhow::Result<()> {
         [chrono_now()],
     )?;
 
+    Ok(())
+}
+
+/// Migration 013 — descriptor 序列化格式统一 + 重复行去重（2026-08-14）
+///
+/// 根因：2cb24e4（2026-08-12 路径身份修复）之前 `record_history`/`create_book` 直接
+/// `serde_json::to_string(&Value)`（serde_json Map 按字母序，rootPath 在前），之后改为
+/// typed `SourceDescriptor` 序列化（tag-first，type 在前）。同一 descriptor 解析值相同、
+/// 字符串不同 → `ON CONFLICT(source_descriptor, ...)` 永不命中 → browse_history /
+/// library 同目录出现「旧行 + 新行」双行（browse_history.book_id 指向两个 library 行，
+/// readStatus 旧行覆盖新行导致进度状态显示错误）。
+///
+/// 本迁移：
+/// ① browse_history：descriptor 重写为 typed canonical；同 (canonical, rel_path) 组
+///   保 last_visited_at 最大行（tie: 后写者），visit_count 求和。
+/// ② library：descriptor 重写为 canonical；同 (canonical, absolute_path) 组保 id 最大
+///   （最新创建）行，被删行的 progress / bookmark / book_tag 引用迁到保留行
+///   （progress 冲突时保 updated_at 大者）。
+/// 幂等：对已 canonical 且无重复的数据是 no-op；非法 JSON 行原样保留不迁移。
+fn apply_013_descriptor_canonical_dedupe(conn: &Connection) -> anyhow::Result<()> {
+    canonicalize_browse_history(conn)?;
+    canonicalize_library(conn)?;
+    Ok(())
+}
+
+/// descriptor 字符串 → typed canonical 串；解析失败原样返回（防御脏数据）。
+fn canonical_descriptor(s: &str) -> String {
+    serde_json::from_str::<crate::source::descriptor::SourceDescriptor>(s)
+        .ok()
+        .and_then(|d| serde_json::to_string(&d).ok())
+        .unwrap_or_else(|| s.to_string())
+}
+
+#[allow(clippy::type_complexity)]
+fn canonicalize_browse_history(conn: &Connection) -> anyhow::Result<()> {
+    // 1. 读全部行到内存（browse_history 行数受 retention 2000 上限约束）
+    let mut stmt = conn.prepare(
+        "SELECT source_descriptor, rel_path, display_name, last_visited_at, book_id, visit_count
+         FROM browse_history",
+    )?;
+    let rows: Vec<(String, String, String, i64, Option<i64>, i64)> = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    // 2. 分组合并：key = (canonical, rel_path)；保 last_visited_at 最大（tie: 后写者）
+    //    — 与前端 readStatus.refresh「同 key 取最新」语义一致
+    struct Best {
+        descriptor: String,
+        rel_path: String,
+        display_name: String,
+        last_visited_at: i64,
+        book_id: Option<i64>,
+        visit_count: i64,
+        order: usize,
+    }
+    let mut best: std::collections::HashMap<(String, String), Best> =
+        std::collections::HashMap::new();
+    for (i, (sd, rel, name, lva, bid, vc)) in rows.into_iter().enumerate() {
+        let canonical = canonical_descriptor(&sd);
+        let key = (canonical.clone(), rel.clone());
+        match best.get(&key) {
+            Some(b) if (lva, i) <= (b.last_visited_at, b.order) => {
+                // 旧行：只累计 visit_count
+                if let Some(b) = best.get_mut(&key) {
+                    b.visit_count += vc;
+                }
+            }
+            _ => {
+                let visit_total = vc + best.get(&key).map(|b| b.visit_count).unwrap_or(0);
+                best.insert(
+                    key,
+                    Best {
+                        descriptor: canonical,
+                        rel_path: rel,
+                        display_name: name,
+                        last_visited_at: lva,
+                        book_id: bid,
+                        visit_count: visit_total,
+                        order: i,
+                    },
+                );
+            }
+        }
+    }
+
+    // 3. 重写表（PK (source_descriptor, rel_path)，DELETE + 重插）
+    conn.execute("DELETE FROM browse_history", [])?;
+    let mut insert = conn.prepare(
+        "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id, visit_count)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?;
+    for b in best.into_values() {
+        insert.execute(rusqlite::params![
+            b.descriptor,
+            b.rel_path,
+            b.display_name,
+            b.last_visited_at,
+            b.book_id,
+            b.visit_count
+        ])?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::type_complexity)]
+fn canonicalize_library(conn: &Connection) -> anyhow::Result<()> {
+    // 1. 读全部行
+    let mut stmt = conn.prepare(
+        "SELECT id, title, source_descriptor, source_type, absolute_path,
+                cover_entry_path, cover_entry_name, page_count, last_read_at, added_at, is_favorite
+         FROM library",
+    )?;
+    let rows: Vec<(i64, String, String, String, String, Option<String>, Option<String>, i64, Option<i64>, i64, i64)> =
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(stmt);
+
+    // 2. 分组：key = (canonical, absolute_path)，组内保 id 最大（最新创建）。
+    //    两遍式（先定 keep 再生成 remap）避免链式映射在 3+ 行组里丢失中间行。
+    let mut groups: std::collections::HashMap<(String, String), Vec<i64>> =
+        std::collections::HashMap::new();
+    for (id, _title, sd, _st, abs, ..) in &rows {
+        let canonical = canonical_descriptor(sd);
+        groups.entry((canonical, abs.clone())).or_default().push(*id);
+    }
+    // (old_id → keep_id)：非 keep 行的引用迁到 keep 行
+    let remap: Vec<(i64, i64)> = groups
+        .iter()
+        .filter(|(_, ids)| ids.len() > 1)
+        .flat_map(|(_, ids)| {
+            let keep_id = ids.iter().copied().max().unwrap();
+            ids.iter()
+                .copied()
+                .filter(move |&id| id != keep_id)
+                .map(move |id| (id, keep_id))
+        })
+        .collect();
+
+    // 3. 迁移被删行的引用（progress / bookmark / book_tag）
+    for (old_id, keep_id) in &remap {
+        // progress：old 有行 → keep 也有时保 updated_at 大者，否则直接迁移
+        let old_ts: Option<i64> = conn
+            .query_row(
+                "SELECT updated_at FROM progress WHERE book_id = ?1",
+                [old_id],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(old_updated) = old_ts {
+            let keep_ts: Option<i64> = conn
+                .query_row(
+                    "SELECT updated_at FROM progress WHERE book_id = ?1",
+                    [keep_id],
+                    |r| r.get(0),
+                )
+                .ok();
+            match keep_ts {
+                Some(keep_updated) if keep_updated >= old_updated => {
+                    // 保留行的进度更新，旧行进度丢弃
+                    conn.execute("DELETE FROM progress WHERE book_id = ?1", [old_id])?;
+                }
+                _ => {
+                    // 旧行进度更新（或保留行无进度）→ 旧行进度顶替
+                    conn.execute("DELETE FROM progress WHERE book_id = ?1", [keep_id])?;
+                    conn.execute(
+                        "UPDATE progress SET book_id = ?1 WHERE book_id = ?2",
+                        rusqlite::params![keep_id, old_id],
+                    )?;
+                }
+            }
+        }
+        // bookmark / book_tag：OR REPLACE 吸收 (keep 已有同键) 的冲突
+        conn.execute(
+            "UPDATE OR REPLACE bookmark SET book_id = ?1 WHERE book_id = ?2",
+            rusqlite::params![keep_id, old_id],
+        )?;
+        conn.execute(
+            "UPDATE OR REPLACE book_tag SET book_id = ?1 WHERE book_id = ?2",
+            rusqlite::params![keep_id, old_id],
+        )?;
+        conn.execute("DELETE FROM library WHERE id = ?1", [old_id])?;
+    }
+
+    // 4. descriptor 全表重写为 canonical
+    let mut update = conn.prepare("UPDATE library SET source_descriptor = ?1 WHERE id = ?2")?;
+    for (id, _title, sd, ..) in &rows {
+        let canonical = canonical_descriptor(sd);
+        if &canonical != sd {
+            update.execute(rusqlite::params![canonical, id])?;
+        }
+    }
     Ok(())
 }
 
@@ -1052,14 +1275,14 @@ mod tests {
 
     #[test]
     fn migration_010_run_bumps_version_to_10() {
-        // 走完整 run()，验证版本号到最新且幂等（migration 012 后,完整 run 到 12）
+        // 走完整 run()，验证版本号到最新且幂等（migration 013 后,完整 run 到 13）
         let conn = Connection::open_in_memory().unwrap();
         super::run(&conn).unwrap();
 
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 12, "完整 run 后版本号应为 12");
+        assert_eq!(v, 13, "完整 run 后版本号应为 13");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -1391,7 +1614,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 12, "完整 run 后版本号应为 12");
+        assert_eq!(v, 13, "完整 run 后版本号应为 13");
 
         // 幂等：run() 的 current<12 守卫使重复调用不再执行 012
         super::run(&conn).expect("重复 run 应幂等无错");
@@ -1400,7 +1623,7 @@ mod tests {
         let v2: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 12, "重复 run 不应再升版本号");
+        assert_eq!(v2, 13, "重复 run 不应再升版本号");
     }
 
     /// 任务 7：EXPLAIN QUERY PLAN 手动验证（`--ignored --nocapture` 跑，输出写入报告）。
@@ -1459,5 +1682,223 @@ mod tests {
             "PLAN thumbnail: {}",
             detail(&conn, "SELECT cache_key FROM thumbnail_cache ORDER BY last_accessed_at ASC, cache_key ASC LIMIT 256")
         );
+    }
+
+    // —— Migration 013：descriptor 序列化格式统一 + 重复行去重（2026-08-14）——
+
+    /// 复刻 2cb24e4 前后两种序列化格式（解析值相同、字符串不同）
+    const OLD_FMT: &str = r#"{"rootPath":"D:\\Wallpaper","type":"local"}"#;
+    const NEW_FMT: &str = r#"{"type":"local","rootPath":"D:\\Wallpaper"}"#;
+    const CANONICAL: &str = r#"{"type":"local","rootPath":"D:\\Wallpaper"}"#;
+
+    #[test]
+    fn migration_013_dedupes_dual_format_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap(); // 跑到 012
+
+        // browse_history 双行同 rel_path（旧 book_id=1 lva=100 vc=3；新 book_id=3 lva=200 vc=2）
+        conn.execute(
+            "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id, visit_count)
+             VALUES (?1, 'normal', 'normal旧', 100, 1, 3)",
+            [OLD_FMT],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id, visit_count)
+             VALUES (?1, 'normal', 'normal新', 200, 3, 2)",
+            [NEW_FMT],
+        )
+        .unwrap();
+
+        // library 双行同 absolute_path（旧 id 自增=1，新 id=3——手动指定保证确定性）
+        conn.execute(
+            "INSERT INTO library (id, title, source_descriptor, source_type, absolute_path, page_count, added_at, is_favorite)
+             VALUES (1, 'normal', ?1, 'local', 'normal', 10, 1, 0)",
+            [OLD_FMT],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO library (id, title, source_descriptor, source_type, absolute_path, page_count, added_at, is_favorite)
+             VALUES (3, 'normal', $fmt, 'local', 'normal', 20, 2, 0)",
+            rusqlite::params![NEW_FMT],
+        )
+        .unwrap();
+
+        // progress 双行（旧 finished=0 updated=100；新 finished=1 updated=200）
+        conn.execute(
+            "INSERT INTO progress (book_id, page, reader_mode, image_name, updated_at, finished)
+             VALUES (1, 0, 'single', NULL, 100, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO progress (book_id, page, reader_mode, image_name, updated_at, finished)
+             VALUES (3, 211, 'single', NULL, 200, 1)",
+            [],
+        )
+        .unwrap();
+
+        // bookmark 指向旧 book
+        conn.execute(
+            "INSERT INTO bookmark (book_id, page, position, label, created_at)
+             VALUES (1, 5, NULL, 'bm', 1)",
+            [],
+        )
+        .unwrap();
+
+        super::apply_013_descriptor_canonical_dedupe(&conn).unwrap();
+
+        // browse_history: 单行 canonical，保最新行（lva=200, book_id=3, name=新），visit_count=5
+        let (sd, name, lva, bid, vc): (String, String, i64, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT source_descriptor, display_name, last_visited_at, book_id, visit_count
+                 FROM browse_history WHERE rel_path='normal'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap();
+        assert_eq!(sd, CANONICAL);
+        assert_eq!(name, "normal新");
+        assert_eq!(lva, 200);
+        assert_eq!(bid, Some(3));
+        assert_eq!(vc, 5, "visit_count 应求和 3+2");
+
+        // library: 单行 canonical，保 id=3
+        let (count, sd, id): (i64, String, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(source_descriptor), MAX(id) FROM library WHERE absolute_path='normal'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(sd, CANONICAL);
+        assert_eq!(id, 3);
+
+        // progress: 迁到 book_id=3（updated 大者胜出），finished=1 保留
+        let (bid, page, finished): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT book_id, page, finished FROM progress",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((bid, page, finished), (3, 211, 1));
+
+        // bookmark: book_id 迁到 3
+        let bm_bid: i64 = conn
+            .query_row("SELECT book_id FROM bookmark", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(bm_bid, 3);
+    }
+
+    #[test]
+    fn migration_013_keeps_progress_of_old_row_when_newer() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+        // 旧行（小 id）的 progress 更新（updated_at 更大）→ 顶替保留行进度
+        conn.execute(
+            "INSERT INTO library (id, title, source_descriptor, source_type, absolute_path, page_count, added_at, is_favorite)
+             VALUES (1, 'n', $fmt, 'local', 'n', 0, 1, 0)",
+            rusqlite::params![OLD_FMT],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO library (id, title, source_descriptor, source_type, absolute_path, page_count, added_at, is_favorite)
+             VALUES (3, 'n', $fmt, 'local', 'n', 0, 2, 0)",
+            rusqlite::params![NEW_FMT],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO progress (book_id, page, reader_mode, image_name, updated_at, finished)
+             VALUES (1, 99, 'single', NULL, 900, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO progress (book_id, page, reader_mode, image_name, updated_at, finished)
+             VALUES (3, 1, 'single', NULL, 100, 0)",
+            [],
+        )
+        .unwrap();
+
+        super::apply_013_descriptor_canonical_dedupe(&conn).unwrap();
+
+        let (bid, page, finished): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT book_id, page, finished FROM progress",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((bid, page, finished), (3, 99, 1), "updated_at 大的旧行进度应顶替");
+    }
+
+    #[test]
+    fn migration_013_canonicalizes_without_dupes_and_keeps_invalid_json() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+        // 单行旧格式（无重复）+ 一行非法 JSON
+        conn.execute(
+            "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id, visit_count)
+             VALUES (?1, 'normal', 'n', 100, 1, 1)",
+            [OLD_FMT],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id, visit_count)
+             VALUES ('not-json', 'x', 'x', 50, NULL, 1)",
+            [],
+        )
+        .unwrap();
+
+        super::apply_013_descriptor_canonical_dedupe(&conn).unwrap();
+
+        let sd: String = conn
+            .query_row(
+                "SELECT source_descriptor FROM browse_history WHERE rel_path='normal'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sd, CANONICAL, "无重复也应重写为 canonical");
+
+        let bad: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM browse_history WHERE source_descriptor='not-json'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, 1, "非法 JSON 行原样保留不迁移");
+
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM browse_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "无重复场景行数不变");
+    }
+
+    #[test]
+    fn migration_013_idempotent_rerun() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at, book_id, visit_count)
+             VALUES (?1, 'a', 'a', 100, 1, 2)",
+            [NEW_FMT],
+        )
+        .unwrap();
+
+        super::apply_013_descriptor_canonical_dedupe(&conn).unwrap();
+        super::apply_013_descriptor_canonical_dedupe(&conn).unwrap(); // 幂等重跑
+
+        let (n, vc): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(visit_count) FROM browse_history",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((n, vc), (1, 2), "重跑不产生重复 / 不重复累计 visit_count");
     }
 }

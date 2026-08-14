@@ -175,13 +175,33 @@ pub fn delete_history(
     db: tauri::State<crate::db::Db>,
 ) -> Result<(), String> {
     let conn = db.conn();
-    let descriptor_str = serde_json::to_string(&source_descriptor).map_err(|e| e.to_string())?;
+    delete_history_inner(&conn, &source_descriptor, &rel_path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 内部 SQL helper：`delete_history` 调它，测试也调它。
+///
+/// 2026-08-14 fix: descriptor 先反序列化为 SourceDescriptor 再序列化（typed canonical，
+/// 与 `record_history_inner` 一致）。之前直接 `to_string(&Value)` —— serde_json Map
+/// 按字母序输出（rootPath 在前），与 typed tag-first（type 在前）不同串，
+/// 导致 2cb24e4 之后写入的行 delete 匹配不到（删除静默失效）。
+pub(crate) fn delete_history_inner(
+    conn: &rusqlite::Connection,
+    source_descriptor: &serde_json::Value,
+    rel_path: &str,
+) -> rusqlite::Result<usize> {
+    let descriptor_str = match serde_json::from_value::<crate::source::descriptor::SourceDescriptor>(
+        source_descriptor.clone(),
+    ) {
+        Ok(d) => serde_json::to_string(&d).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+        // 非法 descriptor 保持原值（与旧行为一致，删不到行由调用方结果体现）
+        Err(_) => serde_json::to_string(source_descriptor)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+    };
     conn.execute(
         "DELETE FROM browse_history WHERE source_descriptor = ?1 AND rel_path = ?2",
         rusqlite::params![descriptor_str, rel_path],
     )
-    .map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 fn chrono_now() -> i64 {
@@ -347,5 +367,41 @@ mod tests {
         seed_history(&conn, 3);
         let res = list_history_inner(&conn, Some(2), Some("not-a-valid-cursor".to_string()));
         assert!(res.is_err(), "无效游标应返回参数错误");
+    }
+
+    // —— 2026-08-14 fix: delete_history descriptor canonical 化 ——
+
+    /// record_history (typed tag-first) 写入的行，用前端 raw Value（字母序字段
+    /// 顺序）删除应命中 —— 修复前 to_string(&Value) 生成字母序串匹配不到 typed 行。
+    #[test]
+    fn delete_history_inner_canonicalizes_descriptor_to_match_typed_rows() {
+        let conn = test_db();
+        let typed = serde_json::to_string(&crate::source::descriptor::SourceDescriptor::Local {
+            root_path: "D:/x".into(),
+        })
+        .unwrap();
+        record_history_inner(&conn, &typed, "/a", "A", 100, Some(1)).unwrap();
+
+        // 前端等价 raw Value：字段顺序与 typed 序列化不同（rootPath 在前）
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"rootPath":"D:/x","type":"local"}"#).unwrap();
+        let n = delete_history_inner(&conn, &v, "/a").unwrap();
+        assert_eq!(n, 1, "canonical 化后应删掉 typed 格式行");
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM browse_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    /// canonical 化不改变合法行删除语义（typed 串传 typed Value 也能删）。
+    #[test]
+    fn delete_history_inner_deletes_canonical_value_rows() {
+        let conn = test_db();
+        record_history_inner(&conn, r#"{"type":"local","rootPath":"D:/x"}"#, "/a", "A", 100, None).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"type":"local","rootPath":"D:/x"}"#).unwrap();
+        let n = delete_history_inner(&conn, &v, "/a").unwrap();
+        assert_eq!(n, 1);
     }
 }
