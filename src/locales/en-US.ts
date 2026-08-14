@@ -406,4 +406,18 @@ export default {
       openFileBrowser: 'Open file browser',
     },
   },
+  // module3.0.11: per-image thumbnail generation phases (spec §8)
+  thumbnail: {
+    phase: { queued: 'Queued', decoding: 'Decoding', resizing: 'Resizing', encoding: 'Encoding', writing: 'Writing' },
+    popover: {
+      title: 'Thumbnail generation',
+      elapsed: 'Elapsed {ms}ms',
+      stages: 'Stages',
+      image: 'Image',
+      sourceImage: 'Source',
+      output: 'Output',
+      failed: 'Generation failed',
+      retry: 'Regenerate',
+    },
+  },
 };

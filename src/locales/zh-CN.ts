@@ -408,4 +408,18 @@ export default {
       openFileBrowser: '打开文件浏览器',
     },
   },
+  // module3.0.11：单图缩略图生成阶段进度（spec §8）
+  thumbnail: {
+    phase: { queued: '排队中', decoding: '解码中', resizing: '缩放中', encoding: '编码中', writing: '写入中' },
+    popover: {
+      title: '缩略图生成',
+      elapsed: '已用时 {ms}ms',
+      stages: '阶段',
+      image: '图像',
+      sourceImage: '原图',
+      output: '输出',
+      failed: '生成失败',
+      retry: '重新生成',
+    },
+  },
 };
