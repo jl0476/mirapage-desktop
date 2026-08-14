@@ -34,6 +34,13 @@ import { validateSourceRelativePath } from '@/lib/relativePath';
 const REQUEST_DEBOUNCE_MS = 80;
 /** 停止滚动后多久才允许提交 idle（§5.3）。 */
 const IDLE_SETTLE_MS = 250;
+/**
+ * 连续滚动期间的请求保底间隔（hotfix）。
+ * 纯 debounce 在连续窗口变化（滚动事件间隔 <80ms）下会无限重置 timer——
+ * 滚多久请求就延迟多久（实测快速滚动 3 秒才漏出一条）。加保底节流：
+ * 距上次发出 ≥500ms 时下一条立即发，滚动中最多延迟 500ms。
+ */
+const REQUEST_MIN_INTERVAL_MS = 500;
 
 /** 每次 batch log 上限（path 数量），防止 flood */
 const BATCH_LOG_PATH_LIMIT = 12;
@@ -145,7 +152,21 @@ export function useMasonryThumbnails(
     },
   );
 
+  /** 距上次 flushRequest 发出的时刻（0 = 尚未发过）。保底节流用。 */
+  let lastFlushAt = 0;
+
   const scheduleRequest = () => {
+    const now = Date.now();
+    // 保底节流（hotfix）：距上次发出 ≥500ms（且已发过至少一次）→ 立即发，
+    // 不再等 debounce——连续滚动中每 500ms 必有一条请求覆盖途中的可见区。
+    if (lastFlushAt > 0 && now - lastFlushAt >= REQUEST_MIN_INTERVAL_MS) {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      void flushRequest();
+      return;
+    }
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(flushRequest, REQUEST_DEBOUNCE_MS);
   };
@@ -158,6 +179,7 @@ export function useMasonryThumbnails(
 
   const flushRequest = async () => {
     debounceTimer = null;
+    lastFlushAt = Date.now(); // 保底节流基准（hotfix）
     const reqEpoch = epoch.value;
     const w = params.thumbnailWindows.value;
     const prioMap = mergeWindowsToPriorities(w);

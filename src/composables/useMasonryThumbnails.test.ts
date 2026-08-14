@@ -407,3 +407,24 @@ describe('useMasonryThumbnails progress (module3.0.11)', () => {
     expect(lateUnlisten).toHaveBeenCalledTimes(1); // 不是存起来等下一次 unmount
   });
 });
+
+// module3.0.11-hotfix：连续滚动（窗口持续变化、间隔 <80ms debounce）期间，
+// 纯 debounce 会无限重置 timer → 滚多久请求延迟多久（实测快速滚动 3 秒
+// 才漏出一条请求）。修复：500ms 保底节流——滚动中最多 500ms 必发一条。
+it('连续窗口变化（模拟快速滚动）每 500ms 保底发一次请求', async () => {
+  const { entries, windowsRef } = setup({ measured: new Map([['a', { width: 1000, height: 800 }]]) });
+  entries.value = [mkEntry('a')];
+  requestSpy.mockResolvedValue([]);
+  // 第一条走 80ms debounce（挂载初始合并）
+  windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+  await vi.runOnlyPendingTimersAsync();
+  expect(requestSpy).toHaveBeenCalledTimes(1);
+  // 连续滚动 1.2s：每 50ms 变一次窗口（间隔 <80ms，纯 debounce 会全吞）
+  for (let t = 0; t < 1200; t += 50) {
+    windowsRef.value = { visible: [`a${t}`], ahead: [], behind: [], idle: [] };
+    entries.value = [mkEntry(`a${t}`)];
+    await vi.advanceTimersByTimeAsync(50);
+  }
+  // 500ms 保底：1.2s 连续变化至少再发 2 条（纯 debounce = 0 条）
+  expect(requestSpy.mock.calls.length).toBeGreaterThanOrEqual(3);
+});
