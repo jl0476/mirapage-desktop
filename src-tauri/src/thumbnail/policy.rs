@@ -124,8 +124,14 @@ const DIRECT_USE_MAX_BYTES: u64 = 2_000_000;
 const HARD_MAX_BYTES: u64 = 4_000_000;
 /// 直用原图总像素上限（2MP）。
 const DIRECT_USE_MAX_PIXELS: u64 = 2_000_000;
-/// 必生成总像素硬阈值（4MP）。
-const HARD_MAX_PIXELS: u64 = 4_000_000;
+/// 必生成总像素硬阈值（8MP）。
+///
+/// 2026-08-15 从 4MP 放宽（命中率报告 2026-08-10 方案 A）：4–8MP 典型手机照
+/// （如 1800×3202=5.76MP）不再仅因像素数命中硬闸，落回灰区低优生成，让位给
+/// 可见区任务。只影响"是否必生成"；输出预算仍是普通 3MP / 长图 4MP（§6.4），
+/// 不改变生成结果，缓存无需失效（不 bump THUMBNAIL_ALGORITHM_VERSION）。
+/// 宽度闸（> bucket×1.5）与体积/边长闸独立生效，小档位下窄宽大图仍可命中硬闸。
+const HARD_MAX_PIXELS: u64 = 8_000_000;
 /// 必生成单边硬阈值（4096px）。
 const HARD_MAX_EDGE: u32 = 4096;
 /// 直用宽度相对档位的倍数上限（×1.25）。
@@ -400,12 +406,25 @@ mod tests {
     }
 
     #[test]
-    fn decide_source_required_when_pixels_over_4mp() {
-        // 3000x2000=6MP > 4MP，体积 1MB，宽 3000 同时也超 1.5x 但走硬阈值
-        let d = decide_source(3000, 2000, 1_000_000, 1024);
+    fn decide_source_required_when_pixels_over_8mp() {
+        // 3072x2605≈8.003MP > 8MP，体积 1MB，bucket 2048：宽 3072<=3072（1.5x 边界值，
+        // 条件是严格 >）、边 3072<=4096 —— 仅像素闸命中 -> Required
+        let d = decide_source(3072, 2605, 1_000_000, 2048);
         assert!(matches!(
             d,
             SourceDecision::Generate { priority: GenerationUrgency::Required, .. }
+        ));
+    }
+
+    #[test]
+    fn decide_source_4_to_8mp_falls_to_gray_zone_when_other_gates_pass() {
+        // 1800x3202=5.76MP 手机照（2026-08-10 命中率报告实测目录），bucket 2048：
+        // 宽 1800<=3072、边 3202<=4096、500KB<=4MB、5.76MP<=8MP —— 硬闸全过；
+        // 但 5.76MP > 2MP 直用上限 -> 灰区低优生成（原 4MP 闸下是 Required）
+        let d = decide_source(1800, 3202, 500_000, 2048);
+        assert!(matches!(
+            d,
+            SourceDecision::Generate { priority: GenerationUrgency::Opportunistic, .. }
         ));
     }
 
