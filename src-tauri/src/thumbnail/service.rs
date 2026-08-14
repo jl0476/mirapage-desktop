@@ -17,7 +17,7 @@ use super::key::{self, CacheKeyInput};
 use super::migration::{self, MigrationMode, RealFs};
 use super::policy::{self, QualityPolicy, SourceDecision};
 use super::scheduler::{self, GenerateFn, GenerationJob, Outcome, QueuedTask, SchedulerConfig, SchedulerHandle};
-use super::{GenPhase, Priority, Quality, ThumbnailError, ThumbnailRequestItem, THUMBNAIL_ALGORITHM_VERSION};
+use super::{GenPhase, Priority, Quality, ThumbnailError, ThumbnailRequestItem, phase_str, THUMBNAIL_ALGORITHM_VERSION};
 use crate::db::Db;
 use crate::log;
 use crate::source::descriptor::SourceDescriptor;
@@ -39,6 +39,29 @@ pub fn quality_str(q: Quality) -> &'static str {
         Quality::High => "high",
         Quality::Ultra => "ultra",
     }
+}
+
+/// 为单个生成任务构造 progress 闭包：捕获身份 + AppHandle，emit thumbnail://progress
+/// （module3.0.11）。在 spawn_blocking 线程内被调用（scheduler.rs worker）；
+/// emit 非阻塞、不持 Db 锁，回调失败静默（`let _ =`），绝不做同步 IO。
+fn progress_closure_for(
+    app: AppHandle,
+    epoch: u64,
+    cache_key: String,
+    ui_path: String,
+) -> Option<std::sync::Arc<dyn Fn(GenPhase, u64) + Send + Sync>> {
+    Some(std::sync::Arc::new(move |phase, elapsed_ms| {
+        let _ = app.emit(
+            EVENT_PROGRESS,
+            ProgressEvent {
+                epoch,
+                cache_key: cache_key.clone(),
+                path: ui_path.clone(),
+                phase: phase_str(phase).to_string(),
+                elapsed_ms,
+            },
+        );
+    }))
 }
 
 pub fn is_local_descriptor(descriptor: &SourceDescriptor) -> bool {
@@ -587,9 +610,16 @@ impl ThumbnailService {
                 ),
             );
         }
-        for (task, cache_abs, item) in to_submit {
+        for (mut task, cache_abs, item) in to_submit {
             let cache_key = task.cache_key.clone();
             let target_bucket = task.job.target_width;
+            // module3.0.11：注入阶段进度闭包（emit thumbnail://progress）
+            task.job.on_progress = progress_closure_for(
+                self.app.clone(),
+                epoch,
+                cache_key.clone(),
+                item.path.clone(),
+            );
             let rx = self.scheduler.submit(task);
             let app = self.app.clone();
             let root_for_completion = cache_root.clone();
@@ -730,6 +760,14 @@ impl ThumbnailService {
         };
         let cache_key = task.cache_key.clone();
         let target_bucket = task.job.target_width;
+        // module3.0.11：注入阶段进度闭包（emit thumbnail://progress）
+        let mut task = task;
+        task.job.on_progress = progress_closure_for(
+            self.app.clone(),
+            epoch,
+            cache_key.clone(),
+            item.path.clone(),
+        );
         // P1-6: in-flight key 加入保护集合
         {
             let mut pk = self.protected_keys.lock().unwrap();
@@ -1208,6 +1246,25 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(cls, ItemClass::UseOriginal));
+    }
+
+    /// module3.0.11：progress 闭包产生的 ProgressEvent 序列化字段名与 phase_str 映射
+    /// 锁死（emit 本身由 scheduler 集成路径覆盖，纯单测无法收 tauri 事件）。
+    #[test]
+    fn progress_closure_emits_progress_event() {
+        let ev = ProgressEvent {
+            epoch: 7,
+            cache_key: "ck".into(),
+            path: "a.jpg".into(),
+            phase: phase_str(GenPhase::Decoding).to_string(),
+            elapsed_ms: 12,
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(json["epoch"], 7);
+        assert_eq!(json["cacheKey"], "ck");
+        assert_eq!(json["path"], "a.jpg");
+        assert_eq!(json["phase"], "decoding");
+        assert_eq!(json["elapsedMs"], 12);
     }
 
     #[test]
