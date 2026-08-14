@@ -64,6 +64,9 @@ export const useSettingsStore = defineStore('settings', () => {
   const recordBrowsePosition = ref(true);
   const restoreBrowsePositionOnEnter = ref(true);
 
+  // v0.1.0-module3.0.11: 点击角标是否弹生成详情浮层（默认开，spec §7）
+  const thumbnailDetailPopover = ref(true);
+
   const initialized = ref(false);
 
   /** 加载所有 settings（启动时调用） */
@@ -98,6 +101,7 @@ export const useSettingsStore = defineStore('settings', () => {
       // v0.1.0-module3.0.8 (任务 11): masonry 浏览位置 2 开关（'true'/'false' 字符串语义）
       ['fb_record_browse_position', (v) => (recordBrowsePosition.value = v !== 'false')],
       ['fb_restore_browse_position_on_enter', (v) => (restoreBrowsePositionOnEnter.value = v !== 'false')],
+      ['fb_thumbnail_detail_popover', (v) => (thumbnailDetailPopover.value = v !== 'false')],
       ...TOUCH_ZONES.map((z) =>
         [`touch_${TOUCH_ZONE_KEY[z]}`, (v) => (touchScheme[z] = v as TouchAction)] as [string, (v: string) => void],
       ),
@@ -251,6 +255,12 @@ export const useSettingsStore = defineStore('settings', () => {
     await setSetting('fb_restore_browse_position_on_enter', v ? 'true' : 'false');
   }
 
+  /** v0.1.0-module3.0.11: 角标点击弹详情开关（'true'/'false' 字符串语义）。 */
+  async function setThumbnailDetailPopover(v: boolean): Promise<void> {
+    thumbnailDetailPopover.value = v;
+    await setSetting('fb_thumbnail_detail_popover', v ? 'true' : 'false');
+  }
+
   /**
    * v0.1.0-reader-review-fix-9: 切换 reader_default_mode (in-memory + 持久化).
    *  - 修复 settings.update() 只持久化不更新 in-memory 的 bug
@@ -327,6 +337,9 @@ export const useSettingsStore = defineStore('settings', () => {
     // v0.1.0-module3.0.8 (任务 11): masonry 浏览位置 2 开关
     recordBrowsePosition,
     restoreBrowsePositionOnEnter,
+    // v0.1.0-module3.0.11: 角标点击弹详情开关
+    thumbnailDetailPopover,
+    setThumbnailDetailPopover,
     initialized,
     // 方法
     load,

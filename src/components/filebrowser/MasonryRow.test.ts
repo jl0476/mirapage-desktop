@@ -111,4 +111,19 @@ describe('MasonryRow.vue', () => {
     expect(ev).toBeTruthy();
     expect(ev![0][0]).toEqual(entry('page-001.jpg'));
   });
+
+  // module3.0.11：show-progress 转发（entry + 角标元素，round-1 P2）
+  it('show-progress 转发到父级（entry + 角标元素）', async () => {
+    const w = mount(MasonryRow, {
+      props: mkProps({ thumbState: { kind: 'generating', cacheKey: 'k', phase: 'decoding', startedAt: Date.now(), timings: {} } }),
+      global: { plugins: [createPinia(), i18n] },
+    });
+    const badge = w.find('.phase-badge');
+    await badge.trigger('click');
+    const emitted = w.emitted('show-progress');
+    expect(emitted).toBeTruthy();
+    // 转发链携带 entry + 角标 DOM 元素（MasonryView 不走 querySelector）
+    expect(emitted![0]![0]).toEqual(entry('page-001.jpg'));
+    expect(emitted![0]![1]).toBeInstanceOf(HTMLElement);
+  });
 });

@@ -124,6 +124,24 @@ vi.mock('@/lib/tauri', async () => {
 /** 测试用 layout map：null 表示空（让 layout map 为空），Map 表示预填。 */
 const fakeLayoutMap = { current: new Map<string, MasonryItem>() };
 
+// module3.0.11：mock 缩略图 composable，stateMap/progressSnapshots 由测试注入
+const thumbnailsMock = vi.hoisted(() => ({
+  stateMap: new Map<string, unknown>(),
+  progressSnapshots: new Map<string, unknown>(),
+}));
+
+vi.mock('@/composables/useMasonryThumbnails', () => ({
+  useMasonryThumbnails: () => ({
+    stateMap: computed(() => thumbnailsMock.stateMap),
+    progressSnapshots: computed(() => thumbnailsMock.progressSnapshots),
+    retry: vi.fn(),
+    retryBatch: vi.fn(),
+    regenerate: vi.fn(),
+    regenerateBatch: vi.fn(),
+    epoch: { value: 0 },
+  }),
+}));
+
 vi.mock('@/composables/useMasonryLayout', async () => {
   const actual = await vi.importActual<typeof import('@/composables/useMasonryLayout')>(
     '@/composables/useMasonryLayout',
@@ -378,6 +396,140 @@ describe('MasonryView.resize viewport anchor (task-21)', () => {
     // 不抛错即可（restoreResizeAnchor 内部 anchor 不存在返 null）
     expect(true).toBe(true);
 
+    w.unmount();
+  });
+});
+
+// ─── module3.0.11 — popover 接线（round-1/2/3 修订全覆盖）──────────────────
+describe('MasonryView.popover (module3.0.11)', () => {
+  /** happy-dom 的 getBoundingClientRect 返回全 0，会触发 width===0 守卫——测试里 stub 非零 rect。 */
+  function stubBadgeRect(el: Element, r = { left: 100, top: 50, width: 18, height: 14 }) {
+    el.getBoundingClientRect = () => ({
+      ...r, x: r.left, y: r.top, right: r.left + r.width, bottom: r.top + r.height,
+      toJSON: () => ({}),
+    } as DOMRect);
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['a.jpg', { path: 'a.jpg', width: 100, height: 100, top: 0, left: 0, col: 0 }],
+    ]);
+    thumbnailsMock.stateMap = new Map([
+      ['a.jpg', { kind: 'generating', cacheKey: 'ck', phase: 'decoding', startedAt: Date.now(), timings: {} }],
+    ]);
+    thumbnailsMock.progressSnapshots = new Map();
+  });
+
+  it('settings 开时点击角标 → 显示 popover', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    expect(badge.exists()).toBe(true);
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    w.unmount();
+  });
+
+  it('settings 关时点击角标 → 不弹 popover + 角标 disabled（round-3 prop 下传）', async () => {
+    const pinia = createPinia();
+    const settings = useSettingsStore(pinia);
+    settings.thumbnailDetailPopover = false;
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [pinia, i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    expect(badge.attributes('disabled')).toBeDefined();
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('ESC 关闭 popover', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('外部 mousedown 关闭；角标上的 mousedown 不关（toggle 交给 click）', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    // round-1 P2：角标 mousedown 跳过（否则 mousedown 先关、click 再开抖动）
+    badge.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    // 外部 mousedown：关闭（bubbles: true 才能到达 document 监听器）
+    document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('角标再点 toggle 关闭（spec §6.4）', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('特殊路径（含引号/反斜杠）弹 popover——元素直传不走 querySelector', async () => {
+    const weird = 'a"b\c.jpg';
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      [weird, { path: weird, width: 100, height: 100, top: 0, left: 0, col: 0 }],
+    ]);
+    thumbnailsMock.stateMap = new Map([
+      [weird, { kind: 'generating', cacheKey: 'ck', phase: 'decoding', startedAt: Date.now(), timings: {} }],
+    ]);
+    const w = mount(MasonryView, { props: { ...baseProps, entries: [img(weird)], canonicalImageNames: [weird] }, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge');
+    expect(badge.exists()).toBe(true);
+    stubBadgeRect(badge.element);
+    await badge.trigger('click'); // 旧实现此处 querySelector 语法错误
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    w.unmount();
+  });
+
+  it('failed 卡错误角标可打开失败详情 popover（round-2 必修：事后可达）', async () => {
+    thumbnailsMock.stateMap = new Map([
+      ['a.jpg', { kind: 'failed', cacheKey: 'ck', retryable: true, message: 'boom' }],
+    ]);
+    thumbnailsMock.progressSnapshots = new Map([
+      ['a.jpg', { phase: 'decoding', timings: { decoding: 3 }, startedAt: Date.now() - 1000 }],
+    ]);
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge.fail'); // 失败角标（非 generating）
+    expect(badge.exists()).toBe(true);
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+    expect(w.find('.err-msg').exists()).toBe(true); // 失败详情渲染
     w.unmount();
   });
 });

@@ -19,14 +19,19 @@ interface Props {
   left: number;
   mark: RowMark;
   selected: boolean;
+  /** 角标是否可交互（module3.0.11 round-3：MasonryView 绑设置逐层下传）。 */
+  badgeInteractive?: boolean;
 }
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  badgeInteractive: true,
+});
 
 defineEmits<{
   (e: 'row-click', entry: MediaEntry, event: MouseEvent): void;
   (e: 'row-dblclick', entry: MediaEntry, event: MouseEvent): void;
   (e: 'row-contextmenu', entry: MediaEntry, event: MouseEvent): void;
   (e: 'row-retry', entry: MediaEntry): void;
+  (e: 'show-progress', entry: MediaEntry, el: HTMLElement): void;
 }>();
 
 const { t } = useI18n();
@@ -68,7 +73,9 @@ function statusLabel(m: RowMark): string {
     <MasonryThumbnail
       :state="thumbState"
       :alt="entry.name"
+      :badge-interactive="badgeInteractive"
       @retry="$emit('row-retry', entry)"
+      @show-progress="(el) => $emit('show-progress', entry, el)"
     />
     <span v-if="mark !== 'none'" class="masonry-badge" :class="mark">{{ statusLabel(mark) }}</span>
   </div>

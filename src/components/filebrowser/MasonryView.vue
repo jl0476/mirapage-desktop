@@ -16,12 +16,14 @@ import {
   type MasonryViewportAnchor,
 } from '@/composables/useMasonryLayout';
 import { useMasonryThumbnails } from '@/composables/useMasonryThumbnails';
+import type { ThumbnailState } from '@/lib/thumbnail';
 import { useMasonryBrowsePosition } from '@/composables/useMasonryBrowsePosition';
 import { listImageDimensions } from '@/lib/tauri';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import { useSettingsStore } from '@/stores/settings';
 import MasonryRow from './MasonryRow.vue';
+import ThumbnailProgressPopover from './ThumbnailProgressPopover.vue';
 import type { MediaEntry, ReadStatusMap, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 interface Props {
@@ -122,10 +124,15 @@ onMounted(async () => {
   // 返回瀑布流深处时 needPrefetch 恒 true 不翻转 → watcher 停滞 → 视口附近图拿不到尺寸。
   // v0.1.0-module3.0.8 (任务 8): 启动浏览位置监听 + 查 progress + 可选自动滚
   await browsePosition.start();
+  // module3.0.11：popover ESC + 外部 mousedown 关闭
+  window.addEventListener('keydown', onKeydown);
+  document.addEventListener('mousedown', onDocMouseDown);
 });
 onUnmounted(() => {
   ro?.disconnect();
   if (resizeEndTimer) { clearTimeout(resizeEndTimer); resizeEndTimer = null; }
+  window.removeEventListener('keydown', onKeydown);
+  document.removeEventListener('mousedown', onDocMouseDown);
 });
 
 /** v0.1.0-module3.0.8 (任务 8): 目录切换时让 composable 重新初始化（spec §3.4 做法 A）。
@@ -134,6 +141,7 @@ onUnmounted(() => {
 watch(
   () => [props.descriptor, props.currentPath] as const,
   () => {
+    closeProgressPopover(); // module3.0.11：切目录关 popover（spec §6.4）
     browsePosition.stop();
     void browsePosition.start();
   },
@@ -160,7 +168,7 @@ const { layout, visibleRange, colWidth, thumbnailWindows, dimensionPrefetchPaths
 // 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 来自设置 store。
 const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
 const thumbQuality = computed(() => settingsStore.thumbnailQuality);
-const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateThumbnail, retryBatch: retryBatchFn, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
+const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, regenerate: regenerateThumbnail, retryBatch: retryBatchFn, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
   currentPath: toRef(props, 'currentPath'),
   entries: entriesRef,
@@ -172,6 +180,74 @@ const { stateMap: thumbStateMap, retry: retryThumbnail, regenerate: regenerateTh
   scrollTop,
   originalUrlFor: (e) => convertFileSrc(joinPath(joinPath(props.rootPath, props.currentPath), e.name)),
 });
+
+// ─── module3.0.11：单张生成详情 popover（round-1 P2 / round-2 / round-3）──────
+// anchorEl 是角标 DOM 元素（点击事件直传），杜绝 querySelector 拼接用户路径。
+interface PopoverState {
+  path: string;
+  anchorEl: HTMLElement;
+  rect: { left: number; top: number; width: number; height: number };
+  state: ThumbnailState;
+}
+const popoverState = ref<PopoverState | null>(null);
+
+function rectOf(r: DOMRect): { left: number; top: number; width: number; height: number } {
+  return { left: r.left, top: r.top, width: r.width, height: r.height };
+}
+
+function openProgressPopover(entry: MediaEntry, el: HTMLElement) {
+  // 第二道防线（第一道在角标 disabled，round-3 spec §7.2）
+  if (!settingsStore.thumbnailDetailPopover) return;
+  // 角标再点切换（spec §6.4 toggle）
+  if (popoverState.value?.path === entry.path) {
+    closeProgressPopover();
+    return;
+  }
+  const s = thumbStateMap.value.get(entry.path);
+  if (!s) return;
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0) return; // 虚拟滚动移出 DOM
+  popoverState.value = { path: entry.path, anchorEl: el, rect: rectOf(rect), state: s };
+}
+
+function closeProgressPopover() { popoverState.value = null; }
+
+// 滚动时用存储的 anchorEl 重测 rect；卡片被虚拟滚动移出 DOM（width 0）自动关闭。
+function onContainerScroll() {
+  if (!popoverState.value) return;
+  const rect = popoverState.value.anchorEl.getBoundingClientRect();
+  if (rect.width === 0) { closeProgressPopover(); return; }
+  popoverState.value.rect = rectOf(rect);
+}
+watch(scrollTop, onContainerScroll);
+
+// 角标状态推进/终态：popover 已开时同步 state；到终态（cached/original/unsupported）自动关
+watch(thumbStateMap, (m) => {
+  if (!popoverState.value) return;
+  const s = m.get(popoverState.value.path);
+  if (s && s.kind !== 'generating' && s.kind !== 'failed') closeProgressPopover();
+  else if (s) popoverState.value.state = s;
+});
+
+function entriesByPath(path: string): MediaEntry | undefined {
+  return props.entries.find((e) => e.path === path);
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') closeProgressPopover();
+}
+// round-1 P2：外部点击关闭（spec §6.4）。跳过 popover 根与 .phase-badge——
+// 角标交互交给 click 处理器做 toggle，避免 mousedown 先关、click 再开的抖动。
+// round-2：用 instanceof Element——角标/popover 内的 SVG、path 不是 HTMLElement，
+// 误判 null 会把角标内 SVG 点击当成"外部点击"先关再开（抖动）。
+function onDocMouseDown(e: MouseEvent) {
+  if (!popoverState.value) return;
+  const target = e.target instanceof Element ? e.target : null;
+  if (!target) return;
+  if (target.closest('[data-test="thumb-popover"]')) return;
+  if (target.closest('.phase-badge')) return;
+  closeProgressPopover();
+}
 
 // 暴露给父级 FileBrowser（移动到 browsePosition 定义后，见下方）
 
@@ -412,12 +488,27 @@ const loading = computed(() => {
         :left="v.item.left"
         :mark="v.mark"
         :selected="v.selected"
+        :badge-interactive="settingsStore.thumbnailDetailPopover"
         @row-click="(e, ev) => emit('row-click', e, ev)"
         @row-dblclick="(e, ev) => emit('row-dblclick', e, ev)"
         @row-contextmenu="(e, ev) => emit('row-contextmenu', e, ev)"
         @row-retry="(e) => retryThumbnail(e.path)"
+        @show-progress="(entry, el) => openProgressPopover(entry, el)"
       />
     </div>
+    <!-- module3.0.11：单张生成详情浮层（anchorEl 直传定位，无 querySelector） -->
+    <ThumbnailProgressPopover
+      v-if="popoverState"
+      :state="popoverState.state"
+      :snapshot="progressSnapshots.get(popoverState.path)"
+      :file-name="entriesByPath(popoverState.path)?.name ?? popoverState.path"
+      :source-width="measuredMap.get(popoverState.path)?.width ?? 0"
+      :source-height="measuredMap.get(popoverState.path)?.height ?? 0"
+      :source-bytes="entriesByPath(popoverState.path)?.size ?? 0"
+      :anchor-rect="popoverState.rect"
+      @close="closeProgressPopover"
+      @retry="retryThumbnail(popoverState.path); closeProgressPopover()"
+    />
     <!-- 加载提示: 首屏图片测量/字节未就绪时显示, 完成后自动隐藏 -->
     <div
       v-if="loading"
