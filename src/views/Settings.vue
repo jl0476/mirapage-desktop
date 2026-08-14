@@ -165,10 +165,13 @@ async function setTouchZonesEnabled(v: boolean) {
 }
 // v0.1.0-module3.0.8 (任务 12): masonry 浏览位置 2 开关 setter
 async function setRecordBrowsePosition(v: boolean) {
-  await settings.setRecordBrowsePosition(v);
-}
+  await settings.setRecordBrowsePosition(v);}
 async function setRestoreBrowsePositionOnEnter(v: boolean) {
   await settings.setRestoreBrowsePositionOnEnter(v);
+}
+// v0.1.0-module3.0.11: 角标点击弹详情开关
+async function setThumbnailDetailPopover(v: boolean) {
+  await settings.setThumbnailDetailPopover(v);
 }
 
 const touchGridRows: TouchZone[][] = [
@@ -244,6 +247,14 @@ function closeOpenCell(e: MouseEvent) {
               :disabled="!settings.recordBrowsePosition"
               data-test="restore-browse-position"
               @change="setRestoreBrowsePositionOnEnter"
+            />
+            <!-- module3.0.11：角标点击弹生成详情开关（spec §7） -->
+            <BooleanRow
+              :label="t('settings.fileBrowser.thumbnailDetailPopover')"
+              :description="t('settings.fileBrowser.thumbnailDetailPopoverDesc')"
+              :value="settings.thumbnailDetailPopover"
+              data-test="thumbnail-detail-popover"
+              @change="setThumbnailDetailPopover"
             />
           </div>
         </section>

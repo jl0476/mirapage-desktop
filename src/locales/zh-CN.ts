@@ -292,6 +292,9 @@ export default {
       recordBrowsePositionDesc: '在瀑布流视图滚动时自动记录最近浏览的图片。',
       restoreBrowsePosition: '进入目录时自动跳转',
       restoreBrowsePositionDesc: '关闭后只会记录，需要手动点击工具栏的「↶ 跳到上次」按钮。',
+      // module3.0.11：角标点击弹生成详情开关
+      thumbnailDetailPopover: '点击角标显示生成详情',
+      thumbnailDetailPopoverDesc: '开启后点击缩略图阶段/错误角标可查看生成阶段耗时与失败详情',
     },
     reader: {
       mode: '默认阅读模式',

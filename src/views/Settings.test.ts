@@ -125,6 +125,25 @@ describe('Settings.vue fileBrowser section (任务 12)', () => {
     expect(store.recordBrowsePosition).toBe(false);
   });
 
+  // module3.0.11：角标详情开关（settings.fileBrowser namespace）
+  it('renders thumbnail detail popover BooleanRow', () => {
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    const row = wrapper.find('[data-test="thumbnail-detail-popover"]');
+    expect(row.exists()).toBe(true);
+  });
+
+  it('点击 thumbnail-detail-popover 调 setThumbnailDetailPopover', async () => {
+    const store = useSettingsStore();
+    const spy = vi.spyOn(store, 'setThumbnailDetailPopover');
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    const row = wrapper.find('[data-test="thumbnail-detail-popover"]');
+    expect(row.exists()).toBe(true);
+    await row.find('button').trigger('click');
+    await flushPromises();
+    expect(spy).toHaveBeenCalledWith(false);
+    expect(store.thumbnailDetailPopover).toBe(false);
+  });
+
   it('父开关关闭时子开关 disabled', async () => {
     const store = useSettingsStore();
     // 父开关默认 true，子开关 enabled

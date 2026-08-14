@@ -4,6 +4,7 @@
 // 仅 transform: rotate 做 spinner；淡入只改 opacity。失败按钮 stopPropagation 只 emit retry。
 
 import { computed, ref } from 'vue';
+import { useI18n } from 'vue-i18n';
 import type { ThumbnailState } from '@/lib/thumbnail';
 
 const props = withDefaults(defineProps<{
@@ -47,11 +48,13 @@ const showPhaseBadge = computed(() => {
   return k === 'generating' || k === 'failed';
 });
 
+const { t } = useI18n();
+
 const phaseLabel = computed(() => {
   const s = props.state;
-  if (s?.kind === 'failed') return 'generation failed'; // 任务 9 换 i18n（thumbnail.popover.failed）
+  if (s?.kind === 'failed') return t('thumbnail.popover.failed');
   if (s?.kind !== 'generating') return '';
-  return `thumbnail phase: ${s.phase}`;  // 具体 i18n 在任务 9 换 t()
+  return t(`thumbnail.phase.${s.phase}`);
 });
 
 // round-1 P2：直传角标元素（currentTarget 在派发期间有效，须在 handler 内取）。

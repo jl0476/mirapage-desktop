@@ -290,6 +290,9 @@ export default {
       recordBrowsePositionDesc: 'Automatically record the topmost visible image while scrolling in masonry view.',
       restoreBrowsePosition: 'Auto-jump on directory enter',
       restoreBrowsePositionDesc: 'When disabled, the position is still recorded but you must click the toolbar "↶ Jump to last" button manually.',
+      // module3.0.11: badge click shows generation details
+      thumbnailDetailPopover: 'Show generation details on badge click',
+      thumbnailDetailPopoverDesc: 'Click a thumbnail phase/error badge to view stage timings and failure details',
     },
     reader: {
       mode: 'Default reading mode',

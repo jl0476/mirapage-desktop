@@ -147,6 +147,17 @@ describe('MasonryThumbnail phase badge (module3.0.11)', () => {
     expect(emitted![0]![0]).toBeInstanceOf(HTMLElement);
   });
 
+  // 任务 9：角标 title 用 i18n（非 hardcode）
+  it('generating(decoding) 角标 title 用 i18n 文案（解码中）', () => {
+    const w = mountThumb({ kind: 'generating', cacheKey: 'k', phase: 'decoding', startedAt: Date.now(), timings: {} });
+    expect(w.find('.phase-badge').attributes('title')).toBe('解码中');
+  });
+
+  it('failed 角标 title 用 i18n 文案（生成失败）', () => {
+    const w = mountThumb({ kind: 'failed', cacheKey: 'k', retryable: true, message: 'x' });
+    expect(w.find('.phase-badge').attributes('title')).toBe('生成失败');
+  });
+
   // round-3：开关关时角标纯指示——disabled + 不 emit（spec §7.2 实现契约）
   it('badgeInteractive=false → 角标 disabled、点击不 emit（纯指示）', async () => {
     const w = mountThumb(

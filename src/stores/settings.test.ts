@@ -213,4 +213,27 @@ describe('settings store: masonry 浏览位置（v0.1.0-module3.0.8 任务 11）
     expect(store.recordBrowsePosition).toBe(false);
     expect(store.restoreBrowsePositionOnEnter).toBe(false);
   });
+
+  // module3.0.11：角标点击弹详情开关
+  it('thumbnailDetailPopover 读写：load 加载 + setter 持久化（true/false 字符串）', async () => {
+    const setSetting = vi.mocked((await import('@/lib/tauri')).setSetting);
+    const store = useSettingsStore();
+    await store.load();
+    // 默认 true
+    expect(store.thumbnailDetailPopover).toBe(true);
+    await store.setThumbnailDetailPopover(false);
+    expect(store.thumbnailDetailPopover).toBe(false);
+    expect(setSetting).toHaveBeenCalledWith('fb_thumbnail_detail_popover', 'false');
+  });
+
+  it('load 从 DB 读 fb_thumbnail_detail_popover="false" → ref=false', async () => {
+    const { getSetting } = await import('@/lib/tauri');
+    vi.mocked(getSetting).mockImplementation(async (key: string) => {
+      if (key === 'fb_thumbnail_detail_popover') return 'false';
+      return null;
+    });
+    const store = useSettingsStore();
+    await store.load();
+    expect(store.thumbnailDetailPopover).toBe(false);
+  });
 });
