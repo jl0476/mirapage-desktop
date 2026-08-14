@@ -78,7 +78,7 @@
 
 - [ ] **步骤 2：运行测试验证失败**
 
-运行：`cargo test -p mirapage-desktop-lib gen_phase`（在 `src-tauri/` 下）
+运行：`cargo test --lib gen_phase`（在 `src-tauri/` 下）
 预期：编译失败，`GenPhase` / `phase_str` 未定义。
 
 - [ ] **步骤 3：实现**
@@ -138,7 +138,7 @@ pub struct ProgressEvent {
 
 - [ ] **步骤 4：运行测试验证通过**
 
-运行：`cargo test -p mirapage-desktop-lib gen_phase`
+运行：`cargo test --lib gen_phase`
 预期：PASS。
 
 - [ ] **步骤 5：Commit**
@@ -206,7 +206,7 @@ git commit -m "feat(thumbnail): GenPhase 枚举 + ProgressEvent 事件协议（m
 
 - [ ] **步骤 2：运行测试验证失败**
 
-运行：`cargo test -p mirapage-desktop-lib on_progress`
+运行：`cargo test --lib on_progress`
 预期：编译失败，`GenerationJob` 无 `on_progress` 字段。
 
 - [ ] **步骤 3：实现**
@@ -239,7 +239,7 @@ git commit -m "feat(thumbnail): GenPhase 枚举 + ProgressEvent 事件协议（m
 
 - [ ] **步骤 4：运行测试验证通过**
 
-运行：`cargo test -p mirapage-desktop-lib`（thumbnail 全部）
+运行：`cargo test --lib`（thumbnail 全部）
 预期：PASS（含新增 on_progress 测试；若 Debug 移除引发编译错误，按步骤 3 的手写 Debug 兜底）。
 
 - [ ] **步骤 5：Commit**
@@ -303,7 +303,7 @@ git commit -m "feat(thumbnail): GenerationJob 加 on_progress 回调并透传（
 
 - [ ] **步骤 2：运行测试验证失败**
 
-运行：`cargo test -p mirapage-desktop-lib generate_fires_phases_in_order`
+运行：`cargo test --lib generate_fires_phases_in_order`
 预期：编译失败，`generate_thumbnail` 无第二参数。
 
 - [ ] **步骤 3：实现**
@@ -350,7 +350,7 @@ pub fn generate_thumbnail(
 
 - [ ] **步骤 4：运行测试验证通过**
 
-运行：`cargo test -p mirapage-desktop-lib`（generator + thumbnail）
+运行：`cargo test --lib`（generator + thumbnail）
 预期：PASS。
 
 - [ ] **步骤 5：Commit**
@@ -402,7 +402,7 @@ mod tests {
 
 - [ ] **步骤 2：运行测试验证失败**
 
-运行：`cargo test -p mirapage-desktop-lib progress_closure`
+运行：`cargo test --lib progress_closure`
 预期：编译失败，`ProgressEvent` 未导入到测试模块（`use super::*` 应已含——若 service.rs 无测试模块则创建）。若无测试模块，先创建空的 `#[cfg(test)] mod tests { use super::*; }`。
 
 - [ ] **步骤 3：实现**
@@ -465,7 +465,7 @@ fn progress_closure_for(
 
 - [ ] **步骤 4：运行测试验证通过**
 
-运行：`cargo test -p mirapage-desktop-lib`（thumbnail 全量）
+运行：`cargo test --lib`（thumbnail 全量）
 预期：PASS（新增序列化测试 + 既有全部绿）。
 
 - [ ] **步骤 5：Commit**
@@ -477,7 +477,7 @@ git commit -m "feat(thumbnail): request/resubmit 注入 progress 闭包 emit 事
 
 > **Rust 端收尾检查**（提交前手动跑一遍全量）：
 > ```bash
-> cd src-tauri && cargo test -p mirapage-desktop-lib 2>&1 | tail -5
+> cd src-tauri && cargo test --lib 2>&1 | tail -5
 > ```
 
 ---
@@ -2004,7 +2004,7 @@ git commit -m "feat(thumbnail): 角标详情全局开关 + i18n（module3.0.11 �
 
 - [ ] **步骤 3：Rust 全量测试**
 
-运行：`cd src-tauri && cargo test -p mirapage-desktop-lib 2>&1 | tail -5`
+运行：`cd src-tauri && cargo test --lib 2>&1 | tail -5`
 预期：全部 PASS（thumbnail 105 + 新增）。
 
 - [ ] **步骤 4：Commit 收尾**
