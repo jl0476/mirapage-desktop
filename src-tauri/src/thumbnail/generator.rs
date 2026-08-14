@@ -47,7 +47,6 @@ pub fn generate_thumbnail(
     on_progress: Option<&dyn Fn(GenPhase, u64)>,
 ) -> Result<GeneratedThumbnail, ThumbnailError> {
     let t0 = Instant::now();
-    let _ = on_progress; // 任务 3 接入 4 阶段边界调用
     log::write_log(
         "INFO",
         "thumbnail",
@@ -61,6 +60,9 @@ pub fn generate_thumbnail(
     );
 
     // 1. EXIF Orientation（缺失 / 不可解析视为 1）。
+    if let Some(cb) = on_progress {
+        cb(GenPhase::Decoding, t0.elapsed().as_millis() as u64);
+    }
     let orientation = read_orientation(req.source_bytes);
 
     // 2. 解码第一帧（GIF / 动态 WebP 只取首帧）。
@@ -83,6 +85,9 @@ pub fn generate_thumbnail(
             orientation
         ),
     );
+    if let Some(cb) = on_progress {
+        cb(GenPhase::Resizing, t0.elapsed().as_millis() as u64);
+    }
 
     // 3. 方向归一化（烘焙进像素，输出不再带 Orientation）。
     let img = apply_orientation(img, orientation);
@@ -116,6 +121,9 @@ pub fn generate_thumbnail(
             display_w, display_h, out_w, out_h
         ),
     );
+    if let Some(cb) = on_progress {
+        cb(GenPhase::Encoding, t0.elapsed().as_millis() as u64);
+    }
 
     // 6. WebP 编码（按是否有 alpha 选 RGB / RGBA，保留 PNG 透明通道）。
     let webp_bytes = match encode_webp(&resized, req.webp_quality) {
@@ -134,6 +142,9 @@ pub fn generate_thumbnail(
         "thumbnail",
         &format!("generator ENCODE done bytes={}", webp_bytes.len()),
     );
+    if let Some(cb) = on_progress {
+        cb(GenPhase::Writing, t0.elapsed().as_millis() as u64);
+    }
 
     // 7. 原子写入：.tmp -> flush(+best-effort fsync) -> rename。
     if let Err(e) = write_atomic(req.cache_path, &webp_bytes) {
@@ -251,6 +262,49 @@ pub fn guess_format(bytes: &[u8]) -> Option<ImageFormat> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// module3.0.11：on_progress 在 4 个阶段边界按序触发，elapsed_ms 单调不减。
+    /// fixture 用 image crate 程序化编码 4×4 PNG（比手拼字节可靠）。
+    #[test]
+    fn generate_fires_phases_in_order() {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 255]));
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .expect("encode png failed");
+        let out_dir = std::env::temp_dir().join("mira-thumb-phase-test");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let cache_path = out_dir.join("out.webp");
+        let phases: std::sync::Mutex<Vec<(GenPhase, u64)>> = std::sync::Mutex::new(Vec::new());
+        let req = GenerateRequest {
+            source_bytes: &png_bytes,
+            target_width: 512,
+            pixel_budget: 3_000_000,
+            clarity_floor_width: 0,
+            webp_quality: 82.0,
+            cache_path: &cache_path,
+        };
+        let result = generate_thumbnail(req, Some(&|phase, elapsed_ms| {
+            phases.lock().unwrap().push((phase, elapsed_ms));
+        }));
+        assert!(result.is_ok(), "generate should succeed: {:?}", result.err());
+        let got = phases.lock().unwrap().clone();
+        let kinds: Vec<GenPhase> = got.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                GenPhase::Decoding,
+                GenPhase::Resizing,
+                GenPhase::Encoding,
+                GenPhase::Writing
+            ]
+        );
+        // elapsed_ms 单调不减
+        for w in got.windows(2) {
+            assert!(w[1].1 >= w[0].1, "elapsed must be monotonic: {:?}", w);
+        }
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
 
     #[test]
     fn compute_output_size_no_upscale_beyond_source() {
