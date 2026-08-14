@@ -1,7 +1,8 @@
 /**
  * Settings.vue DOM 渲染 + 交互测试
- * v0.1.0-module3.0: 6 section + 锚点 nav + 9 宫格 + reset
+ * v0.1.0-module3.0: 6 section + 锚点 nav
  * v0.1.0-module3.0.8 (任务 12): +1 fileBrowser section (7 sections total)
+ * v0.1.0-module3.0.12: 移除 touch section（9 宫格功能整体删除）
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
@@ -37,11 +38,11 @@ beforeEach(() => {
 });
 
 describe('Settings.vue', () => {
-  it('renders all 8 sections with anchors', () => {
+  it('renders all 7 sections with anchors', () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const anchors = wrapper.findAll('[data-test^="anchor-"]');
-    expect(anchors.length).toBe(8);
-    for (const id of ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry', 'maintenance']) {
+    expect(anchors.length).toBe(7);
+    for (const id of ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'masonry', 'maintenance']) {
       expect(wrapper.find(`#${id}`).exists()).toBe(true);
     }
   });
@@ -58,26 +59,6 @@ describe('Settings.vue', () => {
     store.continueToNextVolume = 'off';
     await flushPromises();
     expect(store.continueToNextVolume).toBe('off');
-  });
-
-  it('clicking reset shows confirm and resets touch scheme', async () => {
-    const store = useSettingsStore();
-    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
-    // 篡改 store 一格
-    store.touchScheme.tl = 'jump-first';
-    await flushPromises();
-
-    const resetBtn = wrapper.find('[data-test="touch-reset"]');
-    expect(resetBtn.exists()).toBe(true);
-    await resetBtn.trigger('click');
-    await flushPromises();
-
-    const confirm = wrapper.find('[data-test="reset-confirm"]');
-    expect(confirm.exists()).toBe(true);
-    await confirm.trigger('click');
-    await flushPromises();
-
-    expect(store.touchScheme.tl).toBe('fit-width');
   });
 
   it('anchor click triggers scrollTo for the matching section', async () => {

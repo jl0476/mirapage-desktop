@@ -126,6 +126,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 14 {
+        apply_014_drop_touch_zone_settings(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (14, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -593,6 +601,16 @@ fn apply_012_maintenance_retention(conn: &Connection) -> anyhow::Result<()> {
 fn apply_013_descriptor_canonical_dedupe(conn: &Connection) -> anyhow::Result<()> {
     canonicalize_browse_history(conn)?;
     canonicalize_library(conn)?;
+    Ok(())
+}
+
+/// Migration 014 —— 移除 9 宫格触控残留 key（v0.1.0-module3.0.12-touch-zones-removal）
+///
+/// 001 seed 的 9 个 `touch_{top,mid,bot}_{left,center,right}` 是大写枚举值（`FIT_WIDTH`），
+/// 与前端 kebab 值不匹配，从未被读回使用（死数据）；`touch_zones_enabled` 为运行时写入。
+/// 9 宫格功能整体移除后前端不再读写任何 touch_* key，此处一并清理。幂等：重跑无行可删。
+fn apply_014_drop_touch_zone_settings(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM settings WHERE key LIKE 'touch_%'", [])?;
     Ok(())
 }
 
@@ -1275,14 +1293,14 @@ mod tests {
 
     #[test]
     fn migration_010_run_bumps_version_to_10() {
-        // 走完整 run()，验证版本号到最新且幂等（migration 013 后,完整 run 到 13）
+        // 走完整 run()，验证版本号到最新且幂等（migration 014 后,完整 run 到 14）
         let conn = Connection::open_in_memory().unwrap();
         super::run(&conn).unwrap();
 
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 13, "完整 run 后版本号应为 13");
+        assert_eq!(v, 14, "完整 run 后版本号应为 14");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -1614,7 +1632,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 13, "完整 run 后版本号应为 13");
+        assert_eq!(v, 14, "完整 run 后版本号应为 14");
 
         // 幂等：run() 的 current<12 守卫使重复调用不再执行 012
         super::run(&conn).expect("重复 run 应幂等无错");
@@ -1623,7 +1641,7 @@ mod tests {
         let v2: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 13, "重复 run 不应再升版本号");
+        assert_eq!(v2, 14, "重复 run 不应再升版本号");
     }
 
     /// 任务 7：EXPLAIN QUERY PLAN 手动验证（`--ignored --nocapture` 跑，输出写入报告）。
@@ -1900,5 +1918,53 @@ mod tests {
             )
             .unwrap();
         assert_eq!((n, vc), (1, 2), "重跑不产生重复 / 不重复累计 visit_count");
+    }
+
+    #[test]
+    fn migration_014_run_clears_001_touch_seed() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        let touch: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'touch_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(touch, 0, "完整 run() 后 001 seed 的 9 个 touch_* key 已被 014 清除");
+    }
+
+    #[test]
+    fn migration_014_deletes_only_touch_keys_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO settings (key, value) VALUES
+             ('touch_zones_enabled', '1'),
+             ('touch_top_left', 'FIT_WIDTH'),
+             ('unrelated_key', 'x')",
+        )
+        .unwrap();
+
+        super::apply_014_drop_touch_zone_settings(&conn).unwrap();
+        super::apply_014_drop_touch_zone_settings(&conn).unwrap(); // 幂等重跑
+
+        let touch: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key LIKE 'touch_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(touch, 0, "touch_* key（含运行时写入的 touch_zones_enabled）全部清除");
+        let other: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = 'unrelated_key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(other, 1, "非 touch key 不受影响");
     }
 }

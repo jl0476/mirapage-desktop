@@ -4,13 +4,13 @@
  *  - 老的 emit 事件 (back / cycle-mode / cycle-direction / update:show)
  *  - 跳页改为 emit('open-jump-input') (父级打开 dialog)
  *  - 新增 PV 全套: 导航组(navigate) / 缩放下拉(scale-change) / 幻灯片(toggle-slideshow,
- *    toggle-slideshow-direction) / 书库工具组(toggle-like, add-bookmark,
- *    打开书签走 navigate(/bookmarks), show-touch-regions)
+ *    toggle-slideshow-direction) / 书签工具组(toggle-like, add-bookmark,
+ *    打开书签走 navigate(/bookmarks))
  *  + props + i18n + Teleport + 不自动 fade
  *
  * v0.1.0-reader-review:
  *  - jump 事件改为 open-jump-input (修复: 之前 emit('jump-page', 0) 总跳到封面)
- *  - 4 个 lib 按钮用独立 data-test id (menu-lib-like/bookmark/bookmarks/regions)
+ *  - lib 按钮用独立 data-test id (menu-lib-like/bookmark/bookmarks)
  *    测试按 id 取, 不再靠 positional index (reorder 安全)
  *  - aria-modal="true" 验证
  */
@@ -179,14 +179,15 @@ describe('ReaderMainMenu.vue', () => {
     expect(w.emitted('navigate')?.[0]).toEqual(['/settings']);
   });
 
-  // v0.1.0-module3.0.7: 删"加入书库"按钮(menu-lib-add),剩 4 个 lib 按钮
-  it('渲染书库工具组 4 项 (独立 id: like/bookmark/bookmarks/regions)', () => {
+  // v0.1.0-module3.0.7: 删"加入书库"按钮(menu-lib-add)
+  // v0.1.0-module3.0.12: 删"显示触控区"按钮(menu-lib-regions, 9 宫格整体移除), 剩 3 个 lib 按钮
+  it('渲染书签工具组 3 项 (独立 id: like/bookmark/bookmarks)', () => {
     mountMenu();
     expect(findInBody('menu-lib-add')).toBeFalsy();
     expect(findInBody('menu-lib-like')).toBeTruthy();
     expect(findInBody('menu-lib-bookmark')).toBeTruthy();
     expect(findInBody('menu-lib-bookmarks')).toBeTruthy();
-    expect(findInBody('menu-lib-regions')).toBeTruthy();
+    expect(findInBody('menu-lib-regions')).toBeFalsy();
   });
 
   it('点喜欢 → emit toggle-like + 关闭', async () => {
@@ -216,15 +217,6 @@ describe('ReaderMainMenu.vue', () => {
     (findInBody('menu-lib-bookmarks') as HTMLElement).click();
     await w.vm.$nextTick();
     expect(w.emitted('navigate')?.[0]).toEqual(['/bookmarks']);
-    expect(w.emitted('update:show')?.[0]).toEqual([false]);
-  });
-
-  // v0.1.0-reader-review: 显示触控区不再是 stub (之前只 close)
-  it('点显示触控区 → emit show-touch-regions + 关闭', async () => {
-    const w = mountMenu();
-    (findInBody('menu-lib-regions') as HTMLElement).click();
-    await w.vm.$nextTick();
-    expect(w.emitted('show-touch-regions')).toBeTruthy();
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 

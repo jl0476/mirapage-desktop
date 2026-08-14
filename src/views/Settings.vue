@@ -1,17 +1,15 @@
 <script setup lang="ts">
 /**
  * Settings.vue — v0.1.0-module3.0 重写
- * 6 section + 左侧 anchor nav + 9 宫格触控编辑器 + reset 按钮.
+ * 7 section + 左侧 anchor nav.
  * 视觉基线: Tailwind utility class (CLAUDE.md §1.1), 无 scoped hex 色.
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSettingsStore } from '@/stores/settings';
 import { useMaintenanceStore } from '@/stores/maintenance';
 import {
-  TOUCH_ACTIONS,
   type ScaleMode, type ReadDirection,
-  type TouchZone, type TouchAction,
 } from '@/lib/readerSettings';
 import { useSectionAnchors } from '@/composables/useSectionAnchors';
 import EnumRow from '@/components/settings/EnumRow.vue';
@@ -23,7 +21,7 @@ const { t } = useI18n();
 const settings = useSettingsStore();
 const maintenance = useMaintenanceStore();
 
-const sections = ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'touch', 'masonry', 'maintenance'] as const;
+const sections = ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'masonry', 'maintenance'] as const;
 const { activeId, scrollTo } = useSectionAnchors([...sections]);
 
 // ─── 维护（spec §8）──────────────────────────────────────────────────
@@ -85,38 +83,6 @@ const slideshowDirs = [
   { value: 'backward', label: t('settings.slideshow.directionBackward') },
 ];
 
-const touchActionLabels = computed<Record<TouchAction, string>>(() => ({
-  'none': t('settings.touchAction.none'),
-  'prev-page': t('settings.touchAction.prevPage'),
-  'next-page': t('settings.touchAction.nextPage'),
-  'jump-first': t('settings.touchAction.jumpFirst'),
-  'jump-last': t('settings.touchAction.jumpLast'),
-  'open-main-menu': t('settings.touchAction.openMainMenu'),
-  'slideshow-toggle': t('settings.touchAction.slideshowToggle'),
-  'fit-width': t('settings.touchAction.fitWidth'),
-  'folder-prev': t('settings.touchAction.folderPrev'),
-  'folder-next': t('settings.touchAction.folderNext'),
-  'open-file-browser': t('settings.touchAction.openFileBrowser'),
-}));
-
-// ─── 单格 dropdown 开/关状态 ──────────────────────────────────────────
-const openCell = ref<TouchZone | null>(null);
-const showResetConfirm = ref(false);
-
-function toggleCell(zone: TouchZone): void {
-  openCell.value = openCell.value === zone ? null : zone;
-}
-
-async function pickAction(zone: TouchZone, action: TouchAction): Promise<void> {
-  openCell.value = null;
-  await settings.setTouchAction(zone, action);
-}
-
-async function onResetTouch(): Promise<void> {
-  showResetConfirm.value = false;
-  await settings.resetTouchScheme();
-}
-
 // ─── 通用 setter (封装 store 字段 + DB) ─────────────────────────────
 async function setReaderMode(v: string) {
   settings.readerDefaultMode = v as 'single' | 'double';
@@ -159,10 +125,6 @@ async function setSlideshowLoop(v: boolean) {
   settings.slideshowLoop = v;
   await settings.update('slideshow_loop', v);
 }
-async function setTouchZonesEnabled(v: boolean) {
-  settings.touchZonesEnabled = v;
-  await settings.update('touch_zones_enabled', v);
-}
 // v0.1.0-module3.0.8 (任务 12): masonry 浏览位置 2 开关 setter
 async function setRecordBrowsePosition(v: boolean) {
   await settings.setRecordBrowsePosition(v);}
@@ -173,25 +135,11 @@ async function setRestoreBrowsePositionOnEnter(v: boolean) {
 async function setThumbnailDetailPopover(v: boolean) {
   await settings.setThumbnailDetailPopover(v);
 }
-
-const touchGridRows: TouchZone[][] = [
-  ['tl', 'tm', 'tr'],
-  ['ml', 'mm', 'mr'],
-  ['bl', 'bm', 'br'],
-];
-
-// 点击空白处关闭单格 dropdown
-function closeOpenCell(e: MouseEvent) {
-  if (!(e.target as HTMLElement).closest('[data-touch-cell]')) {
-    openCell.value = null;
-  }
-}
 </script>
 
 <template>
   <div
     class="flex h-full w-full bg-bg text-text-primary overflow-hidden"
-    @mousedown="closeOpenCell"
   >
     <!-- 左侧锚点 nav (light 模式用 surface-2 浅灰底, 与主内容白底区分) -->
     <aside
@@ -352,77 +300,6 @@ function closeOpenCell(e: MouseEvent) {
               :value="settings.slideshowLoop"
               @change="setSlideshowLoop"
             />
-          </div>
-        </section>
-
-        <!-- Touch zones -->
-        <section id="touch" data-test="section-touch" class="scroll-mt-4 bg-surface-1 border border-[color:var(--color-border-default)] rounded-lg p-6">
-          <h3 class="text-sm font-semibold text-accent uppercase tracking-wider mb-2">
-            {{ t('settings.section.touch') }}
-          </h3>
-          <p class="text-xs text-text-secondary mb-4">{{ t('settings.touch.hint') }}</p>
-
-          <div class="mb-4">
-            <BooleanRow
-              :label="t('settings.touch.enabled')"
-              :value="settings.touchZonesEnabled"
-              @change="setTouchZonesEnabled"
-            />
-          </div>
-
-          <div class="inline-flex flex-col gap-1 mb-4">
-            <div v-for="row in touchGridRows" :key="row.join(',')" class="flex gap-1">
-              <div
-                v-for="zone in row"
-                :key="zone"
-                class="relative"
-                data-test="touch-cell"
-                data-touch-cell
-              >
-                <button
-                  type="button"
-                  class="w-[88px] h-[60px] bg-surface-2 border border-[color:var(--color-border-default)] rounded-md text-xs px-1 hover:bg-surface-3 transition-colors flex items-center justify-center text-center"
-                  @click.stop="toggleCell(zone)"
-                >
-                  {{ touchActionLabels[settings.touchScheme[zone]] }}
-                </button>
-                <ul
-                  v-if="openCell === zone"
-                  class="absolute z-10 left-0 top-full mt-1 min-w-[170px] bg-surface-4 border border-[color:var(--color-border-default)] rounded-lg py-1 shadow-xl backdrop-blur-xl"
-                >
-                  <li v-for="action in TOUCH_ACTIONS" :key="action">
-                    <button
-                      type="button"
-                      class="block w-full text-left text-xs px-3 py-1.5 hover:bg-surface-light"
-                      :class="settings.touchScheme[zone] === action ? 'text-accent' : ''"
-                      @click.stop="pickAction(zone, action)"
-                    >
-                      {{ touchActionLabels[action] }}
-                    </button>
-                  </li>
-                </ul>
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <button
-              type="button"
-              data-test="touch-reset"
-              class="text-xs text-text-secondary hover:text-accent border border-[color:var(--color-border-default)] px-3 py-1 rounded-md"
-              @click="showResetConfirm = true"
-            >
-              {{ t('settings.touch.reset') }}
-            </button>
-            <button
-              v-if="showResetConfirm"
-              type="button"
-              data-test="reset-confirm"
-              class="ml-2 text-xs text-error border border-error/40 px-3 py-1 rounded-md"
-              @click="onResetTouch"
-            >
-              {{ t('settings.touch.resetConfirm') }}
-            </button>
           </div>
         </section>
 

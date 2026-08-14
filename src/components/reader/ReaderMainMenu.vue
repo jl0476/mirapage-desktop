@@ -4,7 +4,6 @@
  * 参考 PerfectViewer `ReaderMainMenu.kt` 全套 5 组菜单项:
  * - 全屏半透明黑色 (bg-black/88)
  * - 不常驻 toolbar, 不自动 fade
- * - 中央 / 顶中 触发 (useReaderTouchZones 派发 openMenu)
  * - 切换模式/方向/缩放保持打开
  * - 跳页 / 路由 / 关闭按钮 关闭
  *
@@ -12,12 +11,11 @@
  * 1. 顶栏: 返回 + 标题 + 页码 + 跳页
  * 2. 导航组: 文件浏览器 / 书库 / 历史 / 账户 / 设置
  * 3. 阅读组: 模式 / 方向 / 缩放(下拉) / 幻灯片 / 幻灯片方向
- * 4. 书库工具组: 加入书库 / 喜欢 / 加书签 / 打开书签 / 显示触控区
+ * 4. 书库工具组: 喜欢 / 加书签 / 打开书签
  * 5. 关闭
  *
  * v0.1.0-reader-review fixes:
  *  - onJumpPage 改为 emit('open-jump-input') — 父级打开跳页 dialog
- *  - onShowTouchRegions emit('show-touch-regions') — 父级切换触控区可视化
  *  - mode/direction/scale/slideshowDirection 走 t() (CLAUDE.md §2.5)
  *  - bg-white/10 分隔条 → xp-divider-h (light 模式可见)
  *  - 5 个 lib 按钮 data-test 独立 id (测试靠 index 取会因 reorder 崩)
@@ -55,7 +53,6 @@ const emit = defineEmits<{
   (e: 'update:show', v: boolean): void;
   (e: 'back'): void;
   (e: 'open-jump-input'): void;           // 跳页 — 父级打开 dialog
-  (e: 'show-touch-regions'): void;        // 显示触控区可视化
   (e: 'cycle-mode'): void;
   (e: 'cycle-direction'): void;
   (e: 'scale-change', m: ScaleMode): void;
@@ -87,7 +84,6 @@ function scaleLabel(m: ScaleMode): string {
 function close(): void { localShow.value = false; }
 function onBack(): void { close(); emit('back'); }
 function onJumpPage(): void { close(); emit('open-jump-input'); }
-function onShowTouchRegions(): void { close(); emit('show-touch-regions'); }
 function onCycleMode(): void { emit('cycle-mode'); }
 function onCycleDirection(): void { emit('cycle-direction'); }
 function onScaleChange(m: ScaleMode): void { emit('scale-change', m); scaleOpen.value = false; }
@@ -240,11 +236,6 @@ function onOpenBookmarks(): void {
           data-test="menu-lib-bookmarks"
           @click="onOpenBookmarks"
         >{{ t('reader.openBookmarks') }}</button>
-        <button
-          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
-          data-test="menu-lib-regions"
-          @click="onShowTouchRegions"
-        >{{ t('reader.showTouchRegions') }}</button>
       </section>
 
       <!-- 5. 关闭 -->

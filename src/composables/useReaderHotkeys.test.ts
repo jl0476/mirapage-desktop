@@ -7,9 +7,9 @@
  * - Escape → closeReader → router.back()
  *
  * v0.1.0-reader-review-fix:
- * - 不再监听 window mousedown (与 9 宫格 useReaderTouchZones + chrome 按钮 click
- *   冲突; 用户报告点 btn-mode 后变成下一页).
- * - mouse 位置派发由 9 宫格接管.
+ * - 不再监听 window mousedown (与 chrome 按钮 click 冲突;
+ *   用户报告点 btn-mode 后变成下一页).
+ * - 桌面端鼠标点击不承载翻页语义.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
@@ -61,7 +61,7 @@ describe('useReaderHotkeys', () => {
     vi.spyOn(window, 'addEventListener').mockImplementation((event: any, handler: any) => {
       if (event === 'keydown') keyHandler = handler;
       // v0.1.0-module3.0.2-hotfix6 (H12): 不再监听 wheel — useReaderWheel 接管
-      // v0.1.0-reader-review-fix: 不再监听 mousedown — 与 9 宫格冲突
+      // v0.1.0-reader-review-fix: 不再监听 mousedown — 与 chrome 按钮冲突
     });
     vi.spyOn(window, 'removeEventListener').mockImplementation(() => undefined);
   });
@@ -70,7 +70,7 @@ describe('useReaderHotkeys', () => {
     useReaderHotkeys();
     expect(keyHandler).not.toBeNull();
     expect(wheelHandler).toBeNull();
-    expect(mouseHandler).toBeNull();  // 9 宫格接管鼠标位置派发
+    expect(mouseHandler).toBeNull();  // 鼠标点击不承载翻页语义
   });
 
   it('ArrowRight on keyboard calls reader.nextPage()', () => {
@@ -128,7 +128,7 @@ describe('useReaderHotkeys', () => {
     expect(r.currentSpreadIndex).toBe(1);
   });
 
-  it('window mousedown 不再派发 prev/next (review-fix: 9 宫格接管)', () => {
+  it('window mousedown 不再派发 prev/next (review-fix: 移除 mousedown listener)', () => {
     Object.defineProperty(window, 'innerWidth', { value: 1200, configurable: true });
     Object.defineProperty(window, 'innerHeight', { value: 800, configurable: true });
     const r = useReaderStore();
@@ -145,7 +145,7 @@ describe('useReaderHotkeys', () => {
     useReaderHotkeys();
     // mouseHandler 现在永远 null (review-fix 移除 mousedown listener)
     expect(mouseHandler).toBeNull();
-    // 即使 dispatch mousedown, 也不应 prevPage (由 9 宫格接管)
+    // 即使 dispatch mousedown, 也不应 prevPage (鼠标点击不承载翻页语义)
     window.dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 100, clientY: 400 }));
     expect(r.currentSpreadIndex).toBe(1);  // 不动
   });

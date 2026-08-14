@@ -5,7 +5,6 @@
  *          listDirectory 拿 MediaEntry[] 拼 convertFileSrc URL
  *          readerStore.openBook
  * - unmount: saveProgress 兜底 + closeBook
- * - 9 宫格 click (useReaderTouchZones) → 派发 reader store actions
  * - 跨卷 (pendingNextVolume) watch 处理
  * - 滚轮 / 鼠标按键 已 useReaderHotkeys() 接管 (内含 wheel listener)
  *
@@ -13,7 +12,6 @@
  *  - 新增 jumpDialog + openJumpDialog 处理 main menu 的 open-jump-input 事件
  *  - cycle-direction 改为切换 settings.defaultReadDirection (之前误改 slideshow.direction)
  *  - ctx menu direction 从 settings.defaultReadDirection 派生 (之前误用 slideshow.direction)
- *  - 显示触控区 ref 接入 + 透传给 ReaderScreen
  *  - 错误返回按钮 border-white/10 → xp-bd (light 模式可见)
  *
  * 2026-08-12 跨卷任务 8 (spec §11): 编排层总装
@@ -27,7 +25,6 @@
  *    pushToast/getContinueMode/pauseSlideshow/consumePendingNextVolume/canStart）
  *  - 末页 → reader.setOnAtLastNextAttempt → slideshow.pendingNextVolume
  *  - watch pendingNextVolume → crossVolume.maybeContinue(false, 'next')
- *  - 9 宫格 folder-next (zoneActions.nextVolume) → crossVolume.maybeContinue(true, 'next')
  *  - Alt+→ 经 useReaderHotkeys({ nextVolume: () => crossVolume.maybeContinue(true,'next') })
  *  - ContinueNextVolumeToast 保留在 ReaderView (只 reader 场景显示, props 来自 crossVolume 实例)
  *  - onUnmounted: setOnAtLastNextAttempt(null) + activeLoadSeq++ + saveCurrentProgressNow
@@ -45,10 +42,6 @@ import { useSettingsStore } from '@/stores/settings';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
 import { useReaderWheel } from '@/composables/useReaderWheel';
 import { useKeepScreenOn } from '@/composables/useKeepScreenOn';
-import {
-  useReaderTouchZones,
-  dispatchZoneAction,
-} from '@/composables/useReaderTouchZones';
 import {
   useReaderBookLoader,
   type BookIdentity,
@@ -96,8 +89,6 @@ const isGoingBack = ref(false);
 // v0.1.0-reader-review: 跳页 dialog (主菜单"跳页"按钮 / 右键"跳页"都打开它)
 const jumpDialogRef = ref<HTMLDialogElement | null>(null);
 const jumpDialogValue = ref(1);
-// v0.1.0-reader-review: 触控区可视化 overlay
-const showTouchRegions = ref(false);
 
 // 2026-08-12 跨卷任务 8 (spec §11.1): route watch 唯一入口状态
 // lastLoadedBookId: 上次成功 load 的 bookId, 用于去重（phase=ready 时跳过）
@@ -223,10 +214,6 @@ function submitJumpDialog(ev: Event): void {
   closeJumpDialog();
 }
 
-function onShowTouchRegions(): void {
-  showTouchRegions.value = !showTouchRegions.value;
-}
-
 // 2026-08-12 跨卷任务 8 (spec §11.1): 不再用 computed 包 route.params.bookId,
 // loadRouteBook 直接接 watch source 参数。
 
@@ -326,7 +313,7 @@ async function navigateToVolume(target: NextVolumeTarget): Promise<void> {
  * 2026-08-12 跨卷任务 8 (spec §11.2 P1-1): 当前卷身份.
  * 加载期 (bookLoadPhase !== 'ready') 或 reader store 与 route 不一致时返回 null.
  * Controller.canStart + identity 双重保护：加载期 maybeContinue 直接 return,
- * 即使 hotkey/9宫格/watch 绕过 UI busy 检查也无法发起跨卷.
+ * 即使 hotkey/watch 绕过 UI busy 检查也无法发起跨卷.
  */
 function currentIdentity(): BookIdentity | null {
   if (bookLoadPhase.value !== 'ready') return null;
@@ -427,14 +414,6 @@ useReaderWheel({
 const keepScreenOnRef = computed(() => settings.keepScreenOn);
 useKeepScreenOn(keepScreenOnRef);
 
-// v0.1.0-module3.0.2: M4 修复 — 让 9 宫格自动忽略 overlay 内的 button/input 点击,
-// 避免 overlay 按钮被 9 宫格拦截双触发. 用 [data-test-ignore-touch-zones] 属性 marker.
-useReaderTouchZones({
-  containerRef,
-  ignoreSelector: '[data-test-ignore-touch-zones]',
-  onAction: (a) => dispatchZoneAction(a, zoneActions),
-});
-
 // 2026-08-12 跨卷任务 8: onUnmounted 清理回调 + activeLoadSeq++ + saveCurrentProgressNow 兜底.
 // 不变量 10 + 11.
 onUnmounted(() => {
@@ -448,24 +427,6 @@ onUnmounted(() => {
   reader.closeBook();
   log('[ReaderView/onUnmounted] done');
 });
-
-const zoneActions = {
-  openMainMenu: () => { showMainMenu.value = true; slideshow.pause(); },
-  prevPage: () => { reader.prevPage(); slideshow.reset(); },
-  nextPage: () => { reader.nextPage(); slideshow.reset(); },
-  jumpToFirst: () => { reader.jumpToSpread(0); slideshow.reset(); },
-  jumpToLast: () => { reader.jumpToSpread(Math.max(0, reader.spreads.length - 1)); slideshow.reset(); },
-  toggleSlideshow: () => { slideshow.toggle(); },
-  prevVolume: () => { log('[ReaderView/zoneActions] prevVolume TODO (cross-volume prev)'); },
-  // 2026-08-12 跨卷任务 8 (spec §11.3): 9 宫格 folder-next 显式跨卷 (force=true, 不看模式)
-  nextVolume: () => { void crossVolume.maybeContinue(true, 'next'); },
-  // v0.1.0-module3.0: 新增 fit-width + open-file-browser 回调
-  fitWidth: () => {
-    // Cluster C: 调 setScaleMode 立即 apply + 持久化 (was: 只写 defaultScaleMode 下次生效)
-    void settings.setScaleMode('fit-width');
-  },
-  openFileBrowser: () => { void goBackToFileBrowser(); },
-};
 </script>
 
 <template>
@@ -503,7 +464,6 @@ const zoneActions = {
       :initial-spread-index="reader.currentSpreadIndex"
       :mode="settings.readerDefaultMode"
       :title="reader.title"
-      :show-touch-regions="showTouchRegions"
       :direction="settings.defaultReadDirection"
       @back="goBackToFileBrowser()"
       @toggle-mode="() => settings.cycleReaderMode()"
@@ -522,7 +482,6 @@ const zoneActions = {
       :slideshow-direction="slideshow.direction"
       :is-liked="(book?.isFavorite ?? false)"
       @open-jump-input="openJumpDialog"
-      @show-touch-regions="onShowTouchRegions"
       @back="goBackToFileBrowser()"
       @cycle-mode="() => settings.cycleReaderMode()"
       @cycle-direction="() => settings.cycleReadDirection()"

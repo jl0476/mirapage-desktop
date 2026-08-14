@@ -64,7 +64,7 @@ onMounted(() => {
     showNavigationControl: false,
     // v0.1.0-module3.0.2 (M5): 关掉 OSD 滚轮缩放, 改由 ReaderView 的
     // useReaderWheel 接管翻页. 否则滚轮先被 OSD 缩吞, 翻页不响应.
-    // 需求3: 关闭 OSD 内置滚轮缩放 + 点击缩放，让 click 完全交给 useReaderTouchZones 9 宫格
+    // 关闭点击缩放（桌面端点击不承载翻页/缩放语义）
     gestureSettingsMouse: { scrollToZoom: false, clickToZoom: false, dblClickToZoom: false },
     animationTime: 0,  // v0.1.0-reader-review-fix-12: 关掉 OSD 内部动画, 缩放/翻页 instant, 减少重渲染延迟
   });

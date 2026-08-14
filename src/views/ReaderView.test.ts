@@ -42,10 +42,6 @@ vi.mock('@/lib/tauri', async () => {
 });
 
 vi.mock('@/composables/useReaderHotkeys', () => ({ useReaderHotkeys: vi.fn() }));
-vi.mock('@/composables/useReaderTouchZones', () => ({
-  useReaderTouchZones: vi.fn(),
-  dispatchZoneAction: vi.fn(),
-}));
 vi.mock('@/composables/useReaderWheel', () => ({ useReaderWheel: vi.fn() }));
 vi.mock('@/composables/useKeepScreenOn', () => ({ useKeepScreenOn: vi.fn() }));
 vi.mock('@tauri-apps/api/core', () => ({

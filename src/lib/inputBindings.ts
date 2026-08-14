@@ -1,7 +1,7 @@
 /**
- * 输入绑定——键盘/鼠标/滚轮到 ReaderCommand 的纯函数映射
+ * 输入绑定——键盘/滚轮到 ReaderCommand 的纯函数映射
  *
- * 设计与 DESIGn §14.1 + §15.3 + §15.4 严格对齐。
+ * 设计与 DESIGn §14.1 + §15.4 严格对齐。
  * 默认键位与 MiraPage Android 1:1,可由设置覆盖。
  *
  * 为什么纯函数？
@@ -10,7 +10,8 @@
  *
  * v0.1.0-module3.0.2-reader-polish (Cluster B #7):
  * - Escape 从 openMainMenu 移到 closeReader (返回文件浏览器, router.back)
- * - openMainMenu 仅保留 'm' (中宫点击 + m 键, 不再被 ESC 触发)
+ * - openMainMenu 仅保留 'm' (不再被 ESC 触发)
+ * v0.1.0-module3.0.12: 鼠标 3×3 分区映射随 9 宫格功能移除,只保留键盘/滚轮。
  */
 export type ReaderCommand =
   | 'nextPage'
@@ -42,12 +43,12 @@ export interface KeyBindings {
 }
 
 /**
- * 默认键位（与 Android TouchScheme 映射一致；macOS / Win / Linux 通用）
+ * 默认键位（与 Android 键位语义一致；macOS / Win / Linux 通用）
  * 详见 DESIGn §15.9 完整映射表
  *
  * v0.1.0-module3.0.2-reader-polish:
  * - Escape 改映射 closeReader (was: openMainMenu)
- * - m 仍 openMainMenu (中宫点击)
+ * - m 仍 openMainMenu
  */
 export const defaultKeyBindings: KeyBindings = {
   nextPage: ['ArrowRight', 'PageDown'],
@@ -100,52 +101,20 @@ function findKeyboardCommand(
   return null;
 }
 
-/** 把 mouse event + 视口尺寸映射到 3×3 区域 → 命令 */
-function mouseRegionCommand(
-  ev: MouseEvent,
-  width: number,
-  height: number,
-): ReaderCommand | null {
-  if (ev.button !== 0) return null; // 仅左键
-  const x = ev.clientX / Math.max(1, width);
-  const y = ev.clientY / Math.max(1, height);
-  // 顶 1/3 → openFileBrowser
-  if (y < 1 / 3) {
-    return x < 1 / 3 ? 'prevPage' : x > 2 / 3 ? 'nextPage' : 'openFileBrowser';
-  }
-  // 底 1/3 → openMainMenu (与 Android 一致)
-  if (y > 2 / 3) {
-    return x < 1 / 3 ? 'prevPage' : x > 2 / 3 ? 'nextPage' : 'openMainMenu';
-  }
-  // 中 1/3 → openMainMenu（中心点击）
-  return x < 1 / 3 ? 'prevPage' : x > 2 / 3 ? 'nextPage' : 'openMainMenu';
-}
-
-/** resolveHotkey 输入上下文 */
-export type InputContext =
-  | { kind: 'keyboard' }
-  | { kind: 'mouse'; width: number; height: number }
-  | { kind: 'wheel' };
-
 /**
  * 把任意输入事件解析为 ReaderCommand
- * @param event  KeyboardEvent / MouseEvent / WheelEvent
+ * @param event  KeyboardEvent / WheelEvent
  * @param bindings 当前键位绑定
- * @param ctx 事件类型 + 视口尺寸（仅 mouse 需要）
  */
 export function resolveHotkey(
   event: KeyboardEvent | MouseEvent | WheelEvent,
   bindings: KeyBindings,
-  ctx?: InputContext,
 ): ReaderCommand | null {
   if ('deltaY' in (event as WheelEvent)) {
     const w = event as WheelEvent;
     if (w.deltaY > 0) return 'nextPage';
     if (w.deltaY < 0) return 'prevPage';
     return null;
-  }
-  if ('clientX' in (event as MouseEvent) && ctx?.kind === 'mouse') {
-    return mouseRegionCommand(event as MouseEvent, ctx.width, ctx.height);
   }
   if ('key' in (event as KeyboardEvent)) {
     const key = normalizeKey(event as KeyboardEvent);

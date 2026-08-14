@@ -2,14 +2,12 @@
 // 读 / 写 settings 表（通过 Tauri IPC 桥接到 SQLite）
 
 import { defineStore } from 'pinia';
-import { reactive, ref } from 'vue';
+import { ref } from 'vue';
 import { getSetting, setSetting, updateThumbnailRuntimeConfig, updateThumbnailCacheLimit } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import {
-  TOUCH_ZONES, TOUCH_ZONE_KEY, DEFAULT_TOUCH_SCHEME,
   DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION, normalizeScaleMode,
   type ScaleMode, type ReadDirection,
-  type TouchZone, type TouchAction,
 } from '@/lib/readerSettings';
 import {
   resolveThumbnailPreset, normalizeWorkerLimit, normalizeDecodeMemoryMb, normalizeCacheLimitMb,
@@ -40,8 +38,6 @@ export const useSettingsStore = defineStore('settings', () => {
   // currentScaleMode = 阅读中当前生效的缩放 (runtime, 随用户切换变化, 持久化为 scale_mode)
   // defaultScaleMode = 新书打开时的初始化缩放 (持久化为 default_scale_mode, 已存在)
   const currentScaleMode = ref<ScaleMode>(DEFAULT_SCALE_MODE);
-  const touchZonesEnabled = ref<boolean>(true);  // master toggle for 9-zone
-  const touchScheme = reactive<Record<TouchZone, TouchAction>>({ ...DEFAULT_TOUCH_SCHEME });
 
   // v0.1.0-module3.0.6: masonry 瀑布流全局默认（per-folder override 在 useMasonrySettings）
   const masonryDefaultCols = ref(4);
@@ -84,7 +80,6 @@ export const useSettingsStore = defineStore('settings', () => {
       ['default_scale_mode', (v) => (defaultScaleMode.value = normalizeScaleMode(v as ScaleMode))],
       ['scale_mode', (v) => (currentScaleMode.value = normalizeScaleMode(v as ScaleMode))],
       ['default_read_direction', (v) => (defaultReadDirection.value = v as ReadDirection)],
-      ['touch_zones_enabled', (v) => (touchZonesEnabled.value = v === '1')],
       ['fb_masonry_default_cols', (v) => (masonryDefaultCols.value = Number(v))],
       ['fb_masonry_default_h_gap', (v) => (masonryDefaultHGap.value = Number(v))],
       ['fb_masonry_default_v_gap', (v) => (masonryDefaultVGap.value = Number(v))],
@@ -102,9 +97,6 @@ export const useSettingsStore = defineStore('settings', () => {
       ['fb_record_browse_position', (v) => (recordBrowsePosition.value = v !== 'false')],
       ['fb_restore_browse_position_on_enter', (v) => (restoreBrowsePositionOnEnter.value = v !== 'false')],
       ['fb_thumbnail_detail_popover', (v) => (thumbnailDetailPopover.value = v !== 'false')],
-      ...TOUCH_ZONES.map((z) =>
-        [`touch_${TOUCH_ZONE_KEY[z]}`, (v) => (touchScheme[z] = v as TouchAction)] as [string, (v: string) => void],
-      ),
     ];
 
     for (const [key, apply] of keys) {
@@ -292,20 +284,6 @@ export const useSettingsStore = defineStore('settings', () => {
     log('[settings] cycleReadDirection done, current=', defaultReadDirection.value);
   }
 
-  /** 设置单个触控分区动作 */
-  async function setTouchAction(zone: TouchZone, action: TouchAction): Promise<void> {
-    touchScheme[zone] = action;
-    await update(`touch_${TOUCH_ZONE_KEY[zone]}`, action);
-  }
-
-  /** 恢复 PV 经典 9 区布局 */
-  async function resetTouchScheme(): Promise<void> {
-    for (const z of TOUCH_ZONES) {
-      touchScheme[z] = DEFAULT_TOUCH_SCHEME[z];
-      await update(`touch_${TOUCH_ZONE_KEY[z]}`, DEFAULT_TOUCH_SCHEME[z]);
-    }
-  }
-
   return {
     // 状态
     themeMode,
@@ -320,8 +298,6 @@ export const useSettingsStore = defineStore('settings', () => {
     defaultScaleMode,
     defaultReadDirection,
     currentScaleMode,
-    touchZonesEnabled,
-    touchScheme,
     masonryDefaultCols,
     masonryDefaultHGap,
     masonryDefaultVGap,
@@ -360,7 +336,5 @@ export const useSettingsStore = defineStore('settings', () => {
     setRestoreBrowsePositionOnEnter,
     cycleReaderMode,
     cycleReadDirection,
-    setTouchAction,
-    resetTouchScheme,
   };
 });

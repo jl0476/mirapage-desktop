@@ -346,6 +346,7 @@ git push github v0.1.0
 | `v0.1.0-module3.0-settings` | `mirapage-desktop.exe` | Settings 5 section + 9 宫格触控方案 + theme 切换 + i18n 45 keys |
 | `v0.1.0-module3.0.2-reader-polish` | `mirapage-desktop.exe` | 阅读器打磨 3 cluster：立即阅读入口（双击图片 + `?at=`）+ UI 修复（OSD nav 关闭 / ESC closeReader / chrome autoHide / pointer-events / 窗口 480×360）+ 6 种缩放 + reader 排序与 file browser 一致 |
 | `v0.1.0-module3.0.11-thumbnail-per-image-progress` | `mirapage-desktop.exe` | 单图缩略图生成阶段进度、详情 popover、失败快照与全局开关 |
+| `v0.1.0-module3.0.12-touch-zones-removal` | `mirapage-desktop.exe` | 移除阅读器 9 宫格触控（migration 014 清理 touch_* key；顺带清理 mouseRegionCommand 与 16 个孤儿 i18n key） |
 
 > **当前状态**：本地 `tauri -- build --no-bundle` 流程已端到端验证通过（17.95 MB / MD5 一致，参考 §5.1 末段命令）。后续模块首选本地构建验证，CI 作为最后一道关。
 >

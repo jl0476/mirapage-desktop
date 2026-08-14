@@ -27,7 +27,6 @@
  *    viewport 在新图加载后还在用旧 transform).
  *
  * v0.1.0-reader-review fixes:
- *  - 接入 showTouchRegions prop, 条件渲染 TouchRegionsOverlay (9 宫格可视化)
  *  - 删除 (singleViewerRef.value as { getViewer?: ... }) 类型断言 —
  *    SinglePageViewer.vue defineExpose 已返回完整 OSDViewerLike 类型,
  *    直接 .value?.getViewer?.() 即可, 断言绕过 TS 检查不安全
@@ -42,7 +41,6 @@ import { log } from '@/lib/logger';
 import SinglePageViewer from './SinglePageViewer.vue';
 import DoublePageViewer from './DoublePageViewer.vue';
 import ReaderOverlay from './ReaderOverlay.vue';
-import TouchRegionsOverlay from './TouchRegionsOverlay.vue';
 
 interface Props {
   title: string;
@@ -50,8 +48,6 @@ interface Props {
   spreads?: Array<{ start: number; end: number }>;
   initialSpreadIndex?: number;
   mode?: 'single' | 'double';
-  /** v0.1.0-reader-review: 显示 9 宫格触控区可视化 (主菜单"显示触控区"触发) */
-  showTouchRegions?: boolean;
   /** v0.1.0-reader-review-fix: 阅读方向 (传给 DoublePageViewer 用于 RTL 镜像) */
   direction?: 'ltr' | 'rtl';
 }
@@ -59,7 +55,6 @@ const props = withDefaults(defineProps<Props>(), {
   spreads: undefined,
   initialSpreadIndex: 0,
   mode: 'single',
-  showTouchRegions: false,
   direction: 'ltr',
 });
 
@@ -414,8 +409,5 @@ function onContainerMouseLeave(): void {
       <span class="font-semibold truncate" data-test="watermark-title">{{ props.title }}</span>
       <span class="font-mono tabular-nums shrink-0 ml-3" data-test="watermark-page">{{ currentPage }} / {{ totalPages }}</span>
     </div>
-
-    <!-- 触控区可视化 (pointer-events-none, 不拦截点击) -->
-    <TouchRegionsOverlay v-if="props.showTouchRegions" />
   </div>
 </template>

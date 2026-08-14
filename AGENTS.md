@@ -132,7 +132,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | Phase | 内容 | 状态 |
 |---|---|---|
 | 1 | Tauri 骨架 + SQLite + `algorithm/` 纯函数 | ✅ |
-| 2 | OpenSeadragon 阅读器 + 文件浏览器 + 阅读器路由 | ✅ `v0.1.0-module2.0`：`ReaderView` / `ReaderMainMenu` / 9 宫格 / 滚轮 / 轮播 |
+| 2 | OpenSeadragon 阅读器 + 文件浏览器 + 阅读器路由 | ✅ `v0.1.0-module2.0`：`ReaderView` / `ReaderMainMenu` / 滚轮 / 轮播（9 宫格触控已于 3.0.12 移除） |
 | 3 | 压缩包（CBZ/ZIP） | 🟡 ZIP ✅；RAR/7z 占位（`unrar`/`sevenz-rust` 注释未启） |
 | 4 | 书签/喜欢/历史/书架/标签/搜索 | ✅ 10 个 commands + 9 个 Pinia stores |
 | 4.5 | 书库 / 阅览记录 / directory_sort（Android schema 对齐） | ✅ `v0.1.0-module3.0`：`library` 11 列 + `browse_history` folder-level + `directory_sort` per-folder |
@@ -152,6 +152,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 3.0.9 | Library → Likes 合并 | ✅ `v0.1.0-module3.0.9-likes-merge`（spec：`docs/superpowers/specs/2026-08-13-library-to-likes-merge-design.md`，plan：`docs/superpowers/plans/2026-08-13-library-to-likes-merge.md`）：去掉冗余"书库"+ 死表 `like`，统一为"喜欢"单一概念。**注：模块号 3.0.7→3.0.9（racyan 机器已占 3.0.7=thumbnail-cache + 3.0.8=browse-position）**。**数据层**：migration 011 `UPDATE library SET is_favorite=1 WHERE id IN (SELECT book_id FROM \`like\`)` 先合并数据再 DROP `like` 表（不丢用户数据；`like.book_id` 必有对应 `library.id`，UPDATE 安全）。**视图层**：删 `Library.vue` + `/library` 路由改为 `redirect: '/likes'`；重写 `Likes.vue` 用 `useLibraryStore.favorites` + 行内 ❤️ toggle；`router/index.test.ts` 新增（`push+isReady+fullPath` 验证 redirect，不用 `resolve()`）。**Reader**：删主菜单"加入书库"按钮；新增 `onToggleLike` 本地 handler + in-flight guard 防 round-4 P1 并发竞态；`ReaderView.test.ts` 新增连续 toggle + in-flight 测试。**SideNav**：删 library 项，likes 提到第 3 位。**FileBrowser 三入口**：文案 `fileBrowser.addToLibrary` → `reader.like`。**i18n**：删 `nav.library` / `library.*` / `reader.menu.library` / `fileBrowser.{,contextMenu.}addToLibrary` / 孤儿 `fileBrowser.inLibrary`。**4 轮代码审查 10 条反馈全闭环**：R1（migration 011 非 009 + 数据合并 + commands/mod.rs 删 + SideNav.test 改 + Reader book ref 同步 + Likes reader params）；R2（ReaderView.test 加连续 toggle + /library redirect）；R3（redirect 测试用 push 不用 resolve）；R4（onToggleLike in-flight guard 防并发竞态）。**预存在不修**：RowContextMenu.onResetProgress 查 book_id 落空；FileBrowser 入口按钮无"已喜欢"状态联动。 |
 | 3.0.10 | Likes 页打磨：取消喜欢 + 浏览跳转瀑布流 | ✅ `v0.1.0-module3.0.10-likes-browse-jump`（spec：`docs/superpowers/specs/2026-08-13-likes-browse-jump-design.md`，plan：`docs/superpowers/plans/2026-08-13-likes-browse-jump.md`）：**A 取消喜欢明确化** — 行内 ❤️ 图标 toggle → 「取消喜欢」文本按钮（复用 `likes.toggleOff`，删孤儿 `likes.toggleOn`），点击后行消失语义不变。**B 浏览跳转瀑布流** — fileBrowser store 新增 `pendingOpenLocation` 一次性意图（`requestOpenLocation` 写入时清 `savedNavigationContext` + `shortcuts.clearActive()` 两类陈旧导航意图，防旧上下文滞留/shortcut 重挂载重放）；FileBrowser onMounted 在 `loadLayout()` 之后、`restoreNavigationContext()` 之前消费（校验 relPath → setRoot → navigate → setViewMode('masonry') 持久化；无图目录现有守卫回落 details）；Likes 每行「浏览」按钮写意图 + push('/')，非 Local 防御不渲染。对齐 shortcut activeId 收敛模式（2026-08-12 路径身份修复方向）。消费点后置结构性避开 loadLayout 覆盖 viewMode 的 IPC 时序竞争。单测 901→912（+11）。 |
 | 3.0.11 | 单图缩略图生成阶段进度 | ✅ `v0.1.0-module3.0.11-thumbnail-per-image-progress`（spec：`docs/superpowers/specs/2026-08-14-thumbnail-per-image-progress-design.md`，plan：`docs/superpowers/plans/2026-08-14-thumbnail-per-image-progress.md`，**三轮审查 13 项闭环后实施**）：**Rust** — `GenPhase` 枚举（queued/decoding/resizing/encoding/writing，Serialize lowercase）+ `GenerationJob.on_progress: Option<Arc<dyn Fn(GenPhase,u64)>>`（不改 `GenerateFn` 签名；手写 Debug 跳过闭包字段）+ `generate_thumbnail` 4 阶段边界回调（复用 t0，elapsed 不含排队）+ `progress_closure_for` 注入（request/resubmit 两处）emit `thumbnail://progress`（非阻塞 `let _ =`）。**前端** — `ThumbnailState.generating` 扩展（phase/startedAt/generationStartedAt/timings）+ `pendingProgress` 竞态缓冲 + queued 回包 cacheKey 顺序守卫（防事件先到被降级/丢 phase）+ `progressSnapshots` 失败快照 + progress 监听 disposed 迟到解绑守卫；`MasonryThumbnail` 顶部居中阶段角标（generating 5 phase 图标 + **failed 错误角标**＝失败详情唯一事后入口）点击直传 DOM 元素（无 querySelector）+ `badgeInteractive` prop 下传（disabled + handler 双保险）；`ThumbnailProgressPopover`（`lib/thumbnailPosition.positionFor` 右→左→下→上 + anchorRect 补算 right/bottom + 失败 snapshot 时间线 + 外部 mousedown/ESC/切目录/toggle 关闭）；settings `fb_thumbnail_detail_popover` 开关（Settings fileBrowser section）。i18n `thumbnail.*` 13 keys 双语。**测试**：前端 912→950（+38）；Rust thumbnail 单测 +5（gen_phase×2/on_progress 顺序/progress 契约）。**已知**：cargo lib 1 个预存在失败（webdav parse_propfind，与本模块无关）。 |
+| 3.0.12 | 移除阅读器 9 宫格触控 | ✅ `v0.1.0-module3.0.12-touch-zones-removal`（spec：`docs/superpowers/specs/2026-08-14-touch-zones-removal-design.md`，plan：`docs/superpowers/plans/2026-08-14-touch-zones-removal.md`）：**纯删除模块**——9 宫格触控整体移除（桌面端滚轮/快捷键/菜单/右键菜单已全覆盖，且全屏点击易误触）。删 3 整文件（`useReaderTouchZones.ts` + 23 测、`TouchRegionsOverlay.vue`）+ `readerSettings.ts` touch 类型体系（`TouchZone`/`TouchAction`/`DEFAULT_TOUCH_SCHEME` 等，引用面封闭无隐藏耦合）+ settings store `touchScheme`/`touchZonesEnabled`/`setTouchAction`/`resetTouchScheme` + Settings.vue Touch section（8→7 section）+ ReaderView `zoneActions` 10 回调 + ReaderScreen/ReaderMainMenu/ReaderOverlay 接线 + 主菜单「显示触控区」按钮。migration 014 `DELETE FROM settings WHERE key LIKE 'touch_%'`（含 001 大写枚举死数据 seed，+2 Rust 测）。**顺带清理**：`inputBindings.mouseRegionCommand` 半死代码（3×3 鼠标分区从未接线，`InputContext` 收窄 keyboard/wheel，`resolveHotkey` 删 ctx 参数）+ 16 个孤儿 `reader.*` i18n key + `settings.touch.*`/`touchAction.*`/`showTouchRegions` 双 locale。**行为影响**：`folder-prev` 失去唯一入口（原为 TODO 空实现可接受，跨卷 prev 留独立模块）；其余动作入口无损失。**测试**：前端 965→929（-36）；Rust lib 294 passed（migration 版本断言 13→14 两处同步）。 |
 
 **构建**：见 [`BUILD.md`](./BUILD.md)。Rust ≥ 1.96 需 `Cargo.toml` 的 `indexmap` 修复（schemars/indexmap 兼容性，详见 BUILD.md §2）。
 
@@ -180,15 +181,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 - **不自动 fade out**（Android 已删），显式关闭按钮 + 路由跳转关闭。
 - Props：`show / title / currentSpreadIndex / totalSpreads`，emit `update:show / back / jump-page / cycle-mode / cycle-direction`。
 
-**0.3 9 宫格点击（`useReaderTouchZones.ts`）**
-
-- 3x3 网格：`tl / tm / tr / ml / mm / mr / bl / bm / br`（**全部 3 字母 key，与 Android 端保持一致**）。
-- **v0.1.0-module3.0-settings 起**：动作源从硬编码 `DEFAULT_READER_ZONES` 改为 `settings.touchScheme`（reactive）+ `settings.touchZonesEnabled` master toggle。类型枚举 `TouchAction` 在 `src/lib/readerSettings.ts`，11 个值（**删除** PV 的 `toggle-chrome`）：`none / prev-page / next-page / jump-first / jump-last / open-main-menu / slideshow-toggle / fit-width / folder-prev / folder-next / open-file-browser`。
-- 默认映射（`DEFAULT_TOUCH_SCHEME`，对齐 PV `TouchScheme.DEFAULT`）：`tl=fit-width / tm=open-file-browser / tr=jump-last / ml=prev-page / mm=open-main-menu / mr=next-page / bl=folder-prev / bm=slideshow-toggle / br=folder-next`。
-- 中央 + 顶中 **都**映射 `open-main-menu` —— 让用户能稳定打开控制面板（任意点击屏幕中部）。
-- `dispatchZoneAction(action, ctx)` 统一派发到 11 个回调（新增 `fitWidth` / `openFileBrowser`）。`fitWidth` 当前仅写 store + log（OSG viewer 未 expose），下次开卷生效。
-
-**0.4 桌面端滚轮（`useReaderWheel.ts`）**
+**0.3 桌面端滚轮（`useReaderWheel.ts`）**
 
 - `passive: false` 才能 `preventDefault()` 阻止页面滚动 + OSD 内部缩放。
 - 250ms 节流避免 Mac 触控板惯性事件一次触发多页。
@@ -196,7 +189,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 - 不区分水平滚轮（`deltaX`）—— 桌面端水平滚轮少见。
 - `useReaderHotkeys` 也接管 `wheel`（走 `inputBindings.resolveHotkey`），二者并存：hotkey 走全局，wheel composable 走 containerRef，**只在 ReaderView 容器范围**生效。
 
-**0.5 轮播 store（`useSlideshowStore`）**
+**0.4 轮播 store（`useSlideshowStore`）**
 
 - 运行时：`isPlaying / intervalMs / direction / loop` + `pendingNextVolume` ref。
 - `start()` / `pause()` / `toggle()` 控制 setInterval。
@@ -206,7 +199,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 - `setInterval` 在 Node / happy-dom 返回类型不一致（`Timeout` vs `number`）—— `let timerId: any = null` 绕过。
 - **v0.1.0-module3.0-settings 起**：interval / direction / loop **全部经 Settings 页 UI 改写**（§11 设置面板），不再是 ReaderMainMenu 单独的临时控件入口。
 
-**0.6 跨卷意图 flag**
+**0.5 跨卷意图 flag**
 
 - `slideshow.pendingNextVolume` 是 ref，ReaderView `watch` 它 → 调 `find_next_volume` IPC。
 - 处理完后调 `consumePendingNextVolume()` 清 flag，避免重复触发。
@@ -360,7 +353,7 @@ function onMouseDown(e: MouseEvent) {
 - **持久化 state**：调用 `useSettingsStore().update('key', value)`，**不**直接调 `setSetting`。store 内统一 `persist('fb_xxx', value)` 包装。
 - **跨视图共享 state**（如 sortField / viewMode / selectedPaths）放专门 store，**不**放组件 local state。
 - **视图临时 state**（如当前 dropdown 是否展开）放组件 `ref`。
-- **域枚举 / 默认值**（v0.1.0-module3.0-settings 起）：阅读器相关枚举（`ScaleMode / ReadDirection / TouchZone / TouchAction`）+ 默认值（`DEFAULT_TOUCH_SCHEME` / `DEFAULT_SCALE_MODE` / `DEFAULT_READ_DIRECTION`）放 `src/lib/readerSettings.ts`，**无 Vue / Pinia / Tauri 依赖**，可独立 vitest。让 store 与 view 都依赖这一个模块，避免重复定义。
+- **域枚举 / 默认值**（v0.1.0-module3.0-settings 起）：阅读器相关枚举（`ScaleMode / ReadDirection`）+ 默认值（`DEFAULT_SCALE_MODE` / `DEFAULT_READ_DIRECTION`）放 `src/lib/readerSettings.ts`，**无 Vue / Pinia / Tauri 依赖**，可独立 vitest。让 store 与 view 都依赖这一个模块，避免重复定义。
 
 **3.4 IPC 桥接 (`src/lib/tauri.ts`)**
 
@@ -414,7 +407,7 @@ vi.mock('@/lib/tauri', async () => {
 **4.4 必须测试**
 
 - 所有 `*.test.ts` 文件**先写测试**（TDD 风格）。
-- 单测跑：220 → 259 → 393 → 397 → 462 → 535 → **582** 用例（v0.1.0-module3.0.6-masonry 增 image_header Rust 9 + TS imageHeader 3 + useMasonrySettings 4 + useMasonryLayout 18 + MasonrySettingsPopup 4 + ViewMode 收窄 fallback 用例，删 list/grid 视图相关用例），目标 0 fail。
+- 单测跑：220 → 259 → 393 → 397 → 462 → 535 → 582 → 965 → **929** 用例（v0.1.0-module3.0.12 移除 9 宫格：-23 useReaderTouchZones -4 mouseRegion -4 readerSettings -3 settings store -1 Settings reset -1 MainMenu regions），目标 0 fail。
 - 任何新组件至少 1 个 default + 1 个 edge case（null / empty / disabled）。
 
 ### 5. Tag / Commit / Branch 约定
@@ -475,7 +468,7 @@ git push github v0.1.0-module1.NN
 - **history 重写为 folder-level**（v0.1.0-module3.0）：Android BrowseHistory 直接对齐；旧 per-book 行丢弃
 - **`book` 表重命名为 `library`**（v0.1.0-module3.0）：与 Android LibraryEntity 字节级镜像，简化 backup/restore 对接
 - **per-folder 排序覆盖**（v0.1.0-module3.0）：Android DirectorySortEntity 对齐；`locationKey = JSON.stringify(sourceDescriptor) + "|" + relPath`
-- **9 宫格触控 master toggle**（v0.1.0-module3.0-settings）：用户可在 Settings § Touch 顶部 BooleanRow 启用/关闭整 9 宫格点击（`touch_zones_enabled`，DB key，默认 `true`）。`useReaderTouchZones` 入口守卫 `if (!settings.touchZonesEnabled) return;`。每个区单独的 `none` 动作也可禁用单格。
+- **移除 9 宫格触控**（v0.1.0-module3.0.12-touch-zones-removal）：`useReaderTouchZones` / `TouchZone` / `TouchAction` / `touchScheme` / `touchZonesEnabled` / TouchRegionsOverlay / Settings Touch section 整体删除；桌面端翻页/菜单/缩放/跨卷由滚轮 + 快捷键 + 顶栏/主菜单/右键菜单承载。migration 014 清理 `touch_*` settings key（含 001 的死数据 seed）。`folder-prev` 因此失去唯一入口（原为 TODO 空实现），跨卷 prev 留独立模块；`inputBindings.mouseRegionCommand` 半死代码一并删除。
 - **breadcrumb 不要内层圆角矩形**（v0.1.0-module3.0-settings）：nav 用 `bg-surface xp-bdb px-3 py-1.5` 即可，**不要** inner `xp-bd rounded` 框，段间 chevron + 段按钮 `text-text-muted hover:bg-surface-light hover:text-text-primary` 即可。validation 反馈改用 `inset 2px 0 0 0 var(--color-success|error)` box-shadow 左侧条。
 - **Settings section 卡片化**（v0.1.0-module3.0-settings）：5 个 section 各自 `bg-surface-1 xp-bd rounded-lg p-6`，parent `flex flex-col gap-6 max-w-[800px]` 自带间距；删 `<hr class="border-white/5 my-8">` 暗色专用分隔（light 不可见）。
 - **Bookmarks / 旧 scoped CSS 视图迁移**（v0.1.0-module3.0-settings）：所有 `<style scoped>` 里 hardcoded hex CSS（`#2a2a2a` input bg / `#444` border 等）必须改用 Tailwind utility + xp-bd token。逐个迁移：Bookmarks.vue 已重写。

@@ -69,7 +69,7 @@
 > - **阅读器默认值**：默认阅读模式 / 默认缩放 / 默认阅读方向 / 翻到末页后
 > - **行为**：屏幕常亮 / 界面语言
 > - **幻灯片**：间隔（秒）/ 方向 / 循环
-> - **9 宫格触控方案**（11 动作 + master toggle `touch_zones_enabled`），对齐 PV `TouchScheme.DEFAULT`
+> - **9 宫格触控方案**（11 动作 + master toggle `touch_zones_enabled`），对齐 PV `TouchScheme.DEFAULT` —— **已于 3.0.12 整体移除**（migration 014 清理 `touch_*` key）
 > - **Settings 面板卡片化**（5 section + 锚点 nav + `gap-6` 间距替代 `<hr>` 分隔线）
 > - **Breadcrumb 去掉内层圆角矩形框**（纯文字 + chevron，nav 仅 `xp-bdb` 分隔条）
 
@@ -439,7 +439,7 @@ INSERT INTO settings (key, value) VALUES
 - 新算法（Rust 端）：`pick_sibling` 纯函数 + `VolumeDirection` 强类型 enum + `find_next_volume` async command（仅 Local，非 Local 明确 Err；`MediaSourceFactory` 集成测试用 tempdir + LocalMediaSource，codebase 首例 factory 集成测试）
 - 设置 `continue_to_next_volume`：**off / auto / manual 3 态**（不含 PV 的 SWIPE，详见 §12.3）
 - 11 条不变量端到端闭环（spec §4.3）：route 唯一真值 / watch immediate 唯一入口 / 失败不保留旧卷 / 去重看 phase=ready / 原子提交 / busy 覆盖 loader / pendingCrossVolume 只在 awaiting-confirm 非空 / route.query.at 清空 / pendingNextVolume 五处消费 / saveCurrentProgressNow await+取消旧 debounce / setOnAtLastNextAttempt(null) 卸载清理
-- 三层架构：意图（5 入口：末页再向下/slideshow/9 宫格/Alt+→/瀑布流按钮）→ CrossVolumeController（模式决策 + requestSeq 竞态 + sameBookIdentity 结构化校验 + canStart 加载期守卫 + settleIdle 集中收口）→ 统一 Book Loader `useReaderBookLoader.loadBookById(bookId)` 返回不可变 `ReaderBookSnapshot`（不写 refs、不调 reader.openBook）→ ReaderView.commitBookSnapshot 原子提交
+- 三层架构：意图（4 入口：末页再向下/slideshow/Alt+→/瀑布流按钮）→ CrossVolumeController（模式决策 + requestSeq 竞态 + sameBookIdentity 结构化校验 + canStart 加载期守卫 + settleIdle 集中收口）→ 统一 Book Loader `useReaderBookLoader.loadBookById(bookId)` 返回不可变 `ReaderBookSnapshot`（不写 refs、不调 reader.openBook）→ ReaderView.commitBookSnapshot 原子提交（9 宫格入口已随 3.0.12 移除）
 - 通用 toast（useToast 单例 ref 队列 + ToastHost Teleport 到 body）+ ContinueNextVolumeToast manual 模式底部胶囊（纯 props/emits **不调 useCrossVolume()**）+ ToastHost 挂在 `src/App.vue` 顶层（最终审查 I1 修复 FileBrowser 路径下 toast 也能渲染）
 - `ProgressItem.finished` 跨边界 gap 修复：Rust `get_progress_inner` SQL 加 finished 列 + row 解析 `!= 0`；TS `ProgressItem` 加字段；Loader 去掉 `& { finished?: boolean }` 死代码交叉类型——"已读完→首页"端到端打通
 - A7 修复（E2E 后发现）：auto/force 跨卷成功 → resume slideshow（仅当调用前 isPlaying=true）+ `pushToast('reader.crossVolume.jumped', {title})` 短暂反馈
@@ -586,7 +586,6 @@ MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**
 | `ui/reader/BookSwapTarget.kt` | 跨卷事件 payload | Phase 5 用 |
 | `ui/reader/overlay/ReaderMainMenu.kt:78-188` | 全屏菜单栏（顶栏 / 导航组 / 阅读组 / 库与工具） | `components/reader/ReaderMainMenu.vue` |
 | `ui/reader/overlay/ReaderOverlay.kt:31-89` | `JumpPageDialog`（Slider + TextField） | `components/reader/JumpPageDialog.vue` |
-| `ui/reader/overlay/TouchRegionOverlay.kt:52-94` | 3×3 触控分区可视化 | `components/reader/TouchRegionOverlay.vue` |
 | `ui/reader/ContinueNextVolume.kt:20-94` | paged 模式跨卷手势（`PointerEventPass.Initial`） | Phase 5 重写为键盘 + 鼠标拖动 |
 | `ui/reader/container/SpreadPlanner.kt`（domain） | 已迁移到 `algorithm/spread_planner.rs`（已建） | 直接用 |
 
@@ -1076,26 +1075,10 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 | 下载 | `download_directory_display_name` | String? | 下载目录显示名 | 同上 | UI 文本 | ❌ |
 | 下载 | `auto_delete_after_finished` | Boolean, `false` | 全部阅读后自动删除 | `SwitchRow` | `DownloadManager` 末态清理 | ❌ |
 | 下载 | `download_concurrency` | Int, `4` (1-10) | 下载并发数 | `NumberInputRow` | `DownloadManager.setConcurrency` | ❌ |
-| **触控** | `touch_zones_enabled` | Boolean, `true` | 启用 9 宫格点击 | 设置 → 触控 → 顶部 toggle | `useReaderTouchZones` 入口守卫 | ✅ |
-| 触控 | 9 个 `touch_{top,mid,bot}_{left,center,right}` | String/Enum | 屏幕触控分区（3×3） | 设置 → 触控 → 3×3 cell 下拉 | `touchRegion()` → `TouchAction` 映射 | ✅ |
 | **i18n** | `locale` | String, `system` | 语言（zh-CN / en-US / 跟随系统） | 设置 → 行为 | `vue-i18n` locale 切换 | ✅ |
 | **搜索** | `search_mode` | String/Enum, `fuzzy` | 搜索模式（模糊 / 子串） | 无 UI（仅 store，Search.vue 直接读写） | fuse.js threshold 配置 | 🟡 |
 
-**触控 3×3 → 默认动作映射**（v0.1.0-module3.0-settings 起对齐 PV `TouchScheme.DEFAULT`）：
-
-| 区域 | 默认动作 | 桌面端等价键 |
-|---|---|---|
-| 左上 (TL) | `fit-width` | `W` |
-| 中上 (TC) | `open-file-browser` | `B` |
-| 右上 (TR) | `jump-last` | `End` |
-| 左中 (ML) | `prev-page` | `←` / `PageUp` |
-| 中中 (MC) | `open-main-menu` | `Esc` / `M` |
-| 右中 (MR) | `next-page` | `→` / `PageDown` / `Space` |
-| 左下 (BL) | `folder-prev` | `Alt+←` |
-| 中下 (BC) | `slideshow-toggle` | `P` / `F5` |
-| 右下 (BR) | `folder-next` | `Alt+→` |
-
-`TouchAction` 枚举（桌面端 11 个，**删除** PV 的 `toggle-chrome`）：`none`, `prev-page`, `next-page`, `jump-first`, `jump-last`, `open-main-menu`, `slideshow-toggle`, `fit-width`, `folder-prev`, `folder-next`, `open-file-browser`。定义在 `src/lib/readerSettings.ts`，DB key 格式 `touch_{top,mid,bot}_{left,center,right}`（与 PV 一致）。
+**触控 3×3 映射已移除**（v0.1.0-module3.0.12-touch-zones-removal）：9 宫格触控方案（`TouchZone`/`TouchAction`/`touchScheme` + Settings Touch section + `TouchRegionsOverlay` 可视化）整体删除，migration 014 清理 `touch_*` settings key。原 9 区动作全部有桌面端等价入口（`W`/`B`/`End`/`←→`/`M`/`P`/`Alt+→`，见 §15.9 键位表）；唯 `folder-prev`（`Alt+←`）失去入口——原为 TODO 空实现，跨卷 prev 留独立模块。
 
 **i18n 文案**（全部走 `$t()`，新增 `settings.*` namespace 参考 `docs/superpowers/specs/2026-08-03-settings-panel-design.md` §4.5）：
 - `slide.range`（间隔滑块标签）
@@ -1126,11 +1109,11 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 
 - **底层**：`HorizontalPager`（desktop 用一个支持键盘 + 鼠标拖拽的 pager 组件或 `swiper.js`），`reverseLayout = direction == RTL`
 - **初始页**：`initialPage = currentIndex.coerceIn(0, lastIndex)`
-- **点击**：`detectTapGestures`（Vue 改 `useMouseEvents` 或 `@click` 监听 + `touchRegion(x, y, w, h)` 映射）
+- **点击**：桌面端鼠标点击不承载翻页/缩放语义（9 宫格已于 3.0.12 移除）
 - **翻页触发**：
   - Pager 拖动 → `pagerState.currentPage` 变化 → `watch(currentPage)` → `onPageChanged(newPage)` → ViewModel
   - 键盘 / 鼠标侧键 → `useReaderHotkeys` 拦截 → `viewModel.nextPage()/previousPage()` → 更新 `_currentIndex` → `watch(currentIndex)` → `pagerState.scrollToPage(currentIndex)`
-  - 翻页按钮 / 触控区域 → `viewModel.nextPage()` / `previousPage()`
+  - 翻页按钮 → `viewModel.nextPage()` / `previousPage()`
 - **Chrome 显隐**：paged 模式默认显示；按 `Esc` / `M` / `C` 切换；webtoon / strip 模式（不做）自动隐藏
 - **进度条**：复用 `JumpPageDialog.vue`，含 Slider + TextField 输入页码
 
@@ -1158,10 +1141,10 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 | `auto` | 末页自动跳下一本（不等用户操作）；跨卷成功后恢复 slideshow 播放（A7 修复）+ 短暂 toast"已跳转《XXX》" |
 | `manual` | 末页弹底部药丸"继续读下一本《XXX》？" + 跳转/✕；点跳转才换书；manual **不**续播 slideshow（用户主动确认，confirmManual 自己的 capsule 提示） |
 
-**5 触发入口**：
-1. reader 末页再向下（滚轮/下键/触控 MR/双击）→ 末页再向下 `reader.nextPage()` 触发 onAtLastNextAttempt → 写 `slideshow.pendingNextVolume=true` → ReaderView watch → `crossVolume.maybeContinue(false, 'next')` 看模式
+**4 触发入口**（9 宫格入口已随 3.0.12 移除）：
+1. reader 末页再向下（滚轮/下键/双击）→ 末页再向下 `reader.nextPage()` 触发 onAtLastNextAttempt → 写 `slideshow.pendingNextVolume=true` → ReaderView watch → `crossVolume.maybeContinue(false, 'next')` 看模式
 2. slideshow tick 末页 → 同一 flag
-3. 9 宫格 `br=folder-next` / Alt+→ → `crossVolume.maybeContinue(true, 'next')`（force=true 不看模式）
+3. Alt+→ → `crossVolume.maybeContinue(true, 'next')`（force=true 不看模式）
 4. 瀑布流工具栏"下一卷"按钮 → 独立 `onCrossNextVolume`（fileListRef.masonryFlushNow → findNextVolume → 双重陈旧校验 path+root → fb.navigate；不走 Controller/Loader）
 
 **末页再向下触发语义**：从倒数第二页 nextPage 翻到末页那次**不**触发跨卷（序列边沿自动区分"翻到末页"与"末页再向下"），在末页再向下才触发（spec §1.2 末页触发时机）。
@@ -1269,9 +1252,8 @@ maybeContinue(force, dir):
 | 跨卷进度药丸 | 底部居中（bottom 100dp） | `continuePull > 0` | 滑动到末页继续向 NEXT 方向划 |
 | 跨卷切换 | 底部居中 | `_swapping == true` | 切换进行中 |
 | 切换 toast | 底部居中（bottom 72dp） | 模式/方向/缩放切换 | 切换后 1.5s |
-| 主菜单 | 全屏遮罩 | `Esc` / `M` / 中区点击 | 用户触发 |
+| 主菜单 | 全屏遮罩 | `Esc` / `M` | 用户触发 |
 | 跳页对话框 | 全屏 | 顶栏跳页按钮 / `Ctrl+G` | 用户触发 |
-| 触控分区覆盖 | 全屏 | 主菜单"显示触控分区" | 用户触发 |
 
 ---
 
@@ -1289,7 +1271,6 @@ maybeContinue(force, dir):
 | `archiveKeyParts` | `domain/usecase/OpenBookUseCase.kt:175` | `(source, absPath) -> (SourceDescriptor, String)` | Archive 归一化到 `(origin, archiveRelPath)`；否则原样 |
 | `progressKeyForLocal` | `domain/usecase/OpenBookUseCase.kt:186` | `(localDesc, localRel, mapping) -> i64` | 本地副本进度映射到远程源 |
 | `NaturalSortComparator.compare` | `core/util/NaturalSortComparator.kt:11` | `(a, b) -> i32` | `page2.jpg < page10.jpg`；数字段长度优先 + 前导零归一 |
-| `TouchScheme.touchRegion` | `domain/reader/TouchScheme.kt:83` | `(x, y, w, h) -> TouchRegion` | 3×3 分区；`width/height` `coerceAtLeast(1.0)` 防除零 |
 | `PathUtils.{segments, normalize, join, parent, crumbs}` | `core/util/PathUtils.kt:12` | 字符串处理函数 | 反斜杠→`/`、去空段、面包屑累积 |
 | `MimeUtils.{isImage, isArchive, mimeFromName, supportedExtensions}` | `core/util/MimeUtils.kt:7` | 扩展名映射函数 | jpg/jpeg/png/gif/webp/bmp/heic/heif；压缩包 cbz/cbr/zip/rar/7z |
 | `image_header::image_dimensions` | 桌面端原创（无 Android 对应） | `(bytes: &[u8]) -> Option<(u32,u32)>` | 手写 JPEG SOF0 / PNG IHDR / GIF LSD / BMP DIB header 字节解析（纯 std 无 image crate）；TS 双实现 `lib/imageHeader.ts`。仅 masonry viewMode 经 `list_image_dimensions` command 调用 |
@@ -1308,20 +1289,21 @@ maybeContinue(force, dir):
 - **`archiveKeyParts` 的归一化条件**：`source is Archive && origin != null && archiveRelPath != null` 才归一化；否则原样
 - **`progressKeyForLocal` 的 mapping**：必须在 openTemp 阶段就构好 mapping，不能到 saveProgress 阶段临时查
 - **`SortOptionComparator` 的 override 优先级**：`DirectorySortRepository.resolveSort` 必须 per-dir override > 全局 default（这是 Android 修过的 #4 bug）
-- **`TouchScheme` 默认 9 个动作值**：与 `TouchScheme.kt:37-46` 严格一致；桌面端键位映射见 §11 表
+
+> 注：`TouchScheme.touchRegion`（3×3 分区算法）曾随 v0.1.0-module3.0-settings 落地，v0.1.0-module3.0.12 随 9 宫格功能整体移除（桌面端点击不承载翻页语义）。
 
 ---
 
 ## 14. 桌面端键盘快捷键映射
 
-Android 端的触控 3×3 区域 + 音量键翻页 + 触屏手势，在桌面端映射为键盘 + 鼠标：
+Android 端的触控 3×3 区域 + 音量键翻页 + 触屏手势，在桌面端映射为键盘 + 滚轮（原 3×3 鼠标分区点击已随 9 宫格功能于 3.0.12 移除——桌面端鼠标点击不承载翻页语义，避免与 chrome 按钮误触冲突）：
 
 ### 14.1 通用阅读器键位（与 MiraPage Android 1:1 对齐）
 
 | 桌面输入 | 动作 | Android 等价 |
 |---|---|---|
-| `←` / `PageUp` | 上一页（PREV_PAGE） | 触控 ML 区 |
-| `→` / `PageDown` / `Space` | 下一页（NEXT_PAGE） | 触控 MR 区 |
+| `←` / `PageUp` | 上一页（PREV_PAGE） | 触控 ML 区 / 音量键 |
+| `→` / `PageDown` / `Space` | 下一页（NEXT_PAGE） | 触控 MR 区 / 音量键 |
 | `Home` | 跳到首页（JUMP_FIRST） | — |
 | `End` | 跳到末页（JUMP_LAST） | 触控 TR 区 |
 | `Esc` / `M` | 切换主菜单（OPEN_MAIN_MENU） | 触控 MC 区 |
@@ -1329,7 +1311,7 @@ Android 端的触控 3×3 区域 + 音量键翻页 + 触屏手势，在桌面端
 | `W` | 适宽缩放（FIT_WIDTH） | 触控 TL 区 |
 | `B` | 打开文件浏览器（OPEN_FILE_BROWSER） | 触控 TC 区 |
 | `Alt+→` | 下一卷（FOLDER_NEXT） | 触控 BR 区 |
-| `Alt+←` | 上一卷（FOLDER_PREV） | 触控 BL 区 |
+| `Alt+←` | 上一卷（FOLDER_PREV） | 触控 BL 区（桌面端待实现） |
 | `P` / `F5` | 切换幻灯片（SLIDESHOW_TOGGLE） | 触控 BC 区 |
 | `1` / `2` | 单页 / 双页模式 | — |
 | `L` | LTR / RTL 切换 | — |
@@ -1341,13 +1323,9 @@ Android 端的触控 3×3 区域 + 音量键翻页 + 触屏手势，在桌面端
 
 | 鼠标输入 | 动作 |
 |---|---|
-| 左键单击左 / 右 1/3 | PREV_PAGE / NEXT_PAGE（与 Android 触控 ML / MR 一致） |
-| 左键单击中区 | OPEN_MAIN_MENU |
-| 左键单击顶 / 底 1/3 | 与对应动作一致 |
 | 左键拖动 | Pager 翻页（桌面端比触屏更精确） |
 | 滚轮上 / 下 | PREV_PAGE / NEXT_PAGE（paged）或滚动（已不做 webtoon / strip） |
-| 中键 | 打开主菜单 |
-| 右键 | 上下文菜单（暂不实现；预留接口） |
+| 右键 | 上下文菜单（`ReaderContextMenu`，v0.1.0-module3.0.2 已实现） |
 
 ### 14.3 跨卷触发（桌面端）
 
@@ -1464,19 +1442,19 @@ fn detect_touch_capable() -> bool {
 
 桌面端**必须**支持用户自定义键位，因为默认映射无法覆盖所有用户习惯。设计要点：
 
-1. **数据模型**（v0.1.0-module3.0-settings 起：**3×3 触控方案已落地**，存在 `settings.touch_*` key + `settings.touchZonesEnabled` master toggle；键盘 / 鼠标 / 触控板 的键位自定义**仍待**）：
+1. **数据模型**（v0.1.0-module3.0.12 起：3×3 触控方案已移除，`touch_*` key 由 migration 014 清理；键盘 / 鼠标 / 触控板 的键位自定义**仍待**）：
    ```typescript
    // src/stores/inputBindings.ts（**待** Phase 6+ 落地）
    interface InputBindings {
      // 键盘键位
-     keyboard: Record<TouchAction, string[]>;   // action → 多组快捷键
+     keyboard: Record<ReaderCommand, string[]>;   // action → 多组快捷键
      // 鼠标按键
-     mouseButtons: Record<MouseButton, TouchAction>;
+     mouseButtons: Record<MouseButton, ReaderCommand>;
      // 滚轮
-     wheelUp: TouchAction;
-     wheelDown: TouchAction;
+     wheelUp: ReaderCommand;
+     wheelDown: ReaderCommand;
      // 触控板手势
-     trackpad: Record<TrackpadGesture, TouchAction>;
+     trackpad: Record<TrackpadGesture, ReaderCommand>;
    }
    ```
 
@@ -1491,7 +1469,7 @@ fn detect_touch_capable() -> bool {
    - Windows 显示 `Ctrl`
    - 通过 `navigator.platform` 检测
 
-> **当前落地**（v0.1.0-module3.0-settings）：3×3 触控方案（11 动作 + master toggle），由 `useReaderTouchZones` 直接读 `settings.touchScheme`。键盘 / 鼠标 / 触控板 的完整自定义编辑器仍在 roadmap。
+> **当前落地**（v0.1.0-module3.0.12）：键盘默认映射由 `inputBindings.defaultKeyBindings` 提供（`useReaderHotkeys` 消费）；3×3 触控方案已移除。键盘 / 鼠标 / 触控板 的完整自定义编辑器仍在 roadmap。
 
 ### 15.8 输入事件总线（架构）
 

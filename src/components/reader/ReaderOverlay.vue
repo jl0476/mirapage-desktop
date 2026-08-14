@@ -134,7 +134,6 @@ onUnmounted(() => window.removeEventListener('pointerdown', onScalePointerDown, 
   <div
     class="absolute inset-0 pointer-events-none flex flex-col justify-between text-white select-none"
     data-test="overlay"
-    data-test-ignore-touch-zones
   >
     <!-- 顶栏 (fix-8: text-white + drop-shadow, 字号 text-sm) -->
     <header v-if="chromeShow" class="bg-surface/90 backdrop-blur-xl px-3 py-1.5 flex items-center gap-3 text-sm text-white pointer-events-auto shadow-lg" data-test="overlay-top" @mouseenter="emit('chrome-hover-enter')" @mouseleave="emit('chrome-hover-leave')">

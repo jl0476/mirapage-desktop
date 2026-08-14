@@ -1,11 +1,13 @@
 /**
  * inputBindings 测试
- * 覆盖 DESIGn §14.1 全键盘映射 + §15.3 鼠标映射 + §15.4 滚轮映射
+ * 覆盖 DESIGn §14.1 全键盘映射 + §15.4 滚轮映射
  *
  * API 设计:
  * - resolveHotkey(event, bindings) → ReaderCommand | null
  * - 纯函数,无副作用,便于单测
  * - bindings 由 useInputBindingsStore 提供(此文件先锁默认映射)
+ *
+ * v0.1.0-module3.0.12: 鼠标 3×3 分区映射（mouseRegionCommand）随 9 宫格一并移除。
  */
 import { describe, it, expect } from 'vitest';
 import { resolveHotkey, defaultKeyBindings } from './inputBindings';
@@ -21,22 +23,6 @@ function keyboardEvent(
     shiftKey: !!options.shiftKey,
     metaKey: !!options.metaKey,
   } as KeyboardEvent;
-}
-
-function mouseEventAt(
-  x: number,
-  y: number,
-  options: { width?: number; height?: number; button?: number } = {},
-): MouseEvent {
-  const w = options.width ?? 1200;
-  const h = options.height ?? 800;
-  return {
-    clientX: x,
-    clientY: y,
-    button: options.button ?? 0,
-    width: w,
-    height: h,
-  } as unknown as MouseEvent;
 }
 
 function wheelEvent(deltaY: number, ctrlKey = false): WheelEvent {
@@ -125,43 +111,6 @@ describe('resolveHotkey — keyboard', () => {
   it('returns null for unmapped keys', () => {
     expect(resolveHotkey(keyboardEvent('z'), defaultKeyBindings)).toBeNull();
     expect(resolveHotkey(keyboardEvent('q'), defaultKeyBindings)).toBeNull();
-  });
-});
-
-describe('resolveHotkey — mouse 3-region click', () => {
-  it('left click at left 1/3 → prevPage', () => {
-    // x=200, width=1200 → in left 0..400
-    expect(resolveHotkey(mouseEventAt(200, 400), defaultKeyBindings, {
-      kind: 'mouse',
-      width: 1200,
-      height: 800,
-    })).toBe('prevPage');
-  });
-
-  it('left click at right 1/3 → nextPage', () => {
-    // x=1000, width=1200 → in right 800..1200
-    expect(resolveHotkey(mouseEventAt(1000, 400), defaultKeyBindings, {
-      kind: 'mouse',
-      width: 1200,
-      height: 800,
-    })).toBe('nextPage');
-  });
-
-  it('left click at center 1/3 (or middle vertical) → openMainMenu', () => {
-    expect(resolveHotkey(mouseEventAt(600, 400), defaultKeyBindings, {
-      kind: 'mouse',
-      width: 1200,
-      height: 800,
-    })).toBe('openMainMenu');
-  });
-
-  it('right click returns null (reserved for future context menu)', () => {
-    const ev = mouseEventAt(600, 400, { button: 2 });
-    expect(resolveHotkey(ev, defaultKeyBindings, {
-      kind: 'mouse',
-      width: 1200,
-      height: 800,
-    })).toBeNull();
   });
 });
 

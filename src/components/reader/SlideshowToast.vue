@@ -2,7 +2,7 @@
 /**
  * SlideshowToast.vue — v0.1.0-module3.0.3
  *
- * 按 Space / 9 宫格 / 右键 / Overlay 按钮切换 slideshow 时, 在屏幕底部居中弹出一个胶囊,
+ * 按 Space / 右键 / Overlay 按钮切换 slideshow 时, 在屏幕底部居中弹出一个胶囊,
  * 复用 ReaderOverlay 轮播控制条同款 token (bg-surface/90 backdrop-blur-xl rounded-full)。
  *
  * **触发源**: watch slideshow.isPlaying flip —— 与现有 watch(pendingNextVolume) 同款。

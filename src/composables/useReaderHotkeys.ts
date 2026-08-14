@@ -3,13 +3,12 @@
  *
  * v0.1.0-reader-review-fix: 移除 window 上的 mousedown listener.
  *  - 原 onMousedown 在 window 上监听所有 mousedown → 按鼠标位置派发 prev/next,
- *    与 9 宫格 useReaderTouchZones + 顶栏/底栏按钮 click 冲突 (用户报告:
- *    点击 btn-mode 后变成下一页).
- *  - 鼠标位置派发逻辑与 9 宫格重复 (9 宫格已接管屏幕分区点击).
+ *    与顶栏/底栏按钮 click 冲突 (用户报告: 点击 btn-mode 后变成下一页).
+ *  - 桌面端鼠标点击不承载翻页语义.
  *  - 仅保留 keyboard + wheel (后者由 useReaderWheel 在容器内独立处理).
  *
  * - onMounted 注册 window.addEventListener('keydown')
- * - 通过 resolveHotkey(event, defaultKeyBindings, ctx) → ReaderCommand
+ * - 通过 resolveHotkey(event, defaultKeyBindings) → ReaderCommand
  * - 派发到 reader store action
  * - onBeforeUnmount 解绑所有 listener
  *
@@ -29,7 +28,7 @@
  * 2026-08-12 跨卷任务 8 (P1-2 修复): 加 ReaderHotkeyActions 可选参数。
  *  - folderNext / folderPrev 之前是 // TODO no-op，本任务派发到 actions.nextVolume / prevVolume。
  *  - 保持向后兼容：actions 默认 {}，现有调用方（不传 actions）不受影响。
- *  - 9 宫格 / Alt+→ 跨卷由 ReaderView 注入 crossVolume.maybeContinue(true, 'next')。
+ *  - Alt+→ 跨卷由 ReaderView 注入 crossVolume.maybeContinue(true, 'next')。
  */
 import { onBeforeUnmount, onMounted } from 'vue';
 import { useRouter, type Router } from 'vue-router';
@@ -125,7 +124,7 @@ export function useReaderHotkeys(actions: ReaderHotkeyActions = {}): void {
     // 一次滚动触发 2 次 nextPage (从 spread 0 → spread 2, 单页模式跳 2 张).
     //
     // v0.1.0-reader-review-fix: 删 mousedown listener.
-    // 与 9 宫格 click + chrome 按钮 click 冲突 (见上方注释).
+    // 与 chrome 按钮 click 冲突 (见上方注释).
     window.addEventListener('keydown', onKeydown);
   });
 

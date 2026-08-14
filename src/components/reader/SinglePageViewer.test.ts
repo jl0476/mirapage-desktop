@@ -88,7 +88,7 @@ describe('SinglePageViewer.vue', () => {
 });
 
 describe('SinglePageViewer OSD config', () => {
-  it('clickToZoom 与 dblClickToZoom 均为 false（不拦截 9 宫格 click）', () => {
+  it('clickToZoom 与 dblClickToZoom 均为 false（点击不触发缩放）', () => {
     (OpenSeadragon as unknown as { _reset: () => void })._reset();
     const w = mount(SinglePageViewer, {
       props: { imageUrl: 'file:///a.jpg' },
