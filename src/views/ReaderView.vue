@@ -228,9 +228,12 @@ const initialImageName = computed<string | null>(() => {
 // 2026-08-12 跨卷任务 8 (spec §11.1): route watch 唯一入口 (替代 onMounted loadBook)
 // 首次挂载靠 immediate: true; bookId 变化 (跨卷) 靠 watcher 触发。
 // 删 onMounted(loadBook) 以避免双加载 (不变量 2)。
+// bugfix 2026-08-15: 记录在途加载 promise —— navigateToVolume await 新卷 commit
+// 后才返回，跨卷续播（resumeSlideshow）由此拿到确定时机。
+let activeLoadPromise: Promise<void> = Promise.resolve();
 watch(
   () => Number(route.params.bookId),
-  (id) => void loadRouteBook(id),
+  (id) => { activeLoadPromise = loadRouteBook(id); },
   { immediate: true },
 );
 
@@ -307,6 +310,11 @@ defineExpose({ retryCurrentBook });
 async function navigateToVolume(target: NextVolumeTarget): Promise<void> {
   const bookId = await loader.ensureBookId(target);
   await router.replace({ name: 'reader', params: { bookId }, query: {} });
+  // bugfix 2026-08-15: 跨卷续播要求返回时新卷已 commit（phase ready + reader.bookId
+  // 更新）。router.replace resolve 时 route watcher 可能尚未跑（microtask 顺序不
+  // 保证），nextTick 保证 watcher flush 后再 await 加载完成。
+  await nextTick();
+  await activeLoadPromise;
 }
 
 /**
@@ -345,13 +353,26 @@ const crossVolume = useCrossVolume({
   pauseSlideshow: () => slideshow.pause(),
   consumePendingNextVolume: () => slideshow.consumePendingNextVolume(),
   canStart: () => bookLoadPhase.value === 'ready',
-  isSlideshowPlaying: () => slideshow.isPlaying,
-  resumeSlideshow: () => slideshow.start(),
+  // bugfix 2026-08-15: slideshow.tick 末页先 pause() 再置 pendingNextVolume ——
+  // 此处读 isPlaying 恒 false，A7 续播判定失效。加 || pendingNextVolumeFromSlideshow
+  // （tick 发起时捕获的来源标记）恢复"发起时正在播放"的事实。
+  isSlideshowPlaying: () => slideshow.isPlaying || slideshow.pendingNextVolumeFromSlideshow,
+  // 续播守卫：navigateToVolume 已 await 新卷加载完成；bookId 不匹配 = 路由已再变
+  // / 用户已离开 reader —— 不续播。
+  resumeSlideshow: () => {
+    if (bookLoadPhase.value === 'ready' && reader.bookId === Number(route.params.bookId)) {
+      slideshow.start();
+    }
+  },
 });
 
 // 末页跨卷意图 (spec §9 reader.nextPage atLast → onAtLastNextAttempt 回调):
 // 写 slideshow.pendingNextVolume → 下方统一 watch 消费。
-reader.setOnAtLastNextAttempt(() => { slideshow.pendingNextVolume = true; });
+reader.setOnAtLastNextAttempt(() => {
+  // 用户翻页发起（非 tick）：清 tick 来源标记，续播判定走实时 isPlaying
+  slideshow.pendingNextVolumeFromSlideshow = false;
+  slideshow.pendingNextVolume = true;
+});
 
 // 单一 watch 消费 pendingNextVolume (手动末页 + slideshow 末页统一).
 watch(

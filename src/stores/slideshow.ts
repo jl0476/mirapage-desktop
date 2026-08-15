@@ -47,6 +47,11 @@ export const useSlideshowStore = defineStore('slideshow', () => {
   /** 末页触发跨卷后, ReaderScreen watch 此 ref → 调 find_next_volume IPC */
   const pendingNextVolume = ref(false);
 
+  /** 末页跨卷意图发起来源：true = slideshow tick 发起（发起时正在播放）。
+   * tick 内 pause() 先于置 flag —— 消费方（useCrossVolume A7 续播判定）在
+   * maybeContinue 入口读 isPlaying 已是 false，须在置 flag 时捕获来源。 */
+  const pendingNextVolumeFromSlideshow = ref(false);
+
   async function load(): Promise<void> {
     const iv = await getSetting('slideshow_interval_ms');
     if (iv !== null) intervalMs.value = Number(iv);
@@ -109,6 +114,7 @@ export const useSlideshowStore = defineStore('slideshow', () => {
   function consumePendingNextVolume(): boolean {
     const v = pendingNextVolume.value;
     pendingNextVolume.value = false;
+    pendingNextVolumeFromSlideshow.value = false;
     return v;
   }
 
@@ -129,6 +135,9 @@ export const useSlideshowStore = defineStore('slideshow', () => {
     atLast: () => boolean,
   ): void {
     if (atLast()) {
+      // 续播来源先于 pause 捕获（bugfix 2026-08-15：pause 后 isPlaying 恒 false，
+      // 跨卷消费方拿不到"发起时正在播放"，跨卷成功后永不续播）
+      pendingNextVolumeFromSlideshow.value = true;
       pause();
       pendingNextVolume.value = true;
       return;
@@ -143,6 +152,7 @@ export const useSlideshowStore = defineStore('slideshow', () => {
     direction,
     loop,
     pendingNextVolume,
+    pendingNextVolumeFromSlideshow,
     load,
     updateIntervalMs,
     updateDirection,

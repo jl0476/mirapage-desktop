@@ -38,6 +38,8 @@ vi.mock('@/lib/tauri', async () => {
     getSetting: vi.fn(async () => null),
     setSetting: vi.fn(async () => undefined),
     setFavorite: vi.fn(async () => undefined),
+    findNextVolume: vi.fn(async () => null),
+    createBook: vi.fn(async () => 8),
   };
 });
 
@@ -63,7 +65,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { getBook, getProgress, listDirectory, setFavorite } from '@/lib/tauri';
+import { getBook, getProgress, listDirectory, setFavorite, findNextVolume, createBook } from '@/lib/tauri';
+import { useSettingsStore } from '@/stores/settings';
 import ReaderView from './ReaderView.vue';
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
@@ -1108,4 +1111,75 @@ describe('ReaderView.vue', () => {
     expect(setFavorite).toHaveBeenNthCalledWith(2, 7, false);
     expect(menu.props('isLiked')).toBe(false);
   });
+
+  // ─── bugfix 2026-08-15 — 幻灯片跨卷续播 ──────────────────────────────
+  // 现象：幻灯片播放中末页自动跨卷成功后，播放停止，不再续播下一卷。
+  // 根因：slideshow.tick 末页分支先 pause() 再置 pendingNextVolume ——
+  // useCrossVolume.maybeContinue 入口读 isPlaying 已是 false →
+  // A7 wasSlideshowPlaying 恒 false → 跨卷成功后 resumeSlideshow 永不调用。
+  // 修法：tick 置 flag 前记 pendingNextVolumeFromSlideshow；ReaderView 注入
+  // isSlideshowPlaying 读 isPlaying || fromSlideshow；resumeSlideshow 在新卷
+  // commit（navigateToVolume await 加载完成）后 start。
+  it('slideshow 播放中末页 tick → auto 跨卷 → 新卷 ready 后自动续播', async () => {
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    useReaderStore();
+    const slideshow = useSlideshowStore();
+    const settings = useSettingsStore();
+    settings.continueToNextVolume = 'auto';
+
+    vi.mocked(getBook).mockImplementation(async (id: number) => ({
+      id,
+      title: 'Manga ' + id,
+      sourceDescriptor: { type: 'local', rootPath: '/test/manga' },
+      sourceType: 'Local',
+      absolutePath: '',
+      coverEntryPath: null,
+      coverEntryName: null,
+      pageCount: 3,
+      lastReadAt: null,
+      addedAt: 0,
+      isFavorite: false,
+    } as never));
+    vi.mocked(findNextVolume).mockResolvedValueOnce({
+      descriptor: { type: 'local', rootPath: '/test/manga' },
+      relPath: 'vol2',
+      title: 'Vol 2',
+    } as never);
+    vi.mocked(createBook).mockResolvedValueOnce(8);
+
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    // 播放中，末页 tick（模拟 interval 在末页触发跨卷意图）
+    slideshow.start();
+    expect(slideshow.isPlaying).toBe(true);
+    slideshow.tick(vi.fn(), vi.fn(), () => true);
+    expect(slideshow.isPlaying).toBe(false); // tick 内已 pause
+
+    // 链路：watch → maybeContinue(auto) → findNextVolume → navigate →
+    // ensureBookId(8) → router.replace → loadRouteBook(8) → ready → 续播
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+
+    expect(router.currentRoute.value.params.bookId).toBe('8');
+    expect(slideshow.pendingNextVolume).toBe(false); // 意图已消费
+    expect(slideshow.isPlaying).toBe(true);          // ← 跨卷后续播
+
+    slideshow.pause();
+    w.unmount();
+  });
+
 });

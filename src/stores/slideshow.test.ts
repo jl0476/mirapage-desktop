@@ -62,6 +62,38 @@ describe('slideshow — tick 翻页回调', () => {
   });
 });
 
+describe('slideshow — tick 末页续播来源捕获 (bugfix 2026-08-15)', () => {
+  // 背景：tick 末页分支先 pause() 再置 pendingNextVolume —— 跨卷消费方
+  // (useCrossVolume A7 续播判定) 在 maybeContinue 入口读 isPlaying 已是 false，
+  // "发起时正在播放"的事实丢失 → 跨卷成功后永不续播。
+  // 修法：tick 置 flag 前先记 pendingNextVolumeFromSlideshow=true（发起来源）。
+
+  it('末页 tick → pendingNextVolumeFromSlideshow=true（pause 先行不丢失来源）', () => {
+    const store = useSlideshowStore();
+    store.isPlaying = true; // 模拟 start 后
+    store.tick(vi.fn(), vi.fn(), () => true);
+    expect(store.isPlaying).toBe(false);                       // pause 已发生
+    expect(store.pendingNextVolume).toBe(true);
+    expect(store.pendingNextVolumeFromSlideshow).toBe(true);   // ← 续播判定依据
+  });
+
+  it('consumePendingNextVolume → 来源标记一并复位', () => {
+    const store = useSlideshowStore();
+    store.isPlaying = true;
+    store.tick(vi.fn(), vi.fn(), () => true);
+    store.consumePendingNextVolume();
+    expect(store.pendingNextVolume).toBe(false);
+    expect(store.pendingNextVolumeFromSlideshow).toBe(false);
+  });
+
+  it('非末页 tick 不动来源标记', () => {
+    const store = useSlideshowStore();
+    store.isPlaying = true;
+    store.tick(vi.fn(), vi.fn(), () => false);
+    expect(store.pendingNextVolumeFromSlideshow).toBe(false);
+  });
+});
+
 describe('slideshow — reset 重置 timer', () => {
   it('isPlaying=false → reset 是 no-op', () => {
     const store = useSlideshowStore();
