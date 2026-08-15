@@ -26,8 +26,26 @@ export default defineConfig(() => ({
       ? { protocol: 'ws', host, port: 1421 }
       : undefined,
     watch: {
-      // 告诉 vite 不要监听 src-tauri 目录
-      ignored: ['**/src-tauri/**'],
+      // 只监听前端模块图需要的文件，其余（Rust 侧/文档/脚本/CI/会话产物/
+      // 测试素材/构建产物）统统忽略。tailwind v4 会扫描非 gitignore 文本做
+      // class 检测——不忽略时改 DESIGN.md 62ms 后触发整页 reload，打断正在
+      // 运行的调试会话（2026-08-16 实测）。
+      ignored: [
+        '**/src-tauri/**',
+        '**/src-tauri-algorithm-tests/**',
+        '**/*.md',
+        'docs/**',
+        'scripts/**',
+        '.github/**',
+        '.claude/**',
+        '.superpowers/**',
+        'samples/**',
+        'test_manga/**',
+        'dist/**',
+        '*.exe',
+        '*.log',
+        '*.diff',
+      ],
     },
   },
 
