@@ -39,6 +39,7 @@ vi.mock('@/lib/tauri', async () => {
     setSetting: vi.fn(async () => undefined),
     setFavorite: vi.fn(async () => undefined),
     findNextVolume: vi.fn(async () => null),
+    recordHistory: vi.fn(async () => undefined),
     createBook: vi.fn(async () => 8),
   };
 });
@@ -65,7 +66,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { getBook, getProgress, listDirectory, setFavorite, findNextVolume, createBook } from '@/lib/tauri';
+import { getBook, getProgress, listDirectory, setFavorite, findNextVolume, createBook, recordHistory } from '@/lib/tauri';
 import { useSettingsStore } from '@/stores/settings';
 import ReaderView from './ReaderView.vue';
 
@@ -1112,6 +1113,36 @@ describe('ReaderView.vue', () => {
     expect(menu.props('isLiked')).toBe(false);
   });
 
+  // ─── 2026-08-16 — 阅览记录：所有进阅读器的路径统一记录 ──────────────
+  // 此前 recordHistory 只在 useReaderActions（文件浏览器打开动作）调用，
+  // 自动跨卷（navigateToVolume → router.replace → loadRouteBook）漏记。
+  // 修法：loadRouteBook 提交成功后统一记录（幂等 upsert，失败静默）。
+  it('mount 加载成功后记录 browse_history（loadRouteBook 统一入口）', async () => {
+    const fb = useFileBrowserStore();
+    fb.entries = [
+      { name: 'a.jpg', path: '/test/manga/a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'b.jpg', path: '/test/manga/b.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'c.jpg', path: '/test/manga/c.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ] as never;
+    useReaderStore();
+    useSlideshowStore();
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    await flushPromises();
+    expect(recordHistory).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(recordHistory).mock.calls[0]).toEqual([
+      expect.objectContaining({ type: 'local' }),
+      expect.any(String),
+      'Manga 7',
+      7,
+    ]);
+    w.unmount();
+  });
+
   // ─── bugfix 2026-08-15 — 幻灯片跨卷续播 ──────────────────────────────
   // 现象：幻灯片播放中末页自动跨卷成功后，播放停止，不再续播下一卷。
   // 根因：slideshow.tick 末页分支先 pause() 再置 pendingNextVolume ——
@@ -1177,6 +1208,14 @@ describe('ReaderView.vue', () => {
     expect(router.currentRoute.value.params.bookId).toBe('8');
     expect(slideshow.pendingNextVolume).toBe(false); // 意图已消费
     expect(vi.mocked(findNextVolume).mock.calls[0]?.[3]).toEqual({ skipFinished: true }); // 自动跨卷跳过已读完
+    await flushPromises();
+    // 2026-08-16: 跨卷也要记阅览记录（loadRouteBook 统一入口）
+    expect(vi.mocked(recordHistory).mock.calls.at(-1)).toEqual([
+      expect.objectContaining({ type: 'local' }),
+      expect.any(String),
+      'Manga 8',
+      8,
+    ]);
     expect(slideshow.isPlaying).toBe(true);          // ← 跨卷后续播
 
     slideshow.pause();

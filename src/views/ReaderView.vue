@@ -34,7 +34,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
-import { type BookItem, addBookmark, setFavorite } from '@/lib/tauri';
+import { type BookItem, addBookmark, setFavorite, recordHistory } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { useSlideshowStore } from '@/stores/slideshow';
@@ -256,6 +256,20 @@ async function loadRouteBook(bookId: number): Promise<void> {
     bookLoadPhase.value = 'ready';
     status.value = 'ready';
     visibleReader.value = true;
+    // 2026-08-16: 阅览记录——所有进阅读器的路径统一在此记录（含自动跨卷：
+    // navigateToVolume 走 router.replace → 本函数，此前只有 useReaderActions
+    // 入口记录，跨卷漏记）。record_history 幂等 upsert，与 actions 入口的
+    // 重复记录只多一次 last_visited_at 刷新；失败静默不阻断阅读。
+    try {
+      await recordHistory(
+        snapshot.descriptor,
+        snapshot.relPath,
+        snapshot.book.title || '无标题',
+        snapshot.book.id,
+      );
+    } catch (err) {
+      log('[ReaderView/loadRouteBook] recordHistory failed', err);
+    }
     log('[ReaderView/loadRouteBook] committed, bookId=', bookId, 'seq=', seq);
   } catch (error) {
     if (seq !== activeLoadSeq) return;
