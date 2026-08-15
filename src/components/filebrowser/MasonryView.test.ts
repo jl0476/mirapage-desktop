@@ -279,6 +279,83 @@ describe('MasonryView.settings 闭环', () => {
   });
 });
 
+// ─── bugfix 2026-08-15 — atBottom 响应式（滚到底不标 finished 根因）─────────
+// 场景：缩略图全缓存命中 → 布局在用户滚到底之前已收敛（totalHeight 不再变）。
+// 旧实现 atBottom computed 读非响应式 el.scrollTop，唯一响应式依赖是
+// layout.totalHeight → 滚到底后 computed 永不重算 → 缓存停在 false →
+// 「滚到底停留 1.2s 写 finished=true」机制从不触发（实机 CDP 定位：缓存 false
+// vs 同 DOM 现算 true）。
+//
+// 测试策略：mock layout.totalHeight 固定不变（模拟已收敛）；先读一次 atBottom
+// （scrollTop=0 → false，种下缓存）；再通过真实 scroll 事件把 scrollTop 滚到
+// 贴底 → atBottom 必须翻 true。scroll 走 useVirtualList 真实 listener（未 mock）。
+
+describe('MasonryView.atBottom 响应式 (bugfix 2026-08-15)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    fakeLayoutMap.current = new Map<string, MasonryItem>();
+    browsePositionParams.current = null;
+  });
+
+  it('布局已收敛（totalHeight 不变）后滚到底 → atBottom 翻 true', async () => {
+    const w = mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    // happy-dom 不算布局，stub 容器几何：sh=2000, ch=800 → 档3 长目录
+    // 贴底阈值 64px：scrollTop>=1136 即 nearBottom
+    const containerEl = w.element as HTMLElement;
+    expect(containerEl.classList.contains('masonry-container')).toBe(true);
+    Object.defineProperty(containerEl, 'scrollHeight', { configurable: true, value: 2000 });
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+
+    // 种下缓存：scrollTop=0 时 atBottom=false（此时 computed 求值，依赖无滚动项）
+    expect(browsePositionParams.current).not.toBeNull();
+    expect(browsePositionParams.current!.atBottom.value).toBe(false);
+
+    // 真实滚动到底：scrollTop=1200 → 1200+800=2000 >= 2000-64 → nearBottom
+    containerEl.scrollTop = 1200;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    // 旧实现：scrollTop ref 不在依赖里 → 缓存 stale false → 红
+    expect(browsePositionParams.current!.atBottom.value).toBe(true);
+
+    w.unmount();
+  });
+
+  it('滚离底部 → atBottom 翻回 false', async () => {
+    const w = mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+
+    const containerEl = w.element as HTMLElement;
+    Object.defineProperty(containerEl, 'scrollHeight', { configurable: true, value: 2000 });
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+
+    // 先到底（true），再滚回中部（0+800 >= 1936 不成立 → false）
+    containerEl.scrollTop = 1200;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+    expect(browsePositionParams.current!.atBottom.value).toBe(true);
+
+    containerEl.scrollTop = 100;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+    expect(browsePositionParams.current!.atBottom.value).toBe(false);
+
+    w.unmount();
+  });
+});
+
 // ─── v0.1.0-module3.0.8 task-21 — resize 视觉焦点漂移修复（spec §resize-anchor）──────
 // 验证：resize 触发时，containerWidth 变化 → 捕获 viewport anchor (path+ratio) →
 // layout 重排后恢复 scrollTop 到同一图片同一相对位置。

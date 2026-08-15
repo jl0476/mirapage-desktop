@@ -345,12 +345,15 @@ async function scrollToEntry(imageName: string): Promise<boolean> {
 /** atBottom 三档规则(spec §2.1): layoutHeight 作响应式触发源(审查 P1), 判定读 el.scrollHeight.
  *  - layout.totalHeight 是 computed, 缩略图尺寸收敛会变, 把它纳入依赖强制 atBottom 重算.
  *  - 判定值仍读 el.scrollHeight(准), 不读 layout.value.totalHeight(可能是估算高度).
- *  - 任务 7 只暴露 computed, 任务 8 才接进 useMasonryBrowsePosition. */
+ *  - scrollTop 必须读响应式 ref 而非 el.scrollTop(bugfix 2026-08-15): el.scrollTop 是
+ *    非响应式 DOM 属性, 滚动不触发重算 → 缩略图全缓存命中(布局在滚到底前已收敛)时
+ *    computed 冻结在 false, 「滚到底停留 1.2s 标 finished」机制从不触发。
+ *  - scrollHeight/clientHeight 无响应式对应物, 仍由 totalHeight 触发源覆盖。 */
 const atBottom = computed(() => {
   const el = containerRef.value;
   if (!el) return false;
   void layout.value.totalHeight;
-  return computeAtBottom(el.scrollHeight, el.clientHeight, el.scrollTop);
+  return computeAtBottom(el.scrollHeight, el.clientHeight, scrollTop.value);
 });
 
 /** v0.1.0-module3.0.8 (任务 8): 浏览位置 composable（任务 7 实现）。
