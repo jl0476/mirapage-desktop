@@ -11,7 +11,8 @@ pub struct DirectorySort {
 }
 
 /// locationKey = SourceDescriptorJson + "|" + relPath (与 Android DirectorySortRepository 一致)
-fn location_key_of(source_descriptor: &serde_json::Value, rel_path: &str) -> String {
+/// pub(crate)：find_next_volume 解析父目录排序覆盖时复用（必须同构，防键序漂移查不到行）
+pub(crate) fn location_key_of(source_descriptor: &serde_json::Value, rel_path: &str) -> String {
     let sd_str = serde_json::to_string(source_descriptor).unwrap_or_default();
     format!("{}|{}", sd_str, rel_path)
 }

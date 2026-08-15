@@ -26,6 +26,28 @@ pub enum VolumeDirection {
     Prev,
 }
 
+/// 兄弟目录排序字段（与 TS `SortField` / `directory_sort.sort_field` 存储值一致）。
+/// 不作 IPC 入参 —— command 按父目录生效排序自动解析（resolve_sibling_sort），
+/// 与文件浏览器 `fileSort.sortEntries` 展示卷的顺序保持一致（2026-08-16）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeSortField {
+    Name,
+    ModifiedAt,
+    Size,
+}
+
+impl VolumeSortField {
+    /// 解析 `directory_sort.sort_field` / settings `fb_sort_field` 的存储值。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "name" => Some(Self::Name),
+            "modifiedAt" => Some(Self::ModifiedAt),
+            "size" => Some(Self::Size),
+            _ => None,
+        }
+    }
+}
+
 /// spec §5.2：在 siblings 里按 natural sort 找 current 的 next/prev，只保留 `is_directory`。
 /// 返回目标 entry 的克隆（不返回索引，避免过滤数组索引歧义 —— P1-5）。
 /// current 不在或越界返回 None。
@@ -34,15 +56,25 @@ pub fn pick_sibling(
     current_basename: &str,
     direction: VolumeDirection,
 ) -> Option<crate::source::descriptor::MediaEntry> {
-    pick_sibling_where(siblings, current_basename, direction, &|_| true)
+    pick_sibling_where(
+        siblings,
+        current_basename,
+        direction,
+        VolumeSortField::Name,
+        true,
+        &|_| true,
+    )
 }
 
-/// bugfix 2026-08-16（自动跨卷跳过已读完）：在方向上逐个迭代 sibling 目录，
-/// 返回第一个通过 `pred` 的候选。`pick_sibling` = pred 恒 true 的特例。
+/// bugfix 2026-08-16（跨卷排序与文件浏览器一致）：按父目录生效排序排兄弟目录，
+/// 在方向上逐个迭代，返回第一个通过 `pred` 的候选。`pick_sibling` =
+/// (name 升序, pred 恒 true) 的特例（旧行为）。
 pub fn pick_sibling_where(
     siblings: &[crate::source::descriptor::MediaEntry],
     current_basename: &str,
     direction: VolumeDirection,
+    sort_field: VolumeSortField,
+    sort_ascending: bool,
     pred: &dyn Fn(&crate::source::descriptor::MediaEntry) -> bool,
 ) -> Option<crate::source::descriptor::MediaEntry> {
     use crate::algorithm::natural_compare;
@@ -53,7 +85,11 @@ pub fn pick_sibling_where(
     if dirs.is_empty() {
         return None;
     }
-    dirs.sort_by(|a, b| natural_compare(&a.name, &b.name));
+    dirs.sort_by(|a, b| cmp_sibling(a, b, sort_field));
+    // 镜像 TS sortEntries：descending = 升序结果整体反转
+    if !sort_ascending {
+        dirs.reverse();
+    }
     let pos = dirs.iter().position(|e| e.name == current_basename)?;
     let clone = |i: usize| {
         dirs.get(i).map(|e| crate::source::descriptor::MediaEntry {
@@ -87,6 +123,73 @@ pub fn pick_sibling_where(
             None
         }
     }
+}
+
+/// 镜像 TS `fileSort.sortByField` 的比较语义（ascending 方向）：
+/// - name：natural_compare（与 TS naturalSort 语义对齐，Android 真值源）
+/// - modifiedAt：数值比较，`None` 排末尾（TS `undefined` 排后）
+/// - size：数值比较
+fn cmp_sibling(
+    a: &crate::source::descriptor::MediaEntry,
+    b: &crate::source::descriptor::MediaEntry,
+    field: VolumeSortField,
+) -> std::cmp::Ordering {
+    use crate::algorithm::natural_compare;
+    match field {
+        VolumeSortField::Name => natural_compare(&a.name, &b.name),
+        VolumeSortField::ModifiedAt => match (a.modified_at, b.modified_at) {
+            (Some(x), Some(y)) => x.cmp(&y),
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(_), None) => std::cmp::Ordering::Less,
+        },
+        VolumeSortField::Size => a.size.cmp(&b.size),
+    }
+}
+
+/// 父目录生效排序（与文件浏览器一致，逐维度解析）：
+/// `directory_sort` 覆盖（location_key 与 directory_sort 命令同构）
+/// ?? settings 全局（`fb_sort_field` / `fb_sort_ascending`）?? name 升序。
+/// 查不到 / 值非法 → 静默回退默认，不阻断跨卷。
+fn resolve_sibling_sort(
+    db: &crate::db::Db,
+    descriptor_value: &serde_json::Value,
+    parent_path: &str,
+) -> (VolumeSortField, bool) {
+    let conn = db.conn();
+    let key = crate::commands::directory_sort::location_key_of(descriptor_value, parent_path);
+    let ovr: Option<(String, bool)> = conn
+        .query_row(
+            "SELECT sort_field, ascending FROM directory_sort WHERE location_key = ?1",
+            rusqlite::params![key],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
+        )
+        .ok();
+    let global_field = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'fb_sort_field'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    let global_asc = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'fb_sort_ascending'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .ok();
+    let field = ovr
+        .as_ref()
+        .and_then(|(f, _)| VolumeSortField::parse(f))
+        .or_else(|| global_field.as_deref().and_then(VolumeSortField::parse))
+        .unwrap_or(VolumeSortField::Name);
+    let ascending = ovr
+        .as_ref()
+        .map(|(_, a)| *a)
+        .or_else(|| global_asc.as_deref().map(|v| v == "1"))
+        .unwrap_or(true);
+    (field, ascending)
 }
 
 /// 候选卷是否已读完（progress.finished=1）。
@@ -184,24 +287,40 @@ pub async fn find_next_volume_impl(
         .cloned()
         .unwrap_or_default();
 
-    // 4. list parent + pick_sibling（只保留 is_directory）
+    // 4. list parent + 按父目录生效排序排兄弟（与文件浏览器视觉顺序一致）
     let source = factory.resolve(&descriptor);
     let siblings = source
         .list_directory(&descriptor, &parent_path)
         .await
         .map_err(|e| e.to_string())?;
+    // 兄弟排序：父目录 directory_sort 覆盖 ?? settings 全局 ?? name 升序
+    // （db=None 仅旧单测路径 → 默认；生产 command 恒传 Some）
+    let (sort_field, sort_ascending) = match db {
+        Some(db) => resolve_sibling_sort(db, &args.descriptor, &parent_path),
+        None => (VolumeSortField::Name, true),
+    };
     // skip_finished 的 finished 查库用（与 create_book 写入的序列化保持一致）
     let descriptor_str = serde_json::to_string(&descriptor).map_err(|e| e.to_string())?;
-    let target = if args.skip_finished.unwrap_or(false) {
-        let db = db.ok_or_else(|| {
-            "find_next_volume: skip_finished 需要 DB 访问（command 层必须传入）".to_string()
-        })?;
-        pick_sibling_where(&siblings, &current_basename, args.direction, &|e| {
-            !sibling_is_finished(db, &descriptor_str, &parent_path, e)
-        })
-    } else {
-        pick_sibling(&siblings, &current_basename, args.direction)
-    };
+    // pred：skip_finished=true 时跳过已读完的相邻卷；否则恒通过
+    let pred: Box<dyn Fn(&crate::source::descriptor::MediaEntry) -> bool> =
+        if args.skip_finished.unwrap_or(false) {
+            let db = db.ok_or_else(|| {
+                "find_next_volume: skip_finished 需要 DB 访问（command 层必须传入）".to_string()
+            })?;
+            // parent_path 后面 rel_path 计算还要用 → clone 进闭包
+            let parent_for_pred = parent_path.clone();
+            Box::new(move |e| !sibling_is_finished(db, &descriptor_str, &parent_for_pred, e))
+        } else {
+            Box::new(|_| true)
+        };
+    let target = pick_sibling_where(
+        &siblings,
+        &current_basename,
+        args.direction,
+        sort_field,
+        sort_ascending,
+        &*pred,
+    );
     let target = match target {
         Some(t) => t,
         None => return Ok(None),
@@ -769,13 +888,13 @@ mod tests {
         ];
         // 拒绝 vol2 → next 取 vol3
         assert_eq!(
-            pick_sibling_where(&s, "vol1", VolumeDirection::Next, &|e| e.name != "vol2")
+            pick_sibling_where(&s, "vol1", VolumeDirection::Next, VolumeSortField::Name, true, &|e| e.name != "vol2")
                 .map(|e| e.name),
             Some("vol3".to_string()),
         );
         // prev 从 vol3 反向，拒绝 vol2 → 取 vol1
         assert_eq!(
-            pick_sibling_where(&s, "vol3", VolumeDirection::Prev, &|e| e.name != "vol2")
+            pick_sibling_where(&s, "vol3", VolumeDirection::Prev, VolumeSortField::Name, true, &|e| e.name != "vol2")
                 .map(|e| e.name),
             Some("vol1".to_string()),
         );
@@ -788,7 +907,7 @@ mod tests {
             entry("vol1", true, false),
             entry("vol2", true, false),
         ];
-        assert!(pick_sibling_where(&s, "vol1", VolumeDirection::Next, &|_| false).is_none());
+        assert!(pick_sibling_where(&s, "vol1", VolumeDirection::Next, VolumeSortField::Name, true, &|_| false).is_none());
     }
 
     /// 12) skip_finished：相邻 vol2 已读完 → 跳到 vol3。
@@ -962,5 +1081,211 @@ mod tests {
         let json = r#"{"descriptor": {}, "currentPath": "x", "direction": "next", "skipFinished": true}"#;
         let args: FindNextVolumeArgs = serde_json::from_str(json).expect("deserialize skip");
         assert_eq!(args.skip_finished, Some(true));
+    }
+
+    // ---- 兄弟排序与文件浏览器一致（2026-08-16）----
+
+    /// 带时间的 entry（mtime 可控，避开 fs mtime）。
+    fn entry_mtime(name: &str, mtime: Option<i64>) -> MediaEntry {
+        MediaEntry {
+            name: name.to_string(),
+            path: name.to_string(),
+            is_directory: true,
+            is_archive: false,
+            size: 0,
+            modified_at: mtime,
+        }
+    }
+
+    /// name 降序：升序整体反转 → vol1 是最后，next 无；vol3 的 next 是 vol2。
+    #[test]
+    fn pick_sibling_where_name_desc_reverses_order() {
+        let s = vec![
+            entry("vol1", true, false),
+            entry("vol2", true, false),
+            entry("vol3", true, false),
+        ];
+        // 降序 = [vol3, vol2, vol1]
+        assert!(pick_sibling_where(&s, "vol1", VolumeDirection::Next, VolumeSortField::Name, false, &|_| true).is_none());
+        assert_eq!(
+            pick_sibling_where(&s, "vol3", VolumeDirection::Next, VolumeSortField::Name, false, &|_| true)
+                .map(|e| e.name),
+            Some("vol2".to_string()),
+        );
+        // prev 对称：vol1 的 prev 是 vol2
+        assert_eq!(
+            pick_sibling_where(&s, "vol1", VolumeDirection::Prev, VolumeSortField::Name, false, &|_| true)
+                .map(|e| e.name),
+            Some("vol2".to_string()),
+        );
+    }
+
+    /// modifiedAt 升序：兄弟顺序按 mtime（与 name 序不同），next 跟随时间序。
+    #[test]
+    fn pick_sibling_where_modified_at_orders_by_mtime() {
+        // name 序 [a, b, c]；mtime 序 [c(1), a(2), b(3)]
+        let s = vec![
+            entry_mtime("a", Some(2)),
+            entry_mtime("b", Some(3)),
+            entry_mtime("c", Some(1)),
+        ];
+        // 升序 = [c, a, b] → a 的 next 是 b；c 的 next 是 a
+        assert_eq!(
+            pick_sibling_where(&s, "a", VolumeDirection::Next, VolumeSortField::ModifiedAt, true, &|_| true)
+                .map(|e| e.name),
+            Some("b".to_string()),
+        );
+        assert_eq!(
+            pick_sibling_where(&s, "c", VolumeDirection::Next, VolumeSortField::ModifiedAt, true, &|_| true)
+                .map(|e| e.name),
+            Some("a".to_string()),
+        );
+    }
+
+    /// modifiedAt 缺失值：升序排末尾；降序（整体反转）排最前 —— 镜像 TS sortEntries 怪癖。
+    #[test]
+    fn pick_sibling_where_modified_at_none_endings_mirror_ts() {
+        let s = vec![
+            entry_mtime("none1", None),
+            entry_mtime("old", Some(1)),
+            entry_mtime("new", Some(2)),
+            entry_mtime("none2", None),
+        ];
+        // 升序 = [old, new, none1, none2]（None 排末尾，稳定序保插入序）
+        assert_eq!(
+            pick_sibling_where(&s, "new", VolumeDirection::Next, VolumeSortField::ModifiedAt, true, &|_| true)
+                .map(|e| e.name),
+            Some("none1".to_string()),
+        );
+        // 降序 = [none2, none1, new, old]（反转后 None 到最前 —— TS 同款行为）
+        assert_eq!(
+            pick_sibling_where(&s, "none2", VolumeDirection::Next, VolumeSortField::ModifiedAt, false, &|_| true)
+                .map(|e| e.name),
+            Some("none1".to_string()),
+        );
+    }
+
+    /// resolve_sibling_sort：directory_sort 覆盖优先（location_key 与命令同构）。
+    #[test]
+    fn resolve_sibling_sort_override_wins() {
+        let db = crate::db::Db::open_in_memory().expect("db");
+        let desc = serde_json::json!({"type": "local", "rootPath": "/r"});
+        let key = crate::commands::directory_sort::location_key_of(&desc, "");
+        db.conn()
+            .execute(
+                "INSERT INTO directory_sort (location_key, sort_field, ascending) VALUES (?1, 'modifiedAt', 0)",
+                rusqlite::params![key],
+            )
+            .expect("seed");
+        assert_eq!(
+            resolve_sibling_sort(&db, &desc, ""),
+            (VolumeSortField::ModifiedAt, false),
+        );
+    }
+
+    /// resolve_sibling_sort：无覆盖 → settings 全局（fb_sort_field / fb_sort_ascending）。
+    #[test]
+    fn resolve_sibling_sort_settings_global_fallback() {
+        let db = crate::db::Db::open_in_memory().expect("db");
+        let desc = serde_json::json!({"type": "local", "rootPath": "/r"});
+        db.conn()
+            .execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('fb_sort_field', 'size'), ('fb_sort_ascending', '0')",
+                [],
+            )
+            .expect("seed settings");
+        assert_eq!(
+            resolve_sibling_sort(&db, &desc, ""),
+            (VolumeSortField::Size, false),
+        );
+    }
+
+    /// resolve_sibling_sort：全空 / 值非法 → 默认 name 升序（静默回退不阻断）。
+    #[test]
+    fn resolve_sibling_sort_defaults_on_missing_or_invalid() {
+        let db = crate::db::Db::open_in_memory().expect("db");
+        let desc = serde_json::json!({"type": "local", "rootPath": "/r"});
+        assert_eq!(resolve_sibling_sort(&db, &desc, ""), (VolumeSortField::Name, true));
+
+        // 覆盖存在但值非法 → 回退默认（不是全局——全局也没配）
+        let key = crate::commands::directory_sort::location_key_of(&desc, "");
+        db.conn()
+            .execute(
+                "INSERT INTO directory_sort (location_key, sort_field, ascending) VALUES (?1, 'garbage', 1)",
+                rusqlite::params![key],
+            )
+            .expect("seed");
+        assert_eq!(resolve_sibling_sort(&db, &desc, ""), (VolumeSortField::Name, true));
+    }
+
+    /// 20) command 级：父目录 directory_sort 覆盖（name 降序）→ 跨卷跟随降序。
+    #[tokio::test]
+    async fn cross_volume_follows_parent_sort_override_desc() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2", "vol3"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("db");
+        let desc = local_descriptor(dir.path().to_str().unwrap());
+        let key = crate::commands::directory_sort::location_key_of(&desc, "");
+        db.conn()
+            .execute(
+                "INSERT INTO directory_sort (location_key, sort_field, ascending) VALUES (?1, 'name', 0)",
+                rusqlite::params![key],
+            )
+            .expect("seed");
+
+        // 降序 = [vol3, vol2, vol1]：vol3 的 next 是 vol2；vol1 的 next 是 None
+        let args = FindNextVolumeArgs {
+            descriptor: desc.clone(),
+            current_path: "vol3".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: None,
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        assert_eq!(result.expect("降序下 vol3 → vol2").title, "vol2");
+
+        let args = FindNextVolumeArgs {
+            descriptor: desc,
+            current_path: "vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: None,
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        assert!(result.is_none(), "降序下 vol1 是最后一卷，next 应为 None");
+    }
+
+    /// 21) command 级：无覆盖时 settings 全局（fb_sort_ascending='0'）生效。
+    #[tokio::test]
+    async fn cross_volume_follows_settings_global_sort_desc() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("db");
+        db.conn()
+            .execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('fb_sort_field', 'name'), ('fb_sort_ascending', '0')",
+                [],
+            )
+            .expect("seed settings");
+
+        // 全局降序 = [vol2, vol1]：vol2 的 next 是 vol1；vol1 的 next 是 None
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "vol2".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: None,
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        assert_eq!(result.expect("全局降序 vol2 → vol1").title, "vol1");
     }
 }
