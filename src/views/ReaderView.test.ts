@@ -1176,6 +1176,7 @@ describe('ReaderView.vue', () => {
 
     expect(router.currentRoute.value.params.bookId).toBe('8');
     expect(slideshow.pendingNextVolume).toBe(false); // 意图已消费
+    expect(vi.mocked(findNextVolume).mock.calls[0]?.[3]).toEqual({ skipFinished: true }); // 自动跨卷跳过已读完
     expect(slideshow.isPlaying).toBe(true);          // ← 跨卷后续播
 
     slideshow.pause();

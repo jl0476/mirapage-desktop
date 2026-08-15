@@ -552,9 +552,11 @@ export async function findNextVolume(
   descriptor: SourceDescriptor,
   currentPath: string,
   direction: 'next' | 'prev',
+  /** 自动跨卷传 true：跳过 progress.finished=1 的相邻卷，落到方向上第一个未读卷 */
+  opts?: { skipFinished?: boolean },
 ): Promise<NextVolumeResult | null> {
   return invoke<NextVolumeResult | null>('find_next_volume', {
-    args: { descriptor, currentPath, direction },
+    args: { descriptor, currentPath, direction, skipFinished: opts?.skipFinished ?? false },
   });
 }
 

@@ -103,6 +103,34 @@ describe('useCrossVolume', () => {
     vi.clearAllMocks();
   });
 
+  // ── skipFinished（2026-08-16 自动跨卷跳过已读完）──────────────────────
+
+  it('auto 档 findNextVolume 带 skipFinished=true；force / manual 档带 false', async () => {
+    const id = identity(1, 'vol1');
+    vi.mocked(findNextVolume).mockResolvedValue(null);
+
+    // auto 档（force=false）：自动跨卷不打开已读完的卷
+    const a = setup({ currentIdentity: id, continueMode: 'auto' });
+    await a.cv.maybeContinue(false, 'next');
+    expect(vi.mocked(findNextVolume)).toHaveBeenLastCalledWith(
+      id.descriptor, 'vol1', 'next', { skipFinished: true },
+    );
+
+    // force（Alt+→）：用户显式跳卷，不跳过
+    const f = setup({ currentIdentity: id, continueMode: 'manual' });
+    await f.cv.maybeContinue(true, 'next');
+    expect(vi.mocked(findNextVolume)).toHaveBeenLastCalledWith(
+      id.descriptor, 'vol1', 'next', { skipFinished: false },
+    );
+
+    // manual 档：toast 目标由用户确认，不跳过
+    const m = setup({ currentIdentity: id, continueMode: 'manual' });
+    await m.cv.maybeContinue(false, 'next');
+    expect(vi.mocked(findNextVolume)).toHaveBeenLastCalledWith(
+      id.descriptor, 'vol1', 'next', { skipFinished: false },
+    );
+  });
+
   // ── maybeContinue(force=true) ────────────────────────────────────────
 
   it('force=true 不看模式直接 resolve + navigate', async () => {

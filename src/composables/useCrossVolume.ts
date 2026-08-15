@@ -190,6 +190,9 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
       return;
     }
 
+    // 2026-08-16: 自动跨卷（非 force + auto 档）跳过已读完的相邻卷；
+    // manual 档 toast 目标由用户确认、force（Alt+→）是显式跳卷 —— 都不跳。
+    const skipFinished = !force && mode === 'auto';
     const seq = ++requestSeq;
     phase.value = 'resolving';
     // A7 修复: 进入 maybeContinue 入口立即捕获 isSlideshowPlaying, 避免 race 期间手动 toggle 后误判.
@@ -197,7 +200,7 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
     // 入口早捕获: 即使 phase='resolving' 期间用户切换 slideshow 也不影响本判断.
     const wasSlideshowPlaying = mode !== 'manual' ? (opts.isSlideshowPlaying?.() ?? false) : false;
     try {
-      const result = await findNextVolume(startIdentity.descriptor, startIdentity.relPath, dir);
+      const result = await findNextVolume(startIdentity.descriptor, startIdentity.relPath, dir, { skipFinished });
       // 陈旧校验：seq / canStart / identity 任一变化即丢弃
       if (seq !== requestSeq || !opts.canStart() || !sameBookIdentity(opts.identity(), startIdentity)) {
         settleIdle();

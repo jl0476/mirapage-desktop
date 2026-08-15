@@ -34,6 +34,17 @@ pub fn pick_sibling(
     current_basename: &str,
     direction: VolumeDirection,
 ) -> Option<crate::source::descriptor::MediaEntry> {
+    pick_sibling_where(siblings, current_basename, direction, &|_| true)
+}
+
+/// bugfix 2026-08-16（自动跨卷跳过已读完）：在方向上逐个迭代 sibling 目录，
+/// 返回第一个通过 `pred` 的候选。`pick_sibling` = pred 恒 true 的特例。
+pub fn pick_sibling_where(
+    siblings: &[crate::source::descriptor::MediaEntry],
+    current_basename: &str,
+    direction: VolumeDirection,
+    pred: &dyn Fn(&crate::source::descriptor::MediaEntry) -> bool,
+) -> Option<crate::source::descriptor::MediaEntry> {
     use crate::algorithm::natural_compare;
     let mut dirs: Vec<&crate::source::descriptor::MediaEntry> = siblings
         .iter()
@@ -44,12 +55,8 @@ pub fn pick_sibling(
     }
     dirs.sort_by(|a, b| natural_compare(&a.name, &b.name));
     let pos = dirs.iter().position(|e| e.name == current_basename)?;
-    let target_pos = match direction {
-        VolumeDirection::Next => pos + 1,
-        VolumeDirection::Prev => pos.checked_sub(1)?,
-    };
-    dirs.get(target_pos)
-        .map(|e| crate::source::descriptor::MediaEntry {
+    let clone = |i: usize| {
+        dirs.get(i).map(|e| crate::source::descriptor::MediaEntry {
             name: e.name.clone(),
             path: e.path.clone(),
             is_directory: e.is_directory,
@@ -57,6 +64,65 @@ pub fn pick_sibling(
             size: e.size,
             modified_at: e.modified_at,
         })
+    };
+    match direction {
+        VolumeDirection::Next => {
+            for i in (pos + 1)..dirs.len() {
+                if let Some(e) = dirs.get(i) {
+                    if pred(e) {
+                        return clone(i);
+                    }
+                }
+            }
+            None
+        }
+        VolumeDirection::Prev => {
+            for i in (0..pos).rev() {
+                if let Some(e) = dirs.get(i) {
+                    if pred(e) {
+                        return clone(i);
+                    }
+                }
+            }
+            None
+        }
+    }
+}
+
+/// 候选卷是否已读完（progress.finished=1）。
+/// 无 library 行（从未打开过）或无 progress 行 → 未读完（不跳过）。
+fn sibling_is_finished(
+    db: &crate::db::Db,
+    descriptor_str: &str,
+    parent_path: &str,
+    entry: &crate::source::descriptor::MediaEntry,
+) -> bool {
+    let rel = if parent_path.is_empty() {
+        entry.name.clone()
+    } else {
+        PathUtils::join(parent_path, &entry.name)
+    };
+    let rel_norm = crate::algorithm::validate_source_relative(&rel)
+        .unwrap_or_else(|_| rel.clone());
+    let conn = db.conn();
+    let book_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM library WHERE source_descriptor = ?1 AND absolute_path = ?2",
+            rusqlite::params![descriptor_str, rel_norm],
+            |r| r.get(0),
+        )
+        .ok();
+    match book_id {
+        Some(id) => conn
+            .query_row(
+                "SELECT finished FROM progress WHERE book_id = ?1",
+                rusqlite::params![id],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|f| f != 0)
+            .unwrap_or(false),
+        None => false,
+    }
 }
 
 /// IPC 入参（spec §5.1）
@@ -72,6 +138,10 @@ pub struct FindNextVolumeArgs {
     pub current_path: String,
     /// 跨卷方向
     pub direction: VolumeDirection,
+    /// 自动跨卷跳过已读完（progress.finished=1）的相邻卷，落到方向上第一个未读卷。
+    /// 缺省 false —— 手动跨卷（Alt+→ / manual 确认）不跳，用户显式选择目标。
+    #[serde(default)]
+    pub skip_finished: Option<bool>,
 }
 
 /// IPC 出参（spec §5.1）
@@ -90,11 +160,12 @@ pub struct NextVolumeResult {
 
 /// 业务实现（spec §5.2）。
 ///
-/// 拆出独立函数供测试：测试用 `find_next_volume_impl(args, &factory)` 调，
+/// 拆出独立函数供测试：测试用 `find_next_volume_impl(args, &factory, None)` 调，
 /// 避免构造 `tauri::State`。
 pub async fn find_next_volume_impl(
     args: FindNextVolumeArgs,
     factory: &MediaSourceFactory,
+    db: Option<&crate::db::Db>,
 ) -> Result<Option<NextVolumeResult>, String> {
     // 1. 强类型解析 descriptor（不在 command 内反复操作 serde_json::Value —— P1-5 修复）
     let descriptor: SourceDescriptor = serde_json::from_value(args.descriptor.clone())
@@ -119,7 +190,19 @@ pub async fn find_next_volume_impl(
         .list_directory(&descriptor, &parent_path)
         .await
         .map_err(|e| e.to_string())?;
-    let target = match pick_sibling(&siblings, &current_basename, args.direction) {
+    // skip_finished 的 finished 查库用（与 create_book 写入的序列化保持一致）
+    let descriptor_str = serde_json::to_string(&descriptor).map_err(|e| e.to_string())?;
+    let target = if args.skip_finished.unwrap_or(false) {
+        let db = db.ok_or_else(|| {
+            "find_next_volume: skip_finished 需要 DB 访问（command 层必须传入）".to_string()
+        })?;
+        pick_sibling_where(&siblings, &current_basename, args.direction, &|e| {
+            !sibling_is_finished(db, &descriptor_str, &parent_path, e)
+        })
+    } else {
+        pick_sibling(&siblings, &current_basename, args.direction)
+    };
+    let target = match target {
         Some(t) => t,
         None => return Ok(None),
     };
@@ -141,12 +224,14 @@ pub async fn find_next_volume_impl(
 /// Tauri command（spec §5.2）。
 ///
 /// `tauri::State<MediaSourceFactory>` 由 `lib.rs` 的 `app.manage(factory)` 注入。
+/// `db` 供 skip_finished 查 library/progress（无该 flag 时不触库）。
 #[tauri::command]
 pub async fn find_next_volume(
     args: FindNextVolumeArgs,
     factory: State<'_, MediaSourceFactory>,
+    db: State<'_, crate::db::Db>,
 ) -> Result<Option<NextVolumeResult>, String> {
-    find_next_volume_impl(args, factory.inner()).await
+    find_next_volume_impl(args, factory.inner(), Some(&db)).await
 }
 
 #[cfg(test)]
@@ -404,8 +489,9 @@ mod tests {
             }),
             current_path: "vol1".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory).await;
+        let result = find_next_volume_impl(args, &factory, None).await;
         assert!(result.is_err(), "非 Local 应返回 Err");
         let err = result.unwrap_err();
         assert!(
@@ -423,8 +509,9 @@ mod tests {
             descriptor: serde_json::json!({"rootPath": "/a"}),
             current_path: "vol1".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory).await;
+        let result = find_next_volume_impl(args, &factory, None).await;
         assert!(
             result.is_err(),
             "垃圾 descriptor 应反序列化失败"
@@ -448,8 +535,9 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "vol1".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         let next = result.expect("应有下一卷");
@@ -472,8 +560,9 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "vol3".to_string(),
             direction: VolumeDirection::Prev,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         let next = result.expect("应有上一卷");
@@ -493,8 +582,9 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "vol2".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         assert!(result.is_none(), "末卷 next 应返回 None");
@@ -512,8 +602,9 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "vol1".to_string(),
             direction: VolumeDirection::Prev,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         assert!(result.is_none(), "首卷 prev 应返回 None");
@@ -532,8 +623,9 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "vol2".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         assert!(
@@ -554,8 +646,9 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "comics/vol1".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         let next = result.expect("应有下一卷");
@@ -577,8 +670,9 @@ mod tests {
             // 用 Windows 风格 `\\`（实际是单反斜杠在 Rust 字符串里写为 `\\`）
             current_path: "comics\\vol1".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         let next = result.expect("应有下一卷");
@@ -600,8 +694,9 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "page1".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory)
+        let result = find_next_volume_impl(args, &factory, None)
             .await
             .expect("impl ok");
         let next = result.expect("应有下一卷");
@@ -620,8 +715,252 @@ mod tests {
             descriptor: local_descriptor(dir.path().to_str().unwrap()),
             current_path: "missing/parent/vol1".to_string(),
             direction: VolumeDirection::Next,
+            skip_finished: None,
         };
-        let result = find_next_volume_impl(args, &factory).await;
+        let result = find_next_volume_impl(args, &factory, None).await;
         assert!(result.is_err(), "不存在的 parent 应返回 Err");
+    }
+
+    // ---- skip_finished 测试（2026-08-16 自动跨卷跳过已读完）----
+
+    /// 测试 helper：在 library 表登记一本书（与 create_book 同序列化），
+    /// finished=Some 时再写 progress.finished。
+    fn seed_book(
+        db: &crate::db::Db,
+        root: &str,
+        abs_path: &str,
+        finished: Option<bool>,
+    ) -> i64 {
+        use crate::source::descriptor::SourceDescriptor;
+        let desc = SourceDescriptor::Local {
+            root_path: root.to_string(),
+        };
+        let descriptor_str = serde_json::to_string(&desc).expect("serialize descriptor");
+        db.conn()
+            .execute(
+                "INSERT INTO library
+                    (title, source_descriptor, source_type, absolute_path,
+                     cover_entry_path, cover_entry_name, page_count,
+                     added_at, is_favorite)
+                 VALUES (?1, ?2, 'Local', ?3, NULL, NULL, 0, 0, 0)",
+                rusqlite::params![abs_path, descriptor_str, abs_path],
+            )
+            .expect("seed library row");
+        let id = db.conn().last_insert_rowid();
+        if let Some(f) = finished {
+            db.conn()
+                .execute(
+                    "INSERT INTO progress (book_id, page, reader_mode, updated_at, finished)
+                     VALUES (?1, 0, 'single', 0, ?2)",
+                    rusqlite::params![id, if f { 1i64 } else { 0i64 }],
+                )
+                .expect("seed progress row");
+        }
+        id
+    }
+
+    /// pick_sibling_where 纯函数：pred 拒绝的候选被跳过，返回方向上第一个通过者。
+    #[test]
+    fn pick_sibling_where_skips_rejected_candidates() {
+        let s = vec![
+            entry("vol1", true, false),
+            entry("vol2", true, false),
+            entry("vol3", true, false),
+        ];
+        // 拒绝 vol2 → next 取 vol3
+        assert_eq!(
+            pick_sibling_where(&s, "vol1", VolumeDirection::Next, &|e| e.name != "vol2")
+                .map(|e| e.name),
+            Some("vol3".to_string()),
+        );
+        // prev 从 vol3 反向，拒绝 vol2 → 取 vol1
+        assert_eq!(
+            pick_sibling_where(&s, "vol3", VolumeDirection::Prev, &|e| e.name != "vol2")
+                .map(|e| e.name),
+            Some("vol1".to_string()),
+        );
+    }
+
+    /// pick_sibling_where：全部被拒 → None。
+    #[test]
+    fn pick_sibling_where_all_rejected_returns_none() {
+        let s = vec![
+            entry("vol1", true, false),
+            entry("vol2", true, false),
+        ];
+        assert!(pick_sibling_where(&s, "vol1", VolumeDirection::Next, &|_| false).is_none());
+    }
+
+    /// 12) skip_finished：相邻 vol2 已读完 → 跳到 vol3。
+    #[tokio::test]
+    async fn skip_finished_jumps_over_finished_volume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2", "vol3"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("in-memory db");
+        seed_book(&db, dir.path().to_str().unwrap(), "vol2", Some(true));
+
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: Some(true),
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        let next = result.expect("vol3 未读完应有下一卷");
+        assert_eq!(next.title, "vol3");
+        assert_eq!(next.rel_path, "vol3");
+    }
+
+    /// 13) skip_finished 但 vol2 未读完（finished=0）→ 正常取相邻 vol2。
+    #[tokio::test]
+    async fn skip_finished_keeps_unfinished_adjacent_volume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("in-memory db");
+        seed_book(&db, dir.path().to_str().unwrap(), "vol2", Some(false));
+
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: Some(true),
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        assert_eq!(result.expect("vol2 未读完").title, "vol2");
+    }
+
+    /// 14) skip_finished：book 存在但无 progress 行（读过一半？无记录）→ 不跳过。
+    #[tokio::test]
+    async fn skip_finished_without_progress_row_keeps_volume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("in-memory db");
+        // 只登记 library 行，不写 progress
+        seed_book(&db, dir.path().to_str().unwrap(), "vol2", None);
+
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: Some(true),
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        assert_eq!(result.expect("无 progress 行不算读完").title, "vol2");
+    }
+
+    /// 15) skip_finished：方向上全部读完 → None（视为没有可跨的卷）。
+    #[tokio::test]
+    async fn skip_finished_all_finished_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2", "vol3"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("in-memory db");
+        seed_book(&db, dir.path().to_str().unwrap(), "vol2", Some(true));
+        seed_book(&db, dir.path().to_str().unwrap(), "vol3", Some(true));
+
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: Some(true),
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        assert!(result.is_none(), "全部读完应返回 None");
+    }
+
+    /// 16) skip_finished：从未打开过的卷（无 library 行）→ 不跳过。
+    #[tokio::test]
+    async fn skip_finished_never_opened_volume_keeps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("in-memory db");
+        // vol2 无任何记录
+
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: Some(true),
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        assert_eq!(result.expect("未打开过 = 未读").title, "vol2");
+    }
+
+    /// 17) skip_finished + 嵌套路径（parent 非根）查库路径拼对。
+    #[tokio::test]
+    async fn skip_finished_nested_path_lookup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2", "vol3"] {
+            make_subdir(dir.path(), &format!("comics/{name}"));
+        }
+        let factory = make_factory();
+        let db = crate::db::Db::open_in_memory().expect("in-memory db");
+        seed_book(&db, dir.path().to_str().unwrap(), "comics/vol2", Some(true));
+
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "comics/vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: Some(true),
+        };
+        let result = find_next_volume_impl(args, &factory, Some(&db))
+            .await
+            .expect("impl ok");
+        let next = result.expect("comics/vol3 未读完");
+        assert_eq!(next.title, "vol3");
+        assert_eq!(next.rel_path, "comics/vol3");
+    }
+
+    /// 18) skip_finished=true 但 db 未传（内部调用误用）→ 明确 Err。
+    #[tokio::test]
+    async fn skip_finished_without_db_returns_err() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for name in ["vol1", "vol2"] {
+            make_subdir(dir.path(), name);
+        }
+        let factory = make_factory();
+        let args = FindNextVolumeArgs {
+            descriptor: local_descriptor(dir.path().to_str().unwrap()),
+            current_path: "vol1".to_string(),
+            direction: VolumeDirection::Next,
+            skip_finished: Some(true),
+        };
+        let result = find_next_volume_impl(args, &factory, None).await;
+        assert!(result.is_err(), "skip_finished 无 DB 应明确报错");
+    }
+
+    /// 19) FindNextVolumeArgs 缺 skip_finished 字段 → 反序列化为 None（向后兼容）。
+    #[test]
+    fn find_next_volume_args_skip_finished_defaults_none() {
+        let json = r#"{"descriptor": {}, "currentPath": "x", "direction": "next"}"#;
+        let args: FindNextVolumeArgs = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(args.skip_finished, None);
+        let json = r#"{"descriptor": {}, "currentPath": "x", "direction": "next", "skipFinished": true}"#;
+        let args: FindNextVolumeArgs = serde_json::from_str(json).expect("deserialize skip");
+        assert_eq!(args.skip_finished, Some(true));
     }
 }
