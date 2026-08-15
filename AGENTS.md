@@ -153,6 +153,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 3.0.10 | Likes 页打磨：取消喜欢 + 浏览跳转瀑布流 | ✅ `v0.1.0-module3.0.10-likes-browse-jump`（spec：`docs/superpowers/specs/2026-08-13-likes-browse-jump-design.md`，plan：`docs/superpowers/plans/2026-08-13-likes-browse-jump.md`）：**A 取消喜欢明确化** — 行内 ❤️ 图标 toggle → 「取消喜欢」文本按钮（复用 `likes.toggleOff`，删孤儿 `likes.toggleOn`），点击后行消失语义不变。**B 浏览跳转瀑布流** — fileBrowser store 新增 `pendingOpenLocation` 一次性意图（`requestOpenLocation` 写入时清 `savedNavigationContext` + `shortcuts.clearActive()` 两类陈旧导航意图，防旧上下文滞留/shortcut 重挂载重放）；FileBrowser onMounted 在 `loadLayout()` 之后、`restoreNavigationContext()` 之前消费（校验 relPath → setRoot → navigate → setViewMode('masonry') 持久化；无图目录现有守卫回落 details）；Likes 每行「浏览」按钮写意图 + push('/')，非 Local 防御不渲染。对齐 shortcut activeId 收敛模式（2026-08-12 路径身份修复方向）。消费点后置结构性避开 loadLayout 覆盖 viewMode 的 IPC 时序竞争。单测 901→912（+11）。 |
 | 3.0.11 | 单图缩略图生成阶段进度 | ✅ `v0.1.0-module3.0.11-thumbnail-per-image-progress`（spec：`docs/superpowers/specs/2026-08-14-thumbnail-per-image-progress-design.md`，plan：`docs/superpowers/plans/2026-08-14-thumbnail-per-image-progress.md`，**三轮审查 13 项闭环后实施**）：**Rust** — `GenPhase` 枚举（queued/decoding/resizing/encoding/writing，Serialize lowercase）+ `GenerationJob.on_progress: Option<Arc<dyn Fn(GenPhase,u64)>>`（不改 `GenerateFn` 签名；手写 Debug 跳过闭包字段）+ `generate_thumbnail` 4 阶段边界回调（复用 t0，elapsed 不含排队）+ `progress_closure_for` 注入（request/resubmit 两处）emit `thumbnail://progress`（非阻塞 `let _ =`）。**前端** — `ThumbnailState.generating` 扩展（phase/startedAt/generationStartedAt/timings）+ `pendingProgress` 竞态缓冲 + queued 回包 cacheKey 顺序守卫（防事件先到被降级/丢 phase）+ `progressSnapshots` 失败快照 + progress 监听 disposed 迟到解绑守卫；`MasonryThumbnail` 顶部居中阶段角标（generating 5 phase 图标 + **failed 错误角标**＝失败详情唯一事后入口）点击直传 DOM 元素（无 querySelector）+ `badgeInteractive` prop 下传（disabled + handler 双保险）；`ThumbnailProgressPopover`（`lib/thumbnailPosition.positionFor` 右→左→下→上 + anchorRect 补算 right/bottom + 失败 snapshot 时间线 + 外部 mousedown/ESC/切目录/toggle 关闭）；settings `fb_thumbnail_detail_popover` 开关（Settings fileBrowser section）。i18n `thumbnail.*` 13 keys 双语。**测试**：前端 912→950（+38）；Rust thumbnail 单测 +5（gen_phase×2/on_progress 顺序/progress 契约）。**已知**：cargo lib 1 个预存在失败（webdav parse_propfind，与本模块无关）。 |
 | 3.0.12 | 移除阅读器 9 宫格触控 | ✅ `v0.1.0-module3.0.12-touch-zones-removal`（spec：`docs/superpowers/specs/2026-08-14-touch-zones-removal-design.md`，plan：`docs/superpowers/plans/2026-08-14-touch-zones-removal.md`）：**纯删除模块**——9 宫格触控整体移除（桌面端滚轮/快捷键/菜单/右键菜单已全覆盖，且全屏点击易误触）。删 3 整文件（`useReaderTouchZones.ts` + 23 测、`TouchRegionsOverlay.vue`）+ `readerSettings.ts` touch 类型体系（`TouchZone`/`TouchAction`/`DEFAULT_TOUCH_SCHEME` 等，引用面封闭无隐藏耦合）+ settings store `touchScheme`/`touchZonesEnabled`/`setTouchAction`/`resetTouchScheme` + Settings.vue Touch section（8→7 section）+ ReaderView `zoneActions` 10 回调 + ReaderScreen/ReaderMainMenu/ReaderOverlay 接线 + 主菜单「显示触控区」按钮。migration 014 `DELETE FROM settings WHERE key LIKE 'touch_%'`（含 001 大写枚举死数据 seed，+2 Rust 测）。**顺带清理**：`inputBindings.mouseRegionCommand` 半死代码（3×3 鼠标分区从未接线，`InputContext` 收窄 keyboard/wheel，`resolveHotkey` 删 ctx 参数）+ 16 个孤儿 `reader.*` i18n key + `settings.touch.*`/`touchAction.*`/`showTouchRegions` 双 locale。**行为影响**：`folder-prev` 失去唯一入口（原为 TODO 空实现可接受，跨卷 prev 留独立模块）；其余动作入口无损失。**测试**：前端 965→929（-36）；Rust lib 294 passed（migration 版本断言 13→14 两处同步）。 |
+| 3.0.13 | 跨卷与阅读体验打磨（5 hotfix 直推 main，未打 tag） | ✅ 2026-08-15/16 实机 CDP 调试驱动：**A 瀑布流滚到底标 finished**（`b2a7b2d`）— `MasonryView.atBottom` computed 读非响应式 `el.scrollTop`，缩略图全缓存命中（布局在滚到底前已收敛）时 computed 永不重算、缓存冻结 false →「滚到底停留 1.2s（STABLE_MS）写 finished=true」从不触发（缓存命中率越高越必现）；改用 useVirtualList 响应式 `scrollTop.value` 参与判定，+2 组件级用例。**B 幻灯片跨卷自动续播**（`310dc02`）— 根因 `tick` 末页先 `pause()` 再置 flag，`maybeContinue` 入口读 isPlaying 恒 false → A7 `wasSlideshowPlaying` 永假不续播；修法 slideshow store 加 `pendingNextVolumeFromSlideshow`（置 flag 前捕获来源，consume 一并复位）+ `navigateToVolume` await `nextTick()+activeLoadPromise`（新卷 commit 后返回）+ resume 守卫式 start（phase ready 且 bookId=路由）；+4 用例，实机 E2E TIER1→TIER2 续播验证。**C 自动跨卷跳过已读完**（`a98d779`）— `find_next_volume` 加 `skip_finished`：`pick_sibling` 泛化 `pick_sibling_where(pred)` 方向迭代 + `sibling_is_finished`（(descriptor 序列化, validate_source_relative 归一路径) 查 library.id→progress.finished；无行=未读不跳）；仅自动路径（非 force 且 auto 档）传 true，manual 确认与 Alt+→ force 不跳；全读完=None；Rust +8 测。**D 跨卷排序与父目录生效排序一致**（`283cf34`）— 兄弟目录原硬编码 name 升序；现按父目录 `directory_sort` 覆盖（location_key 复用 directory_sort 命令的 Value 序列化，提取 pub(crate)）?? settings `fb_sort_*` 全局 ?? name 升序；`cmp_sibling` 镜像 TS `fileSort`（modifiedAt None 升序排末尾/降序反转到最前的怪癖一致）；Rust 端自动解析前端零改动（4 调用方天然一致），+8 测（find_next_volume 41 用例）。**E 跨卷记阅览记录**（`bf82c7e`）— recordHistory 原只在 useReaderActions/瀑布流入口，跨卷走 navigateToVolume→router.replace→loadRouteBook 漏记；修法 loadRouteBook 提交成功后统一 recordHistory（幂等 upsert，失败静默），+1 用例；实机佐证：修复前 TIER2 历史行停在跨卷前 23.5h。前端 929→937。 |
 
 **构建**：见 [`BUILD.md`](./BUILD.md)。Rust ≥ 1.96 需 `Cargo.toml` 的 `indexmap` 修复（schemars/indexmap 兼容性，详见 BUILD.md §2）。
 
@@ -195,15 +196,16 @@ cargo test -p mirapage-desktop-lib natural_compare
 - `start()` / `pause()` / `toggle()` 控制 setInterval。
 - `reset()` —— 用户翻页/点击/滚轮时调用，**不影响 isPlaying** 仅重启 timer。
 - `tick(onAdvance, onPrev, atLast)` 是回调式（**不直接调 reader store**，避免循环依赖）。
-- 末页触发：`pause()` + `pendingNextVolume = true` → ReaderScreen watch 触发 `find_next_volume` IPC（v0.1.0-module2.0 留 TODO 占位，settings.continueToNextVolume 已就绪）。
+- 末页触发（v0.1.0-module3.0.13 语义）：`tick` 末页分支**先**记 `pendingNextVolumeFromSlideshow = true`（先于 pause()——续播判定靠来源标记，事后读 isPlaying 已是 false）→ `pause()` → `pendingNextVolume = true` → ReaderView 单一 watch 消费 → `crossVolume.maybeContinue(false, "next")`。
 - `setInterval` 在 Node / happy-dom 返回类型不一致（`Timeout` vs `number`）—— `let timerId: any = null` 绕过。
 - **v0.1.0-module3.0-settings 起**：interval / direction / loop **全部经 Settings 页 UI 改写**（§11 设置面板），不再是 ReaderMainMenu 单独的临时控件入口。
 
 **0.5 跨卷意图 flag**
 
-- `slideshow.pendingNextVolume` 是 ref，ReaderView `watch` 它 → 调 `find_next_volume` IPC。
-- 处理完后调 `consumePendingNextVolume()` 清 flag，避免重复触发。
-- 跨卷实际加载 v0.1.0-module2.0 **未落地**（reader store 需扩展 sourceDescriptor 字段），但 flag 通路已通。
+- `slideshow.pendingNextVolume` 是 ref，ReaderView 单一 `watch` 消费（手动末页 + slideshow 末页统一）→ `crossVolume.maybeContinue(force, dir)`（`useCrossVolume` 状态机：idle/resolving/awaiting-confirm/navigating + requestSeq/sameBookIdentity 竞态校验 + canStart 加载期守卫）。
+- 处理完后调 `consumePendingNextVolume()` 清 flag + 清 `pendingNextVolumeFromSlideshow` 来源标记。
+- 模式：settings `continue_to_next_volume` off/manual/auto 三态；Alt+→ force 直跳（不看档位）。
+- **3.0.13 打磨**：① 幻灯片发起的跨卷在新卷 ready 后自动续播（来源标记捕获 + navigateToVolume await 加载完成 + 守卫式 start）；② 自动路径 `skipFinished=true` 跳过已读完相邻卷（manual/force 不跳，全读完=没有下一卷）；③ 兄弟排序=父目录生效排序（directory_sort 覆盖 ?? fb_sort_* 全局，Rust 端自动解析前端零传参）；④ 所有进 reader 的路径（含跨卷/直接 URL/重试）在 loadRouteBook 提交成功后统一 recordHistory（幂等，失败静默）。
 
 ### 1. UI / UE 规范
 
@@ -407,7 +409,7 @@ vi.mock('@/lib/tauri', async () => {
 **4.4 必须测试**
 
 - 所有 `*.test.ts` 文件**先写测试**（TDD 风格）。
-- 单测跑：220 → 259 → 393 → 397 → 462 → 535 → 582 → 965 → **929** 用例（v0.1.0-module3.0.12 移除 9 宫格：-23 useReaderTouchZones -4 mouseRegion -4 readerSettings -3 settings store -1 Settings reset -1 MainMenu regions），目标 0 fail。
+- 单测跑：220 → 259 → 393 → 397 → 462 → 535 → 582 → 965 → 929 → **937** 用例（3.0.12 -36 移除 9 宫格；3.0.13 +8：atBottom 响应式 2 + slideshow 续播 3 + ReaderView 跨卷集成断言 1 + skipFinished 1 + 阅览记录 1），目标 0 fail。
 - 任何新组件至少 1 个 default + 1 个 edge case（null / empty / disabled）。
 
 ### 5. Tag / Commit / Branch 约定
@@ -481,6 +483,10 @@ git push github v0.1.0-module1.NN
 - **瀑布流尺寸预读不全量**（v0.1.0-module3.0.6-masonry）：header 当懒加载资源，首屏可见 + 3 屏预读（动态，不硬编码 120 张），未测量用估算宽高比（3:4）占位，渐进式 totalHeight。适配本地挂载远程存储的慢速 I/O——不滚动不查。
 - **resize 视觉焦点双层解耦**（v0.1.0-module3.0.8）：视觉层 `captureMasonryViewportAnchor`/`restoreMasonryViewportAnchor`（path+ratio 锚定，不按宽度比例换算）+ 数据层 500ms cooldown（colWidth 变化后丢弃 scheduleRecord），窗口尺寸变化不污染阅读进度。DB progress 与视觉焦点解耦。
 - **Library → Likes 合并**（v0.1.0-module3.0.9）：删 `like` 表(死表,前端 Likes.vue 不读只 Reader ❤️ 写) + 整套 likes 后端/前端/store/IPC;视图层 Library 改名为 Likes(`useLibraryStore.favorites`),❤️ 一以贯之;Reader 主菜单删"加入书库"按钮(跟 ❤️ 数据语义重叠合并为单一入口);migration 011 `UPDATE library SET is_favorite=1 WHERE id IN (SELECT book_id FROM \`like\`)` 先合并数据再 DROP(不丢用户数据)。
+- **自动跨卷跳过已读完的卷**（v0.1.0-module3.0.13，用户拍板 2026-08-16）：自动路径（幻灯片末页 / auto 档末页再翻）跳过方向上所有 `progress.finished=1` 的相邻卷，落到第一个未读卷；manual 档 toast 目标由用户确认、Alt+→ force 是显式跳卷，均**不跳**；方向上全读完视为没有下一卷（toast）；从未打开（无 library 行）或无 progress 行 = 未读不跳。判定在 Rust `find_next_volume`（`sibling_is_finished`），前端仅自动路径传 `skipFinished: true`。
+- **跨卷排序与父目录生效排序一致**（v0.1.0-module3.0.13）：find_next_volume 按父目录 `directory_sort` 覆盖 ?? settings `fb_sort_*` 全局排兄弟目录（name/modifiedAt/size × 升降序），与文件浏览器视觉顺序一致；Rust 端自动解析（前端不传参，useCrossVolume/FileBrowser 手动按钮/prefetch 天然一致）；比较语义镜像 TS `fileSort`（含 modifiedAt 缺失值升序排末尾、降序反转到最前的怪癖）。
+- **进阅读器统一记阅览记录**（v0.1.0-module3.0.13）：`loadRouteBook` 提交成功后统一 recordHistory，覆盖自动跨卷/直接 URL/失败重试等所有路径（此前只有 useReaderActions 打开动作 + 瀑布流进入目录）；与 actions 入口重复无害（record_history 幂等 upsert 只刷 last_visited_at）；失败静默不阻断阅读。
+- **幻灯片跨卷续播语义**（v0.1.0-module3.0.13）：slideshow tick 发起的跨卷在新卷 ready 后自动续播；手动翻页发起且当时正在播放也续播；manual confirm 不续播（用户主动确认）。续播判定用 `pendingNextVolumeFromSlideshow` 来源标记（tick 内先于 pause() 捕获），不依赖入口时机的 isPlaying。
 
 ---
 

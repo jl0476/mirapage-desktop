@@ -34,7 +34,7 @@
 | 10 | 书架收藏 | 收藏标记；书架视图；按收藏 / 最近阅读筛选 | P0 |
 | 11 | 标签 | 创建 / 删除标签；为书打标签；按标签筛选书架 | P1 |
 | 12 | 搜索 | 文件名 / 书名 / 标签模糊搜索（fuse.js） | P1 |
-| 13 | 跨卷连续阅读 | 读完一本自动跳到目录中下一本（OFF / AUTO / MANUAL） | ✅ `v0.1.0-module3.0.9-cross-volume` 14 commits |
+| 13 | 跨卷连续阅读 | 读完一本自动跳到目录中下一本（OFF / AUTO / MANUAL） | ✅ `v0.1.0-module3.0.9-cross-volume` 14 commits + 3.0.13 打磨（幻灯片续播/跳过已读/排序一致/记 history） |
 | 9 | 幻灯片 | 定时自动翻页；间隔 / 方向 / 循环可配置；播放 / 暂停 | P1 |
 
 **远程源（后期完成）**：
@@ -122,6 +122,13 @@
 > - **浏览位置 = 阅读进度**（v3.0.8 masonry-browse-position）—— migration 010 `progress.image_name` 列（瀑布流滚动锚点，NULL 走 page fallback）。`useMasonryBrowsePosition` composable（滚动监听 + 竞态保护 + 缓存）+ `scrollToEntry` 渐进校正。FileBrowser 工具栏「↶ 跳到上次」按钮 + canonicalImageNames + canReadNow 扩展。Settings masonry section + `recordBrowsePosition` / `restoreBrowsePositionOnEnter` 2 BooleanRow + fileBrowser section。
 > - **完整日志** — Rust `thumbnail/{service,scheduler,generator}` + worker panic `catch_unwind` 写到 `main.log`；前端 `useMasonryThumbnails` 加 5 个关键日志点 + `listen()` catch `isTauriEnv` 判断。
 > - **实测**：单测 582→**717** 前端 / Rust thumbnail 100 单测 + 12 集成 + 3 bench。Rust lib 179 测试 177 pass / **2 fail**（详见 `2026-08-11-feature-matrix.md` §1.5；CI 不跑 cargo test，2 个失败用例永远抓不到）。
+> ✅ **已落地**（v0.1.0-module3.0.13-cross-volume-polish，2026-08-15/16，5 commits 直推 main 未打 tag，实机 CDP 调试驱动）：
+> - **瀑布流滚到底标 finished 修复**（`b2a7b2d`）—— `MasonryView.atBottom` computed 读非响应式 `el.scrollTop`，缩略图全缓存命中（布局在滚到底前已收敛）时 computed 永不重算、缓存冻结 false →「滚到底停留 1.2s 写 finished=true」（STABLE_MS）从不触发。缓存命中率越高越必现（首次访问边滚边测量反而正常）；改用 useVirtualList 响应式 `scrollTop.value` 参与判定。
+> - **幻灯片跨卷自动续播**（`310dc02`）—— 根因：`slideshow.tick` 末页分支先 `pause()` 再置 `pendingNextVolume`，`useCrossVolume.maybeContinue` 入口读 `isPlaying` 恒 false → A7 `wasSlideshowPlaying` 永假、跨卷成功后 `resumeSlideshow` 永不调用。修法：store 加 `pendingNextVolumeFromSlideshow`（置 flag 前捕获来源）+ `navigateToVolume` await `nextTick() + activeLoadPromise`（新卷 commit 后才返回）+ resume 改守卫式 start（phase ready 且 reader.bookId=路由）。用户翻页发起清来源标记、走实时 isPlaying。
+> - **自动跨卷跳过已读完**（`a98d779`）—— `find_next_volume` 加 `skip_finished`：`pick_sibling` 泛化 `pick_sibling_where(pred)` 方向迭代 + `sibling_is_finished`（(descriptor 序列化, validate_source_relative 归一路径) 查 library.id → progress.finished；无行 = 未读不跳）。仅自动路径（非 force 且 auto 档）传 true；manual 确认与 Alt+→ force 不跳；方向上全读完 → None（没有下一卷）。
+> - **跨卷排序与文件浏览器父目录排序一致**（`283cf34`）—— 兄弟目录原硬编码 name 自然升序；现按父目录生效排序（`directory_sort` 覆盖（location_key 复用 directory_sort 命令的 Value 序列化，提取 pub(crate) 防 key 序漂移）?? settings `fb_sort_field/ascending` 全局 ?? name 升序）。`cmp_sibling` 镜像 TS `fileSort`（name=natural_compare；modifiedAt 数值 + None 升序排末尾、降序整体反转后到最前——镜像 TS 怪癖；size 数值）。Rust 端自动解析，前端零改动。
+> - **进阅读器统一记阅览记录**（`bf82c7e`）—— recordHistory 原只在 useReaderActions（打开动作）与瀑布流进入目录调用，自动跨卷走 navigateToVolume → router.replace → loadRouteBook 漏记；修法 loadRouteBook 提交成功后统一 recordHistory（descriptor + relPath + title + bookId，幂等 upsert，失败静默）。
+> - **测试**：前端 929→937；Rust find_next_volume 33→41。实机 CDP 只读验证：skipFinished 连跳 2 个已读卷（TIER1+TIER2）落首个未读；排序覆盖（根目录 modifiedAt 升序）下 prev 由名字序前驱变时间序前驱。
 
 ---
 
@@ -425,7 +432,7 @@ INSERT INTO settings (key, value) VALUES
 
 - `bookmarks` 表 CRUD + UI 列表 + 添加 / 删除
 - `like` toggle
-- `browse_history`：进入 reader 时自动 upsert
+- `browse_history`：进入 reader 时自动 upsert（3.0.13 起所有路径含自动跨卷统一在 loadRouteBook 记录）
 - 书架视图：`is_favorite = 1` 的书 + 按 `last_read_at` 倒序
 - 标签：`tag` + `book_tag` 表 CRUD；UI 标签选择器 + 书架标签筛选
 - 搜索：fuse.js 集成；搜索框在文件浏览器顶部 + 书架顶部；模糊匹配文件名 / 书名 / 标签
@@ -443,6 +450,7 @@ INSERT INTO settings (key, value) VALUES
 - 通用 toast（useToast 单例 ref 队列 + ToastHost Teleport 到 body）+ ContinueNextVolumeToast manual 模式底部胶囊（纯 props/emits **不调 useCrossVolume()**）+ ToastHost 挂在 `src/App.vue` 顶层（最终审查 I1 修复 FileBrowser 路径下 toast 也能渲染）
 - `ProgressItem.finished` 跨边界 gap 修复：Rust `get_progress_inner` SQL 加 finished 列 + row 解析 `!= 0`；TS `ProgressItem` 加字段；Loader 去掉 `& { finished?: boolean }` 死代码交叉类型——"已读完→首页"端到端打通
 - A7 修复（E2E 后发现）：auto/force 跨卷成功 → resume slideshow（仅当调用前 isPlaying=true）+ `pushToast('reader.crossVolume.jumped', {title})` 短暂反馈
+- 3.0.13 打磨（2026-08-16，5 commits）：幻灯片跨卷续播修复（A7 捕获时机 bug——tick 先 pause 再置 flag）+ 自动跨卷 skip_finished 跳过已读 + 兄弟排序与父目录生效排序一致 + loadRouteBook 统一记 browse_history——详见 §1 3.0.13 块
 - 14 commits（任务 0-10 实施 + 任务5审查修复 + 最终审查I1 + A7两补）：0baa8d0/20bc8ed/aef174f/9559198/2fd7a6c/3f4963c/3d62669/0deb1c2/a81e3b0/48607c9/c4dcf3f/6a2a3fd/3a57e63/fb29346
 
 **幻灯片**：
