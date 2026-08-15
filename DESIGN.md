@@ -1571,7 +1571,41 @@ export function useReaderInput() {
 
 ---
 
-## 16. 后续可扩展方向（不在本期范围）
+## 16. 后续工作清单
+
+> 2026-08-16 盘点（来源：AGENTS.md 当前状态表 + 各模块「留后续」标记 + 3.0.13 会话发现）。完成一项划一项；量级 / 顺序供排期参考。
+
+### 16.1 主线待完成（Phase 级）
+
+| 项 | 现状 | 说明 | 量级 |
+|---|---|---|---|
+| RAR / 7z 压缩包（Phase 3 收尾） | 🟡 ZIP 已通 | `unrar` / `sevenz-rust` 依赖已加未启，`ArchiveMediaSource` 实装两种格式；7z 末尾索引需整包读（先落 cacheDir 再读，见 §3 预研）；CBR 依赖 RAR | 中 |
+| SMB 协议层（Phase 7） | ❌ stub | `smb_impl.rs` 多处 `NotImplemented`（`smb = "0.11"` 已加未用）；还差 accounts CRUD + keyring 凭据 + `test_connection` + Settings 账户页接线 | 大 |
+| Phase 9 分发 | 🟡 Windows CI 已通 | 代码签名 / macOS `.dmg`（需 mac 环境 + notarization）/ Linux AppImage / 自动更新（`updater` 插件占位） | 中，依赖环境 |
+
+### 16.2 遗留打磨项（文档点名「留后续」）
+
+- **跨卷 prev 入口**（3.0.12 行为影响）：Rust `find_next_volume` 的 prev 方向已就绪（3.0.13 起排序一致 + skip_finished 均双向），只差前端入口（Alt+← 快捷键 + 阅读器菜单项）。性价比最高的一件。
+- **瀑布流打磨四件**（3.0.6）：像素级 scrollTop 锚定补偿；resolve in-flight cancel；hasImages 搜索态副作用；`var(--ease-out)` 未定义变量清理（FileList.details-header / FileBrowser.tb-btn）。
+- **3.0.3 孤儿清理**：settings store `SearchMode` / `search_mode`、`fileBrowser.search` 单 key。
+- **3.0.9 预存在不修两项**：右键「重置进度」查 book_id 落空（可能无效）；FileBrowser 入口按钮无「已喜欢」状态联动。
+- **设置面板**：`color_theme` 已存 store 但 UI 未暴露。
+- **性能报告补数据**（3.0.7 / 3.0.8）：本地实时 rAF 帧时间采集，填 `docs/superpowers/reports/2026-08-08-masonry-thumbnail-performance.md`（调试实例即可采）。
+
+### 16.3 技术债
+
+- **CI 不跑 `cargo test`**——Rust 侧回归静默（webdav 用例红了很久无人知）。建议 `.github/workflows/verify.yml` 加 cargo test 步骤（Windows runner 或加 Linux job 均可）。
+- **webdav `parse_propfind` 测试在 main 上失败**（预存在，2026-08-15 实机确认非回归）——修掉或明确 skip + 记录原因。
+- **useCrossVolume `identity===null` 早退不消费 `pendingNextVolume`**（3.0.13 会话发现）：窄竞态下 flag 卡 true，末页重试不再触发 watch（Alt+→ 强制路径不受影响）。修法：早退前 consume。
+
+### 16.4 建议实施顺序
+
+1. `cargo test` 进 CI + 修 webdav 用例（基建，防 Rust 回归静默）
+2. 跨卷 prev 入口（后端全就绪，纯前端小件）
+3. 技术债 / 打磨小件打包（useCrossVolume flag / 重置进度落空 / 孤儿清理 / ease-out / 性能报告采集）
+4. RAR/7z → SMB → 分发（三个大件按此序；分发依赖 mac / Linux 环境，可并行等待环境）
+
+### 16.5 远期方向（不在本期范围）
 
 - Webtoon 模式（连续竖向滚动）
 - 横条模式（连续横向滚动）
