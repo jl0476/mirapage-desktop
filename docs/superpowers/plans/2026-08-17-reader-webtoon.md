@@ -21,7 +21,7 @@
 | 文件 | 变更 | 职责 |
 |---|---|---|
 | `src/lib/readerSettings.ts` + `.test.ts` | 修改 | ReadMode 枚举 + normalize |
-| `src/stores/settings.ts` + `.test.ts` | 修改 | readMode ref + persist + webtoon 三设置 |
+| `src/stores/settings.ts` + `.test.ts` | 修改 | 扩既有 ReaderMode 加 webtoon（re-export readerSettings 类型）+ 三 webtoon 设置键 |
 | `src/lib/webtoonLayout.ts` + `.test.ts` | 创建 | 纯函数：布局前缀和 / 窗口二分 / 顶部图 / 缩放锚点 / 自动滚动步进 |
 | `src/composables/useWebtoonDimensions.ts` + `.test.ts` | 创建 | 图头渐进测量（估算占位 + 预读窗口批量 IPC） |
 | `src/components/reader/WebtoonViewer.vue` + `.test.ts` | 创建 | 滚动容器 + 虚拟 strip + 缩放 + expose |
@@ -88,38 +88,42 @@ export function normalizeReadMode(v: string): ReadMode {
 }
 ```
 
-- [ ] **步骤 4：settings store（settings.ts，CRLF 用 node 补丁）**
+- [ ] **步骤 4：settings store（settings.ts，CRLF 用 node 补丁）——扩既有 ReaderMode，不新增模式 key（审查 P1-1）**
 
-三处编辑（模式对齐 `currentScaleMode`/`scale_mode` 既有写法）：
+**背景**：settings.ts:21 已有 `type ReaderMode = 'single' | 'double'` + `readerDefaultMode` ref + `reader_default_mode` key + `cycleReaderMode()` 两态循环，ReaderView/主菜单/双页判断均消费它。**禁止另立 readMode/reader_mode 第二套状态**——扩既有链路：
 
-(a) import 行加 `ReadMode, DEFAULT_READ_MODE, normalizeReadMode`（from `'@/lib/readerSettings'`，与既有 ScaleMode import 同行合并）。
+(a) `readerSettings.ts`（任务 1 步骤 3 已建）成为类型单一真值源；settings.ts:21 本地 `export type ReaderMode` 改为 `export type { ReadMode as ReaderMode } from '@/lib/readerSettings'`（re-export 保既有 import 不动），`import { ReadMode, normalizeReadMode } from '@/lib/readerSettings'`。
 
-(b) `currentScaleMode` 声明后加：
+(b) 加载映射既有 `['reader_default_mode', (v) => (readerDefaultMode.value = v as ReaderMode)]` 改为：
 
 ```ts
-  // module3.1.0: 阅读模式（single/double/webtoon），持久化 reader_mode
-  const readMode = ref<ReadMode>(DEFAULT_READ_MODE);
+      ['reader_default_mode', (v) => (readerDefaultMode.value = normalizeReadMode(v as string))],
+```
+
+(c) `cycleReaderMode`（settings.ts:263-270）改三态循环：
+
+```ts
+  async function cycleReaderMode(): Promise<void> {
+    const order: ReadMode[] = ['single', 'double', 'webtoon'];
+    const next = order[(order.indexOf(readerDefaultMode.value) + 1) % order.length];
+    log('[settings] cycleReaderMode →', next, '(was', readerDefaultMode.value, ')');
+    store.$patch({ readerDefaultMode: next });
+    await update('reader_default_mode', next);
+    log('[settings] cycleReaderMode done, current=', readerDefaultMode.value);
+  }
+```
+
+(d) `currentScaleMode` 声明后加 webtoon 三设置 + 模式直设器（**不含模式 key**——`setReaderMode` 写既有 `reader_default_mode`，Settings 下拉用）：
+
+```ts
   // module3.1.0: webtoon 设置（spec §1/§2/§4）
   const webtoonMaxWidth = ref(0);     // 0 = 不限宽；px
   const webtoonGap = ref(0);          // 0-24 px
   const webtoonScrollSpeed = ref(60); // px/s，10-300
-```
-
-(c) settings 加载映射数组（`['scale_mode', ...]` 行后）加：
-
-```ts
-      ['reader_mode', (v) => (readMode.value = normalizeReadMode(v as string))],
-      ['webtoon_max_width', (v) => (webtoonMaxWidth.value = Number(v) || 0)],
-      ['webtoon_gap', (v) => (webtoonGap.value = Math.min(24, Math.max(0, Number(v) || 0)))],
-      ['webtoon_scroll_speed', (v) => (webtoonScrollSpeed.value = Math.min(300, Math.max(10, Number(v) || 60)))],
-```
-
-(d) `setScaleMode` 旁加（persist 包装若为内部函数则同款调用）：
-
-```ts
-  function setReadMode(mode: ReadMode): void {
-    readMode.value = mode;
-    void update('reader_mode', mode);
+  /** 模式直设（Settings 下拉用；写入既有 reader_default_mode key）。 */
+  async function setReaderMode(mode: ReadMode): Promise<void> {
+    readerDefaultMode.value = mode;
+    await update('reader_default_mode', mode);
   }
   function setWebtoonMaxWidth(px: number): void {
     webtoonMaxWidth.value = Math.max(0, Math.round(px));
@@ -135,28 +139,37 @@ export function normalizeReadMode(v: string): ReadMode {
   }
 ```
 
-return 对象加 `readMode, webtoonMaxWidth, webtoonGap, webtoonScrollSpeed, setReadMode, setWebtoonMaxWidth, setWebtoonGap, setWebtoonScrollSpeed`。（`update` 为该 store 既有的 settings 写入函数名——执行时以实际名为准，`setScaleMode` 怎么写就怎么写。）
+return 对象加 `webtoonMaxWidth, webtoonGap, webtoonScrollSpeed, setReaderMode, setWebtoonMaxWidth, setWebtoonGap, setWebtoonScrollSpeed`（`readerDefaultMode`/`cycleReaderMode` 已在 return，不动）。（`update` 为该 store 既有的 settings 写入函数名——执行时以实际名为准。）
 
 - [ ] **步骤 5：settings.test.ts 追加用例**
 
 ```ts
-it('readMode：非法 reader_mode fallback single（module3.1.0）', async () => {
+it('readerDefaultMode：webtoon 合法 + 非法 fallback single（module3.1.0）', async () => {
   const s = useSettingsStore();
-  s.applyLoadedSetting?.('reader_mode', 'webtoon');
-  expect(s.readMode).toBe('webtoon');
-  s.applyLoadedSetting?.('reader_mode', 'bogus');
-  expect(s.readMode).toBe('single');
+  await s.setReaderMode('webtoon');
+  expect(s.readerDefaultMode).toBe('webtoon');
+  // 非法值经 normalizeReadMode fallback（映射数组行为，经 setReaderMode 类型层已挡，此处测加载层）
+  expect(normalizeReadMode('bogus')).toBe('single');
+});
+
+it('cycleReaderMode：三态循环 single→double→webtoon→single（module3.1.0）', async () => {
+  const s = useSettingsStore();
+  await s.setReaderMode('single');
+  await s.cycleReaderMode();
+  expect(s.readerDefaultMode).toBe('double');
+  await s.cycleReaderMode();
+  expect(s.readerDefaultMode).toBe('webtoon');
+  await s.cycleReaderMode();
+  expect(s.readerDefaultMode).toBe('single');
 });
 ```
-
-（`applyLoadedSetting` 以 store 实际暴露的加载入口为准；若映射数组私有，则测 `setReadMode` + mock `update`。）
 
 - [ ] **步骤 6：运行验证通过 + Commit**
 
 ```bash
 npx vitest run src/lib/readerSettings.test.ts src/stores/settings.test.ts
 git add src/lib/readerSettings.ts src/lib/readerSettings.test.ts src/stores/settings.ts src/stores/settings.test.ts
-git commit -m "feat(reader): ReadMode 枚举（single/double/webtoon）+ settings 四键（任务 1/8）"
+git commit -m "feat(reader): 既有 ReaderMode 扩 webtoon（cycle 三态 + normalize）+ webtoon 三设置键（任务 1/8）"
 ```
 
 ---
@@ -364,28 +377,71 @@ vi.mock('@/lib/tauri', async () => {
 });
 
 describe('useWebtoonDimensions（module3.1.0）', () => {
-  it('ensureRange：批量测量窗口内未测图，去重不重复请求', async () => {
-    vi.mocked(listImageDimensions).mockResolvedValue([
-      { path: 'a.jpg', width: 1000, height: 2000 },
-    ] as Awaited<ReturnType<typeof listImageDimensions>>);
-    const d = useWebtoonDimensions(
+  function mk(relPath = '') {
+    return useWebtoonDimensions(
       ref({ type: 'local', rootPath: 'R:\\c' }),
       ref(['a.jpg', 'b.jpg', 'c.jpg']),
+      ref(relPath),
     );
+  }
+
+  it('ensureRange：拼 relPath 前缀请求 fullPath，响应反查 name 回填（审查 P1-3）', async () => {
+    vi.mocked(listImageDimensions).mockResolvedValue([
+      { path: 'comics/vol01/a.jpg', width: 1000, height: 2000 },
+    ] as Awaited<ReturnType<typeof listImageDimensions>>);
+    const d = mk('comics/vol01');
     await d.ensureRange(0, 2);
-    expect(vi.mocked(listImageDimensions)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(listImageDimensions)).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'R:\\c' },
+      ['comics/vol01/a.jpg', 'comics/vol01/b.jpg'],   // fullPaths，非裸名
+    );
+    // measuredMap 以 name 为 key（layout 消费）
     expect(d.measuredMap.value.get('a.jpg')).toEqual({ width: 1000, height: 2000 });
     // 二次同范围：已请求过的不再发 IPC
     await d.ensureRange(0, 2);
     expect(vi.mocked(listImageDimensions)).toHaveBeenCalledTimes(1);
   });
 
-  it('IPC 失败静默（估算占位兜底，measuredMap 不写入失败项）', async () => {
-    vi.mocked(listImageDimensions).mockRejectedValue(new Error('io'));
+  it('relPath=""（书在根）：裸名直传', async () => {
+    vi.mocked(listImageDimensions).mockResolvedValue([
+      { path: 'a.jpg', width: 100, height: 200 },
+    ] as Awaited<ReturnType<typeof listImageDimensions>>);
+    const d = mk('');
+    await d.ensureRange(0, 1);
+    expect(vi.mocked(listImageDimensions)).toHaveBeenCalledWith(
+      expect.anything(), ['a.jpg'],
+    );
+  });
+
+  it('跨卷（relPath 变化）：requested/measuredMap 清空，同名图重新测量', async () => {
+    vi.mocked(listImageDimensions).mockResolvedValue([
+      { path: 'vol1/001.jpg', width: 1000, height: 2000 },
+    ] as Awaited<ReturnType<typeof listImageDimensions>>);
+    const relPath = ref('vol1');
     const d = useWebtoonDimensions(
       ref({ type: 'local', rootPath: 'R:\\c' }),
-      ref(['a.jpg']),
+      ref(['001.jpg']),
+      relPath,
     );
+    await d.ensureRange(0, 1);
+    expect(d.measuredMap.value.size).toBe(1);
+    // 跨卷 → relPath 变 → 清空
+    relPath.value = 'vol2';
+    await Promise.resolve(); // watch flush
+    expect(d.measuredMap.value.size).toBe(0);
+    // 同名 001.jpg 重新请求（requested 已清）
+    vi.mocked(listImageDimensions).mockClear();
+    vi.mocked(listImageDimensions).mockResolvedValue([
+      { path: 'vol2/001.jpg', width: 800, height: 3000 },
+    ] as Awaited<ReturnType<typeof listImageDimensions>>);
+    await d.ensureRange(0, 1);
+    expect(vi.mocked(listImageDimensions)).toHaveBeenCalledTimes(1);
+    expect(d.measuredMap.value.get('001.jpg')).toEqual({ width: 800, height: 3000 });
+  });
+
+  it('IPC 失败静默（估算占位兜底，measuredMap 不写入失败项）', async () => {
+    vi.mocked(listImageDimensions).mockRejectedValue(new Error('io'));
+    const d = mk();
     await d.ensureRange(0, 1); // 不抛
     expect(d.measuredMap.value.size).toBe(0);
   });
@@ -435,10 +491,16 @@ export function useWebtoonDimensions(
     if (inFlight) await inFlight.catch(() => {});
     inFlight = (async () => {
       try {
-        const dims = await listImageDimensions(descriptor.value, batch);
+        // IPC 需要 source-relative 完整路径（审查 P1-3）：拼 relPath 前缀（MasonryView:406-417 同款）
+        const fullPaths = batch.map((n) =>
+          relPath.value ? PathUtils.join(relPath.value, n) : n);
+        const dims = await listImageDimensions(descriptor.value, fullPaths);
         const next = new Map(measuredMap.value);
         for (const d of dims) {
-          if (d.width > 0 && d.height > 0) next.set(d.path, { width: d.width, height: d.height });
+          if (d.width <= 0 || d.height <= 0) continue;
+          // 响应 path 是 fullPath → 反查回 name 作 key（layout 以 name 消费）
+          const name = fullNameToName.get(d.path) ?? d.path;
+          next.set(name, { width: d.width, height: d.height });
         }
         measuredMap.value = next;
       } catch (e) {
@@ -450,9 +512,49 @@ export function useWebtoonDimensions(
     await inFlight;
   }
 
+  // 换书/跨卷（relPath 或 descriptor 变化）：清空 requested + measuredMap
+  // ——跨卷同名 001.jpg 若不清会复用前一卷尺寸（审查 P1-3）
+  watch([relPath, descriptor], () => {
+    requested.clear();
+    fullNameToName.clear();
+    measuredMap.value = new Map();
+  });
+
   return { measuredMap, ensureRange };
 }
 ```
+
+签名与上文配套改为（`relPath` = 书的 root 相对路径，ReaderView 从 reader store 的当前卷身份传入）：
+
+```ts
+export function useWebtoonDimensions(
+  descriptor: Ref<SourceDescriptor>,
+  names: Ref<readonly string[]>,
+  relPath: Ref<string>,
+) {
+  const measuredMap = ref(new Map<string, { width: number; height: number }>());
+  const requested = new Set<string>();
+  const fullNameToName = new Map<string, string>(); // IPC fullPath → name 反查表
+  let inFlight: Promise<void> | null = null;
+
+  async function ensureRange(start: number, end: number): Promise<void> {
+    const batch: string[] = [];
+    for (let i = Math.max(0, start); i < Math.min(end, names.value.length); i++) {
+      const n = names.value[i];
+      if (!requested.has(n)) {
+        requested.add(n);
+        const full = relPath.value ? PathUtils.join(relPath.value, n) : n;
+        fullNameToName.set(full, n);
+        batch.push(n);
+      }
+    }
+    // ……（后半段同上：fullPaths 映射 + 反查回填 + watch 清空）
+  }
+  // ……
+}
+```
+
+import 补：`import { watch } from 'vue';`（与 ref 合并）、`import { PathUtils } from '@/lib/path';`。
 
 （`ImageDim` 的字段名以 `tauri.ts` 实际定义为准——若为 `path/width/height` 之外的命名，同步调整测试与实现。）
 
@@ -493,7 +595,7 @@ const NAMES = ['a.jpg', 'b.jpg', 'c.jpg'];
 
 function mountViewer(extra: Record<string, unknown> = {}) {
   return mount(WebtoonViewer, {
-    props: { urls: URLS, names: NAMES, descriptor: { type: 'local', rootPath: 'R:\\c' } },
+    props: { urls: URLS, names: NAMES, descriptor: { type: 'local', rootPath: 'R:\\c' }, relPath: '' },
     global: { plugins: [i18n] },
     ...extra,
   });
@@ -589,6 +691,8 @@ const props = withDefaults(defineProps<{
   urls: string[];
   names: string[];
   descriptor: SourceDescriptor;
+  /** 书的 root 相对路径（图头 IPC 拼 fullPath 用，审查 P1-3；根书传 ''） */
+  relPath: string;
   /** 0 = 不限宽 */
   maxWidth?: number;
   gap?: number;
@@ -596,6 +700,8 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   (e: 'scroll-past-bottom'): void;
+  (e: 'scroll'): void;
+  (e: 'wheel-delta', deltaY: number): void;
 }>();
 
 const scrollEl = ref<HTMLElement | null>(null);
@@ -607,6 +713,7 @@ let lastNonUnityZoom = 2;
 const { measuredMap, ensureRange } = useWebtoonDimensions(
   computed(() => props.descriptor),
   computed(() => props.names),
+  computed(() => props.relPath),
 );
 
 /** 容器内容宽（zoom 后）：基准 = min(容器宽, maxWidth||容器宽) */
@@ -681,7 +788,7 @@ function setZoom(z: number, anchorY?: number): void {
   if (nz !== 1) lastNonUnityZoom = nz;
 }
 
-/** Ctrl+滚轮锚点缩放（step 10%）；普通滚轮不拦截（原生滚动）+ 底部越滚观察 */
+/** Ctrl+滚轮锚点缩放（step 10%）；普通滚轮不拦截（原生滚动）+ 底部越滚观察 + 临时变速通知 */
 function onWheel(e: WheelEvent): void {
   if (e.ctrlKey) {
     e.preventDefault();
@@ -689,6 +796,8 @@ function onWheel(e: WheelEvent): void {
     setZoom(zoom.value * dir, e.clientY - (scrollEl.value?.getBoundingClientRect().top ?? 0));
     return;
   }
+  // 普通滚轮：通知 ReaderView（自动滚动临时变速用，spec §4）
+  emit('wheel-delta', e.deltaY);
   if (e.deltaY > 0 && atBottom.value) emitScrollPastBottom();
 }
 
@@ -721,6 +830,7 @@ function onScroll(): void {
   scrollTop.value = el.scrollTop;
   viewportHeight.value = el.clientHeight;
   containerWidth.value = el.clientWidth;
+  emit('scroll'); // ReaderView 节流更新顶部图/页码/atBottom
 }
 function syncGeometry(): void { onScroll(); }
 
@@ -735,7 +845,12 @@ onUnmounted(() => { ro?.disconnect(); ro = null; });
 // 窗口移动 → 预读图头
 watch(windowRange, (r) => { void ensureRange(r.start, r.end); });
 
-defineExpose({ scrollToImage, getTopVisibleImage, atBottom: atBottom as Ref<boolean>, setZoom, zoom, autoScrollStep });
+defineExpose({
+  scrollToImage, getTopVisibleImage,
+  atBottom: atBottom as Ref<boolean>,
+  setZoom, zoom, autoScrollStep,
+  scrollEl, // ReaderView scrollScreen（键盘滚屏）用
+});
 </script>
 
 <template>
@@ -830,12 +945,13 @@ describe('useWebtoonProgress（module3.1.0）', () => {
   beforeEach(() => { vi.clearAllMocks(); vi.useFakeTimers(); });
   afterEach(() => vi.useRealTimers());
 
-  it('顶部图变化 300ms debounce 后 saveProgress(image_name)', async () => {
+  it('顶部图变化 300ms debounce 后 saveProgress（readerMode=webtoon，image_name 第五参）', async () => {
     const p = setup();
     p.notifyTopChanged('p005.jpg', 4);
     expect(saveProgress).not.toHaveBeenCalled();
     vi.advanceTimersByTime(310);
-    expect(saveProgress).toHaveBeenCalledWith(105, 4, 'p005.jpg', false);
+    // 签名 (bookId, page, readerMode, finished?, imageName?)——审查 P1-2 修正
+    expect(saveProgress).toHaveBeenCalledWith(105, 4, 'webtoon', undefined, 'p005.jpg');
   });
 
   it('同图不重复写', async () => {
@@ -869,7 +985,36 @@ describe('useWebtoonProgress（module3.1.0）', () => {
 });
 ```
 
-（`saveProgress` 参数序以 `tauri.ts` 实际签名为准——若为对象参数则同步调整实现与断言。）
+（**tauri.ts 前置改动**：`saveProgress` 第三参类型 `readerMode: 'single' | 'double'` 扩为 `'single' | 'double' | 'webtoon'`（tauri.ts:405-411）——Rust 端 `save_progress` 的 `reader_mode` 是 String 直存 DB，无需改 Rust、无迁移。此改动放本任务步骤 3 一并提交。）
+
+补充用例（审查 P1-4：bookId 变化自动 reset）：
+
+```ts
+  it('bookId 变化自动 reset：跨卷同名首图仍写进度 + 新卷可再标 finished', async () => {
+    const bookId = ref(105);
+    const atBottom = ref(false);
+    const topImage = ref<string | null>('001.jpg');
+    const p = useWebtoonProgress({ bookId, topImage, topIndex: ref(0), atBottom });
+    // 卷 1 读完
+    atBottom.value = true;
+    vi.advanceTimersByTime(1300);
+    expect(markFinished).toHaveBeenCalledTimes(1);
+    // 跨卷 → bookId 变化 → auto reset
+    bookId.value = 206;
+    await Promise.resolve(); // watch flush
+    // 新卷顶部又是同名 001.jpg —— lastImage 已被 reset，必须写进度
+    p.notifyTopChanged('001.jpg', 0);
+    vi.advanceTimersByTime(310);
+    expect(saveProgress).toHaveBeenCalledWith(206, 0, 'webtoon', undefined, '001.jpg');
+    // 新卷滚到底 → finishedMarked 已 reset，可再标
+    atBottom.value = false;
+    await Promise.resolve();
+    atBottom.value = true;
+    vi.advanceTimersByTime(1300);
+    expect(markFinished).toHaveBeenCalledTimes(2);
+    expect(markFinished).toHaveBeenLastCalledWith(206, true);
+  });
+```
 
 - [ ] **步骤 2：验证失败 → 步骤 3：实现（新建）**
 
@@ -904,7 +1049,9 @@ export function useWebtoonProgress(opts: {
       timer = null;
       const bookId = opts.bookId.value;
       if (bookId === null) return;
-      saveProgress(bookId, index, image, false).catch((e) => log('[webtoon] saveProgress failed', e));
+      // 签名 (bookId, page, readerMode, finished?, imageName?)——finished=undefined 不动完成态
+      saveProgress(bookId, index, 'webtoon', undefined, image)
+        .catch((e) => log('[webtoon] saveProgress failed', e));
     }, DEBOUNCE_MS);
   }
 
@@ -923,7 +1070,13 @@ export function useWebtoonProgress(opts: {
     }
   });
 
-  /** 换书重置（跨卷导航后调） */
+  /** 换书自动重置（审查 P1-4）：跨卷后 finishedMarked 必须清（新卷可再标完），
+   * lastImage 必须清（跨卷同名首图 001.jpg 不被去重吞掉）。不依赖调用方手动 reset。 */
+  watch(opts.bookId, (nb, ob) => {
+    if (ob !== null && nb !== ob) reset();
+  });
+
+  /** 手动重置（兜底，测试/特殊场景用） */
   function reset(): void {
     lastImage = null;
     finishedMarked = false;
@@ -967,13 +1120,16 @@ git commit -m "feat(webtoon): 进度记录 composable（debounce 顶部图 + atB
       :urls="pageUrls"
       :names="pageNames"
       :descriptor="descriptor"
+      :rel-path="relPath"
       :max-width="webtoonMaxWidth"
       :gap="webtoonGap"
+      @scroll="onViewerScroll"
+      @wheel-delta="$emit('wheel-delta', $event)"
       @scroll-past-bottom="$emit('scroll-past-bottom')"
     />
 ```
 
-新增 props：`pageNames: string[]`、`descriptor: SourceDescriptor`、`webtoonMaxWidth: number`、`webtoonGap: number`；emit `scroll-past-bottom`；`webtoonRef` defineExpose 转发（`getWebtoon(): 暴露类型 | null`）。import WebtoonViewer。
+新增 props：`pageNames: string[]`、`descriptor: SourceDescriptor`、`relPath: string`（书的 root 相对路径，ReaderView 从 reader store 当前卷身份取）、`webtoonMaxWidth: number`、`webtoonGap: number`；emit `scroll` / `wheel-delta` / `scroll-past-bottom`（透传）；`webtoonRef` defineExpose 转发（`getWebtoon(): 暴露类型 | null`）。import WebtoonViewer。
 
 - [ ] **步骤 2：useReaderWheel enabled 守卫**
 
@@ -990,7 +1146,7 @@ git commit -m "feat(webtoon): 进度记录 composable（debounce 顶部图 + atB
   if (opts.enabled && !opts.enabled()) return;
 ```
 
-ReaderView 调用处传 `enabled: () => settingsStore.readMode !== 'webtoon'`。
+ReaderView 调用处传 `enabled: () => settingsStore.readerDefaultMode !== 'webtoon'`。
 
 - [ ] **步骤 3：ReaderView webtoon 分支（node 补丁，锚点按实际代码）**
 
@@ -1001,7 +1157,7 @@ const webtoonScreenRef = ref<InstanceType<typeof ReaderScreen> | null>(null);
 const webtoonTopImage = ref<string | null>(null);
 const webtoonTopIndex = ref(0);
 const webtoonAtBottom = ref(false);
-const isWebtoon = computed(() => settingsStore.readMode === 'webtoon');
+const isWebtoon = computed(() => settingsStore.readerDefaultMode === 'webtoon');
 ```
 
 （ReaderScreen ref 现有名按实际；`webtoonTopImage/Index` 由 scroll watch 更新：）
@@ -1028,6 +1184,8 @@ function markWebtoonScroll(): void {
 ```
 
 （执行时给 WebtoonViewer `@scroll.passive` 里同时 `emit('scroll')`，ReaderScreen 透传，ReaderView 监听调 `markWebtoonScroll`。）
+
+(b0) relPath 来源（审查 P1-3）：ReaderView 从 reader store 当前卷身份取 root 相对路径（`openBook` payload 的 relPath 字段——执行时以 `stores/reader.ts` 实际字段名为准，如 `currentRelPath`），const `webtoonRelPath = computed(() => readerStore.xxx ?? '')`，传给 ReaderScreen `:rel-path`。
 
 (b) 进度 composable 接入（loadBook 成功后）：
 
@@ -1100,7 +1258,7 @@ onUnmounted(() => { if (rafId !== null) cancelAnimationFrame(rafId); });
 
 （跨卷续播：新卷 ready 后 slideshow 续播链已有（3.0.13），rAF watch isPlaying 自动恢复——无需额外处理。）
 
-(f) 模板：ReaderScreen 传 `:mode="isWebtoon ? 'webtoon' : (doubleMode ? 'double' : 'single')"`（现有 mode 构造处合并）+ `:page-names="imageNames"` + `:descriptor` + `:webtoon-max-width` + `:webtoon-gap"` + `@scroll-past-bottom` + `@scroll="markWebtoonScroll"`。页码 overlay：isWebtoon 时显示 `{{ (webtoonTopIndex>=0?webtoonTopIndex+1:1) }} / {{ total }}`。
+(f) 模板：ReaderScreen 传 `:mode="isWebtoon ? 'webtoon' : (现有 mode 构造)"`（现有 doubleMode 判断处合并，webtoon 优先）+ `:page-names="imageNames"` + `:descriptor` + `:rel-path="webtoonRelPath"` + `:webtoon-max-width` + `:webtoon-gap` + `@scroll="markWebtoonScroll"` + `@wheel-delta="onWebtoonWheelDelta"` + `@scroll-past-bottom="requestCrossVolumeNext"`。页码 overlay：isWebtoon 时显示 `{{ (webtoonTopIndex>=0?webtoonTopIndex+1:1) }} / {{ total }}`。
 
 - [ ] **步骤 4：测试 + 验证**
 
@@ -1135,8 +1293,8 @@ git commit -m "feat(webtoon): ReaderView/Screen 接线（三模式/进度恢复/
 
 - [ ] **步骤 2：Settings 阅读器 section**
 
-- 阅读模式行：下拉（复用项目 Dropdown 模式，选项三态）绑 `settingsStore.readMode` / `setReadMode`。
-- webtoon 子组（readMode==='webtoon' 时显示）：限宽 `webtoonMaxWidth`（number input 0=不限）、间距 `webtoonGap`（slider 0-24）、滚动速度 `webtoonScrollSpeed`（slider 10-300）。
+- 阅读模式行：下拉（复用项目 Dropdown 模式，选项三态）绑 `settingsStore.readerDefaultMode` / `setReaderMode`（既有 key reader_default_mode）。
+- webtoon 子组（readerDefaultMode==='webtoon' 时显示）：限宽 `webtoonMaxWidth`（number input 0=不限）、间距 `webtoonGap`（slider 0-24）、滚动速度 `webtoonScrollSpeed`（slider 10-300）。
 - RTL 方向行在 webtoon 时 disabled。
 - i18n：`settings.reader.readMode` / `settings.reader.webtoon.maxWidth|gap|scrollSpeed`（zh：阅读模式/限宽（0 为不限）/图片间距/自动滚动速度）双语。
 

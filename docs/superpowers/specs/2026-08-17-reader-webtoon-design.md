@@ -9,10 +9,9 @@
 
 ## 1. 模式模型
 
-- `src/lib/readerSettings.ts`：`export type ReadMode = 'single' | 'double' | 'webtoon'`；`DEFAULT_READ_MODE = 'single'`；`normalizeReadMode(v)`（非法值/老数据 fallback single，模式对齐 `normalizeScaleMode`）。
-- 持久化：settings key `reader_mode`（settings store 增 `readMode` ref + `setReadMode`，`persist('reader_mode', ...)` 包装）。
+- **扩既有模式链路，不另立状态**（审查 P1-1）：settings store 既有 `ReaderMode = 'single' | 'double'`（`readerDefaultMode` ref / `reader_default_mode` key / `cycleReaderMode()`）扩展为 `'single' | 'double' | 'webtoon'`——类型单一真值源移至 `src/lib/readerSettings.ts`（`ReadMode` + `normalizeReadMode`，非法值 fallback single），settings.ts re-export 保兼容；`cycleReaderMode` 改三态循环；新增 `setReaderMode` 直设器（Settings 下拉用，写既有 key）。
 - **全局设置，不按书记忆**（与 single/double 现状一致；YAGNI）。
-- 切换入口：ReaderMainMenu「切换模式」cycle 三态（single → double → webtoon → single）+ Settings 阅读器 section 下拉。
+- 切换入口：ReaderMainMenu「切换模式」三态循环（复用 cycle-mode emit）+ Settings 阅读器 section 下拉。
 - RTL/LTR 在 webtoon 下不适用：Settings 与菜单中该选项仅 single/double 生效（webtoon 选中时禁用）。
 
 ## 2. WebtoonViewer 组件
@@ -28,8 +27,10 @@
 ### 2.2 尺寸骨架（useWebtoonDimensions）
 
 - 复用 `listImageDimensions` IPC（3.0.6 图头解析：JPEG/PNG/GIF/BMP），按「首屏可见 + 2 屏预读」渐进测量（对齐瀑布流像素窗口思路）；`measuredMap: Map<name, {width,height}>`。
+- **IPC 路径语义**（审查 P1-3）：请求前拼书的 root 相对路径前缀（`join(relPath, name)`，relPath 来自 reader store 当前卷身份；根书传 `''` 即裸名）——IPC 需要 source-relative 完整路径，裸名在子目录书会全部 miss 退化为估算；响应用 fullPath→name 反查表回填。
+- **换书/跨卷清空**：watch relPath/descriptor 变化清空 `requested` 与 `measuredMap`——跨卷同名 `001.jpg` 不复用前一卷尺寸。
 - 未测量图：估算宽高比 3:4 占位（WebP/AVIF 等无图头解析的格式走此 fallback）；实测到达后校正总高度（`applyMeasuredBatch` 模式，滚动锚定补偿见 2.4）。
-- 与瀑布流 `useMasonryLayout` 的差异：单列、无列分配、无卡片卡片间距逻辑——**不共享 masonry composable**，只共享 IPC 与估算/校正模式（薄实现，避免反向耦合）。
+- 与瀑布流 `useMasonryLayout` 的差异：单列、无列分配、无卡片间距逻辑——**不共享 masonry composable**，只共享 IPC 与估算/校正模式（薄实现，避免反向耦合）。
 
 ### 2.3 虚拟化
 
@@ -72,9 +73,10 @@ defineExpose<{
 
 ## 5. 进度与跨卷（全套复用）
 
-- **记录**：ReaderView 对 webtoon 走 300ms debounce 记 `getTopVisibleImage()` → `save_progress(page=canonicalIndex, image_name=topImage)`（同图去重；与 3.0.8 `useMasonryBrowsePosition` 同构，reader 侧新薄 composable `useWebtoonProgress`，不共享 masonry 实现）。
+- **记录**：ReaderView 对 webtoon 走 300ms debounce 记 `getTopVisibleImage()` → `saveProgress(bookId, page, 'webtoon', undefined, image_name)`（现有签名 `(bookId, page, readerMode, finished?, imageName?)`——readerMode 类型扩 `'webtoon'`，Rust 端 String 直存无迁移；finished=undefined 不动完成态）。同图去重；reader 侧新薄 composable `useWebtoonProgress`，不共享 masonry 实现。
+- **换书自动重置**（审查 P1-4）：composable watch `bookId` 变化自动 reset（`lastImage` 与 `finishedMarked`）——跨卷同名首图不被去重吞掉、新卷滚到底仍可标 finished；不依赖调用方手动 reset。
 - **恢复**：`?at=` query 优先 → `progress.image_name` → `page` → 0，目标图经 `scrollToImage` 渐进到位。
-- **读完**：`atBottom` 持续 1.2s（STABLE_MS，对齐瀑布流）→ `markFinished`；下一滚动动作（滚轮/滚屏）触发 `maybeContinue`（与翻页模型的「末页再翻」等价：底部再向下滚动/按键触发）。
+- **读完**：`atBottom` 持续 1.2s（STABLE_MS，对齐瀑布流）→ `markFinished`；底部再向下滚动/按键触发 `maybeContinue`（与翻页模型的「末页再翻」等价）。
 - **阅读记录**：`loadRouteBook` 统一 `recordHistory` 已覆盖（3.0.13），零改动。
 
 ## 6. 输入映射（per-mode 分派）
