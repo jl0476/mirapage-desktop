@@ -45,6 +45,8 @@ impl WebDavMediaSource {
     }
 
     /// 解 PROPFIND multi-status XML,提取每个 <href> 的文件名/大小/类型
+    /// module3.0.14: 标签匹配一律走 local_name（剥 `d:` 等命名空间前缀），
+    /// collection 检测覆盖自闭合 `<collection/>`（Empty 事件）与展开式（Start 事件）。
     fn parse_propfind(body: &str, prefix: &str) -> Result<Vec<MediaEntry>> {
         let mut reader = Reader::from_str(body);
         reader.config_mut().trim_text(true);
@@ -58,22 +60,41 @@ impl WebDavMediaSource {
                 Err(e) => return Err(MediaSourceError::Other(format!("xml: {e}"))),
                 Ok(Event::Eof) => break,
                 Ok(Event::Start(e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                    let name = local_name(e.name().as_ref()).to_owned();
                     match name.as_str() {
                         "response" => current = Some(PartialEntry::default()),
                         "href" | "getcontentlength" | "resourcetype" | "getlastmodified" => {
                             current_field = Some(name);
                         }
+                        // 展开式 <collection></collection>：Start 事件到达
+                        "collection" => {
+                            if current_field.as_deref() == Some("resourcetype") {
+                                if let Some(cur) = current.as_mut() {
+                                    cur.is_collection = true;
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
                 Ok(Event::End(e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                    let qname = e.name();
+                    let name = local_name(qname.as_ref());
                     if name == "response" {
                         if let Some(p) = current.take() {
                             if let Some(entry) = p.finalize(prefix) {
                                 entries.push(entry);
                             }
+                        }
+                    }
+                }
+                Ok(Event::Empty(e)) => {
+                    // 自闭合 <d:collection/>：quick-xml 以 Empty 事件到达（不拆成 Start+End）
+                    if local_name(e.name().as_ref()) == "collection"
+                        && current_field.as_deref() == Some("resourcetype")
+                    {
+                        if let Some(cur) = current.as_mut() {
+                            cur.is_collection = true;
                         }
                     }
                 }
@@ -91,6 +112,15 @@ impl WebDavMediaSource {
         // 自然排序
         entries.sort_by(|a, b| crate::algorithm::natural_compare(&a.name, &b.name));
         Ok(entries)
+    }
+}
+
+/// 取标签 local name（剥命名空间前缀，`d:response` → `response`；无前缀原样返回）。
+fn local_name(name: &[u8]) -> &str {
+    let s = std::str::from_utf8(name).unwrap_or("");
+    match s.split_once(':') {
+        Some((_, local)) => local,
+        None => s,
     }
 }
 
@@ -321,6 +351,34 @@ mod tests {
         assert_eq!(entries[0].name, "file.txt");
         assert!(!entries[0].is_directory);
         assert_eq!(entries[0].size, 12345);
+        assert_eq!(entries[1].name, "sub1");
+        assert!(entries[1].is_directory);
+    }
+
+    #[test]
+    fn parse_propfind_handles_unprefixed_and_expanded_collection() {
+        // module3.0.14 spec B：无命名空间前缀 + 展开式 <collection></collection>
+        // （与既有前缀 + 自闭合用例分别覆盖两条 collection 解析路径）
+        let body = r#"<?xml version="1.0"?>
+<multistatus xmlns="DAV:">
+  <response>
+    <href>/dav/sub1/</href>
+    <propstat><prop>
+      <resourcetype><collection></collection></resourcetype>
+    </prop></propstat>
+  </response>
+  <response>
+    <href>/dav/pic.zip</href>
+    <propstat><prop>
+      <getcontentlength>999</getcontentlength>
+    </prop></propstat>
+  </response>
+</multistatus>"#;
+        let entries = WebDavMediaSource::parse_propfind(body, "/dav/").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "pic.zip");
+        assert_eq!(entries[0].size, 999);
+        assert!(!entries[0].is_directory);
         assert_eq!(entries[1].name, "sub1");
         assert!(entries[1].is_directory);
     }
