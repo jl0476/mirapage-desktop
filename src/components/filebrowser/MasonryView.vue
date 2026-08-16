@@ -168,7 +168,7 @@ const { layout, visibleRange, colWidth, thumbnailWindows, dimensionPrefetchPaths
 // 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 来自设置 store。
 const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
 const thumbQuality = computed(() => settingsStore.thumbnailQuality);
-const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, regenerate: regenerateThumbnail, retryBatch: retryBatchFn, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
+const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, regenerate: regenerateThumbnail, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
   currentPath: toRef(props, 'currentPath'),
   entries: entriesRef,
@@ -393,7 +393,6 @@ defineExpose({
   regenerate: regenerateThumbnail,
   regenerateBatch: regenerateBatchFn,
   retry: retryThumbnail,
-  retryBatch: retryBatchFn,
   scrollToEntry,
   jumpToLast: () => browsePosition.jumpToLast(),
   browsePosition,

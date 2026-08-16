@@ -71,7 +71,6 @@ export interface UseMasonryThumbnailsReturn {
   /** module3.0.11：失败态时间线快照（failed 事件覆盖 generating 态后明细已丢）。 */
   progressSnapshots: ComputedRef<Map<string, ThumbnailProgressSnapshot>>;
   retry: (path: string) => void;
-  retryBatch: (paths: string[]) => void;
   regenerate: (path: string) => void;
   regenerateBatch: (paths: string[]) => void;
   epoch: Ref<number>;
@@ -507,10 +506,6 @@ export function useMasonryThumbnails(
     });
   };
 
-  /** 批量重试：循环复用 retry（不删缓存，重新排队）。scheduler 队列自然限流。 */
-  const retryBatch = (paths: string[]) => {
-    for (const p of paths) retry(p);
-  };
 
   const regenerate = (path: string) => {
     const found = findEntry(path);
@@ -538,7 +533,6 @@ export function useMasonryThumbnails(
     stateMap: computed(() => state.value),
     progressSnapshots: computed(() => progressSnapshots.value),
     retry,
-    retryBatch,
     regenerate,
     regenerateBatch,
     epoch,

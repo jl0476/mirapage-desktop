@@ -131,8 +131,6 @@ export default {
       readNow: '立即阅读',
       regenerateThumbnail: '重新生成缩略图',
       regenerateThumbnailN: '重新生成 {n} 张缩略图',
-      retryThumbnail: '重试缩略图',
-      retryThumbnailN: '重试 {n} 张缩略图',
     },
     // v0.1.0-module2.0: 触发阅读 (不靠双击)
     readNow: '立即阅读',

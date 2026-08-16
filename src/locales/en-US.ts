@@ -129,8 +129,6 @@ export default {
       readNow: 'Read now',
       regenerateThumbnail: 'Regenerate thumbnail',
       regenerateThumbnailN: 'Regenerate {n} thumbnails',
-      retryThumbnail: 'Retry thumbnail',
-      retryThumbnailN: 'Retry {n} thumbnails',
     },
     // v0.1.0-module2.0: read trigger (no double-click)
     readNow: 'Read now',

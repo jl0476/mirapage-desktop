@@ -2,7 +2,7 @@
 /**
  * RowContextMenu.vue — 文件行右键菜单 (v0.1.0-module1.21)
  *
- * 单图（entry）或多选（entries）模式：多选时 regenerate/retry 显示"N 张"，
+ * 单图（entry）或多选（entries）模式：多选时 regenerate 显示"N 张"，
  * 目录专属项（read-now / add-to-library）多选时隐藏。
  * 位置: 绝对定位 (x, y), click-outside 关闭.
  * 样式: Xplorer context-menu-enter / exit 渐入 (90ms ease-out).
@@ -36,7 +36,6 @@ interface Emits {
   (e: 'toggle-like', entry: MediaEntry): void;
   /** 单图: entry; 多选: entries 数组。统一用此签名。 */
   (e: 'regenerate-thumbnail', items: MediaEntry[]): void;
-  (e: 'retry', items: MediaEntry[]): void;
 }
 const emit = defineEmits<Emits>();
 
@@ -111,11 +110,6 @@ function onRegenerate() {
   emit('close');
 }
 
-function onRetry() {
-  if (currentItems.value.length === 0) return;
-  emit('retry', currentItems.value);
-  emit('close');
-}
 </script>
 
 <template>
@@ -160,17 +154,6 @@ function onRetry() {
       ⟳ {{ isBatch
         ? t('fileBrowser.contextMenu.regenerateThumbnailN', { n: currentItems.length })
         : t('fileBrowser.contextMenu.regenerateThumbnail') }}
-    </button>
-    <!-- 图片：重试（不删缓存，重新排队），支持多选 -->
-    <button
-      v-if="firstItem && !firstItem.isDirectory && isImage(firstItem.name)"
-      data-test="retry-thumbnail"
-      class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
-      @click="onRetry"
-    >
-      ↻ {{ isBatch
-        ? t('fileBrowser.contextMenu.retryThumbnailN', { n: currentItems.length })
-        : t('fileBrowser.contextMenu.retryThumbnail') }}
     </button>
   </div>
 </template>

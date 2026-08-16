@@ -158,3 +158,11 @@ describe('RowContextMenu 重置阅读进度（module3.0.14）', () => {
     expect(w.emitted('close')).toBeTruthy();
   });
 });
+
+describe('RowContextMenu 缩略图菜单二合一（module3.0.14）', () => {
+  it('图片右键不再渲染 retry-thumbnail 项（regenerate 功能完全覆盖 retry）', async () => {
+    const w = await mountCtx(imgEntry());
+    expect(w.find('[data-test="retry-thumbnail"]').exists()).toBe(false);
+    expect(w.find('[data-test="regenerate-thumbnail"]').exists()).toBe(true);
+  });
+});

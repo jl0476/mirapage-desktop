@@ -576,10 +576,6 @@ function onRegenerateThumbnail(entries: MediaEntry[]) {
   fileListRef.value?.regenerateBatch(entries);
 }
 
-/** 右键"重试缩略图"：多选时批量转发到 FileList.retryBatch。 */
-function onRetryFromCtx(items: MediaEntry[]) {
-  fileListRef.value?.retryBatch(items);
-}
 
 async function onBreadcrumbNavigate(path: string) {
   await fb.navigate(path);
@@ -1146,7 +1142,6 @@ function onReadNowFromCtx(entry: MediaEntry) {
       @toggle-like="onToggleLikeFromCtx"
       :like-favorite="ctxLikeFavorite"
       @regenerate-thumbnail="onRegenerateThumbnail"
-      @retry="onRetryFromCtx"
     />
   </main>
 </template>
