@@ -181,7 +181,11 @@ export function useCrossVolume(opts: UseCrossVolumeOpts): UseCrossVolumeReturn {
       return;
     }
     const startIdentity = opts.identity();
-    if (!startIdentity) return;
+    if (!startIdentity) {
+      // module3.0.14 spec C：对齐 !canStart() 分支——早退前消费 flag，防末页重试失效
+      opts.consumePendingNextVolume();
+      return;
+    }
 
     // P0-1 修复：off 必须在 findNextVolume 之前处理
     const mode: ContinueMode = force ? 'auto' : opts.getContinueMode();

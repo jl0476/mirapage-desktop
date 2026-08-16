@@ -679,7 +679,7 @@ describe('useCrossVolume', () => {
 
   // ── 辅助: identity === null 时直接 return ─────────────────────────
 
-  it('identity() === null → maybeContinue 直接 return', async () => {
+  it('identity() === null → maybeContinue 直接 return 且消费 pendingNextVolume', async () => {
     const { cv, navigateToVolume, pushToast, consumePendingNextVolume } = setup({ currentIdentity: null, continueMode: 'auto' });
 
     await cv.maybeContinue(true, 'next');
@@ -687,7 +687,8 @@ describe('useCrossVolume', () => {
     expect(vi.mocked(findNextVolume)).not.toHaveBeenCalled();
     expect(navigateToVolume).not.toHaveBeenCalled();
     expect(pushToast).not.toHaveBeenCalled();
-    expect(consumePendingNextVolume).not.toHaveBeenCalled();
+    // module3.0.14 spec C：对齐 !canStart() 分支——早退前消费，防 flag 卡 true
+    expect(consumePendingNextVolume).toHaveBeenCalled();
     expect(cv.phase.value).toBe('idle');
   });
 
