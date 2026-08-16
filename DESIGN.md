@@ -1574,6 +1574,7 @@ export function useReaderInput() {
 ## 16. 后续工作清单
 
 > 2026-08-16 盘点（来源：AGENTS.md 当前状态表 + 各模块「留后续」标记 + 3.0.13 会话发现）。完成一项划一项；量级 / 顺序供排期参考。
+> 2026-08-16 晚 3.0.14 小件打包已收走 8 项（见 §16.4 注记 + AGENTS 状态表）。
 
 ### 16.1 主线待完成（Phase 级）
 
@@ -1586,24 +1587,20 @@ export function useReaderInput() {
 ### 16.2 遗留打磨项（文档点名「留后续」）
 
 - **跨卷 prev 入口**（3.0.12 行为影响）：Rust `find_next_volume` 的 prev 方向已就绪（3.0.13 起排序一致 + skip_finished 均双向），只差前端入口（Alt+← 快捷键 + 阅读器菜单项）。性价比最高的一件。
-- **瀑布流打磨四件**（3.0.6）：像素级 scrollTop 锚定补偿；resolve in-flight cancel；hasImages 搜索态副作用；`var(--ease-out)` 未定义变量清理（FileList.details-header / FileBrowser.tb-btn）。
-- **3.0.3 孤儿清理**：settings store `SearchMode` / `search_mode`、`fileBrowser.search` 单 key。
-- **3.0.9 预存在不修两项**：右键「重置进度」查 book_id 落空（可能无效）；FileBrowser 入口按钮无「已喜欢」状态联动。
-- **设置面板**：`color_theme` 已存 store 但 UI 未暴露。
+- **瀑布流打磨三件**（3.0.6；ease-out 已于 3.0.14 清理）：像素级 scrollTop 锚定补偿；resolve in-flight cancel；hasImages 搜索态副作用。
 - **性能报告补数据**（3.0.7 / 3.0.8）：本地实时 rAF 帧时间采集，填 `docs/superpowers/reports/2026-08-08-masonry-thumbnail-performance.md`（调试实例即可采）。
 
 ### 16.3 技术债
 
-- **CI 不跑 `cargo test`**——Rust 侧回归静默（webdav 用例红了很久无人知）。建议 `.github/workflows/verify.yml` 加 cargo test 步骤（Windows runner 或加 Linux job 均可）。
-- **webdav `parse_propfind` 测试在 main 上失败**（预存在，2026-08-15 实机确认非回归）——修掉或明确 skip + 记录原因。
-- **useCrossVolume `identity===null` 早退不消费 `pendingNextVolume`**（3.0.13 会话发现）：窄竞态下 flag 卡 true，末页重试不再触发 watch（Alt+→ 强制路径不受影响）。修法：早退前 consume。
+（2026-08-16 3.0.14 清空：cargo test 进 CI、webdav parse_propfind 修复、useCrossVolume flag 竞态均已落地。）
 
 ### 16.4 建议实施顺序
 
-1. `cargo test` 进 CI + 修 webdav 用例（基建，防 Rust 回归静默）
-2. 跨卷 prev 入口（后端全就绪，纯前端小件）
-3. 技术债 / 打磨小件打包（useCrossVolume flag / 重置进度落空 / 孤儿清理 / ease-out / 性能报告采集）
-4. RAR/7z → SMB → 分发（三个大件按此序；分发依赖 mac / Linux 环境，可并行等待环境）
+1. 跨卷 prev 入口（后端全就绪，纯前端小件）
+2. 性能报告采集（需实机 dev 配合）
+3. RAR/7z → SMB → 分发（三个大件按此序；分发依赖 mac / Linux 环境，可并行等待环境）
+
+> 3.0.14（2026-08-16）已收走：cargo test 进 CI、webdav 修复、useCrossVolume flag、重置进度落空、喜欢 toggle、ease-out 清理、右键菜单缩略图二合一、瀑布流选中描边环。
 
 ### 16.5 远期方向（不在本期范围）
 
@@ -1611,7 +1608,7 @@ export function useReaderInput() {
 - 横条模式（连续横向滚动）
 - 下载到本地
 - 配置备份 / 导入（与 Android `.pvbackup` 互导）
-- 主题切换（深 / 浅 + 4 套色板）
+- 主题切换（深 / 浅 + 4 套色板；`color_theme` store 类型已备，4 套色板 CSS 未实现——单独暴露 UI 即死下拉，与色板实现一并做）
 - 缩略图网格视图
 - 远程图加载进度条
 - i18n：本期仅中 / 英两种语言；其他语言（日 / 韩 / 法等）为未来工作
