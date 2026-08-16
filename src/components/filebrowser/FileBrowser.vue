@@ -17,7 +17,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { getSetting, setSetting } from '@/lib/tauri';
+import { getSetting, setSetting, setFavorite, getBookStatus } from '@/lib/tauri';
 import { useFileBrowserStore, setScrollToIndexCallback } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
@@ -43,6 +43,8 @@ import MasonrySettingsPopup from './MasonrySettingsPopup.vue';
 // 设计源镜像 (后者不进 IPC, 仅为 Tauri 打包资源).
 import ICON_DETAILS_SVG from '@/icons/详情列表_view-list.svg?raw';
 import ICON_MASONRY_SVG from '@/icons/瀑布流.svg?raw';
+import { descriptorId } from '@/lib/sourceDescriptor';
+import { PathUtils } from '@/lib/path';
 import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
@@ -125,6 +127,90 @@ const selectedEntry = computed<MediaEntry | null>(() => {
   const path = [...fb.selectedPaths][0];
   return fb.sortedEntries.find((e) => e.path === path) ?? null;
 });
+
+
+// module3.0.14 spec E：按 locationKey 缓存的喜欢状态（工具栏/详情面板/右键菜单三入口共用）
+// locationKey = descriptorId + '|' + absPath —— 仅 absPath 会跨源串状态（不同源都可能有 vol1 / ''）
+interface LikeState { bookId: number; isFavorite: boolean }
+const likeStateByLocation = ref(new Map<string, LikeState | null>()); // null = 已查无书
+const pendingLikeLookups = new Set<string>();
+// 审查 P1 竞态守卫：toggle 写状态时 bump epoch；in-flight 旧查询返回时 epoch 失配即作废
+const likeLookupEpoch = new Map<string, number>();
+
+function locationFor(entry: MediaEntry): { key: string; descriptor: SourceDescriptorLocal; absPath: string } | null {
+  if (!entry.isDirectory || fb.rootPath === null || fb.lastFetchedPath === null) return null;
+  const descriptor: SourceDescriptorLocal = { type: 'local', rootPath: fb.rootPath };
+  const absPath = PathUtils.join(fb.lastFetchedPath, entry.path);
+  return { key: `${descriptorId(descriptor)}|${absPath}`, descriptor, absPath };
+}
+
+async function ensureLikeState(entry: MediaEntry): Promise<void> {
+  const loc = locationFor(entry);
+  if (!loc || likeStateByLocation.value.has(loc.key) || pendingLikeLookups.has(loc.key)) return;
+  pendingLikeLookups.add(loc.key);
+  const epoch = (likeLookupEpoch.get(loc.key) ?? 0) + 1;
+  likeLookupEpoch.set(loc.key, epoch);
+  try {
+    const st = await getBookStatus(loc.descriptor, loc.absPath);
+    if (likeLookupEpoch.get(loc.key) === epoch) {
+      likeStateByLocation.value.set(loc.key, st ? { bookId: st.bookId, isFavorite: st.isFavorite } : null);
+    }
+  } catch (e) {
+    log('[FileBrowser] getBookStatus failed', e);
+    if (likeLookupEpoch.get(loc.key) === epoch) likeStateByLocation.value.set(loc.key, null);
+  } finally {
+    pendingLikeLookups.delete(loc.key);
+  }
+}
+
+// 切目录清空（键含 descriptor 身份，清空只为控制规模）
+watch(() => fb.lastFetchedPath, () => likeStateByLocation.value.clear());
+// 选中目录 → 查询（右键单选也走 selectSingle，同一 watch 覆盖）
+watch(() => (selectedEntry.value?.isDirectory ? selectedEntry.value : null), (e) => {
+  if (e) void ensureLikeState(e);
+});
+
+const selectedLike = computed<LikeState | null | undefined>(() => {
+  const loc = selectedEntry.value ? locationFor(selectedEntry.value) : null;
+  if (!loc) return undefined;
+  return likeStateByLocation.value.get(loc.key); // undefined = 未查到（默认显示＋喜欢）
+});
+
+const ctxLikeFavorite = computed(() => {
+  const e = ctxMenu.value?.entry ?? null;
+  if (!e) return false;
+  const loc = locationFor(e);
+  return !!loc && !!likeStateByLocation.value.get(loc.key)?.isFavorite;
+});
+
+async function onToggleLike(entry: MediaEntry): Promise<void> {
+  const loc = locationFor(entry);
+  if (!loc) return;
+  const st = likeStateByLocation.value.get(loc.key);
+  if (st?.isFavorite) {
+    try {
+      await setFavorite(st.bookId, false);
+      likeLookupEpoch.set(loc.key, (likeLookupEpoch.get(loc.key) ?? 0) + 1);
+      likeStateByLocation.value.set(loc.key, { bookId: st.bookId, isFavorite: false });
+    } catch (e) {
+      log('[FileBrowser] unlike failed', e);
+    }
+    return;
+  }
+  // addToLibrary 返回 bookId——成功后直接写终态，不回查（回查会被 in-flight 旧查询竞态污染）
+  const bookId = await readerActions.addToLibrary(entry);
+  if (bookId !== null) {
+    likeLookupEpoch.set(loc.key, (likeLookupEpoch.get(loc.key) ?? 0) + 1);
+    likeStateByLocation.value.set(loc.key, { bookId, isFavorite: true });
+  }
+}
+
+function onToggleLikeClick() {
+  if (selectedEntry.value) void onToggleLike(selectedEntry.value);
+}
+function onToggleLikeFromCtx(entry: MediaEntry) {
+  void onToggleLike(entry);
+}
 
 const canSave = computed(() => fb.rootPath !== null);
 const canUp = computed(() => fb.currentPath !== '');
@@ -651,14 +737,6 @@ watch(() => fb.lastFetchedPath, () => {
   nextVolumeDebounce = setTimeout(() => void prefetchNextVolume(), 300);
 });
 
-function onAddToLibraryClick() {
-  log('[FileBrowser] onAddToLibraryClick fired', selectedEntry.value?.name);
-  if (selectedEntry.value) {
-    void readerActions.addToLibrary(selectedEntry.value);
-  } else {
-    log('[FileBrowser] onAddToLibraryClick: no selectedEntry');
-  }
-}
 // v0.1.0-module3.0.3-hotfix11: 下载全部 stub handler (与 EntryDetailPanel 一致 — 本地文件无需下载)
 function onDownloadAllClick() {
   log('[FileBrowser] onDownloadAllClick: stub (本地文件无需下载)');
@@ -667,9 +745,6 @@ function onDownloadAllClick() {
 function onReadNowFromCtx(entry: MediaEntry) {
   if (entry.isDirectory) void readerActions.readNow(entry);
   else void readerActions.readFromImage(entry);
-}
-function onAddToLibraryFromCtx(entry: MediaEntry) {
-  void readerActions.addToLibrary(entry);
 }
 </script>
 
@@ -818,15 +893,15 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           data-test="btn-add-to-library"
           class="tb-btn"
           :disabled="!canAddToLibrary"
-          :title="t('reader.like')"
-          @click="onAddToLibraryClick"
+          :title="selectedLike?.isFavorite ? t('reader.liked') : t('reader.like')"
+          @click="onToggleLikeClick"
         >
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"
                stroke-linejoin="round" aria-hidden="true">
             <path :d="ICON_LIBRARY_PLUS" />
           </svg>
-          {{ t('reader.like') }}
+          {{ selectedLike?.isFavorite ? t('reader.liked') : t('reader.like') }}
         </button>
         <button
           data-test="btn-download-all"
@@ -994,7 +1069,8 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
           :root-path="fb.rootPath"
           class="w-72 shrink-0 overflow-y-auto"
           @read-now="onReadNowClick"
-          @add-to-library="onAddToLibraryClick"
+          @toggle-like="onToggleLikeClick"
+          :like-favorite="!!selectedLike?.isFavorite"
           @close="showDetail = false"
         />
       </div>
@@ -1067,7 +1143,8 @@ function onAddToLibraryFromCtx(entry: MediaEntry) {
       :y="ctxMenu.y"
       @close="onCtxClose"
       @read-now="onReadNowFromCtx"
-      @add-to-library="onAddToLibraryFromCtx"
+      @toggle-like="onToggleLikeFromCtx"
+      :like-favorite="ctxLikeFavorite"
       @regenerate-thumbnail="onRegenerateThumbnail"
       @retry="onRetryFromCtx"
     />

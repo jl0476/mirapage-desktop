@@ -162,6 +162,18 @@ export async function setFavorite(bookId: number, favorite: boolean): Promise<vo
   await invoke<void>('set_favorite', { bookId, favorite });
 }
 
+/** module3.0.14：按位置查单本书喜欢状态（不筛 favorite、无分页）。 */
+export interface BookStatus {
+  bookId: number;
+  isFavorite: boolean;
+}
+export async function getBookStatus(
+  descriptor: SourceDescriptor,
+  absPath: string,
+): Promise<BookStatus | null> {
+  return invoke<BookStatus | null>('get_book_status', { descriptor, absPath });
+}
+
 // ─── Directory Sort (v0.1.0-module3.0, Android DirectorySortEntity 对齐) ──
 export type DirectorySortField = 'name' | 'modifiedAt' | 'size';
 export interface DirectorySort {

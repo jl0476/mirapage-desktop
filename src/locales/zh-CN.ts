@@ -54,6 +54,7 @@ export default {
     next: '下一页',
     jumpTo: '跳页',
     like: '喜欢',
+    liked: '已喜欢',
     unlike: '取消喜欢',
     openBookmarks: '打开书签',
     menu: {

@@ -22,11 +22,13 @@ import type { MediaEntry } from '@/lib/sourceDescriptor';
 interface Props {
   entry: MediaEntry | null;
   rootPath: string | null;
+  /** module3.0.14：该 entry 已喜欢态（父级状态表传入） */
+  likeFavorite?: boolean;
 }
 const props = defineProps<Props>();
 const emit = defineEmits<{
   (e: 'read-now'): void;
-  (e: 'add-to-library'): void;
+  (e: 'toggle-like'): void;
   (e: 'close'): void;
 }>();
 
@@ -166,9 +168,9 @@ const isDirectory = computed(() => props.entry?.isDirectory === true);
                transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         data-test="entry-detail-add-to-library"
         :disabled="!isDirectory"
-        @click="emit('add-to-library')"
+        @click="emit('toggle-like')"
       >
-        ＋ {{ t('reader.like') }}
+        {{ likeFavorite ? t('reader.liked') : '＋ ' + t('reader.like') }}
       </button>
       <button
         type="button"

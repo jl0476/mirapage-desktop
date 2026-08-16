@@ -25,13 +25,15 @@ interface Props {
   /** 屏幕坐标 (clientX / clientY) */
   x: number;
   y: number;
+  /** module3.0.14：该 entry 已喜欢态（父级状态表传入） */
+  likeFavorite?: boolean;
 }
 const props = defineProps<Props>();
 
 interface Emits {
   (e: 'close'): void;
   (e: 'read-now', entry: MediaEntry): void;
-  (e: 'add-to-library', entry: MediaEntry): void;
+  (e: 'toggle-like', entry: MediaEntry): void;
   /** 单图: entry; 多选: entries 数组。统一用此签名。 */
   (e: 'regenerate-thumbnail', items: MediaEntry[]): void;
   (e: 'retry', items: MediaEntry[]): void;
@@ -135,9 +137,9 @@ function onRetry() {
       <button
         data-test="ctx-add-to-library"
         class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
-        @click="emit('add-to-library', firstItem); emit('close')"
+        @click="emit('toggle-like', firstItem); emit('close')"
       >
-        ＋ {{ t('reader.like') }}
+        {{ likeFavorite ? t('reader.liked') : '＋ ' + t('reader.like') }}
       </button>
       <div class="my-1 mx-2 h-px bg-white/5" aria-hidden="true" />
     </template>

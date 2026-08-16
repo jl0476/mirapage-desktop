@@ -53,6 +53,7 @@ export default {
     next: 'Next',
     jumpTo: 'Jump to',
     like: 'Like',
+    liked: 'Liked',
     unlike: 'Unlike',
     openBookmarks: 'Open bookmarks',
     menu: {

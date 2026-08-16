@@ -8,7 +8,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import FileBrowser from './FileBrowser.vue';
-import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting } from '@/lib/tauri';
+import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting, setFavorite, getBookStatus } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -33,6 +33,8 @@ vi.mock('@/lib/tauri', () => ({
   // v0.1.0-module3.0.x-cross-volume (任务 9): 瀑布流跨卷按钮
   findNextVolume: vi.fn(async () => null),
   getDirectoryMasonry: vi.fn(async () => null),
+  setFavorite: vi.fn(async () => undefined),
+  getBookStatus: vi.fn(async () => null),
 }));
 
 // Cluster A: spy on router.push
@@ -2233,3 +2235,68 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
     expect(fb.currentPath).toBe('VOL.11');
   });
 });
+
+// ─── module3.0.14 任务 6：工具栏喜欢按钮二态 toggle ───
+describe('FileBrowser — 喜欢按钮二态 toggle (module3.0.14)', () => {
+  const dirEntry = { name: 'vol01', path: 'vol01', isDirectory: true, isArchive: false, size: 100 };
+  const imgEntry = { name: 'page-001.jpg', path: 'page-001.jpg', isDirectory: false, isArchive: false, size: 100 };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+  });
+
+  async function mountWithDirSelected() {
+    mockedList.mockResolvedValue([dirEntry, imgEntry]);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    fb.selectSingle(dirEntry);
+    await flushPromises();
+    return { wrapper, fb };
+  }
+
+  it('选中已喜欢目录 → 显示已喜欢，点击调 setFavorite(false)', async () => {
+    vi.mocked(getBookStatus).mockResolvedValueOnce({ bookId: 7, isFavorite: true });
+    const { wrapper } = await mountWithDirSelected();
+    await flushPromises(); // ensureLikeState 回填
+
+    const btn = wrapper.find('[data-test="btn-add-to-library"]');
+    expect(btn.text()).toContain('已喜欢');
+    await btn.trigger('click');
+    await flushPromises();
+    expect(setFavorite).toHaveBeenCalledWith(7, false);
+  });
+
+  it('选中未喜欢目录 → 显示＋喜欢，点击走 addToLibrary 现流程', async () => {
+    vi.mocked(getBookStatus).mockResolvedValueOnce({ bookId: 9, isFavorite: false });
+    const { wrapper } = await mountWithDirSelected();
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-add-to-library"]');
+    expect(btn.text()).not.toContain('已喜欢');
+    await btn.trigger('click');
+    await flushPromises();
+    expect(setFavorite).not.toHaveBeenCalled();
+    expect(vi.mocked(createBook)).toHaveBeenCalled(); // addToLibrary 现流程
+  });
+
+  it('竞态（审查 P1）：in-flight 查询在喜欢之后才返回 null，不得覆盖已喜欢终态', async () => {
+    let resolveStatus!: (v: { bookId: number; isFavorite: boolean } | null) => void;
+    vi.mocked(getBookStatus).mockReturnValueOnce(new Promise((r) => { resolveStatus = r; }));
+    const { wrapper } = await mountWithDirSelected();
+    await new Promise((r) => setTimeout(r, 0)); // 查询已发出、挂起
+
+    const btn = wrapper.find('[data-test="btn-add-to-library"]');
+    await btn.trigger('click'); // 喜欢 → addToLibrary 返回 42 → 写终态
+    await flushPromises();
+    expect(btn.text()).toContain('已喜欢');
+
+    resolveStatus(null); // 旧查询此刻才返回 null
+    await flushPromises();
+    expect(wrapper.find('[data-test="btn-add-to-library"]').text()).toContain('已喜欢'); // epoch 守卫生效
+  });
+});
+
