@@ -166,3 +166,15 @@ describe('RowContextMenu 缩略图菜单二合一（module3.0.14）', () => {
     expect(w.find('[data-test="regenerate-thumbnail"]').exists()).toBe(true);
   });
 });
+
+describe('RowContextMenu 重置进度多选隐藏（module3.0.14 hotfix）', () => {
+  it('多选 (entries) -> reset-progress 隐藏（多选时 firstItem 是排序首位而非右键对象，重置会错书）', async () => {
+    const entries = [dirEntry('vol01'), dirEntry('vol02')];
+    const w = mount(RowContextMenu, {
+      props: { entry: null, entries, x: 10, y: 10 },
+      global: { plugins: [i18n] },
+    });
+    await w.vm.$nextTick();
+    expect(w.find('[data-test="reset-progress"]').exists()).toBe(false);
+  });
+});

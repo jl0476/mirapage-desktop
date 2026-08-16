@@ -137,7 +137,10 @@ function onRegenerate() {
       </button>
       <div class="my-1 mx-2 h-px bg-white/5" aria-hidden="true" />
     </template>
+    <!-- 重置进度仅单选显示（module3.0.14 hotfix）：多选时 firstItem 是排序首位
+         而非右键对象，重置会命中错误的书；批量重置无真实场景。 -->
     <button
+      v-if="!isBatch"
       data-test="reset-progress"
       class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
       @click="onResetProgress"
