@@ -416,6 +416,17 @@ export async function getProgress(bookId: number): Promise<ProgressItem | null> 
 }
 
 /**
+ * module3.0.14：按位置重置阅读进度（清 finished+page+image_name）。
+ * 返回是否有 progress 行被重置（library 无此书 / 从未读过 → false）。
+ */
+export async function resetProgressByLocation(
+  descriptor: SourceDescriptor,
+  absPath: string,
+): Promise<boolean> {
+  return invoke<boolean>('reset_progress_by_location', { descriptor, absPath });
+}
+
+/**
  * 手动标记 finished (右键菜单「重置阅读进度」用)。
  * finished=false 时 Rust 端会清 browse_history。
  */

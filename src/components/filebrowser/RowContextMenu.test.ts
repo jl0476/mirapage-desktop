@@ -1,13 +1,20 @@
 /**
  * RowContextMenu.vue 测试（计划任务10）—— 图片"重新生成缩略图"项。
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
-import { setActivePinia, createPinia } from 'pinia';
+import { setActivePinia, createPinia, getActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import zhCN from '@/locales/zh-CN';
 import RowContextMenu from './RowContextMenu.vue';
+import { resetProgressByLocation } from '@/lib/tauri';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
+
+vi.mock('@/lib/tauri', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
+  return { ...actual, resetProgressByLocation: vi.fn(async () => true) };
+});
 
 const i18n = createI18n({
   legacy: false,
@@ -88,5 +95,66 @@ describe('RowContextMenu 重新生成缩略图', () => {
     await w.vm.$nextTick();
     expect(w.find('[data-test="ctx-read-now"]').exists()).toBe(false);
     expect(w.find('[data-test="ctx-add-to-library"]').exists()).toBe(false);
+  });
+});
+
+describe('RowContextMenu 重置阅读进度（module3.0.14）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.mocked(resetProgressByLocation).mockClear();
+  });
+
+  // 组件与测试共享同一 active pinia（mountCtx 自建 pinia 拿不到 store 状态）
+  async function mountCtxShared(entry: MediaEntry) {
+    const w = mount(RowContextMenu, {
+      props: { entry: null, x: 10, y: 10 },
+      global: { plugins: [getActivePinia()!, i18n] },
+    });
+    await w.setProps({ entry });
+    await w.vm.$nextTick();
+    return w;
+  }
+
+  async function setupStore(base: string) {
+    const fb = useFileBrowserStore();
+    fb.rootPath = 'R:\comics';
+    fb.lastFetchedPath = base;
+    return fb;
+  }
+
+  async function flushTick(w: { vm: { $nextTick: () => Promise<void> } }) {
+    await new Promise((r) => setTimeout(r, 0));
+    await w.vm.$nextTick();
+  }
+
+  it('目录项：absPath = join(lastFetchedPath, entry.path)', async () => {
+    await setupStore('');
+    const w = await mountCtxShared(dirEntry('vol01'));
+    await w.find('[data-test="reset-progress"]').trigger('click');
+    await flushTick(w);
+    expect(resetProgressByLocation).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'R:\comics' },
+      'vol01',
+    );
+  });
+
+  it('子目录内右键图片：absPath = lastFetchedPath 本身（书=所在目录）', async () => {
+    await setupStore('output');
+    const w = await mountCtxShared(imgEntry('page-001.jpg'));
+    await w.find('[data-test="reset-progress"]').trigger('click');
+    await flushTick(w);
+    expect(resetProgressByLocation).toHaveBeenCalledWith(
+      { type: 'local', rootPath: 'R:\comics' },
+      'output',
+    );
+  });
+
+  it('返回 false 不抛错且关闭菜单（no-op 场景）', async () => {
+    await setupStore('');
+    vi.mocked(resetProgressByLocation).mockResolvedValueOnce(false);
+    const w = await mountCtxShared(dirEntry('vol01'));
+    await w.find('[data-test="reset-progress"]').trigger('click');
+    await flushTick(w);
+    expect(w.emitted('close')).toBeTruthy();
   });
 });

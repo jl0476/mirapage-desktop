@@ -9,13 +9,13 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useLibraryStore } from '@/stores/library';
 import { useReadStatusStore } from '@/stores/readStatus';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
-import { markFinished } from '@/lib/tauri';
 import { isImage } from '@/lib/mime';
+import { resetProgressByLocation } from '@/lib/tauri';
+import { PathUtils } from '@/lib/path';
 import { log } from '@/lib/logger';
-import type { MediaEntry } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 interface Props {
   /** 单图模式（与 entries 互斥） */
@@ -39,7 +39,6 @@ interface Emits {
 const emit = defineEmits<Emits>();
 
 const { t } = useI18n();
-const library = useLibraryStore();
 const readStatus = useReadStatusStore();
 const fb = useFileBrowserStore();
 
@@ -80,34 +79,26 @@ onUnmounted(() => {
   document.removeEventListener('mousedown', onMouseDown);
 });
 
+// module3.0.14：按位置精确重置（旧实现查 favorites 列表 + 只比 rootPath，非收藏书落空、
+// 同根多本认错人）。书 = 阅读目录：目录项拼 entry.path（相对 lastFetchedPath），
+// 图片/文件项直接用所在目录（library 行身份是其阅读目录，不是图片文件）。
 async function onResetProgress() {
   if (!firstItem.value) return;
-  // v0.1.0-module3.0: 从 library（不是 browse_history）找同 sourceDescriptor+absolutePath 的 book_id
-  // library.list 只会包含 is_favorite=1；temp-imported books 也已在 DB 中，refresh 后可见
-  await library.refresh();
-  const match = library.items.find((b) => {
-    const sd = b.sourceDescriptor as unknown;
-    if (typeof sd === 'string') {
-      try {
-        return JSON.parse(sd).rootPath === fb.rootPath;
-      } catch {
-        return false;
-      }
-    }
-    return typeof sd === 'object' && sd !== null && 'rootPath' in sd
-      && (sd as { rootPath: string }).rootPath === fb.rootPath;
-  });
-  // 注意: 这里只看 rootPath, 多本书无法区分精确目录, 仅做单文件夹重置.
-  if (!match) {
-    log('[RowContextMenu] no matching library book for entry', firstItem.value.path);
+  const base = fb.lastFetchedPath;
+  if (fb.rootPath === null || base === null) {
     emit('close');
     return;
   }
+  const absPath = firstItem.value.isDirectory
+    ? PathUtils.join(base, firstItem.value.path)
+    : base;
   try {
-    await markFinished(match.id, false);
+    const descriptor: SourceDescriptorLocal = { type: 'local', rootPath: fb.rootPath };
+    const ok = await resetProgressByLocation(descriptor, absPath);
+    if (!ok) log('[RowContextMenu] resetProgressByLocation no-op', absPath);
     await readStatus.refresh();
   } catch (e) {
-    log('[RowContextMenu] markFinished failed', e);
+    log('[RowContextMenu] resetProgressByLocation failed', e);
   }
   emit('close');
 }
