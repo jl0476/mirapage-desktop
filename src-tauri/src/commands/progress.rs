@@ -209,6 +209,38 @@ pub fn mark_finished(
     mark_finished_inner(&*db.conn(), book_id, finished).map_err(|e| e.to_string())
 }
 
+
+fn reset_progress_by_location_inner(
+    conn: &rusqlite::Connection,
+    descriptor_str: &str,
+    abs_path: &str,
+) -> rusqlite::Result<bool> {
+    let Some(book_id) =
+        crate::commands::library::find_library_id_by_location(conn, descriptor_str, abs_path)
+    else {
+        return Ok(false);
+    };
+    let n = conn.execute(
+        "UPDATE progress SET page = 0, image_name = NULL, finished = 0, updated_at = ?2
+         WHERE book_id = ?1",
+        rusqlite::params![book_id, chrono_now()],
+    )?;
+    Ok(n > 0)
+}
+
+/// 重置指定位置的书阅读进度（module3.0.14）：finished=0 + page=0 + image_name=NULL。
+/// library 无此书 / 无 progress 行 → Ok(false)，无副作用（不 upsert）。
+#[tauri::command]
+pub fn reset_progress_by_location(
+    descriptor: crate::source::descriptor::SourceDescriptor,
+    abs_path: String,
+    db: tauri::State<crate::db::Db>,
+) -> Result<bool, String> {
+    let descriptor_str = serde_json::to_string(&descriptor).map_err(|e| e.to_string())?;
+    reset_progress_by_location_inner(&*db.conn(), &descriptor_str, &abs_path)
+        .map_err(|e| e.to_string())
+}
+
 /// 列出所有 progress.finished 映射，给前端 readStatus store 用。
 ///
 /// 返回 `{ book_id: finished_bool }`，key 是 i64 字符串。
@@ -250,6 +282,63 @@ mod tests {
     //!   6. mark_finished 不动 image_name（spec §2.2.4 P0 不变量）
     use super::*;
     use std::collections::HashMap;
+    // ─── module3.0.14 任务 4：reset_progress_by_location 单测 ─────────────
+
+    fn pd_local_descriptor_json() -> String {
+        serde_json::to_string(&crate::source::descriptor::SourceDescriptor::Local {
+            root_path: r"R:\comics".to_string(),
+        })
+        .unwrap()
+    }
+
+    fn insert_library_row_for_reset(conn: &rusqlite::Connection, abs_path: &str) -> i64 {
+        conn.execute(
+            "INSERT INTO library (title, source_descriptor, source_type, absolute_path, added_at, is_favorite)
+             VALUES ('t', ?1, 'local', ?2, 0, 0)",
+            rusqlite::params![pd_local_descriptor_json(), abs_path],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn reset_progress_by_location_clears_finished_page_and_image_name() {
+        let db = setup_db();
+        let conn = db.conn();
+        let book_id = insert_library_row_for_reset(&conn, "comics/vol1");
+        conn.execute(
+            "INSERT INTO progress (book_id, page, reader_mode, updated_at, finished, image_name)
+             VALUES (?1, 42, 'single', 1, 1, 'page-020.jpg')",
+            rusqlite::params![book_id],
+        )
+        .unwrap();
+
+        let descriptor = pd_local_descriptor_json();
+        let ok = reset_progress_by_location_inner(&conn, &descriptor, "comics/vol1").unwrap();
+        assert!(ok);
+
+        let (page, finished, image): (i64, i64, Option<String>) = conn
+            .query_row(
+                "SELECT page, finished, image_name FROM progress WHERE book_id = ?1",
+                rusqlite::params![book_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((page, finished, image), (0, 0, None));
+    }
+
+    #[test]
+    fn reset_progress_by_location_no_library_row_or_no_progress_row() {
+        let db = setup_db();
+        let conn = db.conn();
+        let descriptor = pd_local_descriptor_json();
+        // library 无行 → false
+        assert!(!reset_progress_by_location_inner(&conn, &descriptor, "nope").unwrap());
+        // library 有行但无 progress 行 → false
+        insert_library_row_for_reset(&conn, "comics/vol2");
+        assert!(!reset_progress_by_location_inner(&conn, &descriptor, "comics/vol2").unwrap());
+    }
+
 
     fn setup_db() -> crate::db::Db {
         crate::db::Db::open_in_memory().expect("in-memory db with migrations")

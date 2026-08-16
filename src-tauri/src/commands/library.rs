@@ -138,6 +138,63 @@ pub fn set_favorite(
     Ok(())
 }
 
+
+/// 单本书的喜欢状态（module3.0.14，serde camelCase 与 TS BookStatus 镜像）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BookStatus {
+    pub book_id: i64,
+    pub is_favorite: bool,
+}
+
+/// 按位置精确查 library 行 id（module3.0.14）。
+/// abs_path 经 validate_source_relative 归一（与 find_next_volume::sibling_is_finished 同语义）。
+pub(crate) fn find_library_id_by_location(
+    conn: &rusqlite::Connection,
+    descriptor_str: &str,
+    abs_path: &str,
+) -> Option<i64> {
+    let norm = crate::algorithm::validate_source_relative(abs_path)
+        .unwrap_or_else(|_| abs_path.to_string());
+    conn.query_row(
+        "SELECT id FROM library WHERE source_descriptor = ?1 AND absolute_path = ?2",
+        rusqlite::params![descriptor_str, norm],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+pub(crate) fn get_book_status_inner(
+    conn: &rusqlite::Connection,
+    descriptor_str: &str,
+    abs_path: &str,
+) -> rusqlite::Result<Option<BookStatus>> {
+    let Some(book_id) = find_library_id_by_location(conn, descriptor_str, abs_path) else {
+        return Ok(None);
+    };
+    let fav = conn.query_row(
+        "SELECT is_favorite FROM library WHERE id = ?1",
+        rusqlite::params![book_id],
+        |r| r.get::<_, i64>(0),
+    )?;
+    Ok(Some(BookStatus {
+        book_id,
+        is_favorite: fav != 0,
+    }))
+}
+
+/// 按位置精确查单本书喜欢状态（不筛 favorite、无分页，module3.0.14）。
+/// 文件浏览器喜欢按钮二态用；list_library 只回 favorite 行且有分页截断，前端匹配不可靠。
+#[tauri::command]
+pub fn get_book_status(
+    descriptor: crate::source::descriptor::SourceDescriptor,
+    abs_path: String,
+    db: tauri::State<crate::db::Db>,
+) -> Result<Option<BookStatus>, String> {
+    let descriptor_str = serde_json::to_string(&descriptor).map_err(|e| e.to_string())?;
+    get_book_status_inner(&*db.conn(), &descriptor_str, &abs_path).map_err(|e| e.to_string())
+}
+
 /// v0.1.0-module3.0: 按 book_id 查单条 (ReaderView 启动时用,
 /// 替代旧 per-book history.bookId 查找模式)
 #[tauri::command]
@@ -251,3 +308,71 @@ fn chrono_now() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    //! module3.0.14 任务 4：按位置查书 helper + get_book_status 单测。
+    //! fixture 用 serde_json::to_string(SourceDescriptor) 真实序列化构造
+    //! （手写 JSON 反斜杠转义易错，真实序列化才是 IPC 实际比对值）。
+    use super::*;
+
+    fn local_descriptor_json() -> String {
+        serde_json::to_string(&crate::source::descriptor::SourceDescriptor::Local {
+            root_path: r"R:\comics".to_string(),
+        })
+        .unwrap()
+    }
+
+    fn insert_library_row(conn: &rusqlite::Connection, abs_path: &str, favorite: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO library (title, source_descriptor, source_type, absolute_path, added_at, is_favorite)
+             VALUES ('t', ?1, 'local', ?2, 0, ?3)",
+            rusqlite::params![local_descriptor_json(), abs_path, favorite as i64],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn find_library_id_by_location_matches_descriptor_and_normalized_path() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let conn = db.conn();
+        let id = insert_library_row(&conn, "comics/vol1", false);
+        let descriptor = local_descriptor_json();
+
+        assert_eq!(
+            find_library_id_by_location(&conn, &descriptor, "comics/vol1"),
+            Some(id)
+        );
+        assert_eq!(
+            find_library_id_by_location(&conn, &descriptor, "other/vol9"),
+            None
+        );
+        // 不同 descriptor（rootPath 不同）同相对路径 → 不串
+        let other = serde_json::to_string(
+            &crate::source::descriptor::SourceDescriptor::Local { root_path: r"D:\x".to_string() },
+        )
+        .unwrap();
+        assert_eq!(find_library_id_by_location(&conn, &other, "comics/vol1"), None);
+    }
+
+    #[test]
+    fn get_book_status_returns_favorite_and_temp_rows() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let conn = db.conn();
+        insert_library_row(&conn, "comics/vol1", true);
+        insert_library_row(&conn, "comics/vol2", false);
+        let descriptor = local_descriptor_json();
+
+        // favorite 行
+        let st = get_book_status_inner(&conn, &descriptor, "comics/vol1").unwrap();
+        assert!(st.as_ref().unwrap().is_favorite);
+        // temp 行（读过未喜欢）——list_library 查不到，这里必须查得到
+        let st = get_book_status_inner(&conn, &descriptor, "comics/vol2").unwrap();
+        assert!(!st.as_ref().unwrap().is_favorite);
+        // 无行
+        let st = get_book_status_inner(&conn, &descriptor, "nope").unwrap();
+        assert!(st.is_none());
+    }
+}
+

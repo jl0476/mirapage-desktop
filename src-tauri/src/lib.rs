@@ -73,6 +73,8 @@ pub fn run() {
             commands::directory_sort::set_directory_sort,
             commands::progress::save_progress,
             commands::progress::mark_finished,
+            commands::progress::reset_progress_by_location,
+            commands::library::get_book_status,
             commands::progress::list_progress_finished,
             commands::progress::get_progress,
             commands::tags::list_tags,
