@@ -506,6 +506,6 @@ defineExpose({
 /* details 列头 — 沿用 v0.1.0-module1.23 样式 (Xplorer 风格) */
 .details-header button {
   cursor: pointer;
-  transition: color 120ms var(--ease-out);
+  transition: color 120ms ease-out;
 }
 </style>

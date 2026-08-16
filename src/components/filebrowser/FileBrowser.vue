@@ -1160,7 +1160,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
-  transition: background 120ms var(--ease-out), color 120ms var(--ease-out);
+  transition: background 120ms ease-out, color 120ms ease-out;
 }
 .tb-btn:hover:not(:disabled) {
   background: var(--color-surface-light);
