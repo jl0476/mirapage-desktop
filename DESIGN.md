@@ -1586,7 +1586,6 @@ export function useReaderInput() {
 
 ### 16.2 遗留打磨项（文档点名「留后续」）
 
-- **跨卷 prev 入口**（3.0.12 行为影响）：Rust `find_next_volume` 的 prev 方向已就绪（3.0.13 起排序一致 + skip_finished 均双向），只差前端入口（Alt+← 快捷键 + 阅读器菜单项）。性价比最高的一件。
 - **瀑布流打磨三件**（3.0.6；ease-out 已于 3.0.14 清理）：像素级 scrollTop 锚定补偿；resolve in-flight cancel；hasImages 搜索态副作用。
 - **性能报告补数据**（3.0.7 / 3.0.8）：本地实时 rAF 帧时间采集，填 `docs/superpowers/reports/2026-08-08-masonry-thumbnail-performance.md`（调试实例即可采）。
 
@@ -1596,9 +1595,8 @@ export function useReaderInput() {
 
 ### 16.4 建议实施顺序
 
-1. 跨卷 prev 入口（后端全就绪，纯前端小件）
-2. 性能报告采集（需实机 dev 配合）
-3. RAR/7z → SMB → 分发（三个大件按此序；分发依赖 mac / Linux 环境，可并行等待环境）
+1. 性能报告采集（需实机 dev 配合）
+2. RAR/7z → SMB → 分发（三个大件按此序；分发依赖 mac / Linux 环境，可并行等待环境）
 
 > 3.0.14（2026-08-16）已收走：cargo test 进 CI、webdav 修复、useCrossVolume flag、重置进度落空、喜欢 toggle、ease-out 清理、右键菜单缩略图二合一、瀑布流选中描边环。
 
