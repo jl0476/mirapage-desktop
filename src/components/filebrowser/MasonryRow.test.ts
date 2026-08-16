@@ -7,7 +7,8 @@
  * - 选中态 / 阅读状态 badge
  * - click -> emit row-click
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { mount } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
@@ -127,3 +128,14 @@ describe('MasonryRow.vue', () => {
     expect(emitted![0]![1]).toBeInstanceOf(HTMLElement);
   });
 });
+
+describe('选中描边环源码守卫（module3.0.14）', () => {
+  it('::after 置顶环替代 outline，pointer-events none 不挡点击', () => {
+    const src = readFileSync('src/components/filebrowser/MasonryRow.vue', 'utf-8');
+    expect(src).toContain('.masonry-row::after');
+    expect(src).toContain('pointer-events: none');
+    expect(src).toContain('z-index: 3');
+    expect(src).not.toContain('outline-offset'); // outline 方案已废弃
+  });
+});
+

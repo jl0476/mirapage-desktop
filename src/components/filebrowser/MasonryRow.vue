@@ -84,17 +84,24 @@ function statusLabel(m: RowMark): string {
 <style scoped>
 .masonry-row {
   cursor: pointer;
-  /* 移除 border + border-radius: hGap/vGap 唯一控制间距, gap=0 时图片无缝拼接。
-     选中态用 outline (.is-selected 已有 outline-offset:-2px), 不依赖 border。 */
+  /* 移除 border + border-radius: hGap/vGap 唯一控制间距, gap=0 时图片无缝拼接.
+     选中态用 ::after 置顶环 (module3.0.14): 3.0.7 缩略图卡片层 (absolute inset 0)
+     铺满卡片后 outline 绘制层级不可靠, ::after + z-index 确定性盖顶。 */
   overflow: hidden;
   background: var(--color-surface-1);
-  transition: outline 80ms ease-out;
   contain: layout style;
 }
-.masonry-row.is-selected {
-  outline: 2px solid var(--color-accent);
-  outline-offset: -2px;
+.masonry-row::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--color-accent);
+  pointer-events: none; /* 不挡点击/双击/右键/角标 */
+  opacity: 0;
+  z-index: 3; /* 高于缩略图卡片层与状态/阶段角标 */
+  transition: opacity 80ms ease-out;
 }
+.masonry-row.is-selected::after { opacity: 1; }
 /* 已读完卡片半透明（作用到子组件 MasonryThumbnail 的 img） */
 .masonry-row.is-finished :deep(.thumbnail-image) { opacity: 0.55; }
 .masonry-badge {
