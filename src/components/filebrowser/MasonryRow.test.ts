@@ -7,7 +7,7 @@
  * - 选中态 / 阅读状态 badge
  * - click -> emit row-click
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { mount } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
