@@ -502,3 +502,17 @@ git push github v0.1.0-module1.NN
 - [ ] commit + tag + push，按 §5.3 流程
 - [ ] 更新"当前状态"表格（本文件 + BUILD.md）
 - [ ] 用户的反馈 → 记到 `MEMORY.md`（如果跨会话有用）
+
+---
+
+## 禁用技能
+
+本项目**不使用** AI 代码采纳率追踪。以下 skill 全部禁用，任何场景下不得调用：
+
+- `zz-ai-adoption` / `zz-claude-ai-adoption` / `zz-Codex-ai-adoption`（及任何 `.bak` 变体）
+
+具体约束：
+- **禁止调用**上述 skill（即使触发词命中"commit""提交代码""采纳率"等）。
+- **禁止在 commit message 里添加**采纳率备注、AI 生成标记、co-author 行。
+- **禁止创建或维护 `.patch/` 目录**（该目录是 skill 的快照产物，本项目不需要）。
+- `.patch/` 已加入 `.gitignore`，如已存在可安全删除。

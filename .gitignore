@@ -76,3 +76,6 @@ tauri-build-portable.bat
 backend.diff
 full.diff
 .superpowers/
+
+# zz-ai-adoption skill 快照目录（本项目禁用该 skill，防止误生成）
+.patch/
