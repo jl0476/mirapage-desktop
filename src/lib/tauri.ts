@@ -405,7 +405,7 @@ export interface ProgressItem {
 export async function saveProgress(
   bookId: number,
   page: number,
-  readerMode: 'single' | 'double',
+  readerMode: 'single' | 'double' | 'webtoon',
   finished?: boolean,
   imageName?: string,
 ): Promise<void> {

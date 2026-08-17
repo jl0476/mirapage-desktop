@@ -53,7 +53,8 @@ export function useWebtoonProgress(opts: Options) {
     const bookId = opts.bookId.value;
     if (bookId === null) return false;
     if (finishedInFlight?.bookId === bookId) return finishedInFlight.p;
-    const p = (async () => {
+    let p!: Promise<boolean>;
+    p = (async () => {
       try {
         await markFinished(bookId, true);
         if (opts.bookId.value === bookId) finishedMarked = true;

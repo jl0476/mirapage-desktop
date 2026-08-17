@@ -120,8 +120,7 @@ function onCtxScaleChange(m: ScaleMode): void {
   closeCtxMenu();
 }
 function onCtxCycleMode(): void {
-  // 修复: settings.update() 只持久化不更新 in-memory — 用专用 cycle 方法
-  void settings.cycleReaderMode();
+  void onToggleReaderMode();
   closeCtxMenu();
 }
 function onCtxCycleDirection(): void {
@@ -260,12 +259,21 @@ function onWebtoonWheel(deltaY: number): void {
   if (deltaY > 0) markWebtoonScroll();
 }
 
+function onWebtoonZoom(): void {
+  markWebtoonScroll();
+}
+
+const modeSwitchInFlight = ref(false);
+
 function onToggleReaderMode(): void {
-  if (settings.readerDefaultMode === 'webtoon') {
-    void webtoonProgress.flushNow().then(() => settings.cycleReaderMode());
-  } else {
-    void reader.saveCurrentProgressNow().then(() => settings.cycleReaderMode());
-  }
+  if (modeSwitchInFlight.value) return;
+  modeSwitchInFlight.value = true;
+  const save = settings.readerDefaultMode === 'webtoon'
+    ? webtoonProgress.flushNow()
+    : reader.saveCurrentProgressNow();
+  void save.then(() => settings.cycleReaderMode()).finally(() => {
+    modeSwitchInFlight.value = false;
+  });
 }
 
 
@@ -545,8 +553,8 @@ onUnmounted(() => {
       :descriptor="reader.sourceDescriptor ?? undefined"
       :rel-path="reader.currentRelPath"
       :page-override="webtoonPageIndex"
-      :spreads="reader.spreads"
       ref="webtoonScreenRef"
+      :spreads="reader.spreads"
       :initial-spread-index="reader.currentSpreadIndex"
       :mode="settings.readerDefaultMode"
       :title="reader.title"
