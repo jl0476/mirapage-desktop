@@ -66,4 +66,19 @@ describe('useWebtoonProgress', () => {
     await progress.flushNow();
     expect(saveProgress).toHaveBeenCalledWith(105, 8, 'webtoon', undefined, 'p009.jpg');
   });
+
+  it('写失败不污染 writeTail：失败上抛后空 flush 照常 resolve（审查必修 #1）', async () => {
+    vi.mocked(saveProgress).mockRejectedValueOnce(new Error('db lock'));
+    const { progress } = setup();
+    progress.notifyTopChanged('a.jpg', 0);
+    // 失败写入：flushNow 上抛（跨卷 trySave 的 await 失败契约）
+    await expect(progress.flushNow()).rejects.toThrow('db lock');
+    // 空 flush（无 pending）：不得被旧 rejected tail 传染
+    await expect(progress.flushNow()).resolves.toBeUndefined();
+    // 后续写入恢复正常
+    progress.notifyTopChanged('b.jpg', 1);
+    await progress.flushNow();
+    expect(saveProgress).toHaveBeenCalledTimes(2);
+    expect(saveProgress).toHaveBeenLastCalledWith(105, 1, 'webtoon', undefined, 'b.jpg');
+  });
 });

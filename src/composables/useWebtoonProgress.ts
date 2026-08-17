@@ -43,7 +43,13 @@ export function useWebtoonProgress(opts: Options) {
       const job = writeTail.catch(() => undefined).then(async () => {
         if (bookId !== null) await saveProgress(bookId, index, 'webtoon', undefined, image);
       });
-      writeTail = job;
+      // writeTail 只承载「串行」语义，始终保持 resolved：若把 rejected job 存为
+      // tail，后续所有空 flush（pendingImage 为 null 的卸载/切模式/跨卷 trySave）
+      // 都会 await 旧失败而 reject——本次根本没有待写内容（审查必修 #1）。
+      // 写入失败仍由下方 await job 上抛，满足跨卷 trySave 的 await 失败契约。
+      writeTail = job.then(() => undefined, () => undefined);
+      await job;
+      return;
     }
     await writeTail;
   }
@@ -70,6 +76,7 @@ export function useWebtoonProgress(opts: Options) {
     return request;
   }
 
+  /** spec 三轮 P1-3 命名的 ensureFinished 别名（兜底语义），保留供按 spec 术语调用。 */
   function finishNow(): Promise<boolean> {
     return ensureFinished();
   }

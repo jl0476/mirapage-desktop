@@ -1301,6 +1301,18 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     return w.findComponent({ name: 'WebtoonViewer' });
   }
 
+  it('恢复链：progress.imageName 命中 → scrollToImage 该图（loader 图索引映射，非 spread 索引）', async () => {
+    vi.mocked(getProgress).mockResolvedValueOnce({
+      bookId: 7, page: 0, imageName: 'b.jpg', readerMode: 'webtoon', updatedAt: 0, finished: false,
+    });
+    const w = await mountWebtoon();
+    await flushPromises();
+    // imageName 'b.jpg' 是第 2 张（index 1）；若误用 spread 索引会错位到别的图
+    expect(wtStub.__registry.scrollTargets).toContain('b.jpg');
+    expect(wtStub.__registry.scrollTargets).not.toContain('a.jpg');
+    w.unmount();
+  });
+
   it('恢复链：webtoon 挂载后按 restoreImageIndex 调 scrollToImage（progress 空 → 第 0 张）', async () => {
     const w = await mountWebtoon();
     await flushPromises();
@@ -1496,7 +1508,7 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     }
   });
 
-  it('模式切换屏障：paged→webtoon 先 await reader.saveCurrentProgressNow 再 cycle', async () => {
+  it('模式切换屏障：single（paged）先 await reader.saveCurrentProgressNow 再 cycle 到 double', async () => {
     const reader = useReaderStore();
     const spy = vi.spyOn(reader, 'saveCurrentProgressNow');
     const router = makeRouter();
@@ -1537,6 +1549,7 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     expect(wtStub.__registry.el.scrollBy).toHaveBeenCalledWith({ top: 90, behavior: 'auto' });
     actions!.prevPage!();
     expect(wtStub.__registry.el.scrollBy).toHaveBeenLastCalledWith({ top: -90, behavior: 'auto' });
+    wtStub.__registry.el.scrollTop = 50;
     actions!.jumpFirst!();
     expect(wtStub.__registry.el.scrollTop).toBe(0);
     actions!.jumpLast!();

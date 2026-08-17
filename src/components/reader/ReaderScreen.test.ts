@@ -13,6 +13,7 @@ import WebtoonViewerStub from './WebtoonViewer.vue';
 
 interface WebtoonRegistry {
   scrollTargets: string[];
+  atBottom: boolean;
   el: { clientHeight: number; scrollHeight: number; scrollTop: number; scrollBy: ReturnType<typeof vi.fn> };
 }
 const wtStub = WebtoonViewerStub as unknown as { __registry: WebtoonRegistry };
@@ -36,6 +37,7 @@ vi.mock('./DoublePageViewer.vue', () => ({
 vi.mock('./WebtoonViewer.vue', () => {
   const registry = {
     scrollTargets: [] as string[],
+    atBottom: false,
     el: { clientHeight: 100, scrollHeight: 500, scrollTop: 0, scrollBy: vi.fn() },
   };
   const component = {
@@ -44,6 +46,7 @@ vi.mock('./WebtoonViewer.vue', () => {
     setup(_props: unknown, ctx: { expose: (exposed: Record<string, unknown>) => void }) {
       ctx.expose({
         scrollToImage: (name: string) => { registry.scrollTargets.push(name); },
+        isAtBottom: () => registry.atBottom,
         getScrollEl: () => registry.el,
       });
     },
@@ -203,6 +206,16 @@ describe('ReaderScreen.vue', () => {
     expect(wtStub.__registry.el.scrollBy).toHaveBeenCalledWith({ top: 90, behavior: 'auto' });
     await w.find('[data-test="btn-prev"]').trigger('click');
     expect(wtStub.__registry.el.scrollBy).toHaveBeenLastCalledWith({ top: -90, behavior: 'auto' });
+  });
+
+  it('overlay ▶ 在 webtoon 底部转发 scroll-past-bottom（末页再翻等价，审查 #2）', async () => {
+    wtStub.__registry.atBottom = true;
+    wtStub.__registry.el.scrollBy.mockClear();
+    const w = mountReader({ mode: 'webtoon', pageNames: ['a.jpg', 'b.jpg'], descriptor: webtoonDescriptor, relPath: '' });
+    await w.find('[data-test="trigger-zone-top"]').trigger('mouseenter');
+    await w.find('[data-test="btn-next"]').trigger('click');
+    expect(w.emitted('scroll-past-bottom')).toBeTruthy();
+    expect(wtStub.__registry.el.scrollBy).not.toHaveBeenCalled();
   });
 
   it('overlay 跳页 webtoon 分流：scrollToImage 目标图而非 spread', async () => {

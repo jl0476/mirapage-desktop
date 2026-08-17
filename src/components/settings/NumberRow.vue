@@ -5,6 +5,7 @@ const props = defineProps<{
   min: number;
   max: number;
   suffix?: string;
+  disabled?: boolean;
 }>();
 const emit = defineEmits<{ (e: 'change', v: number): void }>();
 </script>
@@ -18,7 +19,8 @@ const emit = defineEmits<{ (e: 'change', v: number): void }>();
         :value="value"
         :min="props.min"
         :max="props.max"
-        class="w-20 bg-surface-2 border border-white/10 rounded-md text-xs px-2 py-1.5 text-text-primary focus:outline-none focus:border-accent"
+        :disabled="props.disabled"
+        class="w-20 bg-surface-2 border border-white/10 rounded-md text-xs px-2 py-1.5 text-text-primary focus:outline-none focus:border-accent disabled:opacity-40 disabled:cursor-not-allowed"
         @change="emit('change', Number(($event.target as HTMLInputElement).value))"
       />
       <span v-if="suffix" class="text-xs text-text-secondary">{{ suffix }}</span>

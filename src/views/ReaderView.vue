@@ -268,7 +268,8 @@ const webtoonSpeedFactor = ref(1);
 let lastWheelAt = 0;
 function onWebtoonWheel(deltaY: number): void {
   lastWheelAt = Date.now();
-  webtoonSpeedFactor.value = Math.min(3, Math.max(0, webtoonSpeedFactor.value * (deltaY > 0 ? 1.2 : 1 / 1.2)));
+  // 下限 0.1 而非 0：0 × 1.2 = 0，连续下滚会永久锁死零速（只能等 2s 静默回落）。
+  webtoonSpeedFactor.value = Math.min(3, Math.max(0.1, webtoonSpeedFactor.value * (deltaY > 0 ? 1.2 : 1 / 1.2)));
   if (deltaY > 0) markWebtoonScroll();
 }
 
@@ -313,9 +314,12 @@ function onToggleReaderMode(): void {
   const save = settings.readerDefaultMode === 'webtoon'
     ? webtoonProgress.flushNow()
     : reader.saveCurrentProgressNow();
-  void save.then(() => settings.cycleReaderMode()).finally(() => {
-    modeSwitchInFlight.value = false;
-  });
+  // 保存失败不吞用户操作：log 后仍切换（写失败是瞬时错误，位置可由后续滚动重建，
+  // 但「点切换模式没反应」不可接受——审查建议 #4）。
+  void save
+    .catch((error: unknown) => log('[ReaderView/onToggleReaderMode] save before switch failed', error))
+    .then(() => settings.cycleReaderMode())
+    .finally(() => { modeSwitchInFlight.value = false; });
 }
 
 
@@ -613,7 +617,7 @@ onUnmounted(() => {
   reader.setOnAtLastNextAttempt(null);  // 不变量 11: 清理 Pinia store 持有的旧组件闭包
   activeLoadSeq += 1;                    // P0-3: 使在途 Loader 失效, 卸载后不执行提交
   if (reader.bookId !== null) {
-    void saveProgressForCurrentMode();
+    void saveProgressForCurrentMode().catch((error: unknown) => log('[ReaderView/onUnmounted] saveProgress failed', error));
   }
   if (rafId !== null) cancelAnimationFrame(rafId);
   cancelAutoEnd();

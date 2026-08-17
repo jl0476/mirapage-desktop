@@ -340,7 +340,13 @@ function onPrev() {
   slideshow.reset();
 }
 function onNext() {
-  if (props.mode === 'webtoon') { scrollByScreen(1); return; }
+  if (props.mode === 'webtoon') {
+    // 底部再点 ▶ = 翻页模型的「末页再翻」：转发 scroll-past-bottom 走跨卷链，
+    // 否则是死按钮（scrollBy 被钳位无效果）——审查建议 #2。
+    if (webtoonViewerRef.value?.isAtBottom()) { emit('scroll-past-bottom'); return; }
+    scrollByScreen(1);
+    return;
+  }
   store.nextPage();
   slideshow.reset();
 }
