@@ -24,6 +24,9 @@
 | 5 | 取消：等待期内 Alt+→ 换卷 | ✅ | force 跳 109 后旧 autoEnd 回调 fire，`get_progress(109)=null`——不误标不连跳 |
 | 6 | Alt+→ force 跨卷 | ✅ | 卷中任意位置直跳（上面子项已覆盖） |
 | 6 | single/double 回归 | ✅ | webtoon→single（OSD 渲染 + PageDown 翻页）→ double（OSD）→ webtoon（viewer 重挂、zoom 归 1）三态往返稳定 |
+| 7 | single 模式幻灯片回归（补充轮） | ✅ | interval 500ms tick 推进 spread（29→31 末页）；末页 tick → pause + pendingNextVolume + manual 档 toast「继续读下一本…」；toast ✕ 关闭；Space 开（spread 10→11）/ 停 |
+| 7 | webtoon 播放/暂停双入口 | ✅ | Space 键 = 自动滚动开关；主菜单「播放」按钮同效（滚动推进 / 再点即停） |
+| 7 | webtoon 无效控件禁用（spec §7） | ✅ | 主菜单：幻灯片方向 / OSD 缩放 / 阅读方向全 disabled；Overlay 轮播条：interval slider + 方向按钮 disabled、播放按钮可用 |
 
 ## 性能验收（spec §8.2 验收线对照）
 
