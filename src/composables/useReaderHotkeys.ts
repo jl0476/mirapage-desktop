@@ -118,9 +118,18 @@ export function useReaderHotkeys(actions: ReaderHotkeyActions = {}): void {
   const router = useRouter();
 
   function onKeydown(e: KeyboardEvent): void {
+    // 输入控件内的按键归输入框（跳页 dialog 等），不拦截
+    const target = e.target instanceof HTMLElement ? e.target : null;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA'
+      || target.tagName === 'SELECT' || target.isContentEditable)) {
+      return;
+    }
     const wt = actions.isWebtoon?.() ?? false;
     const cmd = resolveHotkey(e, wt ? webtoonKeyBindings : defaultKeyBindings);
     if (!cmd) return;
+    // 命中命令即阻止浏览器默认行为——webtoon 的滚动容器里 Space/箭头/PageX
+    // 的默认行为是再滚一屏，会与 slideshowToggle / scrollScreen 叠加成双动作
+    e.preventDefault();
     if (wt) {
       const overrides: Partial<Record<ReaderCommand, (() => void) | undefined>> = {
         nextPage: actions.nextPage,

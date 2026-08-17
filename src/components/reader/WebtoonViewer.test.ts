@@ -100,6 +100,9 @@ describe('WebtoonViewer（module3.1.0）', () => {
     expect(src).toContain('v-for="it in windowItems"');
     expect(src).not.toContain('v-show'); expect(src).not.toContain('loading="lazy"');
     expect(src).toContain('@wheel="onWheel"'); expect(src).not.toMatch(/wheel\.prevent/);
+    // 滚动条隐藏（2026-08-17 用户拍板：条漫不显示滚动条，位置感知靠页码指示器）
+    expect(src).toContain('scrollbar-width:none');
+    expect(src).toContain('::-webkit-scrollbar{display:none}');
   });
 
   it('调用尺寸预读并传递 descriptor 相对路径', async () => {

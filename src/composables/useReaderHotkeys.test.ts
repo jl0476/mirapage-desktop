@@ -189,6 +189,35 @@ describe('useReaderHotkeys', () => {
     expect(slideshow.isPlaying).toBe(false);
   });
 
+  // 命中命令必须 preventDefault——webtoon 滚动容器里 Space/箭头/PageX 的浏览器
+  // 默认行为是再滚一屏，会与 slideshowToggle/scrollScreen 叠加成双动作
+  it('命中命令的 keydown 调 preventDefault（webtoon Space 不再叠浏览器默认滚屏）', () => {
+    useReaderHotkeys();
+    const e = new KeyboardEvent('keydown', { key: ' ', cancelable: true });
+    const spy = vi.spyOn(e, 'preventDefault');
+    keyHandler!(e as unknown as KeyboardEvent);
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('未命中命令的 keydown 不 preventDefault（如任意字母 x）', () => {
+    useReaderHotkeys();
+    const e = new KeyboardEvent('keydown', { key: 'x', cancelable: true });
+    const spy = vi.spyOn(e, 'preventDefault');
+    keyHandler!(e as unknown as KeyboardEvent);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('焦点在输入控件内不拦截（跳页 dialog 输入 p/空格 归输入框）', async () => {
+    const { useSlideshowStore } = await import('@/stores/slideshow');
+    useReaderHotkeys();
+    const e = new KeyboardEvent('keydown', { key: 'p', cancelable: true });
+    Object.defineProperty(e, 'target', { value: document.createElement('input') });
+    const spy = vi.spyOn(e, 'preventDefault');
+    keyHandler!(e as unknown as KeyboardEvent);
+    expect(spy).not.toHaveBeenCalled();
+    expect(useSlideshowStore().isPlaying).toBe(false);  // 命令也不触发
+  });
+
   // v0.1.0-module3.0.3-hotfix5: Escape 一律 push('/') 回文件浏览器 (不再 router.back(),
   // 避免 library/bookmarks 进 reader 时 Escape 回 library 的问题).
   it('Escape key → closeReader → router.push("/")', () => {
