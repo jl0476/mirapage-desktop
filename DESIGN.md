@@ -581,7 +581,7 @@ MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**
 | `ui/reader/container/SinglePageContainer.kt:36-115` | Pager + tap region + chrome 显隐 | `components/reader/SinglePageViewer.vue` |
 | `ui/reader/container/DoublePageContainer.kt:43-137` | 双页 Pager + Spread 应用 | `components/reader/DoublePageViewer.vue` |
 | `ui/reader/container/HorizontalStripContainer.kt:1-203` | LazyRow + 跨卷（**只做参考**，桌面不做） | 不实现 |
-| `ui/reader/container/VerticalWebtoonContainer.kt:1-194` | Webtoon View 系统（**只做参考**，桌面不做） | 不实现 |
+| `ui/reader/container/VerticalWebtoonContainer.kt:1-194` | Webtoon View 系统（**只做参考**） | `components/reader/WebtoonViewer.vue`（module3.1.0 原生滚动方案，不移植 Android 原容器，见 §12.6） |
 | `ui/reader/page/CoilImage.kt:1-191` | Coil 2 + Android Context | 替换为 Coil 3 + WebView URL |
 | `ui/reader/VolumeKeyBus.kt:1-24` | 键盘 / 音量键事件流 | `composables/useReaderHotkeys.ts` |
 | `ui/reader/ReaderScreen.kt:1-637` | 整体阅读器组合 + chrome 切换逻辑 | `components/reader/ReaderScreen.vue` 顶层 |
@@ -729,7 +729,7 @@ MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**
 ## 7.11 实施时查阅顺序（推荐流程）
 
 1. **Phase 1**：打开 IDE 双窗口（左 Android / 右 Desktop），从 §7.1 表格对照
-2. **Phase 2**：先看 `ReaderViewModel.kt` 的状态机（最长），再看 4 个容器（单/双页 2 个要做，webtoon/strip 2 个跳过）
+2. **Phase 2**：先看 `ReaderViewModel.kt` 的状态机（最长），再看 4 个容器（单/双页 2 个要做；webtoon 已按桌面原生滚动方案另行实现见 §12.6，不移植 Android 原容器；strip 跳过）
 3. **Phase 3**：只看 `ArchiveMediaSource.kt`，其他压缩包相关都是辅助
 4. **Phase 4**：按 §7.4 表格逐个 UI 页面 + Entity + Repository 对应实现
 5. **Phase 5**：先看 `FindNextDirectoryUseCase.kt`（核心算法），再看 `SlideshowController.kt`（paged 模式就够）
