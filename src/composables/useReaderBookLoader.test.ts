@@ -127,6 +127,21 @@ describe('useReaderBookLoader', () => {
     expect(snapshot.initialSpreadIndex).toBe(expected);
   });
 
+  it('恢复快照暴露图索引：imageName 命中、finished 回到首图、page 越界钳位', async () => {
+    mocks.getProgress.mockResolvedValue(progress({ page: 1, imageName: 'page10.jpg' }));
+    const byName = await useReaderBookLoader().loadBookById(7);
+    expect(byName.restoreImageIndex).toBe(1);
+
+    mocks.getProgress.mockResolvedValue(progress({ page: 1, imageName: 'page10.jpg', finished: true }));
+    const finished = await useReaderBookLoader().loadBookById(7);
+    expect(finished.restoreImageIndex).toBe(0);
+
+    mocks.getProgress.mockResolvedValue(progress({ page: 999, imageName: null }));
+    const byPage = await useReaderBookLoader().loadBookById(7);
+    expect(byPage.restoreImageIndex).toBe(1);
+  });
+
+
   it('显式起始图不受末页钳位', async () => {
     mocks.listDirectory.mockResolvedValue([
       ...entries.filter((e) => e.name === 'page2.jpg'),

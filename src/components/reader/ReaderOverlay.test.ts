@@ -89,12 +89,14 @@ describe('ReaderOverlay.vue', () => {
     expect(w.emitted('jump')![0]).toEqual([12]);
   });
 
-  it('displays current mode label (i18n)', () => {
-    const wSingle = makeWrapper({ mode: 'single', hovered: true });
-    expect(wSingle.find('[data-test="btn-mode"]').text()).toContain('单页');
-    const wDouble = makeWrapper({ mode: 'double', hovered: true });
-    expect(wDouble.find('[data-test="btn-mode"]').text()).toContain('双页');
+  it('webtoon 模式显示三态文案并禁用缩放、间隔和方向控件', async () => {
+    const w = makeWrapper({ mode: 'webtoon', hovered: true });
+    expect(w.find('[data-test="btn-mode"]').text()).toContain('竖条漫');
+    expect(w.find('[data-test="scale-trigger"]').attributes('disabled')).toBeDefined();
+    expect(w.find('[data-test="slideshow-interval"]').attributes('disabled')).toBeDefined();
+    expect(w.find('[data-test="slideshow-direction"]').attributes('disabled')).toBeDefined();
   });
+
 
   it('不显示轮播控制条 (isPlaying=false 且未 hover)', () => {
     const w = makeWrapper({ hovered: false });

@@ -41,6 +41,8 @@ export interface ReaderBookSnapshot {
   pageUrls: string[];
   spreads: PageRange[];
   initialSpreadIndex: number;
+  /** webtoon 恢复使用图索引，不能复用 spread 索引。 */
+  restoreImageIndex: number;
 }
 
 export function sameBookIdentity(a: BookIdentity | null, b: BookIdentity | null): boolean {
@@ -143,16 +145,23 @@ export function useReaderBookLoader() {
     const pageUrls = imageNames.map((name) => convertFileSrc(joinPath(absDir, name)));
     const spreads = SpreadPlanner.plan(pageUrls.length, true, settings.readerDefaultMode === 'single');
     const explicitHit = opts.explicitImageName ? imageNames.includes(opts.explicitImageName) : false;
+    let progress: Awaited<ReturnType<typeof getProgress>> = null;
     let initialSpreadIndex: number;
     if (explicitHit) {
       const last = Math.max(0, spreads.length - 1);
       initialSpreadIndex = Math.max(0, Math.min(
         SpreadPlanner.spreadIndexForPage(imageNames.indexOf(opts.explicitImageName!), spreads), last));
     } else {
-      const progress = await getProgress(bookId);
+      progress = await getProgress(bookId);
       initialSpreadIndex = resolveInitialSpreadIndex(progress, undefined, imageNames, spreads);
     }
-    return { book: b, descriptor, relPath: normalizedRel, imageNames, pageUrls, spreads, initialSpreadIndex };
+    const restoreImageIndex = explicitHit
+      ? imageNames.indexOf(opts.explicitImageName!)
+      : (!progress || progress.finished) ? 0
+      : (progress.imageName && imageNames.includes(progress.imageName))
+        ? imageNames.indexOf(progress.imageName)
+        : Math.max(0, Math.min(Math.max(0, progress.page), imageNames.length - 1));
+    return { book: b, descriptor, relPath: normalizedRel, imageNames, pageUrls, spreads, initialSpreadIndex, restoreImageIndex };
   }
 
   async function ensureBookId(target: NextVolumeTarget): Promise<number> {

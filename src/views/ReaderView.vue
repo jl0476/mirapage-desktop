@@ -42,6 +42,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
 import { useReaderWheel } from '@/composables/useReaderWheel';
 import { useKeepScreenOn } from '@/composables/useKeepScreenOn';
+import { useWebtoonProgress } from '@/composables/useWebtoonProgress';
 import {
   useReaderBookLoader,
   type BookIdentity,
@@ -74,6 +75,10 @@ const pageUrls = ref([] as string[]);
 // 1) 注入 reader store: reader.imageNames, 供 emitChanged 计算 imageName 锚点
 // 2) 局部 ref: 供 currentReadImageName() / resolveInitialSpreadIndex 同步访问
 const imageNames = ref([] as string[]);
+const webtoonPageIndex = ref(0);
+const webtoonAtBottom = ref(false);
+const webtoonScreenRef = ref<InstanceType<typeof ReaderScreen> | null>(null);
+const webtoonProgress = useWebtoonProgress({ bookId: computed(() => reader.bookId), atBottom: webtoonAtBottom });
 const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
 // 需求4-C: 模板访问 book.isFavorite / book.id, loadBook 写入此 ref
@@ -225,9 +230,45 @@ const initialImageName = computed<string | null>(() => {
   return typeof v === 'string' ? decodeURIComponent(v) : null;
 });
 
-// 2026-08-12 跨卷任务 8 (spec §11.1): route watch 唯一入口 (替代 onMounted loadBook)
-// 首次挂载靠 immediate: true; bookId 变化 (跨卷) 靠 watcher 触发。
-// 删 onMounted(loadBook) 以避免双加载 (不变量 2)。
+function saveProgressForCurrentMode(): Promise<void> {
+  return settings.readerDefaultMode === 'webtoon'
+    ? webtoonProgress.flushNow()
+    : reader.saveCurrentProgressNow();
+}
+
+function markWebtoonScroll(): void {
+  const viewer = webtoonScreenRef.value?.getWebtoonViewer();
+  if (!viewer) return;
+  webtoonAtBottom.value = viewer.isAtBottom();
+  const image = viewer.getTopVisibleImage();
+  const index = image ? imageNames.value.indexOf(image) : -1;
+  if (image && index >= 0) {
+    webtoonPageIndex.value = index;
+    webtoonProgress.notifyTopChanged(image, index);
+  }
+}
+
+function onWebtoonBottom(): void {
+  webtoonAtBottom.value = true;
+}
+
+function onWebtoonScroll(): void {
+  markWebtoonScroll();
+}
+
+function onWebtoonWheel(deltaY: number): void {
+  if (deltaY > 0) markWebtoonScroll();
+}
+
+function onToggleReaderMode(): void {
+  if (settings.readerDefaultMode === 'webtoon') {
+    void webtoonProgress.flushNow().then(() => settings.cycleReaderMode());
+  } else {
+    void reader.saveCurrentProgressNow().then(() => settings.cycleReaderMode());
+  }
+}
+
+
 // bugfix 2026-08-15: 记录在途加载 promise —— navigateToVolume await 新卷 commit
 // 后才返回，跨卷续播（resumeSlideshow）由此拿到确定时机。
 let activeLoadPromise: Promise<void> = Promise.resolve();
@@ -303,6 +344,8 @@ function commitBookSnapshot(snapshot: ReaderBookSnapshot): void {
     sourceDescriptor: snapshot.descriptor,
     currentRelPath: snapshot.relPath,
   });
+  webtoonPageIndex.value = snapshot.restoreImageIndex;
+  webtoonAtBottom.value = false;
   reader.imageNames = snapshot.imageNames;
 }
 
@@ -361,7 +404,7 @@ function currentIdentity(): BookIdentity | null {
 const crossVolume = useCrossVolume({
   identity: currentIdentity,
   navigateToVolume,
-  saveCurrentProgressNow: () => reader.saveCurrentProgressNow(),
+  saveCurrentProgressNow: saveProgressForCurrentMode,
   pushToast: (k, p?: Record<string, unknown>) => toast.push(t(k, p ?? {})),
   getContinueMode: () => settings.continueToNextVolume,
   pauseSlideshow: () => slideshow.pause(),
@@ -439,6 +482,9 @@ function recomputeSpreadsForMode(): void {
  */
 useReaderHotkeys({
   nextVolume: () => { void crossVolume.maybeContinue(true, 'next'); },
+  isWebtoon: () => settings.readerDefaultMode === 'webtoon',
+  nextPage: () => { webtoonScreenRef.value?.getWebtoonViewer()?.autoScrollStep(16, 1, 1); },
+  prevPage: () => { webtoonScreenRef.value?.getWebtoonViewer()?.autoScrollStep(-16, 1, 1); },
 });
 useReaderWheel({
   containerRef,
@@ -456,7 +502,7 @@ onUnmounted(() => {
   reader.setOnAtLastNextAttempt(null);  // 不变量 11: 清理 Pinia store 持有的旧组件闭包
   activeLoadSeq += 1;                    // P0-3: 使在途 Loader 失效, 卸载后不执行提交
   if (reader.bookId !== null) {
-    void reader.saveCurrentProgressNow();  // 兜底 (不依赖 store 防抖, 立即 await)
+    void saveProgressForCurrentMode();
   }
   slideshow.pause();
   reader.closeBook();
@@ -495,14 +541,23 @@ onUnmounted(() => {
       v-else-if="status === 'ready' && reader.status === 'ready' && visibleReader"
       class="flex-1 min-h-0"
       :page-urls="pageUrls"
+      :page-names="imageNames"
+      :descriptor="reader.sourceDescriptor ?? undefined"
+      :rel-path="reader.currentRelPath"
+      :page-override="webtoonPageIndex"
       :spreads="reader.spreads"
+      ref="webtoonScreenRef"
       :initial-spread-index="reader.currentSpreadIndex"
       :mode="settings.readerDefaultMode"
       :title="reader.title"
       :direction="settings.defaultReadDirection"
       @back="goBackToFileBrowser()"
-      @toggle-mode="() => settings.cycleReaderMode()"
+      @toggle-mode="onToggleReaderMode"
       @open-main-menu="showMainMenu = true"
+      @scroll="onWebtoonScroll"
+      @wheel-delta="onWebtoonWheel"
+      @zoom-change="onWebtoonZoom"
+      @scroll-past-bottom="onWebtoonBottom"
     />
 
     <ReaderMainMenu

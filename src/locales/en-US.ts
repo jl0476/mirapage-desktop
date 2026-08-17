@@ -32,6 +32,7 @@ export default {
     mode: {
       single: 'Single',
       double: 'Double',
+      webtoon: 'Webtoon',
     },
     direction: {
       ltr: 'Left to Right',
@@ -67,6 +68,7 @@ export default {
       mode: 'Page mode',
       direction: 'Read direction',
       scale: 'Scale',
+      resetZoom: 'Reset zoom',
       slideshowPlay: 'Play',
       slideshowPause: 'Pause',
       close: 'Close',
@@ -280,6 +282,7 @@ export default {
       scale: 'Default scale',
       direction: 'Default reading direction',
       continue: 'When reaching last page',
+      webtoon: { maxWidth: 'Maximum width', gap: 'Image gap', scrollSpeed: 'Scroll speed' },
     },
     appearance: {
       theme: 'Theme',

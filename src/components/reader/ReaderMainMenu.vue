@@ -32,7 +32,8 @@ interface Props {
   currentSpreadIndex: number;
   totalSpreads: number;
   scaleMode?: ScaleMode;
-  mode?: 'single' | 'double';
+  mode?: 'single' | 'double' | 'webtoon';
+  webtoonZoom?: number;
   direction?: 'ltr' | 'rtl';
   isSlideshowPlaying?: boolean;
   slideshowDirection?: 'forward' | 'backward';
@@ -46,7 +47,7 @@ const props = withDefaults(defineProps<Props>(), {
   direction: 'ltr',
   isSlideshowPlaying: false,
   slideshowDirection: 'forward',
-  isLiked: false,
+  webtoonZoom: 1,
 });
 
 const emit = defineEmits<{
@@ -61,6 +62,7 @@ const emit = defineEmits<{
   (e: 'navigate', path: string): void;
   (e: 'toggle-like'): void;
   (e: 'add-bookmark'): void;
+  (e: 'reset-zoom'): void;
 }>();
 
 const { t } = useI18n();
@@ -89,6 +91,7 @@ function onCycleDirection(): void { emit('cycle-direction'); }
 function onScaleChange(m: ScaleMode): void { emit('scale-change', m); scaleOpen.value = false; }
 function onToggleSlideshow(): void { emit('toggle-slideshow'); }
 function onToggleSlideshowDirection(): void { emit('toggle-slideshow-direction'); }
+function onResetZoom(): void { emit('reset-zoom'); }
 
 interface NavItem { path: string; key: string }
 const NAV_ITEMS: NavItem[] = [
@@ -170,8 +173,9 @@ function onOpenBookmarks(): void {
           {{ t('reader.menu.mode') }} · {{ t('reader.mode.' + mode) }}
         </button>
         <button
-          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors disabled:opacity-40"
           data-test="menu-direction"
+          :disabled="mode === 'webtoon'"
           @click="onCycleDirection"
         >
           {{ t('reader.menu.direction') }} · {{ t('reader.direction.' + direction) }}
@@ -180,7 +184,7 @@ function onOpenBookmarks(): void {
           <button
             class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
             :aria-haspopup="'menu'"
-            :aria-expanded="scaleOpen"
+            :disabled="mode === 'webtoon'"
             @click="scaleOpen = !scaleOpen"
           >
             {{ t('reader.menu.scale') }} · {{ scaleLabel(scaleMode) }}
@@ -211,10 +215,19 @@ function onOpenBookmarks(): void {
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="menu-slideshow-direction"
+          :disabled="mode === 'webtoon'"
           @click="onToggleSlideshowDirection"
         >
           {{ t('slideshow.direction') }} · {{ t('slideshow.direction' + slideshowDirection.charAt(0).toUpperCase() + slideshowDirection.slice(1)) }}
         </button>
+        <button
+          v-if="mode === 'webtoon'"
+          type="button"
+          :disabled="webtoonZoom === 1"
+          data-test="menu-reset-zoom"
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light disabled:opacity-40"
+          @click="onResetZoom"
+        >{{ t('reader.menu.resetZoom') }}</button>
       </section>
 
       <div class="xp-divider-h" />

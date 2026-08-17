@@ -37,7 +37,7 @@ interface Props {
   title: string;
   currentPage: number;
   totalPages: number;
-  mode: 'single' | 'double';
+  mode: 'single' | 'double' | 'webtoon';
   chromeVisible: boolean;
   /** v0.1.0-reader-review-fix-13: 鼠标 hover 状态 (父级控制, 同步给 watermark) */
   hovered: boolean;
@@ -149,6 +149,7 @@ onUnmounted(() => window.removeEventListener('pointerdown', onScalePointerDown, 
           :aria-label="scaleLabel(props.scaleMode)"
           aria-haspopup="menu"
           :aria-expanded="scaleOpen"
+          :disabled="mode === 'webtoon'"
           @click="scaleOpen = !scaleOpen"
         >
           {{ scaleLabel(props.scaleMode) }}
@@ -178,7 +179,7 @@ onUnmounted(() => window.removeEventListener('pointerdown', onScalePointerDown, 
         data-test="btn-mode"
         @click="emit('toggle-mode')"
       >
-        {{ mode === 'single' ? t('reader.mode.single') : t('reader.mode.double') }}
+        {{ mode === 'webtoon' ? t('reader.mode.webtoon') : t('reader.mode.' + mode) }}
       </button>
       <button
         type="button"
@@ -252,6 +253,7 @@ onUnmounted(() => window.removeEventListener('pointerdown', onScalePointerDown, 
         :value="intervalSeconds"
         data-test="slideshow-interval"
         :aria-label="t('slideshow.interval')"
+        :disabled="mode === 'webtoon'"
         @input="onIntervalChange"
       />
       <span class="font-mono tabular-nums w-8 text-right">{{ intervalSeconds }}s</span>
@@ -263,6 +265,7 @@ onUnmounted(() => window.removeEventListener('pointerdown', onScalePointerDown, 
         class="px-2 py-1 rounded hover:bg-surface-light hover:text-text-primary transition-colors"
         data-test="slideshow-direction"
         :aria-label="t('slideshow.direction')"
+        :disabled="mode === 'webtoon'"
         @click="onDirectionToggle"
       >
         <svg v-if="slideshow.direction === 'forward'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">

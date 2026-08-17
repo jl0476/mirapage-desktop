@@ -44,7 +44,7 @@ async function doRun() {
 // ─── 枚举选项源 ───────────────────────────────────────────────────────
 const readerModes = [
   { value: 'single', label: t('reader.mode.single') },
-  { value: 'double', label: t('reader.mode.double') },
+  { value: 'webtoon', label: t('reader.mode.webtoon') },
 ];
 
 const scaleModes: Array<{ value: ScaleMode; label: string }> = [
@@ -85,7 +85,7 @@ const slideshowDirs = [
 
 // ─── 通用 setter (封装 store 字段 + DB) ─────────────────────────────
 async function setReaderMode(v: string) {
-  settings.readerDefaultMode = v as 'single' | 'double';
+  settings.readerDefaultMode = v as 'single' | 'double' | 'webtoon';
   await settings.update('reader_default_mode', v);
 }
 async function setScaleMode(v: string) {
@@ -230,7 +230,12 @@ async function setThumbnailDetailPopover(v: boolean) {
               :value="settings.defaultReadDirection"
               :options="directions"
               @change="setDirection"
+              :disabled="settings.readerDefaultMode === 'webtoon'"
             />
+            <div v-if="settings.readerDefaultMode === 'webtoon'" class="flex flex-col gap-3" data-test="webtoon-settings">
+              <NumberRow :label="t('settings.reader.webtoon.maxWidth')" :value="settings.webtoonMaxWidth" :min="0" :max="4000" suffix="px" @change="settings.setWebtoonMaxWidth" />
+              <NumberRow :label="t('settings.reader.webtoon.gap')" :value="settings.webtoonGap" :min="0" :max="24" suffix="px" @change="settings.setWebtoonGap" />
+              <NumberRow :label="t('settings.reader.webtoon.scrollSpeed')" :value="settings.webtoonScrollSpeed" :min="10" :max="300" suffix="px/s" @change="settings.setWebtoonScrollSpeed" />
             <EnumRow
               :label="t('settings.reader.continue')"
               :value="settings.continueToNextVolume"
@@ -336,6 +341,12 @@ async function setThumbnailDetailPopover(v: boolean) {
                      class="w-full accent-accent cursor-pointer" data-test="masonry-default-vgap"
                      @input="(e) => settings.setMasonryDefaultVGap(Number((e.target as HTMLInputElement).value))" />
             </div>
+            <EnumRow
+              :label="t('settings.reader.continue')"
+              :value="settings.continueToNextVolume"
+              :options="continueModes"
+              @change="setContinue"
+            />
           </div>
 
           <!-- 缩略图缓存资源 / 清晰度 / 容量（v0.1.0-module3.0.7） -->

@@ -40,14 +40,22 @@ import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { log } from '@/lib/logger';
 import SinglePageViewer from './SinglePageViewer.vue';
 import DoublePageViewer from './DoublePageViewer.vue';
+import WebtoonViewer from './WebtoonViewer.vue';
 import ReaderOverlay from './ReaderOverlay.vue';
+import { descriptorId, type SourceDescriptor } from '@/lib/sourceDescriptor';
 
 interface Props {
   title: string;
   pageUrls: string[];
   spreads?: Array<{ start: number; end: number }>;
   initialSpreadIndex?: number;
-  mode?: 'single' | 'double';
+  mode?: 'single' | 'double' | 'webtoon';
+  pageNames?: string[];
+  descriptor?: SourceDescriptor;
+  relPath?: string;
+  webtoonMaxWidth?: number;
+  webtoonGap?: number;
+  pageOverride?: number | null;
   /** v0.1.0-reader-review-fix: 阅读方向 (传给 DoublePageViewer 用于 RTL 镜像) */
   direction?: 'ltr' | 'rtl';
 }
@@ -61,9 +69,13 @@ const props = withDefaults(defineProps<Props>(), {
 interface Emits {
   (e: 'back'): void;
   (e: 'toggle-mode'): void;
-  (e: 'open-main-menu'): void;   // 需求4: chrome 菜单按钮透传 → ReaderView
-  (e: 'chrome-hover-enter'): void;  // v0.1.0-reader-review-fix-7: chrome 元素自身 hover
+  (e: 'open-main-menu'): void;
+  (e: 'chrome-hover-enter'): void;
   (e: 'chrome-hover-leave'): void;
+  (e: 'scroll'): void;
+  (e: 'wheel-delta', deltaY: number): void;
+  (e: 'zoom-change', zoom: number): void;
+  (e: 'scroll-past-bottom'): void;
 }
 const emit = defineEmits<Emits>();
 
@@ -117,6 +129,13 @@ const containerRef = ref<HTMLElement | null>(null);
 const hovered = ref(false);
 const singleViewerRef = ref<InstanceType<typeof SinglePageViewer> | null>(null);
 const doubleViewerRef = ref<InstanceType<typeof DoublePageViewer> | null>(null);
+const webtoonViewerRef = ref<InstanceType<typeof WebtoonViewer> | null>(null);
+
+/** Parent-facing webtoon controls. WebtoonViewer expose values are getters (proxyRefs). */
+function getWebtoonViewer(): InstanceType<typeof WebtoonViewer> | null {
+  return webtoonViewerRef.value;
+}
+defineExpose({ getWebtoonViewer });
 
 // v0.1.0-reader-review-fix-7: chrome hover 仅由 trigger zone + chrome 自身控制.
 // 之前容器 mouseenter/mouseleave 太宽 (整个 reader 都触发), 用户希望只在
@@ -267,9 +286,13 @@ watch(
 onMounted(() => {
   // v0.1.0-module3.0.2 (H2): 注入 slideshow 翻页回调
   // store 内部 setInterval 触发 tick 时, 实际执行 reader store action
-  slideshow.setAdvance(() => store.nextPage());
-  slideshow.setPrev(() => store.prevPage());
-  slideshow.setIsAtLast(() => store.isAtLastSpread);
+  slideshow.setAdvance(() => {
+    if (props.mode !== 'webtoon') store.nextPage();
+  });
+  slideshow.setPrev(() => {
+    if (props.mode !== 'webtoon') store.prevPage();
+  });
+  slideshow.setIsAtLast(() => props.mode === 'webtoon' ? false : store.isAtLastSpread);
   void slideshow.load();
 });
 
@@ -286,10 +309,17 @@ onUnmounted(() => {
 
 // current page indicator
 const currentPage = computed(() => {
+  if (props.mode === 'webtoon') return (props.pageOverride ?? 0) + 1;
   const spread = finalSpreads.value[store.currentSpreadIndex];
   return spread ? spread.start + 1 : 0;
 });
 const totalPages = computed(() => props.pageUrls.length);
+
+const webtoonKey = computed(() => {
+  const descriptor = props.descriptor;
+  const id = descriptor ? descriptorId(descriptor) : 'unknown';
+  return `webtoon-${id}|${props.relPath ?? ''}`;
+});
 
 // 单页模式只看 spread 首张图
 const singlePageUrl = computed(() => {
@@ -300,10 +330,12 @@ const singlePageUrl = computed(() => {
 });
 
 function onPrev() {
+  if (props.mode === 'webtoon') return;
   store.prevPage();
   slideshow.reset();
 }
 function onNext() {
+  if (props.mode === 'webtoon') return;
   store.nextPage();
   slideshow.reset();
 }
@@ -311,6 +343,7 @@ function onToggleMode() {
   emit('toggle-mode');
 }
 function onJump(page: number) {
+  if (props.mode === 'webtoon') return;
   // 跳到该页所在的 spread
   const target = page - 1;
   const idx = SpreadPlanner.spreadIndexForPage(target, finalSpreads.value);
@@ -346,6 +379,21 @@ function onContainerMouseLeave(): void {
         :ref="(el: unknown) => { singleViewerRef = el as InstanceType<typeof SinglePageViewer> | null }"
         :image-url="singlePageUrl"
         @image-loaded="onFirstImageLoaded"
+      />
+      <WebtoonViewer
+        v-else-if="mode === 'webtoon'"
+        :key="webtoonKey"
+        ref="webtoonViewerRef"
+        :urls="props.pageUrls"
+        :names="props.pageNames ?? []"
+        :descriptor="props.descriptor!"
+        :rel-path="props.relPath ?? ''"
+        :max-width="props.webtoonMaxWidth"
+        :gap="props.webtoonGap"
+        @scroll="emit('scroll')"
+        @wheel-delta="(delta) => emit('wheel-delta', delta)"
+        @zoom-change="(zoom) => emit('zoom-change', zoom)"
+        @scroll-past-bottom="emit('scroll-past-bottom')"
       />
       <DoublePageViewer
         v-else

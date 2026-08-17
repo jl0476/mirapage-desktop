@@ -33,6 +33,7 @@ export default {
     mode: {
       single: '单页',
       double: '双页',
+      webtoon: '竖条漫',
     },
     direction: {
       ltr: '从左到右',
@@ -67,7 +68,7 @@ export default {
       settings: '设置',
       mode: '单/双页',
       direction: '阅读方向',
-      scale: '缩放',
+      resetZoom: '重置缩放',
       slideshowPlay: '播放',
       slideshowPause: '暂停',
       close: '关闭',
@@ -282,6 +283,7 @@ export default {
       scale: '默认缩放',
       direction: '默认阅读方向',
       continue: '翻到末页后',
+      webtoon: { maxWidth: '最大宽度', gap: '图片间距', scrollSpeed: '滚动速度' },
     },
     appearance: {
       theme: '主题',

@@ -20,7 +20,7 @@ interface Props {
   x: number;
   y: number;
   scaleMode: ScaleMode;
-  mode: 'single' | 'double';
+  mode: 'single' | 'double' | 'webtoon';
   direction: 'ltr' | 'rtl';
   isSlideshowPlaying: boolean;
   /** 总页数 (跳页子菜单显示 "n / total") */
@@ -113,7 +113,7 @@ onUnmounted(() => {
         data-test="ctx-item"
         class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary"
         :aria-haspopup="'menu'"
-        :aria-expanded="scaleOpen"
+          :disabled="props.mode === 'webtoon'"
       >
         <span>{{ t('reader.menu.scale') }}</span>
         <span class="text-text-muted">{{ scaleLabel(props.scaleMode) }}</span>
@@ -142,7 +142,7 @@ onUnmounted(() => {
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('cycle-mode')">
       <span>{{ t('reader.menu.mode') }}</span><span class="text-text-muted">{{ t('reader.mode.' + props.mode) }}</span>
     </button>
-    <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('cycle-direction')">
+    <button data-test="ctx-item" :disabled="props.mode === 'webtoon'" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary disabled:opacity-40" @click="onItemClick('cycle-direction')">
       <span>{{ t('reader.menu.direction') }}</span><span class="text-text-muted">{{ t('reader.direction.' + props.direction) }}</span>
     </button>
     <button data-test="ctx-item" class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary" @click="onItemClick('toggle-slideshow')">
