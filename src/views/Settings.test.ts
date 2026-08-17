@@ -59,7 +59,21 @@ describe('Settings.vue', () => {
       i18n.global.t('reader.mode.webtoon'),
     ]);
     expect(wrapper.find('[data-test="section-masonry"] [data-test="enum-select"]').exists()).toBe(false);
-  });
+    // webtoon 下无效控件禁用：阅读方向 + 幻灯片方向 + 幻灯片间隔
+    // section-reader 内 4 个 select 依次为 模式/缩放/方向/继续阅读，方向是第 3 个（index 2）
+    const readerSelects = wrapper.findAll('[data-test="section-reader"] select');
+    const readerDir = readerSelects[2].element as HTMLSelectElement;
+    const slideshowDir = wrapper.find('[data-test="section-slideshow"] [data-test="enum-select"] select').element as HTMLSelectElement;
+    const intervalInput = wrapper.find('[data-test="section-slideshow"] input[type="number"]').element as HTMLInputElement;
+    expect(readerDir.disabled).toBe(true);
+    expect(slideshowDir.disabled).toBe(true);
+    expect(intervalInput.disabled).toBe(true);
+    // 切回 single 恢复可用
+    store.readerDefaultMode = 'single';
+    await flushPromises();
+    const slideshowDirAfter = wrapper.find('[data-test="section-slideshow"] [data-test="enum-select"] select').element as HTMLSelectElement;
+    expect(slideshowDirAfter.disabled).toBe(false);
+});
 
   it('EnumRow change triggers store setter', async () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });

@@ -267,9 +267,13 @@ function onWebtoonScroll(): void {
 const webtoonSpeedFactor = ref(1);
 let lastWheelAt = 0;
 function onWebtoonWheel(deltaY: number): void {
-  lastWheelAt = Date.now();
-  // 下限 0.1 而非 0：0 × 1.2 = 0，连续下滚会永久锁死零速（只能等 2s 静默回落）。
-  webtoonSpeedFactor.value = Math.min(3, Math.max(0.1, webtoonSpeedFactor.value * (deltaY > 0 ? 1.2 : 1 / 1.2)));
+  // 临时变速仅播放中生效（spec §4）：未播放时滚动不改 factor，
+  // 否则 2s 内点播放会以偏离设置值的速度启动。
+  if (slideshow.isPlaying) {
+    lastWheelAt = Date.now();
+    // 下限 0.1 而非 0：0 × 1.2 = 0，连续下滚会永久锁死零速（只能等 2s 静默回落）。
+    webtoonSpeedFactor.value = Math.min(3, Math.max(0.1, webtoonSpeedFactor.value * (deltaY > 0 ? 1.2 : 1 / 1.2)));
+  }
   if (deltaY > 0) markWebtoonScroll();
 }
 

@@ -301,6 +301,7 @@ async function setThumbnailDetailPopover(v: boolean) {
               :label="t('settings.slideshow.direction')"
               :value="settings.slideshowDirection"
               :options="slideshowDirs"
+              :disabled="settings.readerDefaultMode === 'webtoon'"
               @change="setSlideshowDirection"
             />
             <BooleanRow

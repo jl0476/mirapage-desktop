@@ -60,6 +60,7 @@ vi.mock('@/components/reader/WebtoonViewer.vue', () => {
     zoom: 1,
     scrollTargets: [] as string[],
     steps: 0,
+    lastFactor: 0,
     setZoomCalls: [] as number[],
     el: { clientHeight: 100, scrollHeight: 500, scrollTop: 0, scrollBy: vi.fn() },
   };
@@ -73,7 +74,7 @@ vi.mock('@/components/reader/WebtoonViewer.vue', () => {
         getZoom: () => registry.zoom,
         setZoom: (z: number) => { registry.zoom = z; registry.setZoomCalls.push(z); },
         scrollToImage: (name: string) => { registry.scrollTargets.push(name); },
-        autoScrollStep: (dt: number) => { registry.steps += dt; },
+        autoScrollStep: (dt: number, _speed: number, factor: number) => { registry.steps += dt; registry.lastFactor = factor; },
         getScrollEl: () => registry.el,
       });
     },
@@ -114,6 +115,7 @@ interface WebtoonRegistry {
   zoom: number;
   scrollTargets: string[];
   steps: number;
+  lastFactor: number;
   setZoomCalls: number[];
   el: { clientHeight: number; scrollHeight: number; scrollTop: number; scrollBy: ReturnType<typeof vi.fn> };
 }
@@ -1284,6 +1286,7 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     wtStub.__registry.zoom = 1;
     wtStub.__registry.scrollTargets = [];
     wtStub.__registry.steps = 0;
+    wtStub.__registry.lastFactor = 0;
     wtStub.__registry.setZoomCalls = [];
     wtStub.__registry.el.scrollTop = 0;
     wtStub.__registry.el.scrollBy.mockClear();
@@ -1573,6 +1576,34 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     expect(optsS?.disabled?.value).toBe(false);
     wSingle.unmount();
   });
+
+  it('滚轮临时变速仅播放中生效（未播放滚动不改 factor，防播放以偏离速度启动）', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = await mountWebtoon();
+      await flushPromises();
+      const slideshow = useSlideshowStore();
+      // 未播放：连滚 3 格
+      findViewer(w).vm.$emit('wheel-delta', 120);
+      findViewer(w).vm.$emit('wheel-delta', 120);
+      findViewer(w).vm.$emit('wheel-delta', 120);
+      slideshow.start();
+      await flushPromises();  // isPlaying watch flush 后 rAF 才会排上（对齐 autoEnd 测试模式）
+      await vi.advanceTimersByTimeAsync(60);  // rAF 帧到 → autoScrollStep 携带 factor
+      expect(wtStub.__registry.lastFactor).toBe(1);  // 未被污染
+      // 播放中再滚 3 格 → 1.2³
+      findViewer(w).vm.$emit('wheel-delta', 120);
+      findViewer(w).vm.$emit('wheel-delta', 120);
+      findViewer(w).vm.$emit('wheel-delta', 120);
+      await vi.advanceTimersByTimeAsync(60);
+      expect(Math.round(wtStub.__registry.lastFactor * 100) / 100).toBe(1.73);
+      slideshow.pause();
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
 
   it('重置缩放状态链：zoom-change → webtoonZoom → MainMenu prop；reset-zoom → setZoom(1)', async () => {
     const w = await mountWebtoon();
