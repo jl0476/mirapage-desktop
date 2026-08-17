@@ -380,7 +380,7 @@ export interface ProgressItem {
   /** v0.1.0-module3.0.8: 瀑布流浏览位置锚点——masonry 滚动时写入 top visible image 名。
    *  reader 翻页路径不传（保持 null），reload 时按 imageName 找 spread index 恢复。 */
   imageName: string | null;
-  readerMode: 'single' | 'double';
+  readerMode: 'single' | 'double' | 'webtoon';
   updatedAt: number;
   /** 2026-08-12 跨卷任务 4: 补齐 ProgressItem gap（DB 列已存在，Rust/TS 对齐）。
    *  Loader `resolveInitialSpreadIndex` 用此判定"已读完 → 第 1 页"。 */

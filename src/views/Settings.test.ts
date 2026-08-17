@@ -47,6 +47,15 @@ describe('Settings.vue', () => {
     }
   });
 
+  it('webtoon 模式显示连续阅读设置且继续阅读仍属于 reader 区域', async () => {
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    const store = useSettingsStore();
+    store.readerDefaultMode = 'webtoon';
+    await flushPromises();
+    expect(wrapper.find('[data-test="webtoon-settings"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="section-reader"] [data-test="enum-select"]').exists()).toBe(true);
+  });
+
   it('EnumRow change triggers store setter', async () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const store = useSettingsStore();

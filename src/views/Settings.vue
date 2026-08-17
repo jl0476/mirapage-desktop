@@ -236,6 +236,7 @@ async function setThumbnailDetailPopover(v: boolean) {
               <NumberRow :label="t('settings.reader.webtoon.maxWidth')" :value="settings.webtoonMaxWidth" :min="0" :max="4000" suffix="px" @change="settings.setWebtoonMaxWidth" />
               <NumberRow :label="t('settings.reader.webtoon.gap')" :value="settings.webtoonGap" :min="0" :max="24" suffix="px" @change="settings.setWebtoonGap" />
               <NumberRow :label="t('settings.reader.webtoon.scrollSpeed')" :value="settings.webtoonScrollSpeed" :min="10" :max="300" suffix="px/s" @change="settings.setWebtoonScrollSpeed" />
+            </div>
             <EnumRow
               :label="t('settings.reader.continue')"
               :value="settings.continueToNextVolume"

@@ -53,8 +53,7 @@ export function useWebtoonProgress(opts: Options) {
     const bookId = opts.bookId.value;
     if (bookId === null) return false;
     if (finishedInFlight?.bookId === bookId) return finishedInFlight.p;
-    let p!: Promise<boolean>;
-    p = (async () => {
+    const request = (async () => {
       try {
         await markFinished(bookId, true);
         if (opts.bookId.value === bookId) finishedMarked = true;
@@ -62,12 +61,13 @@ export function useWebtoonProgress(opts: Options) {
       } catch (error: unknown) {
         log('[webtoon] markFinished failed', error);
         return false;
-      } finally {
-        if (finishedInFlight?.p === p) finishedInFlight = null;
       }
     })();
-    finishedInFlight = { bookId, p };
-    return p;
+    finishedInFlight = { bookId, p: request };
+    void request.finally(() => {
+      if (finishedInFlight?.p === request) finishedInFlight = null;
+    });
+    return request;
   }
 
   function finishNow(): Promise<boolean> {

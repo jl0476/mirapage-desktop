@@ -68,6 +68,7 @@ export default {
       settings: '设置',
       mode: '单/双页',
       direction: '阅读方向',
+      scale: '缩放',
       resetZoom: '重置缩放',
       slideshowPlay: '播放',
       slideshowPause: '暂停',
