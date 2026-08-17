@@ -62,6 +62,40 @@ describe('settings store', () => {
     expect(store.defaultScaleMode).toBe('fit-width');
     expect(store.defaultReadDirection).toBe('rtl');
   });
+
+  it('readerDefaultMode：webtoon 可直设 + 非法值 normalize fallback single（module3.1.0）', async () => {
+    const store = useSettingsStore();
+    store.readerDefaultMode = 'webtoon';
+    expect(store.readerDefaultMode).toBe('webtoon');
+    const { normalizeReadMode } = await import('@/lib/readerSettings');
+    expect(normalizeReadMode('bogus')).toBe('single');
+    expect(normalizeReadMode('webtoon')).toBe('webtoon');
+  });
+
+  it('cycleReaderMode：三态循环 single→double→webtoon→single（module3.1.0）', async () => {
+    const store = useSettingsStore();
+    store.readerDefaultMode = 'single';
+    await store.cycleReaderMode();
+    expect(store.readerDefaultMode).toBe('double');
+    await store.cycleReaderMode();
+    expect(store.readerDefaultMode).toBe('webtoon');
+    await store.cycleReaderMode();
+    expect(store.readerDefaultMode).toBe('single');
+  });
+
+  it('webtoon 三设置：setter clamp 并持久化', async () => {
+    const setSetting = vi.mocked((await import('@/lib/tauri')).setSetting);
+    const store = useSettingsStore();
+    await store.setWebtoonMaxWidth(1200);
+    await store.setWebtoonGap(99);
+    await store.setWebtoonScrollSpeed(1);
+    expect(store.webtoonMaxWidth).toBe(1200);
+    expect(store.webtoonGap).toBe(24);
+    expect(store.webtoonScrollSpeed).toBe(10);
+    expect(setSetting).toHaveBeenCalledWith('webtoon_max_width', '1200');
+    expect(setSetting).toHaveBeenCalledWith('webtoon_gap', '24');
+    expect(setSetting).toHaveBeenCalledWith('webtoon_scroll_speed', '10');
+  });
 });
 
 describe('settings store: 缩略图缓存', () => {

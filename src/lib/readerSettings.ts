@@ -8,8 +8,12 @@ export type ScaleMode =
 
 export type ReadDirection = 'ltr' | 'rtl';
 
+/** 阅读模式（module3.1.0：webtoon = 竖向连续滚动） */
+export type ReadMode = 'single' | 'double' | 'webtoon';
+
 export const DEFAULT_SCALE_MODE: ScaleMode = 'fit-screen';
 export const DEFAULT_READ_DIRECTION: ReadDirection = 'ltr';
+export const DEFAULT_READ_MODE: ReadMode = 'single';
 
 /** 合法 ScaleMode 集合 (用于校验 DB 老数据) */
 const VALID_SCALE_MODES: ReadonlySet<ScaleMode> = new Set([
@@ -22,4 +26,11 @@ const VALID_SCALE_MODES: ReadonlySet<ScaleMode> = new Set([
  */
 export function normalizeScaleMode(v: string): ScaleMode {
   return VALID_SCALE_MODES.has(v as ScaleMode) ? (v as ScaleMode) : DEFAULT_SCALE_MODE;
+}
+
+const VALID_READ_MODES: ReadonlySet<ReadMode> = new Set(['single', 'double', 'webtoon']);
+
+/** 把 DB 读出的 reader_mode 值规范化为合法 ReadMode。 */
+export function normalizeReadMode(v: string): ReadMode {
+  return VALID_READ_MODES.has(v as ReadMode) ? (v as ReadMode) : DEFAULT_READ_MODE;
 }

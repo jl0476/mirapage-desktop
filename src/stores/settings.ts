@@ -6,8 +6,8 @@ import { ref } from 'vue';
 import { getSetting, setSetting, updateThumbnailRuntimeConfig, updateThumbnailCacheLimit } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import {
-  DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION, normalizeScaleMode,
-  type ScaleMode, type ReadDirection,
+  DEFAULT_SCALE_MODE, DEFAULT_READ_DIRECTION, normalizeScaleMode, normalizeReadMode,
+  type ScaleMode, type ReadDirection, type ReadMode,
 } from '@/lib/readerSettings';
 import {
   resolveThumbnailPreset, normalizeWorkerLimit, normalizeDecodeMemoryMb, normalizeCacheLimitMb,
@@ -18,7 +18,7 @@ export type ThemeMode = 'system' | 'light' | 'dark';
 export type ColorTheme = 'blue' | 'purple' | 'amber' | 'neutral';
 export type Locale = 'system' | 'zh-CN' | 'en-US';
 export type ContinueMode = 'off' | 'auto' | 'manual';
-export type ReaderMode = 'single' | 'double';
+export type ReaderMode = ReadMode;
 
 export const useSettingsStore = defineStore('settings', () => {
   const themeMode = ref<ThemeMode>('system');
@@ -38,6 +38,11 @@ export const useSettingsStore = defineStore('settings', () => {
   // currentScaleMode = 阅读中当前生效的缩放 (runtime, 随用户切换变化, 持久化为 scale_mode)
   // defaultScaleMode = 新书打开时的初始化缩放 (持久化为 default_scale_mode, 已存在)
   const currentScaleMode = ref<ScaleMode>(DEFAULT_SCALE_MODE);
+
+  // module3.1.0: webtoon 设置
+  const webtoonMaxWidth = ref(0);
+  const webtoonGap = ref(0);
+  const webtoonScrollSpeed = ref(60);
 
   // v0.1.0-module3.0.6: masonry 瀑布流全局默认（per-folder override 在 useMasonrySettings）
   const masonryDefaultCols = ref(4);
@@ -71,7 +76,7 @@ export const useSettingsStore = defineStore('settings', () => {
       ['theme_mode', (v) => (themeMode.value = v as ThemeMode)],
       ['color_theme', (v) => (colorTheme.value = v as ColorTheme)],
       ['locale', (v) => (locale.value = v as Locale)],
-      ['reader_default_mode', (v) => (readerDefaultMode.value = v as ReaderMode)],
+      ['reader_default_mode', (v) => (readerDefaultMode.value = normalizeReadMode(v))],
       ['continue_to_next_volume', (v) => (continueToNextVolume.value = v as ContinueMode)],
       ['slideshow_interval_ms', (v) => (slideshowIntervalMs.value = Number(v))],
       ['slideshow_loop', (v) => (slideshowLoop.value = v === '1')],
@@ -80,6 +85,9 @@ export const useSettingsStore = defineStore('settings', () => {
       ['default_scale_mode', (v) => (defaultScaleMode.value = normalizeScaleMode(v as ScaleMode))],
       ['scale_mode', (v) => (currentScaleMode.value = normalizeScaleMode(v as ScaleMode))],
       ['default_read_direction', (v) => (defaultReadDirection.value = v as ReadDirection)],
+      ['webtoon_max_width', (v) => { const n = Number(v); if (Number.isFinite(n)) webtoonMaxWidth.value = Math.max(0, Math.round(n)); }],
+      ['webtoon_gap', (v) => { const n = Number(v); if (Number.isFinite(n)) webtoonGap.value = Math.min(24, Math.max(0, Math.round(n))); }],
+      ['webtoon_scroll_speed', (v) => { const n = Number(v); if (Number.isFinite(n)) webtoonScrollSpeed.value = Math.min(300, Math.max(10, Math.round(n))); }],
       ['fb_masonry_default_cols', (v) => (masonryDefaultCols.value = Number(v))],
       ['fb_masonry_default_h_gap', (v) => (masonryDefaultHGap.value = Number(v))],
       ['fb_masonry_default_v_gap', (v) => (masonryDefaultVGap.value = Number(v))],
@@ -261,13 +269,27 @@ export const useSettingsStore = defineStore('settings', () => {
    *  - 调用方: ReaderMainMenu / ReaderContextMenu 的 cycle-mode handler
    */
   async function cycleReaderMode(): Promise<void> {
-    const next: ReaderMode = readerDefaultMode.value === 'single' ? 'double' : 'single';
+    const order: ReadMode[] = ['single', 'double', 'webtoon'];
+    const next = order[(order.indexOf(readerDefaultMode.value) + 1) % order.length];
     log('[settings] cycleReaderMode →', next, '(was', readerDefaultMode.value, ')');
     // 用 $patch 强制 Pinia 触发响应 + 同步 DB
     const store = useSettingsStore();
     store.$patch({ readerDefaultMode: next });
     await update('reader_default_mode', next);
     log('[settings] cycleReaderMode done, current=', readerDefaultMode.value);
+  }
+
+  async function setWebtoonMaxWidth(px: number): Promise<void> {
+    webtoonMaxWidth.value = Math.max(0, Math.round(px));
+    await update('webtoon_max_width', webtoonMaxWidth.value);
+  }
+  async function setWebtoonGap(px: number): Promise<void> {
+    webtoonGap.value = Math.min(24, Math.max(0, Math.round(px)));
+    await update('webtoon_gap', webtoonGap.value);
+  }
+  async function setWebtoonScrollSpeed(px: number): Promise<void> {
+    webtoonScrollSpeed.value = Math.min(300, Math.max(10, Math.round(px)));
+    await update('webtoon_scroll_speed', webtoonScrollSpeed.value);
   }
 
   /**
@@ -298,6 +320,9 @@ export const useSettingsStore = defineStore('settings', () => {
     defaultScaleMode,
     defaultReadDirection,
     currentScaleMode,
+    webtoonMaxWidth,
+    webtoonGap,
+    webtoonScrollSpeed,
     masonryDefaultCols,
     masonryDefaultHGap,
     masonryDefaultVGap,
@@ -321,6 +346,9 @@ export const useSettingsStore = defineStore('settings', () => {
     load,
     update,
     setScaleMode,
+    setWebtoonMaxWidth,
+    setWebtoonGap,
+    setWebtoonScrollSpeed,
     setMasonryDefaultCols,
     setMasonryDefaultHGap,
     setMasonryDefaultVGap,
