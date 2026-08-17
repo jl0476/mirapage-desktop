@@ -9,6 +9,13 @@ import { createI18n } from 'vue-i18n';
 import zhCN from '@/locales/zh-CN';
 import { useReaderStore } from '@/stores/reader';
 import ReaderScreen from './ReaderScreen.vue';
+import WebtoonViewerStub from './WebtoonViewer.vue';
+
+interface WebtoonRegistry {
+  scrollTargets: string[];
+  el: { clientHeight: number; scrollHeight: number; scrollTop: number; scrollBy: ReturnType<typeof vi.fn> };
+}
+const wtStub = WebtoonViewerStub as unknown as { __registry: WebtoonRegistry };
 
 vi.mock('./SinglePageViewer.vue', () => ({
   default: {
@@ -24,6 +31,26 @@ vi.mock('./DoublePageViewer.vue', () => ({
     template: '<div data-test="double" :data-pages="pageUrls.length" :data-spreads="spreads.length" :data-current="currentSpreadIndex" />',
   },
 }));
+// module3.1.0 webtoon 编排测试 stub：expose 契约与真实 viewer 一致（全 getter），
+// 状态集中在 __registry，测试断言 scrollBy / scrollToImage 副作用。
+vi.mock('./WebtoonViewer.vue', () => {
+  const registry = {
+    scrollTargets: [] as string[],
+    el: { clientHeight: 100, scrollHeight: 500, scrollTop: 0, scrollBy: vi.fn() },
+  };
+  const component = {
+    name: 'WebtoonViewer',
+    template: '<div data-test="webtoon-viewer-stub" />',
+    setup(_props: unknown, ctx: { expose: (exposed: Record<string, unknown>) => void }) {
+      ctx.expose({
+        scrollToImage: (name: string) => { registry.scrollTargets.push(name); },
+        getScrollEl: () => registry.el,
+      });
+    },
+    __registry: registry,
+  };
+  return { default: component };
+});
 // v0.1.0-module3.0.2-hotfix1 (N1): 不 mock slideshow 任何方法
 // (整个 store 透传, 让 setAdvance/setPrev/setIsAtLast 实际写入真实 store 内部 fn)
 // 测试通过 tick() 副作用观察 cleanup: mount 注入 nextPage fn,
@@ -147,6 +174,67 @@ describe('ReaderScreen.vue', () => {
       vi.advanceTimersByTime(500);
       expect(reader.currentSpreadIndex).toBe(initialSpreadIndex);
       slideshow.pause();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── module3.1.0 webtoon 分支 ──────────────────────────────────────────
+  const webtoonDescriptor = { type: 'local', rootPath: '/test/manga' };
+
+  it('renders WebtoonViewer when mode="webtoon"（descriptor 存在时）', () => {
+    const w = mountReader({ mode: 'webtoon', pageNames: ['a.jpg', 'b.jpg'], descriptor: webtoonDescriptor, relPath: '' });
+    expect(w.find('[data-test="webtoon-viewer-stub"]').exists()).toBe(true);
+    expect(w.find('[data-test="single"]').exists()).toBe(false);
+    expect(w.find('[data-test="double"]').exists()).toBe(false);
+  });
+
+  it('webtoon + descriptor 缺失 → 不渲染任何 viewer（三层判空链）', () => {
+    const w = mountReader({ mode: 'webtoon', pageNames: ['a.jpg'] });
+    expect(w.find('[data-test="webtoon-viewer-stub"]').exists()).toBe(false);
+    expect(w.find('[data-test="double"]').exists()).toBe(false);
+  });
+
+  it('overlay ◀▶ 按钮 webtoon 分流：scrollByScreen 而非 store 翻页', async () => {
+    wtStub.__registry.el.scrollBy.mockClear();
+    const w = mountReader({ mode: 'webtoon', pageNames: ['a.jpg', 'b.jpg'], descriptor: webtoonDescriptor, relPath: '', pageOverride: 1 });
+    await w.find('[data-test="trigger-zone-top"]').trigger('mouseenter');
+    await w.find('[data-test="btn-next"]').trigger('click');
+    expect(wtStub.__registry.el.scrollBy).toHaveBeenCalledWith({ top: 90, behavior: 'auto' });
+    await w.find('[data-test="btn-prev"]').trigger('click');
+    expect(wtStub.__registry.el.scrollBy).toHaveBeenLastCalledWith({ top: -90, behavior: 'auto' });
+  });
+
+  it('overlay 跳页 webtoon 分流：scrollToImage 目标图而非 spread', async () => {
+    wtStub.__registry.scrollTargets = [];
+    const w = mountReader({ mode: 'webtoon', pageNames: ['a.jpg', 'b.jpg', 'c.jpg'], descriptor: webtoonDescriptor, relPath: '' });
+    await w.find('[data-test="trigger-zone-top"]').trigger('mouseenter');
+    const form = w.find('[data-test="jump-input"]');
+    await form.find('input').setValue(3);
+    await form.trigger('submit');
+    expect(wtStub.__registry.scrollTargets).toEqual(['c.jpg']);
+  });
+
+  it('slideshow tick mode-aware：webtoon 下不推进 spread（interval 空转无害）', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = mountReader({ mode: 'webtoon', pageNames: ['a.jpg', 'b.jpg'], descriptor: webtoonDescriptor, relPath: '' });
+      const reader = useReaderStore();
+      reader.openBook({
+        bookId: 1,
+        title: 'demo',
+        pages: ['a.jpg', 'b.jpg', 'c.jpg'],
+        spreads: [{ start: 0, end: 1 }, { start: 1, end: 3 }],
+        initialSpreadIndex: 0,
+      });
+      const before = reader.currentSpreadIndex;
+      const slideshow = (await import('@/stores/slideshow')).useSlideshowStore();
+      slideshow.intervalMs = 50;
+      slideshow.start();
+      vi.advanceTimersByTime(200);
+      expect(reader.currentSpreadIndex).toBe(before);
+      slideshow.pause();
+      w.unmount();
     } finally {
       vi.useRealTimers();
     }

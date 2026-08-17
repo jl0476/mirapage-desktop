@@ -34,6 +34,8 @@ interface Props {
   scaleMode?: ScaleMode;
   mode?: 'single' | 'double' | 'webtoon';
   webtoonZoom?: number;
+  currentPageOverride?: number | null;
+  totalPagesOverride?: number | null;
   direction?: 'ltr' | 'rtl';
   isSlideshowPlaying?: boolean;
   slideshowDirection?: 'forward' | 'backward';
@@ -48,6 +50,8 @@ const props = withDefaults(defineProps<Props>(), {
   isSlideshowPlaying: false,
   slideshowDirection: 'forward',
   webtoonZoom: 1,
+  currentPageOverride: null,
+  totalPagesOverride: null,
 });
 
 const emit = defineEmits<{
@@ -139,7 +143,7 @@ function onOpenBookmarks(): void {
           {{ title }}
         </h2>
         <span class="text-xs text-text-muted font-mono">
-          {{ currentSpreadIndex + 1 }} / {{ totalSpreads }}
+          {{ currentPageOverride ?? currentSpreadIndex + 1 }} / {{ totalPagesOverride ?? totalSpreads }}
         </span>
         <button
           class="px-3 py-1.5 rounded text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"

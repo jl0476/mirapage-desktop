@@ -55,6 +55,11 @@ export function useWebtoonDimensions(
         }
       } catch (error) {
         log('[webtoon] listImageDimensions failed', error);
+        // 整批失败按瞬时错误处理：从 requested 移除，允许后续窗口经过时重试
+        // （本地挂载盘临时 I/O 失败不至于永久退化为估算尺寸）。
+        for (const fullPath of batch) {
+          requested.delete(fullNameToName.get(fullPath) ?? fullPath);
+        }
       }
     })();
     inFlight = request;

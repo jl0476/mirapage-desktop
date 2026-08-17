@@ -42,7 +42,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
 import { useReaderWheel } from '@/composables/useReaderWheel';
 import { useKeepScreenOn } from '@/composables/useKeepScreenOn';
-import { useWebtoonProgress } from '@/composables/useWebtoonProgress';
+import { useWebtoonProgress, STABLE_MS } from '@/composables/useWebtoonProgress';
 import {
   useReaderBookLoader,
   type BookIdentity,
@@ -78,6 +78,8 @@ const imageNames = ref([] as string[]);
 const webtoonPageIndex = ref(0);
 const webtoonAtBottom = ref(false);
 const webtoonScreenRef = ref<InstanceType<typeof ReaderScreen> | null>(null);
+const webtoonZoom = ref(1);
+const isWebtoon = computed(() => settings.readerDefaultMode === 'webtoon');
 const webtoonProgress = useWebtoonProgress({ bookId: computed(() => reader.bookId), atBottom: webtoonAtBottom });
 const containerRef = ref(null as HTMLElement | null);
 const showMainMenu = ref(false);
@@ -189,7 +191,7 @@ async function onToggleLike(): Promise<void> {
 
 // v0.1.0-reader-review: 跳页 dialog
 function openJumpDialog(): void {
-  jumpDialogValue.value = reader.currentSpreadIndex + 1;
+  jumpDialogValue.value = isWebtoon.value ? webtoonPageIndex.value + 1 : reader.currentSpreadIndex + 1;
   jumpDialogRef.value?.showModal();
   // 自动 focus input (showModal 后需 nextTick 才能 querySelector)
   void nextTick(() => {
@@ -205,6 +207,11 @@ function doJumpToPage(page: number): void {
   const total = pageUrls.value.length;
   if (total === 0) return;
   const target = Math.min(Math.max(1, Math.floor(page)), total) - 1;
+  if (isWebtoon.value) {
+    const name = imageNames.value[target];
+    if (name) webtoonScreenRef.value?.getWebtoonViewer()?.scrollToImage(name);
+    return;
+  }
   const singlePage = settings.readerDefaultMode === 'single';
   const spreads = SpreadPlanner.plan(total, true, singlePage);
   const idx = SpreadPlanner.spreadIndexForPage(target, spreads);
@@ -249,18 +256,53 @@ function markWebtoonScroll(): void {
 
 function onWebtoonBottom(): void {
   webtoonAtBottom.value = true;
+  void requestCrossVolumeNext();
 }
 
 function onWebtoonScroll(): void {
   markWebtoonScroll();
 }
 
+// 滚轮临时变速（spec §4）：播放中滚轮每格 ±20%（clamp 0-3×），2s 无滚轮回落 1×。
+const webtoonSpeedFactor = ref(1);
+let lastWheelAt = 0;
 function onWebtoonWheel(deltaY: number): void {
+  lastWheelAt = Date.now();
+  webtoonSpeedFactor.value = Math.min(3, Math.max(0, webtoonSpeedFactor.value * (deltaY > 0 ? 1.2 : 1 / 1.2)));
   if (deltaY > 0) markWebtoonScroll();
 }
 
-function onWebtoonZoom(): void {
+function onWebtoonZoom(z: number): void {
+  webtoonZoom.value = z;
   markWebtoonScroll();
+}
+
+/** webtoon 滚屏（hotkeys / ReaderScreen 按钮共用）：一次 90% 视口高。 */
+function scrollScreen(dir: 1 | -1): void {
+  const el = webtoonScreenRef.value?.getWebtoonViewer()?.getScrollEl();
+  if (!el) return;
+  el.scrollBy({ top: dir * el.clientHeight * 0.9, behavior: 'auto' });
+}
+
+// 跨卷请求（spec §6）：底部再向下滚 / PageDown 在底部时触发；800ms 节流。
+// 手动越底与自动结束同流程——从底部发起先 ensureFinished 成功才跨卷（五轮 P1-3）；
+// Alt+→ force 不经此函数（卷中发起不标完）。
+let lastCrossVolumeReqAt = 0;
+async function requestCrossVolumeNext(): Promise<void> {
+  const now = Date.now();
+  if (now - lastCrossVolumeReqAt < 800) return;
+  lastCrossVolumeReqAt = now;
+  cancelAutoEnd();
+  if (webtoonAtBottom.value) {
+    const capturedBookId = reader.bookId;
+    const ok = await webtoonProgress.ensureFinished();
+    // await 后复核：返回值 / 仍是发起时的卷 / 仍在 webtoon / 仍在底部。
+    if (!ok || !isWebtoon.value || reader.bookId !== capturedBookId || !webtoonAtBottom.value) return;
+  }
+  await crossVolume.maybeContinue(false, 'next');
+}
+function onWebtoonBottomKeyPush(): void {
+  if (webtoonAtBottom.value) void requestCrossVolumeNext();
 }
 
 const modeSwitchInFlight = ref(false);
@@ -276,6 +318,57 @@ function onToggleReaderMode(): void {
   });
 }
 
+
+// ── webtoon 自动滚动 rAF + 自动结束状态机（spec §4，五轮 P0-1/P0-2）──
+// 顺序：到底帧先 pause → 挂可取消 autoEnd 定时器（STABLE_MS+200）→ fire 前后
+// 四重校验（isWebtoon / seq / bookId / atBottom）→ ensureFinished 成功才发
+// pendingNextVolume（标完失败不跨）。取消点：滚离底部 / 换书跨卷 / 切模式 /
+// 手动跨卷（requestCrossVolumeNext）/ 卸载。
+let autoEndTimer: ReturnType<typeof setTimeout> | null = null;
+let autoEndSeq = 0;
+function cancelAutoEnd(): void {
+  autoEndSeq += 1;
+  if (autoEndTimer !== null) { clearTimeout(autoEndTimer); autoEndTimer = null; }
+}
+watch(webtoonAtBottom, (b) => { if (!b) cancelAutoEnd(); });
+watch(() => reader.bookId, () => cancelAutoEnd());
+watch(isWebtoon, (w) => {
+  cancelAutoEnd();
+  // 切出 webtoon 时 viewer 即将卸载，atBottom 冻结 true 会让 stableTimer
+  // 迟到误标 finished——显式置 false 触发 composable watch 清掉 stableTimer。
+  if (!w) webtoonAtBottom.value = false;
+});
+
+let rafId: number | null = null;
+let lastTs = 0;
+function webtoonStep(ts: number): void {
+  if (!isWebtoon.value || !slideshow.isPlaying) { rafId = null; return; }
+  const dt = lastTs ? Math.min(100, ts - lastTs) : 16;
+  lastTs = ts;
+  if (Date.now() - lastWheelAt > 2000) webtoonSpeedFactor.value = 1;
+  webtoonScreenRef.value?.getWebtoonViewer()?.autoScrollStep(dt, settings.webtoonScrollSpeed, webtoonSpeedFactor.value);
+  markWebtoonScroll();
+  if (webtoonAtBottom.value) {
+    slideshow.pause();
+    rafId = null;
+    cancelAutoEnd();
+    const capturedBookId = reader.bookId;
+    const mySeq = autoEndSeq;
+    autoEndTimer = setTimeout(async () => {
+      autoEndTimer = null;
+      if (!isWebtoon.value || mySeq !== autoEndSeq || reader.bookId !== capturedBookId || !webtoonAtBottom.value) return;
+      const ok = await webtoonProgress.ensureFinished();
+      if (!ok || !isWebtoon.value || mySeq !== autoEndSeq || reader.bookId !== capturedBookId || !webtoonAtBottom.value) return;
+      slideshow.pendingNextVolumeFromSlideshow = true;  // A7：捕获「发起时在播」
+      slideshow.pendingNextVolume = true;                 // 现有 watch → maybeContinue
+    }, STABLE_MS + 200);
+    return;
+  }
+  rafId = requestAnimationFrame(webtoonStep);
+}
+watch(() => [isWebtoon.value, slideshow.isPlaying] as const, ([w, p]) => {
+  if (w && p && rafId === null) { lastTs = 0; rafId = requestAnimationFrame(webtoonStep); }
+});
 
 // bugfix 2026-08-15: 记录在途加载 promise —— navigateToVolume await 新卷 commit
 // 后才返回，跨卷续播（resumeSlideshow）由此拿到确定时机。
@@ -305,6 +398,12 @@ async function loadRouteBook(bookId: number): Promise<void> {
     bookLoadPhase.value = 'ready';
     status.value = 'ready';
     visibleReader.value = true;
+    // webtoon 恢复链（spec §5）：loader 的 restoreImageIndex 图索引 → scrollToImage
+    // 渐进到位（?at= 优先 / finished→0 / 无进度→0 均由 loader 折叠进该索引）。
+    if (settings.readerDefaultMode === 'webtoon') {
+      const name = snapshot.imageNames[snapshot.restoreImageIndex] ?? snapshot.imageNames[0];
+      void nextTick(() => webtoonScreenRef.value?.getWebtoonViewer()?.scrollToImage(name));
+    }
     // 2026-08-16: 阅览记录——所有进阅读器的路径统一在此记录（含自动跨卷：
     // navigateToVolume 走 router.replace → 本函数，此前只有 useReaderActions
     // 入口记录，跨卷漏记）。record_history 幂等 upsert，与 actions 入口的
@@ -490,12 +589,16 @@ function recomputeSpreadsForMode(): void {
  */
 useReaderHotkeys({
   nextVolume: () => { void crossVolume.maybeContinue(true, 'next'); },
-  isWebtoon: () => settings.readerDefaultMode === 'webtoon',
-  nextPage: () => { webtoonScreenRef.value?.getWebtoonViewer()?.autoScrollStep(16, 1, 1); },
-  prevPage: () => { webtoonScreenRef.value?.getWebtoonViewer()?.autoScrollStep(-16, 1, 1); },
+  isWebtoon: () => isWebtoon.value,
+  nextPage: () => { scrollScreen(1); onWebtoonBottomKeyPush(); },
+  prevPage: () => scrollScreen(-1),
+  jumpFirst: () => { const el = webtoonScreenRef.value?.getWebtoonViewer()?.getScrollEl(); if (el) el.scrollTop = 0; },
+  jumpLast: () => { const el = webtoonScreenRef.value?.getWebtoonViewer()?.getScrollEl(); if (el) el.scrollTop = el.scrollHeight; },
 });
 useReaderWheel({
   containerRef,
+  // webtoon 不接管滚轮（原生滚动 + viewer Ctrl 缩放；spec §6）
+  disabled: computed(() => isWebtoon.value),
   onPrev: () => { reader.prevPage(); slideshow.reset(); },
   onNext: () => { reader.nextPage(); slideshow.reset(); },
 });
@@ -512,6 +615,8 @@ onUnmounted(() => {
   if (reader.bookId !== null) {
     void saveProgressForCurrentMode();
   }
+  if (rafId !== null) cancelAnimationFrame(rafId);
+  cancelAutoEnd();
   slideshow.pause();
   reader.closeBook();
   log('[ReaderView/onUnmounted] done');
@@ -553,6 +658,8 @@ onUnmounted(() => {
       :descriptor="reader.sourceDescriptor ?? undefined"
       :rel-path="reader.currentRelPath"
       :page-override="webtoonPageIndex"
+      :webtoon-max-width="settings.webtoonMaxWidth"
+      :webtoon-gap="settings.webtoonGap"
       ref="webtoonScreenRef"
       :spreads="reader.spreads"
       :initial-spread-index="reader.currentSpreadIndex"
@@ -579,16 +686,20 @@ onUnmounted(() => {
       :is-slideshow-playing="slideshow.isPlaying"
       :slideshow-direction="slideshow.direction"
       :is-liked="(book?.isFavorite ?? false)"
+      :webtoon-zoom="webtoonZoom"
+      :current-page-override="isWebtoon ? webtoonPageIndex + 1 : null"
+      :total-pages-override="isWebtoon ? pageUrls.length : null"
       @open-jump-input="openJumpDialog"
       @back="goBackToFileBrowser()"
-      @cycle-mode="() => settings.cycleReaderMode()"
+      @cycle-mode="onToggleReaderMode"
       @cycle-direction="() => settings.cycleReadDirection()"
       @scale-change="(m: ScaleMode) => settings.setScaleMode(m)"
       @toggle-slideshow="() => slideshow.toggle()"
       @toggle-slideshow-direction="onToggleSlideshowDirection"
       @navigate="(p: string) => router.push(p)"
       @toggle-like="onToggleLike"
-      @add-bookmark="book?.id != null && addBookmark(book.id, reader.currentSpreadIndex, null)"
+      @add-bookmark="book?.id != null && addBookmark(book.id, isWebtoon ? webtoonPageIndex : reader.currentSpreadIndex, null)"
+      @reset-zoom="() => webtoonScreenRef?.getWebtoonViewer()?.setZoom(1)"
     >
     </ReaderMainMenu>
 

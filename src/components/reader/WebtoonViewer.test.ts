@@ -77,6 +77,14 @@ describe('WebtoonViewer（module3.1.0）', () => {
     w.vm.autoScrollStep(1000, 60, 1); expect(el.scrollTop).toBe(60);
   });
 
+  it('autoScrollStep 负向位移 clamp 到 0（不出现负 scrollTop）', async () => {
+    const w = mountViewer(); await flushPromises();
+    const el = w.find('.webtoon-scroll').element as HTMLElement;
+    Object.defineProperty(el, 'scrollTop', { value: 50, writable: true });
+    Object.defineProperty(el, 'scrollHeight', { value: 10000 });
+    w.vm.autoScrollStep(1000, 60, -1); expect(el.scrollTop).toBe(0);
+  });
+
   it('wheel 底部向下滚动 emit scroll-past-bottom', async () => {
     const w = mountViewer(); await flushPromises();
     const el = w.find('.webtoon-scroll');

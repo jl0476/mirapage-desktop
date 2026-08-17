@@ -87,4 +87,18 @@ describe('useWebtoonDimensions（module3.1.0）', () => {
     await expect(d.ensureRange(0, 1)).resolves.toBeUndefined();
     expect(d.measuredMap.value.size).toBe(0);
   });
+
+  it('整批 IPC 失败后允许重试：requested 清理，再次 ensureRange 重新发起请求', async () => {
+    vi.mocked(listImageDimensions)
+      .mockRejectedValueOnce(new Error('transient io'))
+      .mockResolvedValueOnce([{ path: 'a.jpg', width: 800, height: 600 }]);
+    const d = mk();
+    await d.ensureRange(0, 1);
+    expect(d.measuredMap.value.size).toBe(0);
+    expect(listImageDimensions).toHaveBeenCalledTimes(1);
+    // 若 requested 未清理，第二次同窗口 batch 为空不再请求（永久退化为估算）
+    await d.ensureRange(0, 1);
+    expect(listImageDimensions).toHaveBeenCalledTimes(2);
+    expect(d.measuredMap.value.get('a.jpg')).toEqual({ width: 800, height: 600 });
+  });
 });

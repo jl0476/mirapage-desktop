@@ -41,7 +41,7 @@ function setZoom(value: number, anchorX?: number, anchorY?: number): void {
 function onWheel(e: WheelEvent): void { if (e.ctrlKey) { e.preventDefault(); const r = scrollEl.value?.getBoundingClientRect(); const d = e.deltaY < 0 ? 1.1 : 1 / 1.1; setZoom(zoom.value * d, r ? e.clientX - r.left : undefined, r ? e.clientY - r.top : undefined); return; } emit('wheel-delta', e.deltaY); if (e.deltaY > 0 && atBottom.value) emitBottom(); }
 let lastBottom = 0; function emitBottom() { const n = Date.now(); if (n - lastBottom >= 800) { lastBottom = n; emit('scroll-past-bottom'); } }
 function onDblclick(e: MouseEvent) { const r = scrollEl.value?.getBoundingClientRect(); const x = r ? e.clientX - r.left : undefined; const y = r ? e.clientY - r.top : undefined; setZoom(zoom.value === 1 ? lastNonUnityZoom : 1, x, y); }
-function autoScrollStep(dt: number, speed: number, factor: number) { const el = scrollEl.value; if (el) el.scrollTop = Math.min(el.scrollHeight, el.scrollTop + autoScrollDelta(speed, factor, dt)); }
+function autoScrollStep(dt: number, speed: number, factor: number) { const el = scrollEl.value; if (el) el.scrollTop = Math.max(0, Math.min(el.scrollHeight, el.scrollTop + autoScrollDelta(speed, factor, dt))); }
 function onScroll() { const el = scrollEl.value; if (!el) return; scrollTop.value = el.scrollTop; viewportHeight.value = el.clientHeight; containerWidth.value = el.clientWidth; emit('scroll'); }
 let ro: ResizeObserver | null = null;
 onMounted(() => { onScroll(); if (typeof ResizeObserver !== 'undefined' && scrollEl.value) { ro = new ResizeObserver(onScroll); ro.observe(scrollEl.value); } emit('zoom-change', zoom.value); void ensureRange(windowRange.value.start, windowRange.value.end); });

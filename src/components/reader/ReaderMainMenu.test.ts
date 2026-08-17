@@ -265,4 +265,12 @@ describe('ReaderMainMenu.vue', () => {
     await w.vm.$nextTick();
     expect(w.emitted('toggle-slideshow-direction')).toBeTruthy();
   });
+
+  it('页码 override（十轮 P2）：webtoon 下显示 currentPageOverride / totalPagesOverride', async () => {
+    const w = mountMenu({ mode: 'webtoon', currentPageOverride: 5, totalPagesOverride: 120 });
+    await w.vm.$nextTick();
+    const header = document.body.querySelector('[data-test="menu-jump"]')?.parentElement;
+    expect(header?.textContent).toContain('5 / 120');
+  });
+
 });

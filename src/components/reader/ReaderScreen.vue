@@ -329,13 +329,18 @@ const singlePageUrl = computed(() => {
   return url;
 });
 
+function scrollByScreen(dir: 1 | -1): void {
+  const el = webtoonViewerRef.value?.getScrollEl();
+  if (!el) return;
+  el.scrollBy({ top: dir * el.clientHeight * 0.9, behavior: 'auto' });
+}
 function onPrev() {
-  if (props.mode === 'webtoon') return;
+  if (props.mode === 'webtoon') { scrollByScreen(-1); return; }
   store.prevPage();
   slideshow.reset();
 }
 function onNext() {
-  if (props.mode === 'webtoon') return;
+  if (props.mode === 'webtoon') { scrollByScreen(1); return; }
   store.nextPage();
   slideshow.reset();
 }
@@ -343,7 +348,13 @@ function onToggleMode() {
   emit('toggle-mode');
 }
 function onJump(page: number) {
-  if (props.mode === 'webtoon') return;
+  if (props.mode === 'webtoon') {
+    const pageNames = props.pageNames ?? [];
+    const clamped = Math.max(0, Math.min(page - 1, pageNames.length - 1));
+    const name = pageNames[clamped];
+    if (name) webtoonViewerRef.value?.scrollToImage(name);
+    return;
+  }
   // 跳到该页所在的 spread
   const target = page - 1;
   const idx = SpreadPlanner.spreadIndexForPage(target, finalSpreads.value);
@@ -381,12 +392,12 @@ function onContainerMouseLeave(): void {
         @image-loaded="onFirstImageLoaded"
       />
       <WebtoonViewer
-        v-else-if="mode === 'webtoon'"
+        v-else-if="mode === 'webtoon' && descriptor"
         :key="webtoonKey"
         ref="webtoonViewerRef"
         :urls="props.pageUrls"
         :names="props.pageNames ?? []"
-        :descriptor="props.descriptor!"
+        :descriptor="descriptor"
         :rel-path="props.relPath ?? ''"
         :max-width="props.webtoonMaxWidth"
         :gap="props.webtoonGap"
@@ -396,7 +407,7 @@ function onContainerMouseLeave(): void {
         @scroll-past-bottom="emit('scroll-past-bottom')"
       />
       <DoublePageViewer
-        v-else
+        v-else-if="mode === 'double'"
         :key="`double-${mode}`"
         :ref="(el: unknown) => { doubleViewerRef = el as InstanceType<typeof DoublePageViewer> | null }"
         :page-urls="props.pageUrls"

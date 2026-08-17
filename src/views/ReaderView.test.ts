@@ -39,6 +39,9 @@ vi.mock('@/lib/tauri', async () => {
     setSetting: vi.fn(async () => undefined),
     setFavorite: vi.fn(async () => undefined),
     findNextVolume: vi.fn(async () => null),
+    markFinished: vi.fn(async () => undefined),
+    listImageDimensions: vi.fn(async () => []),
+    addBookmark: vi.fn(async () => ({ id: 1, bookId: 7, page: 0, label: null, createdAt: 0 })),
     recordHistory: vi.fn(async () => undefined),
     createBook: vi.fn(async () => 8),
   };
@@ -47,6 +50,37 @@ vi.mock('@/lib/tauri', async () => {
 vi.mock('@/composables/useReaderHotkeys', () => ({ useReaderHotkeys: vi.fn() }));
 vi.mock('@/composables/useReaderWheel', () => ({ useReaderWheel: vi.fn() }));
 vi.mock('@/composables/useKeepScreenOn', () => ({ useKeepScreenOn: vi.fn() }));
+
+vi.mock('@/components/reader/WebtoonViewer.vue', () => {
+  // module3.1.0 编排测试专用 stub：expose 契约与真实 viewer 一致（全 getter），
+  // 状态集中在 __registry，测试直接改 topImage/atBottom/zoom 并断言滚动副作用。
+  const registry = {
+    topImage: 'a.jpg' as string | null,
+    atBottom: false,
+    zoom: 1,
+    scrollTargets: [] as string[],
+    steps: 0,
+    setZoomCalls: [] as number[],
+    el: { clientHeight: 100, scrollHeight: 500, scrollTop: 0, scrollBy: vi.fn() },
+  };
+  const component = {
+    name: 'WebtoonViewer',
+    template: '<div data-test="webtoon-viewer-stub" />',
+    setup(_props: unknown, ctx: { expose: (exposed: Record<string, unknown>) => void }) {
+      ctx.expose({
+        getTopVisibleImage: () => registry.topImage,
+        isAtBottom: () => registry.atBottom,
+        getZoom: () => registry.zoom,
+        setZoom: (z: number) => { registry.zoom = z; registry.setZoomCalls.push(z); },
+        scrollToImage: (name: string) => { registry.scrollTargets.push(name); },
+        autoScrollStep: (dt: number) => { registry.steps += dt; },
+        getScrollEl: () => registry.el,
+      });
+    },
+    __registry: registry,
+  };
+  return { default: component };
+});
 vi.mock('@tauri-apps/api/core', () => ({
   // v0.1.0-module3.0.2-hotfix4 (H9): mock 模拟 Tauri 真实 convertFileSrc 行为
   // (单层 percent-encode, encodeURI + 额外 encode sub-delims ( ) ! * ').
@@ -69,6 +103,21 @@ import { useSlideshowStore } from '@/stores/slideshow';
 import { getBook, getProgress, listDirectory, setFavorite, findNextVolume, createBook, recordHistory } from '@/lib/tauri';
 import { useSettingsStore } from '@/stores/settings';
 import ReaderView from './ReaderView.vue';
+import { useReaderHotkeys } from '@/composables/useReaderHotkeys';
+import { useReaderWheel } from '@/composables/useReaderWheel';
+import { markFinished, addBookmark } from '@/lib/tauri';
+import WebtoonViewerStub from '@/components/reader/WebtoonViewer.vue';
+
+interface WebtoonRegistry {
+  topImage: string | null;
+  atBottom: boolean;
+  zoom: number;
+  scrollTargets: string[];
+  steps: number;
+  setZoomCalls: number[];
+  el: { clientHeight: number; scrollHeight: number; scrollTop: number; scrollBy: ReturnType<typeof vi.fn> };
+}
+const wtStub = WebtoonViewerStub as unknown as { __registry: WebtoonRegistry };
 
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
@@ -1219,6 +1268,334 @@ describe('ReaderView.vue', () => {
     expect(slideshow.isPlaying).toBe(true);          // ← 跨卷后续播
 
     slideshow.pause();
+    w.unmount();
+  });
+
+});
+
+
+describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    wtStub.__registry.topImage = 'a.jpg';
+    wtStub.__registry.atBottom = false;
+    wtStub.__registry.zoom = 1;
+    wtStub.__registry.scrollTargets = [];
+    wtStub.__registry.steps = 0;
+    wtStub.__registry.setZoomCalls = [];
+    wtStub.__registry.el.scrollTop = 0;
+    wtStub.__registry.el.scrollBy.mockClear();
+  });
+
+  /** webtoon 模式挂载：settings 默认模式切 webtoon 后 mount。 */
+  async function mountWebtoon() {
+    const settings = useSettingsStore();
+    settings.readerDefaultMode = 'webtoon';
+    const router = makeRouter();
+    await router.isReady();
+    return mount(ReaderView, { global: { plugins: [i18n, router] } });
+  }
+  function findViewer(w: ReturnType<typeof mount>) {
+    return w.findComponent({ name: 'WebtoonViewer' });
+  }
+
+  it('恢复链：webtoon 挂载后按 restoreImageIndex 调 scrollToImage（progress 空 → 第 0 张）', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    expect(wtStub.__registry.scrollTargets).toContain('a.jpg');
+    w.unmount();
+  });
+
+  it('跳页 dialog webtoon 分流：提交页码 → scrollToImage 该图（不碰 spread）', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    wtStub.__registry.scrollTargets = [];
+    const input = w.find('[data-test="jump-dialog-input"]');
+    await input.setValue(3);
+    await w.find('[data-test="jump-dialog"] form').trigger('submit');
+    expect(wtStub.__registry.scrollTargets).toEqual(['c.jpg']);
+    w.unmount();
+  });
+
+  it('unmount 双写防护：webtoon 走 flushNow 写 webtoon 位置，不走 paged 链（P0-2）', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    wtStub.__registry.topImage = 'b.jpg';
+    findViewer(w).vm.$emit('scroll');
+    await flushPromises();
+    w.unmount();
+    await flushPromises();
+    expect(markFinished).not.toHaveBeenCalled();
+    const calls = vi.mocked(await import('@/lib/tauri')).saveProgress.mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.[0]).toBe(7);
+    expect(calls[0]?.[2]).toBe('webtoon');
+    expect(calls[0]?.[4]).toBe('b.jpg');
+  });
+
+  it('手动越底：scroll-past-bottom → ensureFinished 成功 → maybeContinue（auto 档查下一卷）', async () => {
+    const settings = useSettingsStore();
+    settings.continueToNextVolume = 'auto';
+    const w = await mountWebtoon();
+    await flushPromises();
+    vi.mocked(await import('@/lib/tauri')).findNextVolume.mockClear();
+    wtStub.__registry.atBottom = true;
+    findViewer(w).vm.$emit('scroll');
+    await flushPromises();
+    findViewer(w).vm.$emit('scroll-past-bottom');
+    await flushPromises();
+    expect(markFinished).toHaveBeenCalledWith(7, true);
+    expect(vi.mocked(await import('@/lib/tauri')).findNextVolume).toHaveBeenCalled();
+    w.unmount();
+  });
+
+  it('手动越底节流：800ms 内第二次 scroll-past-bottom 不重复 ensureFinished', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    wtStub.__registry.atBottom = true;
+    findViewer(w).vm.$emit('scroll');
+    await flushPromises();
+    findViewer(w).vm.$emit('scroll-past-bottom');
+    await flushPromises();
+    findViewer(w).vm.$emit('scroll-past-bottom');
+    await flushPromises();
+    expect(markFinished).toHaveBeenCalledTimes(1);
+    w.unmount();
+  });
+
+  it('手动越底身份校验：写入期间换卷（bookId 变）→ 不发起跨卷', async () => {
+    const settings = useSettingsStore();
+    settings.continueToNextVolume = 'auto';
+    const w = await mountWebtoon();
+    await flushPromises();
+    const tauri = vi.mocked(await import('@/lib/tauri'));
+    let resolveMark!: () => void;
+    vi.mocked(markFinished).mockImplementationOnce(() => new Promise<void>((resolve) => { resolveMark = resolve; }));
+    tauri.findNextVolume.mockClear();
+    wtStub.__registry.atBottom = true;
+    findViewer(w).vm.$emit('scroll');
+    await flushPromises();
+    findViewer(w).vm.$emit('scroll-past-bottom');
+    await flushPromises();
+    // markFinished 挂起期间换卷（跨卷/直接 URL）
+    const reader = useReaderStore();
+    reader.bookId = 99;
+    resolveMark();
+    await flushPromises();
+    expect(tauri.findNextVolume).not.toHaveBeenCalled();
+    w.unmount();
+  });
+
+  it('自动滚动 autoEnd：到底 pause → STABLE_MS+200 后 ensureFinished 成功 → 发起跨卷', async () => {
+    vi.useFakeTimers();
+    try {
+      const settingsAuto = useSettingsStore();
+      settingsAuto.continueToNextVolume = 'auto';
+      const w = await mountWebtoon();
+      await flushPromises();
+      const slideshow = useSlideshowStore();
+      wtStub.__registry.atBottom = true;
+      slideshow.start();
+      await flushPromises();
+      // rAF 帧（fake timers 接管 rAF）：step → atBottom → pause + 挂 autoEndTimer
+      await vi.advanceTimersByTimeAsync(50);
+      expect(slideshow.isPlaying).toBe(false);
+      expect(wtStub.__registry.steps).toBeGreaterThan(0);
+      expect(markFinished).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(markFinished).toHaveBeenCalledWith(7, true);
+      // pendingNextVolume 是一次性意图：watch 消费后由 maybeContinue 复位 false，
+      // 断言链路终点——auto 档实际去查了下一卷。
+      expect(vi.mocked(findNextVolume)).toHaveBeenCalled();
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('autoEnd 取消路径：等待期内滚离底部 → 不标完不跨卷', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = await mountWebtoon();
+      await flushPromises();
+      const slideshow = useSlideshowStore();
+      wtStub.__registry.atBottom = true;
+      slideshow.start();
+      await vi.advanceTimersByTimeAsync(50);
+      // 等待期内滚回上方
+      wtStub.__registry.atBottom = false;
+      findViewer(w).vm.$emit('scroll');
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(markFinished).not.toHaveBeenCalled();
+      expect(slideshow.pendingNextVolume).toBe(false);
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('autoEnd 取消路径：等待期内切模式 → 不标完且 atBottom 清空（stableTimer 不迟到误标）', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = await mountWebtoon();
+      await flushPromises();
+      const slideshow = useSlideshowStore();
+      wtStub.__registry.atBottom = true;
+      slideshow.start();
+      await vi.advanceTimersByTimeAsync(50);
+      const settings = useSettingsStore();
+      settings.readerDefaultMode = 'single';
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(markFinished).not.toHaveBeenCalled();
+      expect(slideshow.pendingNextVolume).toBe(false);
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('autoEnd：ensureFinished 失败（写库 reject）→ 不跨卷', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = await mountWebtoon();
+      await flushPromises();
+      const slideshow = useSlideshowStore();
+      vi.mocked(markFinished).mockRejectedValueOnce(new Error('ipc down'));
+      wtStub.__registry.atBottom = true;
+      slideshow.start();
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(slideshow.pendingNextVolume).toBe(false);
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('interval tick 不参与结束（十轮 P1-2）：atBottom 后 tick 不推进 spread 也不跨卷', async () => {
+    vi.useFakeTimers();
+    try {
+      const w = await mountWebtoon();
+      await flushPromises();
+      const slideshow = useSlideshowStore();
+      const reader = useReaderStore();
+      const before = reader.currentSpreadIndex;
+      wtStub.__registry.atBottom = true;
+      slideshow.start();
+      // rAF 尚未跑（未 advance），先让 interval tick 数次
+      await vi.advanceTimersByTimeAsync(0);
+      slideshow.intervalMs = 50;
+      await vi.advanceTimersByTimeAsync(60);
+      expect(reader.currentSpreadIndex).toBe(before);
+      expect(slideshow.pendingNextVolume).toBe(false);
+      w.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('模式切换屏障：paged→webtoon 先 await reader.saveCurrentProgressNow 再 cycle', async () => {
+    const reader = useReaderStore();
+    const spy = vi.spyOn(reader, 'saveCurrentProgressNow');
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    w.findComponent({ name: 'ReaderMainMenu' }).vm.$emit('cycle-mode');
+    await flushPromises();
+    expect(spy).toHaveBeenCalled();
+    const settings = useSettingsStore();
+    expect(settings.readerDefaultMode).toBe('double');
+    w.unmount();
+  });
+
+  it('模式切换屏障：webtoon→paged 先 flushNow 写 webtoon 位置再 cycle', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    wtStub.__registry.topImage = 'c.jpg';
+    findViewer(w).vm.$emit('scroll');
+    await flushPromises();
+    w.findComponent({ name: 'ReaderMainMenu' }).vm.$emit('cycle-mode');
+    await flushPromises();
+    const tauri = vi.mocked(await import('@/lib/tauri'));
+    const webtoonWrites = tauri.saveProgress.mock.calls.filter((c) => c[2] === 'webtoon');
+    expect(webtoonWrites.length).toBe(1);
+    expect(webtoonWrites[0]?.[4]).toBe('c.jpg');
+    const settings = useSettingsStore();
+    expect(settings.readerDefaultMode).toBe('single');
+    w.unmount();
+  });
+
+  it('hotkeys override：nextPage → scrollScreen(1)（90% 视口高），prevPage 反向', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    const actions = vi.mocked(useReaderHotkeys).mock.calls.at(-1)?.[0];
+    expect(actions).toBeTruthy();
+    actions!.nextPage!();
+    expect(wtStub.__registry.el.scrollBy).toHaveBeenCalledWith({ top: 90, behavior: 'auto' });
+    actions!.prevPage!();
+    expect(wtStub.__registry.el.scrollBy).toHaveBeenLastCalledWith({ top: -90, behavior: 'auto' });
+    actions!.jumpFirst!();
+    expect(wtStub.__registry.el.scrollTop).toBe(0);
+    actions!.jumpLast!();
+    expect(wtStub.__registry.el.scrollTop).toBe(wtStub.__registry.el.scrollHeight);
+    w.unmount();
+  });
+
+  it('useReaderWheel disabled 跟随模式：webtoon true / single false', async () => {
+    const wWebtoon = await mountWebtoon();
+    await flushPromises();
+    const optsW = vi.mocked(useReaderWheel).mock.calls.at(-1)?.[0];
+    expect(optsW?.disabled?.value).toBe(true);
+    wWebtoon.unmount();
+    const settings2 = useSettingsStore();
+    settings2.readerDefaultMode = 'single';
+    const router = makeRouter();
+    await router.isReady();
+    const wSingle = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    const optsS = vi.mocked(useReaderWheel).mock.calls.at(-1)?.[0];
+    expect(optsS?.disabled?.value).toBe(false);
+    wSingle.unmount();
+  });
+
+  it('重置缩放状态链：zoom-change → webtoonZoom → MainMenu prop；reset-zoom → setZoom(1)', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    findViewer(w).vm.$emit('zoom-change', 2);
+    await flushPromises();
+    const menu = w.findComponent({ name: 'ReaderMainMenu' });
+    expect(menu.props('webtoonZoom')).toBe(2);
+    menu.vm.$emit('reset-zoom');
+    await flushPromises();
+    expect(wtStub.__registry.setZoomCalls).toContain(1);
+    w.unmount();
+  });
+
+  it('页码 override：webtoon 下 MainMenu 显示顶部图 n / N', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    wtStub.__registry.topImage = 'b.jpg';
+    findViewer(w).vm.$emit('scroll');
+    await flushPromises();
+    const menu = w.findComponent({ name: 'ReaderMainMenu' });
+    expect(menu.props('currentPageOverride')).toBe(2);
+    expect(menu.props('totalPagesOverride')).toBe(3);
+    w.unmount();
+  });
+
+  it('加书签 webtoon 分流：记录顶部图索引而非 spreadIndex', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    wtStub.__registry.topImage = 'c.jpg';
+    findViewer(w).vm.$emit('scroll');
+    await flushPromises();
+    vi.mocked(addBookmark).mockClear();
+    w.findComponent({ name: 'ReaderMainMenu' }).vm.$emit('add-bookmark');
+    await flushPromises();
+    expect(addBookmark).toHaveBeenCalledWith(7, 2, null);
     w.unmount();
   });
 
