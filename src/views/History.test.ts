@@ -16,14 +16,14 @@ const sample: BrowseHistoryEntry[] = [
     sourceDescriptor: { type: 'local', rootPath: 'C:/comics' },
     relPath: '',
     displayName: 'root',
-    lastVisitedAt: 1000,
+    lastVisitedAt: 1699990000,
     bookId: null,
   },
   {
     sourceDescriptor: { type: 'local', rootPath: 'C:/comics' },
     relPath: 'Vol.01',
     displayName: 'Vol.01',
-    lastVisitedAt: 2000,
+    lastVisitedAt: 1700000000,
     bookId: 7,
   },
 ];
@@ -62,6 +62,14 @@ describe('History.vue', () => {
     expect(rows.length).toBe(2);
     expect(rows[0]!.text()).toContain('Vol.01'); // lastVisitedAt DESC
     expect(rows[1]!.text()).toContain('root');
+  });
+
+  it('Unix 秒时间戳按毫秒转换后显示真实日期', async () => {
+    const wrapper = mount(History, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    const time = wrapper.findAll('[data-test="time"]')[0]!;
+    expect(time.text()).not.toContain('1970');
+    expect(time.text()).toContain('2023');
   });
 
   it('点击 Vol.01 row → setRoot + navigate + router.push home', async () => {

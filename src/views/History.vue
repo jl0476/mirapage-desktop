@@ -88,7 +88,7 @@ const ICON_X = 'M18 6 6 18M6 6l12 12';
           {{ item.displayName }}
         </button>
         <span class="text-xs text-text-tertiary font-mono whitespace-nowrap" data-test="time">
-          {{ formatDateTime(item.lastVisitedAt, 'system') }}
+          {{ formatDateTime(item.lastVisitedAt * 1000, 'system') }}
         </span>
         <button
           data-test="btn-delete"
