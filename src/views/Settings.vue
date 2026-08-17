@@ -44,6 +44,7 @@ async function doRun() {
 // ─── 枚举选项源 ───────────────────────────────────────────────────────
 const readerModes = [
   { value: 'single', label: t('reader.mode.single') },
+  { value: 'double', label: t('reader.mode.double') },
   { value: 'webtoon', label: t('reader.mode.webtoon') },
 ];
 
@@ -342,12 +343,6 @@ async function setThumbnailDetailPopover(v: boolean) {
                      class="w-full accent-accent cursor-pointer" data-test="masonry-default-vgap"
                      @input="(e) => settings.setMasonryDefaultVGap(Number((e.target as HTMLInputElement).value))" />
             </div>
-            <EnumRow
-              :label="t('settings.reader.continue')"
-              :value="settings.continueToNextVolume"
-              :options="continueModes"
-              @change="setContinue"
-            />
           </div>
 
           <!-- 缩略图缓存资源 / 清晰度 / 容量（v0.1.0-module3.0.7） -->

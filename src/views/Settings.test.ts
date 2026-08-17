@@ -52,8 +52,13 @@ describe('Settings.vue', () => {
     const store = useSettingsStore();
     store.readerDefaultMode = 'webtoon';
     await flushPromises();
-    expect(wrapper.find('[data-test="webtoon-settings"]').exists()).toBe(true);
-    expect(wrapper.find('[data-test="section-reader"] [data-test="enum-select"]').exists()).toBe(true);
+    const modeOptions = wrapper.find('[data-test="section-reader"] [data-test="enum-select"] select').findAll('option');
+    expect(modeOptions.map((option) => option.text())).toEqual([
+      i18n.global.t('reader.mode.single'),
+      i18n.global.t('reader.mode.double'),
+      i18n.global.t('reader.mode.webtoon'),
+    ]);
+    expect(wrapper.find('[data-test="section-masonry"] [data-test="enum-select"]').exists()).toBe(false);
   });
 
   it('EnumRow change triggers store setter', async () => {
