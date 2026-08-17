@@ -18,7 +18,7 @@
 - **单页阅读**（Single Page）：1 张图 / 屏
 - **双页阅读**（Double Page）：2 张图 / 屏，封面独占、奇数末页不并排
 
-**本期不做**：条漫 webtoon（连续竖向滚动）、横条模式（LazyRow 横向滚动）、翻页动画。
+**本期不做**：横条模式（LazyRow 横向滚动）、翻页动画。（条漫 webtoon 已于 module3.1.0 交付，见 §12.6）
 
 ### 1.3 功能清单（本期必做，按实现优先级排序）
 
@@ -658,7 +658,7 @@ MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**
 | `domain/usecase/FindNextDirectoryUseCase.kt:50-209` | 完整算法（见 §13.2） | `usecase/find_next_directory.rs` 重写 |
 | `ui/reader/ContinueNextVolume.kt:20-94` | paged 模式跨卷手势（1/3 屏阈值） | 桌面端映射为键盘 / 鼠标拖动 |
 | `ui/reader/container/HorizontalStripContainer.kt:107-149` | 横条幻灯片（animateScrollBy + loop） | **只做参考**——桌面不做横条 |
-| `ui/reader/container/VerticalWebtoonContainer.kt:138-192` | 条漫 Choreographer 帧驱动幻灯片 | **只做参考**——桌面不做条漫 |
+| `ui/reader/container/VerticalWebtoonContainer.kt:138-192` | 条漫 Choreographer 帧驱动幻灯片 | **只做参考**——桌面 webtoon 已另行实现（module3.1.0 rAF 方案，非移植该容器，见 §12.6） |
 | `data/slideshow/SlideshowController.kt` | paged 模式 Flow 定时器 + 翻页事件 | `composables/useSlideshow.ts` |
 | `data/slideshow/SlideshowSettings.kt` | 间隔 / 方向 / 循环 | `stores/slideshow.ts` |
 | `ui/reader/ReaderViewModel.kt:404-420` | `nextPage()` 末页触发 SWIPE 二次 nudge | 同上 |
@@ -713,7 +713,7 @@ MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**
 
 | Android 路径 | 不实现的原因 |
 |---|---|
-| `ui/reader/container/VerticalWebtoonContainer.kt` + `WebtoonFrame.kt` + `WebtoonRecyclerView.kt` + `WebtoonAdapter.kt` | 桌面不做条漫 |
+| `ui/reader/container/VerticalWebtoonContainer.kt` + `WebtoonFrame.kt` + `WebtoonRecyclerView.kt` + `WebtoonAdapter.kt` | 桌面 webtoon 已另行实现（module3.1.0 原生滚动方案，不移植 Android 容器） |
 | `ui/reader/container/HorizontalStripContainer.kt` | 桌面不做横条 |
 | `data/download/DownloadManager.kt` + `DownloadPaths.kt` + `DownloadTaskState.kt` | 桌面不做"下载到本地" |
 | `data/local/entity/LocalRootEntity.kt` + `LocalRootDao.kt` + `LocalRootRepository.kt` | 桌面不需要 SAF tree Uri（用 `java.io.File`） |
@@ -1111,7 +1111,7 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
 
 ## 12. 阅读器交互与状态机
 
-桌面端需复刻 Android 阅读器的所有交互语义，但**只用单页 + 双页两种模式**（不做 webtoon / 横条）。
+桌面端需复刻 Android 阅读器的所有交互语义，用**单页 / 双页 / 竖条漫三种模式**（webtoon 于 module3.1.0 交付见 §12.6；横条不做）。
 
 ### 12.1 单页容器 (`SinglePageViewer.vue`)
 
@@ -1122,7 +1122,7 @@ export function naturalSort<T>(items: T[], key: (item: T) => string): T[] {
   - Pager 拖动 → `pagerState.currentPage` 变化 → `watch(currentPage)` → `onPageChanged(newPage)` → ViewModel
   - 键盘 / 鼠标侧键 → `useReaderHotkeys` 拦截 → `viewModel.nextPage()/previousPage()` → 更新 `_currentIndex` → `watch(currentIndex)` → `pagerState.scrollToPage(currentIndex)`
   - 翻页按钮 → `viewModel.nextPage()` / `previousPage()`
-- **Chrome 显隐**：paged 模式默认显示；按 `Esc` / `M` / `C` 切换；webtoon / strip 模式（不做）自动隐藏
+- **Chrome 显隐**：paged 模式默认显示；按 `Esc` / `M` / `C` 切换；webtoon 与 paged 共用同一套 chrome 交互；strip 模式（不做）自动隐藏
 - **进度条**：复用 `JumpPageDialog.vue`，含 Slider + TextField 输入页码
 
 ### 12.2 双页容器 (`DoublePageViewer.vue`)
@@ -1263,6 +1263,16 @@ maybeContinue(force, dir):
 | 主菜单 | 全屏遮罩 | `Esc` / `M` | 用户触发 |
 | 跳页对话框 | 全屏 | 顶栏跳页按钮 / `Ctrl+G` | 用户触发 |
 
+### 12.6 竖条漫容器（`WebtoonViewer.vue`）✅ v0.1.0-module3.1.0-reader-webtoon
+
+> 完整设计见 spec `docs/superpowers/specs/2026-08-17-reader-webtoon-design.md` + 实机冒烟报告 `docs/superpowers/reports/2026-08-17-webtoon-smoke.md`。要点：
+
+- **单列虚拟化**：`webtoonLayout.ts` 纯函数（前缀和 + 二分取窗口，视口前后 ±2.5 屏预载）；未测量图按 3:4 估算占位，尺寸经 `list_image_dimensions` 渐进测量（epoch 丢弃陈旧响应、整批 IPC 失败清 requested 允许重试）。
+- **原生滚动**：不用 OSD；缩放 1–4×（Ctrl+滚轮鼠标锚点 / 双击 1↔上次非 1），gap 固定 px 不随 zoom 缩放。
+- **自动滚动 = 幻灯片等价物**：ReaderView rAF 循环（`webtoon_scroll_speed` px/s）；播放中滚轮临时变速 ±20%（clamp 0.1–3×，仅播放中生效）2s 回落；到底顺序 停止 → 稳定 1.2s → `ensureFinished` 落库成功 → 跨卷（autoEnd 状态机四重校验 + 五取消点）。
+- **进度双写防护**：webtoon 走 `useWebtoonProgress`（300ms debounce 记顶部图 + `flushNow` 串行写链），卸载 / 跨卷 trySave / 模式切换旁路 `reader.saveCurrentProgressNow`；阅读器内三个模式切换入口统一走 flush 屏障。
+- **输入**：↑/PageUp ↓/PageDown 滚屏（90% 视口高）、Home/End 顶底、Space/p/F5 播放暂停、底部再滚或 ▶ 触发跨卷（先标完成功才跨）；Alt+→ force 不标完直接跨卷。
+
 ---
 
 ## 13. Domain 算法清单（待移植）
@@ -1332,7 +1342,7 @@ Android 端的触控 3×3 区域 + 音量键翻页 + 触屏手势，在桌面端
 | 鼠标输入 | 动作 |
 |---|---|
 | 左键拖动 | Pager 翻页（桌面端比触屏更精确） |
-| 滚轮上 / 下 | PREV_PAGE / NEXT_PAGE（paged）或滚动（已不做 webtoon / strip） |
+| 滚轮上 / 下 | PREV_PAGE / NEXT_PAGE（paged）或原生滚动（webtoon，§12.6；strip 不做） |
 | 右键 | 上下文菜单（`ReaderContextMenu`，v0.1.0-module3.0.2 已实现） |
 
 ### 14.3 跨卷触发（桌面端）
@@ -1600,8 +1610,7 @@ export function useReaderInput() {
 
 ### 16.5 远期方向（不在本期范围）
 
-- Webtoon 模式（连续竖向滚动）
-- 横条模式（连续横向滚动）
+- 横条模式（连续横向滚动）（webtoon 已于 module3.1.0 交付）
 - 下载到本地
 - 配置备份 / 导入（与 Android `.pvbackup` 互导）
 - 主题切换（深 / 浅 + 4 套色板；`color_theme` store 类型已备，4 套色板 CSS 未实现——单独暴露 UI 即死下拉，与色板实现一并做）
