@@ -64,6 +64,11 @@ export const defaultKeyBindings: KeyBindings = {
   slideshowToggle: [' ', 'p', 'F5'],
   closeReader: ['Escape'],
 };
+export const webtoonKeyBindings: KeyBindings = {
+  ...defaultKeyBindings,
+  prevPage: ['PageUp', 'ArrowUp'],
+  nextPage: ['PageDown', 'ArrowDown'],
+};
 
 /** 把 KeyboardEvent 归一化为 "Ctrl+Alt+Shift+key" 字符串（与 bindings key 比对） */
 function normalizeKey(event: KeyboardEvent): string {

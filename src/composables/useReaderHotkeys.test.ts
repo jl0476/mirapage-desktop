@@ -150,6 +150,34 @@ describe('useReaderHotkeys', () => {
     expect(r.currentSpreadIndex).toBe(1);  // 不动
   });
 
+  it('webtoon nextPage 使用 override 而不推进 reader store', () => {
+    const r = useReaderStore();
+    r.openBook({ bookId: 1, title: 't', pages: ['a.jpg', 'b.jpg'], spreads: [{ start: 0, end: 1 }, { start: 1, end: 2 }], initialSpreadIndex: 0 });
+    const nextPage = vi.fn();
+    useReaderHotkeys({ isWebtoon: () => true, nextPage });
+    keyHandler!(new KeyboardEvent('keydown', { key: 'ArrowDown' }) as unknown as KeyboardEvent);
+    expect(nextPage).toHaveBeenCalledTimes(1);
+    expect(r.currentSpreadIndex).toBe(0);
+  });
+
+  it('webtoon 四个命令分别调用 override', () => {
+    const actions = { isWebtoon: () => true, nextPage: vi.fn(), prevPage: vi.fn(), jumpFirst: vi.fn(), jumpLast: vi.fn() };
+    useReaderHotkeys(actions);
+    for (const [key, fn] of [['ArrowDown', actions.nextPage], ['ArrowUp', actions.prevPage], ['Home', actions.jumpFirst], ['End', actions.jumpLast]] as const) {
+      keyHandler!(new KeyboardEvent('keydown', { key }) as unknown as KeyboardEvent);
+      expect(fn).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('未启用 webtoon 时保持原有 store 行为', () => {
+    const r = useReaderStore();
+    r.openBook({ bookId: 1, title: 't', pages: ['a.jpg', 'b.jpg'], spreads: [{ start: 0, end: 1 }, { start: 1, end: 2 }], initialSpreadIndex: 0 });
+    const nextPage = vi.fn();
+    useReaderHotkeys({ nextPage });
+    keyHandler!(new KeyboardEvent('keydown', { key: 'ArrowRight' }) as unknown as KeyboardEvent);
+    expect(nextPage).not.toHaveBeenCalled();
+    expect(r.currentSpreadIndex).toBe(1);
+  });
   it('Space key toggles slideshow (slideshowToggle command)', async () => {
     const { useSlideshowStore } = await import('@/stores/slideshow');
     const slideshow = useSlideshowStore();

@@ -34,7 +34,7 @@ import { onBeforeUnmount, onMounted } from 'vue';
 import { useRouter, type Router } from 'vue-router';
 import { useReaderStore } from '@/stores/reader';
 import { useSlideshowStore } from '@/stores/slideshow';
-import { resolveHotkey, defaultKeyBindings, type ReaderCommand } from '@/lib/inputBindings';
+import { resolveHotkey, defaultKeyBindings, webtoonKeyBindings, type ReaderCommand } from '@/lib/inputBindings';
 
 /**
  * 2026-08-12 跨卷任务 8: 跨卷相关 hotkey 命令的回调注入。
@@ -45,6 +45,11 @@ import { resolveHotkey, defaultKeyBindings, type ReaderCommand } from '@/lib/inp
 export interface ReaderHotkeyActions {
   nextVolume?: () => void;
   prevVolume?: () => void;
+  isWebtoon?: () => boolean;
+  nextPage?: () => void;
+  prevPage?: () => void;
+  jumpFirst?: () => void;
+  jumpLast?: () => void;
 }
 
 function dispatch(
@@ -113,8 +118,23 @@ export function useReaderHotkeys(actions: ReaderHotkeyActions = {}): void {
   const router = useRouter();
 
   function onKeydown(e: KeyboardEvent): void {
-    const cmd = resolveHotkey(e, defaultKeyBindings);
-    if (cmd) dispatch(store, router, cmd, actions);
+    const wt = actions.isWebtoon?.() ?? false;
+    const cmd = resolveHotkey(e, wt ? webtoonKeyBindings : defaultKeyBindings);
+    if (!cmd) return;
+    if (wt) {
+      const overrides: Partial<Record<ReaderCommand, (() => void) | undefined>> = {
+        nextPage: actions.nextPage,
+        prevPage: actions.prevPage,
+        jumpFirst: actions.jumpFirst,
+        jumpLast: actions.jumpLast,
+      };
+      const override = overrides[cmd];
+      if (override) {
+        override();
+        return;
+      }
+    }
+    dispatch(store, router, cmd, actions);
   }
 
   onMounted(() => {

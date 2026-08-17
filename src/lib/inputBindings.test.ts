@@ -10,7 +10,7 @@
  * v0.1.0-module3.0.12: 鼠标 3×3 分区映射（mouseRegionCommand）随 9 宫格一并移除。
  */
 import { describe, it, expect } from 'vitest';
-import { resolveHotkey, defaultKeyBindings } from './inputBindings';
+import { resolveHotkey, defaultKeyBindings, webtoonKeyBindings } from './inputBindings';
 
 function keyboardEvent(
   key: string,
@@ -52,6 +52,20 @@ describe('defaultKeyBindings', () => {
   });
 });
 
+describe('webtoonKeyBindings', () => {
+  it('maps vertical arrows while keeping page keys', () => {
+    expect(resolveHotkey(keyboardEvent('ArrowUp'), webtoonKeyBindings)).toBe('prevPage');
+    expect(resolveHotkey(keyboardEvent('ArrowDown'), webtoonKeyBindings)).toBe('nextPage');
+    expect(resolveHotkey(keyboardEvent('PageUp'), webtoonKeyBindings)).toBe('prevPage');
+    expect(resolveHotkey(keyboardEvent('PageDown'), webtoonKeyBindings)).toBe('nextPage');
+  });
+
+  it('unbinds horizontal arrows and preserves slideshow Space', () => {
+    expect(resolveHotkey(keyboardEvent('ArrowLeft'), webtoonKeyBindings)).toBeNull();
+    expect(resolveHotkey(keyboardEvent('ArrowRight'), webtoonKeyBindings)).toBeNull();
+    expect(resolveHotkey(keyboardEvent(' '), webtoonKeyBindings)).toBe('slideshowToggle');
+  });
+});
 describe('resolveHotkey — keyboard', () => {
   it('maps ArrowRight / PageDown to nextPage, Space to slideshowToggle', () => {
     expect(resolveHotkey(keyboardEvent('ArrowRight'), defaultKeyBindings)).toBe('nextPage');
