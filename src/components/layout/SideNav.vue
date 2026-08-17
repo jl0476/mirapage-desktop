@@ -5,8 +5,11 @@
  *
  * v0.1.0-module1.19: 真·Tailwind utility class (移除 bg-[var(--color-*)] arbitrary 形式,
  *                  因为 Tailwind v4 不编译 var() arbitrary → 全部失效 → 视觉没变)
+ *
+ * 折叠态 tooltip: 侧栏收窄只剩图标时, hover 图标 300ms 后在图标右侧弹出功能名
+ * (Teleport to body + 固定定位, 复用 FileList name-tooltip 视觉模式)
  */
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { getSetting, setSetting } from '@/lib/tauri';
 
@@ -18,6 +21,41 @@ interface NavItem {
 
 const { t } = useI18n();
 const collapsed = ref(false);
+
+/* ─── 折叠态图标 tooltip (Teleport to body 跳出 nav overflow-hidden, 同 FileList name-tooltip 模式) ───
+ * 仅 collapsed 时显示; 300ms 延迟防止鼠标扫过多个图标时闪烁 */
+const HOVER_TIP_DELAY_MS = 300;
+const hoveredTip = ref<{ text: string; top: number; left: number } | null>(null);
+let tipTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showTip(text: string, el: EventTarget | null): void {
+  if (!collapsed.value || !(el instanceof Element)) return;
+  const rect = el.getBoundingClientRect();
+  if (tipTimer) clearTimeout(tipTimer);
+  tipTimer = setTimeout(() => {
+    // 延迟期间侧栏可能已展开, 回调里再校验一次
+    if (!collapsed.value) return;
+    hoveredTip.value = { text, top: rect.top + rect.height / 2, left: rect.right + 8 };
+  }, HOVER_TIP_DELAY_MS);
+}
+
+function hideTip(): void {
+  if (tipTimer) {
+    clearTimeout(tipTimer);
+    tipTimer = null;
+  }
+  hoveredTip.value = null;
+}
+
+function onItemEnter(item: NavItem, e: MouseEvent): void {
+  showTip(t(item.labelKey), e.currentTarget);
+}
+
+function onToggleEnter(e: MouseEvent): void {
+  showTip(t('nav.toggleSidebar'), e.currentTarget);
+}
+
+onUnmounted(hideTip);
 
 const items: NavItem[] = [
   { to: '/',          icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z', labelKey: 'nav.fileBrowser' },
@@ -66,6 +104,8 @@ async function onToggle() {
       :aria-label="t('nav.toggleSidebar')"
       data-test="sidenav-toggle"
       @click="onToggle"
+      @mouseenter="onToggleEnter"
+      @mouseleave="hideTip"
     >
       <!-- 折叠态: 横向 hamburger; 展开态: 左对齐文字 -->
       <svg
@@ -94,6 +134,10 @@ async function onToggle() {
             collapsed ? 'h-9 justify-center px-0' : 'h-9 px-2.5',
           ]"
           active-class="is-active"
+          :aria-label="collapsed ? t(item.labelKey) : undefined"
+          data-test="sidenav-item"
+          @mouseenter="onItemEnter(item, $event)"
+          @mouseleave="hideTip"
         >
           <svg
             class="w-[15px] h-[15px] shrink-0"
@@ -115,7 +159,35 @@ async function onToggle() {
     <!-- 底部留白 (填充剩余空间) -->
     <div class="shrink-0 h-2" />
   </nav>
+
+  <!-- 折叠态图标 tooltip (Teleport to body, nav 有 overflow-hidden 会裁剪绝对定位子元素) -->
+  <Teleport to="body">
+    <div
+      v-if="collapsed && hoveredTip"
+      class="sidenav-tip"
+      :style="{ top: hoveredTip.top + 'px', left: hoveredTip.left + 'px' }"
+      role="tooltip"
+      data-test="sidenav-tip"
+    >{{ hoveredTip.text }}</div>
+  </Teleport>
 </template>
+
+<style scoped>
+.sidenav-tip {
+  position: fixed;
+  transform: translateY(-50%);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border-default);
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  z-index: 1100;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+}
+</style>
 
 <style>
 /* RouterLink active 态: indigo 软背景 + accent 文本 + 微 glow */

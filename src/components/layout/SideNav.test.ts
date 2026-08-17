@@ -169,6 +169,76 @@ describe('SideNav — 折叠切换', () => {
   });
 });
 
+describe('SideNav — 折叠态图标 hover tooltip', () => {
+  beforeEach(() => {
+    // Teleport 渲染到 body, 跨用例残留先清掉
+    document.querySelector('[data-test="sidenav-tip"]')?.remove();
+    vi.mocked(getSetting).mockReset();
+    vi.mocked(getSetting).mockResolvedValue(null);
+    vi.mocked(setSetting).mockReset();
+    vi.mocked(setSetting).mockResolvedValue(undefined);
+  });
+
+  async function mountCollapsed(initialRoute = '/'): Promise<ReturnType<typeof mountSideNav>> {
+    vi.mocked(getSetting).mockResolvedValueOnce('1');
+    const mounted = await mountSideNav(initialRoute);
+    await new Promise((r) => setTimeout(r, 0));
+    return mounted;
+  }
+
+  it('折叠态 mouseenter 导航项 → 延迟后 body 出现 tooltip 显示该项 label', async () => {
+    const { wrapper } = await mountCollapsed();
+    const links = wrapper.findAll('nav a');
+    expect(links.length).toBeGreaterThan(2);
+    // /likes 是第 3 项 (files/shortcuts/likes/...)
+    await links[2].trigger('mouseenter');
+    await new Promise((r) => setTimeout(r, 400));
+
+    const tip = document.querySelector('[data-test="sidenav-tip"]');
+    expect(tip).toBeTruthy();
+    expect(tip!.textContent).toBe('喜欢');
+  });
+
+  it('折叠态 hover 顶部折叠按钮 → tooltip 显示 toggleSidebar 文案', async () => {
+    const { wrapper } = await mountCollapsed();
+    await wrapper.find('[data-test="sidenav-toggle"]').trigger('mouseenter');
+    await new Promise((r) => setTimeout(r, 400));
+
+    const tip = document.querySelector('[data-test="sidenav-tip"]');
+    expect(tip).toBeTruthy();
+    expect(tip!.textContent).toBe('折叠/展开 侧栏');
+  });
+
+  it('tooltip 显示后 mouseleave → 立即消失', async () => {
+    const { wrapper } = await mountCollapsed();
+    const links = wrapper.findAll('nav a');
+    await links[2].trigger('mouseenter');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(document.querySelector('[data-test="sidenav-tip"]')).toBeTruthy();
+
+    await links[2].trigger('mouseleave');
+    expect(document.querySelector('[data-test="sidenav-tip"]')).toBeNull();
+  });
+
+  it('延迟窗口内 mouseleave → tooltip 不出现 (不闪)', async () => {
+    const { wrapper } = await mountCollapsed();
+    const links = wrapper.findAll('nav a');
+    await links[2].trigger('mouseenter');
+    await links[2].trigger('mouseleave');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(document.querySelector('[data-test="sidenav-tip"]')).toBeNull();
+  });
+
+  it('展开态 mouseenter 导航项 → 不出现 tooltip (label 已可见)', async () => {
+    const { wrapper } = await mountSideNav('/');
+    await new Promise((r) => setTimeout(r, 0));
+    const links = wrapper.findAll('nav a');
+    await links[2].trigger('mouseenter');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(document.querySelector('[data-test="sidenav-tip"]')).toBeNull();
+  });
+});
+
 describe('SideNav — 选中态高亮 + 路由跳转触达', () => {
   beforeEach(() => {
     vi.mocked(getSetting).mockReset();
