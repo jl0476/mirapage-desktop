@@ -438,4 +438,58 @@ mod tests {
             assert_eq!(doc.items[0].reader_mode.as_deref(), Some(expected), "{input} → {expected}");
         }
     }
+
+    fn insert_account(conn: &rusqlite::Connection, host: Option<&str>) -> i64 {
+        conn.execute(
+            "INSERT INTO account (name, type, host, port, share, username) VALUES ('a', 'smb', ?1, 445, 'share', 'u')",
+            rusqlite::params![host],
+        ).unwrap();
+        conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap()
+    }
+
+    fn smb_sd(account_id: i64) -> SourceDescriptor {
+        SourceDescriptor::Smb { account_id, initial_path: "usbshare3".into(), path: String::new(), port: 445 }
+    }
+
+    #[test]
+    fn smb_row_maps_five_fields_and_joins_account_host() {
+        let conn = test_db();
+        let acc = insert_account(&conn, Some("192.168.50.100"));
+        seed(&conn, &smb_sd(acc), "/00down/x", "X", 100, None);
+
+        let doc = build_export_doc(&conn).unwrap();
+        let it = &doc.items[0];
+        assert_eq!(it.source_type, "smb");
+        assert_eq!(it.smb_host.as_deref(), Some("192.168.50.100"), "host 从 account 表联查");
+        assert_eq!(it.smb_initial_path.as_deref(), Some("usbshare3"));
+        assert_eq!(it.smb_path.as_deref(), Some(""));
+        assert_eq!(it.smb_account_id, Some(acc));
+        assert_eq!(it.smb_port, Some(445));
+        assert_eq!(it.local_root_uri, None);
+    }
+
+    #[test]
+    fn smb_host_null_when_account_deleted() {
+        let conn = test_db();
+        seed(&conn, &smb_sd(999), "/x", "X", 100, None); // account 999 不存在
+
+        let doc = build_export_doc(&conn).unwrap();
+        assert_eq!(doc.items[0].smb_host, None, "账号已删 → smb_host null");
+        assert_eq!(doc.items[0].smb_account_id, Some(999), "accountId 仍导出");
+    }
+
+    #[test]
+    fn webdav_row_maps_three_fields() {
+        let conn = test_db();
+        let sd = SourceDescriptor::WebDav { account_id: 7, base_url: "https://dav.example.com".into(), path: "/books".into() };
+        seed(&conn, &sd, "/book1", "B1", 100, None);
+
+        let doc = build_export_doc(&conn).unwrap();
+        let it = &doc.items[0];
+        assert_eq!(it.source_type, "webdav");
+        assert_eq!(it.webdav_base_url.as_deref(), Some("https://dav.example.com"));
+        assert_eq!(it.webdav_path.as_deref(), Some("/books"));
+        assert_eq!(it.webdav_account_id, Some(7));
+        assert_eq!(it.smb_host, None);
+    }
 }
