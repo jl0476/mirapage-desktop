@@ -91,6 +91,18 @@ describe('Likes.vue', () => {
     expect(openLink.attributes('href')).toBe('/reader/7');
   });
 
+  it('搜索：按书名子串过滤，无结果显示「没有匹配项」', async () => {
+    const tauri = await import('@/lib/tauri');
+    (tauri.listLibrary as any).mockResolvedValueOnce([FAV_BOOK]);
+    const { wrapper } = await mountLikes();
+    const input = wrapper.get('[data-test="list-search-input"]');
+    await input.setValue('testb');   // 大小写不敏感
+    expect(wrapper.findAll('[data-test="row"]').length).toBe(1);
+    await input.setValue('zzz不存在');
+    expect(wrapper.find('[data-test="search-empty"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="empty-state"]').exists()).toBe(false);
+  });
+
   it('行内 btn-unlike 点击调 setFavorite(7, false)，book.isFavorite=false 后行消失', async () => {
     const tauri = await import('@/lib/tauri');
     (tauri.listLibrary as any).mockResolvedValueOnce([FAV_BOOK]);

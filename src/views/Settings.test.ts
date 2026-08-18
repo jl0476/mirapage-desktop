@@ -89,6 +89,17 @@ describe('Settings.vue', () => {
     expect(store.continueToNextVolume).toBe('off');
   });
 
+  it('列表每页条数：下拉切 20 → setSetting 持久化 + store 更新', async () => {
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    const store = useSettingsStore();
+    const select = wrapper.get('[data-test="list-page-size"]').find('select');
+    await select.setValue('20');
+    await flushPromises();
+    expect(store.listPageSize).toBe(20);
+    const { setSetting } = await import('@/lib/tauri');
+    expect(setSetting).toHaveBeenCalledWith('list_page_size', '20');
+  });
+
   it('anchor click triggers scrollTo for the matching section', async () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const scrollIntoView = vi.fn();

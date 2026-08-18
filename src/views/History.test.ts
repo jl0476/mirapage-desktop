@@ -72,6 +72,26 @@ describe('History.vue', () => {
     expect(time.text()).toContain('2023');
   });
 
+  it('搜索：输入子串即时过滤，清空恢复', async () => {
+    const wrapper = mount(History, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    expect(wrapper.findAll('[data-test="row"]').length).toBe(2);
+    const input = wrapper.get('[data-test="list-search-input"]');
+    await input.setValue('vol');
+    expect(wrapper.findAll('[data-test="row"]').length).toBe(1);
+    expect(wrapper.find('[data-test="row"]').text()).toContain('Vol.01');
+    await input.setValue('');
+    expect(wrapper.findAll('[data-test="row"]').length).toBe(2);
+  });
+
+  it('搜索无结果显示「没有匹配项」而非空状态', async () => {
+    const wrapper = mount(History, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    await wrapper.get('[data-test="list-search-input"]').setValue('zzz不存在');
+    expect(wrapper.find('[data-test="search-empty"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="empty-state"]').exists()).toBe(false);
+  });
+
   it('点击 Vol.01 row → setRoot + navigate + router.push home', async () => {
     const wrapper = mount(History, { global: { plugins: [i18n, router] } });
     await flushPromises();

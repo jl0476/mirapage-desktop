@@ -103,6 +103,24 @@ describe('Shortcuts.vue', () => {
     expect(row.text()).toContain('D:/manga/jujutsu/vol05');
   });
 
+  it('搜索：按别名/路径子串过滤，无结果显示「没有匹配项」', async () => {
+    mockedList.mockResolvedValue([
+      mkItem(1, 'C:/a', '漫画 A'),
+      mkItem(2, 'D:/b/sub', null),
+    ]);
+    const wrapper = await mountShortcuts();
+    await flushPromises();
+
+    const input = wrapper.get('[data-test="list-search-input"]');
+    await input.setValue('漫画');              // 别名命中
+    expect(wrapper.findAll('[data-test="row"]').length).toBe(1);
+    await input.setValue('D:/b');              // 路径命中
+    expect(wrapper.findAll('[data-test="row"]').length).toBe(1);
+    await input.setValue('zzz不存在');
+    expect(wrapper.find('[data-test="search-empty"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="empty-state"]').exists()).toBe(false);
+  });
+
   it('点击「打开」 → router.push("/") + shortcuts.setActive(id) (执行收敛到 FileBrowser)', async () => {
     // 路径身份修复 (2026-08-12, spec §6.4): Shortcuts.vue 只 setActive + push('/');
     // setRoot + navigate 由 FileBrowser.vue openShortcut 统一执行, 本视图不再碰 fb。

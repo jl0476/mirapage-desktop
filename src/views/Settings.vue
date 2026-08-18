@@ -67,6 +67,13 @@ const continueModes = [
   { value: 'manual', label: t('reader.continue.manual') },
 ];
 
+// 列表页分页大小（settings.listPageSize，四页共用；与 PaginationBar 原 20/50/100 档位一致）
+const listPageSizeOptions = [
+  { value: '20', label: '20' },
+  { value: '50', label: '50' },
+  { value: '100', label: '100' },
+];
+
 const themes = [
   { value: 'system', label: t('settings.appearance.themeSystem') },
   { value: 'dark', label: t('settings.appearance.themeDark') },
@@ -204,6 +211,15 @@ async function setThumbnailDetailPopover(v: boolean) {
               :value="settings.thumbnailDetailPopover"
               data-test="thumbnail-detail-popover"
               @change="setThumbnailDetailPopover"
+            />
+            <!-- 2026-08-18：列表页（快捷方式/喜欢/书签/阅览记录）分页大小，全局共用 -->
+            <EnumRow
+              :label="t('settings.fileBrowser.listPageSize')"
+              :description="t('settings.fileBrowser.listPageSizeDesc')"
+              :value="String(settings.listPageSize)"
+              :options="listPageSizeOptions"
+              data-test="list-page-size"
+              @change="(v: string) => settings.setListPageSize(Number(v))"
             />
           </div>
         </section>

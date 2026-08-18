@@ -9,13 +9,18 @@
  *  - scoped CSS hardcoded hex → Tailwind utility class (对齐 Bookmarks.vue)
  *  - 保留 button.name / button.delete class 选择器 (History.test.ts 依赖)
  */
-import { onMounted } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { storeToRefs } from 'pinia';
 import { useI18n } from 'vue-i18n';
 import { useHistoryStore } from '@/stores/history';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
+import { useSettingsStore } from '@/stores/settings';
 import { formatDateTime } from '@/locales/helpers';
+import { matchesAnyField } from '@/lib/searchFilter';
+import ListSearchInput from '@/components/common/ListSearchInput.vue';
+import PaginationBar from '@/components/common/PaginationBar.vue';
+import { usePagination } from '@/composables/usePagination';
 import type { BrowseHistoryEntry } from '@/lib/tauri';
 
 const { t } = useI18n();
@@ -23,6 +28,21 @@ const router = useRouter();
 const store = useHistoryStore();
 const { items } = storeToRefs(store);
 const fb = useFileBrowserStore();
+
+// 客户端搜索：按显示名/相对路径子串过滤（大小写不敏感）
+const searchQuery = ref('');
+const filteredItems = computed<BrowseHistoryEntry[]>(() =>
+  items.value.filter((e) => matchesAnyField(searchQuery.value, [e.displayName, e.relPath])));
+
+// 翻页模式：不无限滚动；搜索词变化回第 1 页；每页条数全局设置（settings.listPageSize）
+const settings = useSettingsStore();
+const pagination = usePagination(filteredItems, () => settings.listPageSize);
+const { pagedItems, page, pages } = pagination;
+watch(searchQuery, () => pagination.reset());
+
+// 翻页后列表回到顶部（滚动容器是本页 main）
+const mainRef = ref<HTMLElement | null>(null);
+watch(page, () => mainRef.value?.scrollTo({ top: 0 }));
 
 onMounted(() => {
   void store.refresh();
@@ -42,34 +62,45 @@ async function removeEntry(entry: BrowseHistoryEntry) {
   await store.deleteEntry(entry);
 }
 
+/** 展示用完整路径：rootPath + relPath，分隔符统一 '\'（Windows 风格，对齐快捷方式页） */
+function historyFullPath(entry: BrowseHistoryEntry): string {
+  const sd = entry.sourceDescriptor;
+  if (sd.type !== 'local') return entry.relPath;
+  const root = sd.rootPath.replace(/[\\/]+$/, '');
+  return entry.relPath ? `${root}\\${entry.relPath}` : root;
+}
+
 const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z';
 const ICON_FOLDER_OPEN_BIG = 'M6 14l1.5-7.5A2 2 0 0 1 9.45 4.8h5.1a2 2 0 0 1 1.95 1.7L18 14M6 14h12M6 14l-2 5h16l-2-5';
 const ICON_X = 'M18 6 6 18M6 6l12 12';
 </script>
 
 <template>
-  <main class="p-6 h-full overflow-y-auto">
+  <main ref="mainRef" class="p-6 h-full overflow-y-auto">
     <header class="flex justify-between items-center mb-6">
       <h2 class="m-0 text-xl font-semibold tracking-tight">
         {{ t('history.title') }}
       </h2>
-      <RouterLink
-        to="/"
-        class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
-        data-test="back-link"
-      >
-        ← {{ t('common.back') }}
-      </RouterLink>
+      <div class="flex items-center gap-3">
+        <ListSearchInput v-model="searchQuery" :placeholder="t('history.searchPlaceholder')" />
+        <RouterLink
+          to="/"
+          class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
+          data-test="back-link"
+        >
+          ← {{ t('common.back') }}
+        </RouterLink>
+      </div>
     </header>
 
-    <!-- 列表 -->
+    <!-- 列表（快捷方式同款双行制：主显示名 + mono 副时间/路径） -->
     <ul
-      v-if="items.length > 0"
+      v-if="filteredItems.length > 0"
       class="list-none p-0 m-0 flex flex-col gap-2"
       data-test="list"
     >
       <li
-        v-for="item in items"
+        v-for="item in pagedItems"
         :key="`${JSON.stringify(item.sourceDescriptor)}::${item.relPath}`"
         class="flex items-center gap-4 p-3 px-4 bg-surface-1 xp-bd rounded-lg transition-colors duration-100 hover:border-accent hover:shadow-[0_0_10px_rgba(99,102,241,0.25)]"
         data-test="row"
@@ -81,13 +112,21 @@ const ICON_X = 'M18 6 6 18M6 6l12 12';
         >
           <path :d="ICON_FOLDER" />
         </svg>
-        <button
-          class="name flex-1 bg-transparent border-0 text-left p-0 font-semibold text-sm text-text-primary cursor-pointer truncate hover:text-accent hover:underline transition-colors"
-          @click="openEntry(item)"
-        >
-          {{ item.displayName }}
-        </button>
-        <span class="text-xs text-text-tertiary font-mono whitespace-nowrap" data-test="time">
+        <div class="flex flex-col gap-0.5 flex-1 min-w-0">
+          <button
+            class="name bg-transparent border-0 text-left p-0 font-semibold text-sm text-text-primary cursor-pointer truncate hover:text-accent hover:underline transition-colors"
+            @click="openEntry(item)"
+          >
+            {{ item.displayName }}
+          </button>
+          <span
+            class="font-mono text-xs text-text-tertiary truncate"
+            :title="historyFullPath(item)"
+          >
+            {{ historyFullPath(item) }}
+          </span>
+        </div>
+        <span class="font-mono text-xs text-text-secondary whitespace-nowrap shrink-0" data-test="time">
           {{ formatDateTime(item.lastVisitedAt * 1000, 'system') }}
         </span>
         <button
@@ -104,10 +143,22 @@ const ICON_X = 'M18 6 6 18M6 6l12 12';
         </button>
       </li>
     </ul>
+    <PaginationBar
+      v-model:page="page"
+      :pages="pages"
+      :total="filteredItems.length"
+    />
 
-    <!-- 空状态 -->
+    <!-- 空状态：搜索无结果 vs 真的没记录（不用 v-else 链——与 ul 间夹了分页栏） -->
     <div
-      v-else
+      v-if="filteredItems.length === 0 && searchQuery"
+      class="text-text-tertiary text-center text-sm mt-12"
+      data-test="search-empty"
+    >
+      {{ t('common.searchNoResults') }}
+    </div>
+    <div
+      v-if="filteredItems.length === 0 && !searchQuery"
       class="flex flex-col items-center justify-center gap-4 mt-12"
       data-test="empty-state"
     >

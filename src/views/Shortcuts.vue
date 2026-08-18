@@ -7,19 +7,41 @@
  *  - 删除确认改 in-app dialog (废弃 window.confirm)
  *  - empty state 加 accent icon 容器 (对齐 §1.8)
  */
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
+import { storeToRefs } from 'pinia';
 import { useShortcutsStore } from '@/stores/shortcuts';
+import { useSettingsStore } from '@/stores/settings';
 import {
   decodeLocalDescriptor,
   shortcutFullPath,
   shortcutDisplayLabel,
 } from '@/lib/shortcutHelpers';
+import { matchesAnyField } from '@/lib/searchFilter';
+import ListSearchInput from '@/components/common/ListSearchInput.vue';
+import PaginationBar from '@/components/common/PaginationBar.vue';
+import { usePagination } from '@/composables/usePagination';
 
 const { t } = useI18n();
 const router = useRouter();
 const shortcuts = useShortcutsStore();
+const { items } = storeToRefs(shortcuts);
+
+// 客户端搜索：按别名/完整路径子串过滤（大小写不敏感）
+const searchQuery = ref('');
+const filteredItems = computed(() =>
+  items.value.filter((s) => matchesAnyField(searchQuery.value, [shortcutDisplayLabel(s), shortcutFullPath(s)])));
+
+// 翻页模式：不无限滚动；搜索词变化回第 1 页；每页条数全局设置（settings.listPageSize）
+const settings = useSettingsStore();
+const pagination = usePagination(filteredItems, () => settings.listPageSize);
+const { pagedItems, page, pages } = pagination;
+watch(searchQuery, () => pagination.reset());
+
+// 翻页后列表回到顶部（滚动容器是本页 main）
+const mainRef = ref<HTMLElement | null>(null);
+watch(page, () => mainRef.value?.scrollTo({ top: 0 }));
 
 onMounted(async () => {
   await shortcuts.refresh();
@@ -62,23 +84,33 @@ const ICON_FOLDER_OPEN_BIG = 'M6 14l1.5-7.5A2 2 0 0 1 9.45 4.8h5.1a2 2 0 0 1 1.9
 </script>
 
 <template>
-  <main class="p-6 h-full overflow-y-auto">
+  <main ref="mainRef" class="p-6 h-full overflow-y-auto">
     <header class="flex justify-between items-center mb-6">
       <h2 class="m-0 text-xl font-semibold tracking-tight">
         {{ t('shortcuts.title') }}
       </h2>
-      <RouterLink
-        to="/"
-        class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
-        data-test="back-link"
-      >
-        ← {{ t('common.back') }}
-      </RouterLink>
+      <div class="flex items-center gap-3">
+        <ListSearchInput v-model="searchQuery" :placeholder="t('shortcuts.searchPlaceholder')" />
+        <RouterLink
+          to="/"
+          class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
+          data-test="back-link"
+        >
+          ← {{ t('common.back') }}
+        </RouterLink>
+      </div>
     </header>
 
-    <!-- 空状态 -->
+    <!-- 空状态：搜索无结果 vs 真的没快捷方式 -->
     <div
-      v-if="shortcuts.items.length === 0"
+      v-if="items.length > 0 && filteredItems.length === 0"
+      class="text-text-tertiary text-center text-sm mt-12"
+      data-test="search-empty"
+    >
+      {{ t('common.searchNoResults') }}
+    </div>
+    <div
+      v-else-if="shortcuts.items.length === 0"
       class="flex flex-col items-center justify-center gap-4 mt-12"
       data-test="empty-state"
     >
@@ -112,7 +144,7 @@ const ICON_FOLDER_OPEN_BIG = 'M6 14l1.5-7.5A2 2 0 0 1 9.45 4.8h5.1a2 2 0 0 1 1.9
       data-test="list"
     >
       <li
-        v-for="item in shortcuts.items"
+        v-for="item in pagedItems"
         :key="item.id"
         class="flex items-center gap-4 p-3 px-4 bg-surface-1 xp-bd rounded-lg transition-colors duration-100 hover:border-accent hover:shadow-[0_0_10px_rgba(99,102,241,0.25)]"
         data-test="row"
@@ -158,6 +190,11 @@ const ICON_FOLDER_OPEN_BIG = 'M6 14l1.5-7.5A2 2 0 0 1 9.45 4.8h5.1a2 2 0 0 1 1.9
         </button>
       </li>
     </ul>
+    <PaginationBar
+      v-model:page="page"
+      :pages="pages"
+      :total="filteredItems.length"
+    />
 
     <!-- 删除确认 dialog (v0.1.0-module3.0.X: 替代 window.confirm, 适配 dark/light 主题) -->
     <div

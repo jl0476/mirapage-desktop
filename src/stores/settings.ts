@@ -68,6 +68,14 @@ export const useSettingsStore = defineStore('settings', () => {
   // v0.1.0-module3.0.11: 点击角标是否弹生成详情浮层（默认开，spec §7）
   const thumbnailDetailPopover = ref(true);
 
+  // 2026-08-18: 列表页（快捷方式/喜欢/书签/阅览记录）分页大小，四页共用
+  const listPageSize = ref(50);
+
+  function normalizeListPageSize(v: number): number {
+    if (!Number.isFinite(v)) return 50;
+    return Math.min(200, Math.max(10, Math.round(v)));
+  }
+
   const initialized = ref(false);
 
   /** 加载所有 settings（启动时调用） */
@@ -105,6 +113,7 @@ export const useSettingsStore = defineStore('settings', () => {
       ['fb_record_browse_position', (v) => (recordBrowsePosition.value = v !== 'false')],
       ['fb_restore_browse_position_on_enter', (v) => (restoreBrowsePositionOnEnter.value = v !== 'false')],
       ['fb_thumbnail_detail_popover', (v) => (thumbnailDetailPopover.value = v !== 'false')],
+      ['list_page_size', (v) => (listPageSize.value = normalizeListPageSize(Number(v)))],
     ];
 
     for (const [key, apply] of keys) {
@@ -261,6 +270,11 @@ export const useSettingsStore = defineStore('settings', () => {
     await setSetting('fb_thumbnail_detail_popover', v ? 'true' : 'false');
   }
 
+  async function setListPageSize(v: number): Promise<void> {
+    listPageSize.value = normalizeListPageSize(v);
+    await setSetting('list_page_size', String(listPageSize.value));
+  }
+
   /**
    * v0.1.0-reader-review-fix-9: 切换 reader_default_mode (in-memory + 持久化).
    *  - 修复 settings.update() 只持久化不更新 in-memory 的 bug
@@ -341,6 +355,9 @@ export const useSettingsStore = defineStore('settings', () => {
     // v0.1.0-module3.0.11: 角标点击弹详情开关
     thumbnailDetailPopover,
     setThumbnailDetailPopover,
+    // 2026-08-18: 列表页分页大小（四页共用）
+    listPageSize,
+    setListPageSize,
     initialized,
     // 方法
     load,
