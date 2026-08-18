@@ -635,4 +635,35 @@ mod tests {
             doc.warnings
         );
     }
+
+    #[test]
+    fn nested_archive_origin_skipped_with_warning() {
+        let conn = test_db();
+        let sd = SourceDescriptor::Archive {
+            archive_path: "D:/outer.zip".into(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Zip,
+            origin: Some(Box::new(SourceDescriptor::Archive {
+                archive_path: "D:/inner.cbz".into(),
+                entry_prefix: String::new(),
+                format: ArchiveFormat::Cbz,
+                origin: None,
+                origin_entry_path: None,
+                archive_rel_path: None,
+            })),
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        seed(&conn, &sd, "/nested", "N", 100, None);
+
+        let doc = build_export_doc(&conn).unwrap();
+        assert_eq!(doc.items.len(), 0, "嵌套 archive origin 跳过");
+        assert_eq!(doc.total_count, 0, "totalCount 不含跳过行");
+        assert_eq!(doc.warnings.len(), 1);
+        assert!(
+            doc.warnings[0].contains("/nested") && doc.warnings[0].contains("archive"),
+            "warning 含 origin 形态: {:?}",
+            doc.warnings[0]
+        );
+    }
 }
