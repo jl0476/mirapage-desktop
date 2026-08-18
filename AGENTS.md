@@ -127,14 +127,14 @@ cargo test -p mirapage-desktop-lib natural_compare
 
 ---
 
-## 当前状态（Phase 1-8 主体完成，3.0.x 持续打磨）
+## 当前状态（Phase 1-8 主体完成，3.0.x / 3.1.x 持续打磨）
 
 | Phase | 内容 | 状态 |
 |---|---|---|
 | 1 | Tauri 骨架 + SQLite + `algorithm/` 纯函数 | ✅ |
 | 2 | OpenSeadragon 阅读器 + 文件浏览器 + 阅读器路由 | ✅ `v0.1.0-module2.0`：`ReaderView` / `ReaderMainMenu` / 滚轮 / 轮播（9 宫格触控已于 3.0.12 移除） |
 | 3 | 压缩包（CBZ/ZIP） | 🟡 ZIP ✅；RAR/7z 占位（`unrar`/`sevenz-rust` 注释未启） |
-| 4 | 书签/喜欢/历史/书架/标签/搜索 | ✅ 10 个 commands + 9 个 Pinia stores |
+| 4 | 书签/喜欢/历史/书架/标签/搜索 | ✅ 10 个 commands + 9 个 Pinia stores；列表页已统一搜索、分页与快捷方式行样式 |
 | 4.5 | 书库 / 阅览记录 / directory_sort（Android schema 对齐） | ✅ `v0.1.0-module3.0`：`library` 11 列 + `browse_history` folder-level + `directory_sort` per-folder |
 | 5 | 跨卷连续阅读 + 幻灯片 | ✅ `findNextDirectory` + `slideshow` store |
 | 6 | i18n（中/英） | ✅ TDD 双语一致性 |
@@ -157,6 +157,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 3.0.14 | 小件打包（9 项） | ✅ `v0.1.0-module3.0.14`（spec：`docs/superpowers/specs/2026-08-16-module3.0.14-small-fixes-design.md`）：**A** verify.yml 补 `cargo test` 步骤（Rust 回归不再静默）；**B** webdav `parse_propfind` 修复（`local_name()` 剥命名空间前缀 + Empty/展开式 collection 双路径，main 上红数月用例转绿）；**C** useCrossVolume `identity===null` 早退前消费 `pendingNextVolume`（对齐 canStart 分支）；**D** 新命令 `reset_progress_by_location`（descriptor JSON + `validate_source_relative` 归一精确匹配 library 行；清 `finished=0+page=0+image_name=NULL`，无行 no-op 不 upsert；图片项书=所在目录 `lastFetchedPath`）；**E** 新命令 `get_book_status` + FileBrowser 统一喜欢状态表（locationKey=`descriptorId+''+absPath` 防跨源串状态；per-key epoch 守卫防 in-flight 旧查询覆盖 toggle 终态；喜欢成功直写终态不回查）三入口（工具栏/详情面板/右键菜单）完整 toggle；**F** `var(--ease-out)` 清理 4 处（DESIGN 记 2 实测 4）；**G** DESIGN §16 / AGENTS 同步；**H** 右键删「重试缩略图」菜单项+死转发链（失败卡片 ↻ 原位按钮保留）；**I** 瀑布流选中描边环改 `::after` 置顶（`z-index:3`+`pointer-events:none`，3.0.7 缩略图卡片层盖住 outline 的视觉回归）。前端 937→945，Rust 全绿（+5 用例）。**I 项实机验证已过**（2026-08-16 devtools：选中环 ::after opacity 1 / accent 蓝实线 / z-index 3，pointer-events:none 不挡点击与双击进 reader，缩略图缓存 8/8 命中）。 |
 
 | 3.1.0 | 竖条漫（webtoon）阅读模式 | ✅（spec：`docs/superpowers/specs/2026-08-17-reader-webtoon-design.md`，冒烟报告：`docs/superpowers/reports/2026-08-17-webtoon-smoke.md`）：第三种阅读模式 `single | double | webtoon`——原生滚动单列虚拟化（`webtoonLayout` 纯函数 ±2.5 屏窗口 + `list_image_dimensions` 渐进测量 epoch 防陈旧）+ Ctrl+滚轮鼠标锚点缩放 1–4× / 双击 1↔上次 + rAF 自动滚动（播放中滚轮临时变速 ±20% 2s 回落）+ 到底 停止→稳定 1.2s→标完成功→跨卷 autoEnd 状态机（四重校验五取消点）+ 进度双写防护（`useWebtoonProgress.flushNow` 串行写链，writeTail 恒 resolved）+ 模式切换 flush 屏障（三入口收口）+ Overlay/主菜单/右键/Settings 无效控件禁用。零 Rust 零 migration。3 轮代码审查闭环；实机冒烟全过（heap 恒定 14MB / 0 longtask / 幻灯片回归含 single tick+末页 toast+Space toggle）。前端 946→1023。 |
+| 3.1.1 | 书签与列表页打磨 | ✅ 书签添加/跳转入口补齐并统一页码语义；Bookmarks/History/Likes/Shortcuts 四列表页复用搜索与分页组件，快捷方式采用统一行样式；新增窗口大小、位置、最大化状态退出记忆（`tauri-plugin-window-state`）。 |
 
 **构建**：见 [`BUILD.md`](./BUILD.md)。Rust ≥ 1.96 需 `Cargo.toml` 的 `indexmap` 修复（schemars/indexmap 兼容性，详见 BUILD.md §2）。
 

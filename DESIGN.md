@@ -3,7 +3,7 @@
 > 桌面端漫画阅读器。基于 Tauri 2.x（Rust 后端）+ Vue 3（前端）+ OpenSeadragon（图像渲染）。
 > 新独立仓库，与 MiraPage Android 工程完全独立，不引用其代码。
 >
-> ⚡ **实测状态快照（2026-08-14）**：本文档是设计意图，实际落地状态以当前代码和测试为准。最新里程碑为 `v0.1.0-module3.0.11-thumbnail-per-image-progress`；当前 HEAD 已包含 module3.0.11 收尾 hotfix（缩略图角标文字、请求保底节流、滚动加载修复、history descriptor canonical 化与 migration 013 存量去重）。
+> ⚡ **实测状态快照（2026-08-18）**：本文档是设计意图，实际落地状态以当前代码和测试为准。当前 HEAD 已包含 `v0.1.0-module3.1.0-reader-webtoon`，以及随后完成的书签入口修复、四列表页搜索与分页、窗口状态记忆等收尾改动。
 
 ---
 
@@ -56,7 +56,7 @@
 - 横条模式
 - 下载到本地
 - 配置备份 / 导入（与 Android `.pvbackup` 互导为未来工作）
-- **主题配色**（4 套色板 `color_theme`）：已存值，未接 Tailwind（v0.1.0-module3.0-settings 仅落地 `themeMode`）
+- **主题配色**（4 套色板 `color_theme`）：已存值，未接 Tailwind（当前已落地 `themeMode`）
 - 缩略图网格
 - 远程图加载进度条
 - 缩略图网格（瀑布流 masonry 视图 v0.1.0-module3.0.6 已覆盖"图片目录可视化浏览"需求；预生成缩略图缓存网格 v0.1.0-module3.0.7 + 3.0.8 已落地——见下文 ✅）
