@@ -2314,14 +2314,16 @@ impl MediaLru {
     }
 }
 
-/// 全局单例（lib.rs manage；handler / warm / 账户清空共用）
-pub static GLOBAL: once_cell::sync::Lazy<Mutex<MediaLru>> =
-    once_cell::sync::Lazy::new(|| Mutex::new(MediaLru::new(256 * 1024 * 1024)));
+/// 全局单例（handler / warm / 账户清空共用；std::sync::OnceLock，Rust 1.70+ 标准库，
+/// 不引入 once_cell 直接依赖——rev8 定死，无二选一）
+pub static GLOBAL: std::sync::OnceLock<Mutex<MediaLru>> = std::sync::OnceLock::new();
 
-pub fn clear_all() { GLOBAL.lock().unwrap().clear(); }
+pub fn global() -> &'static Mutex<MediaLru> {
+    GLOBAL.get_or_init(|| Mutex::new(MediaLru::new(256 * 1024 * 1024)))
+}
+
+pub fn clear_all() { global().lock().unwrap().clear(); }
 ```
-
-（`once_cell` 已是 tauri 生态传递依赖，若未直接声明则改用 `std::sync::OnceLock<Mutex<MediaLru>>`——以 Cargo.toml 现状为准，两者取一。）
 
 - [ ] **步骤 4：接线**
 
@@ -2336,35 +2338,76 @@ lib.rs：media handler 的 GET 路径按**显式条件**接缓存（rev7 明确�
 //                              → miss → 读源 → put(url, bytes, mime) → 回包
 ```
 
-新命令（`generate_handler!` 追加）——**完整执行契约（rev7）**：
+新命令 ×2（`generate_handler!` 追加）——**warm 会话协议（rev8）**：
 
 ```rust
+/// 预热会话状态（Rust 侧真值源——前端 ref 递增不通知后端，取消必须走 IPC）：
+/// session_id = ReaderView 挂载时 crypto.randomUUID()（每次挂载唯一）；
+/// generation = 同一挂载内 openBook/切书时递增。
+/// 任何 advance 调用无条件覆盖当前会话 → 所有旧 (session_id, generation) 任务作废。
+static WARM_SESSION: std::sync::OnceLock<std::sync::Mutex<(String, u64)>> =
+    std::sync::OnceLock::new();
+
+fn warm_session_current() -> (String, u64) {
+    WARM_SESSION.get_or_init(|| std::sync::Mutex::new((String::new(), 0)))
+        .lock().unwrap().clone()
+}
+
+/// 判定某任务会话是否仍有效（任务启动前 + 读源完成填充缓存前 双检查）
+fn warm_session_matches(session_id: &str, generation: u64) -> bool {
+    let (cur_sid, cur_gen) = warm_session_current();
+    cur_sid == session_id && cur_gen == generation
+}
+
+/// Reader 打开 / 切书 / 卸载时**无条件**调用——既是 begin 也是 cancel（覆盖即作废旧会话）
+#[tauri::command]
+pub fn advance_warm_session(session_id: String, generation: u64) -> Result<(), String> {
+    *WARM_SESSION.get_or_init(|| std::sync::Mutex::new((String::new(), 0)))
+        .lock().unwrap() = (session_id, generation);
+    Ok(())
+}
+
 /// 图片预读。契约：
 /// - 每次调用最多取前 WARM_MAX（=4）个 URL，超出静默截断——单次调用的资源边界
 /// - 去重（保持顺序）
 /// - 只接受本应用 media 协议 URL：复用 read_media(url) 的完整解析/校验/DB 重建路径，
 ///   任何一步失败（含伪造 host/形态）→ 跳过该条，静默 log::warn
-/// - 并发上限：与阅读器预取语义匹配的 Semaphore(WARM_MAX)（Arc<Semaphore> acquire_owned），
+/// - 并发上限：Semaphore(WARM_MAX)（Arc<Semaphore> acquire_owned），
 ///   不复用缩略图 actor（预算语义不同）
-/// - epoch 取消：参数带 epoch（ReaderView 每次 openBook 递增的 session id）；
-///   执行前比对全局 AtomicU64（reader 卸载/切书时推进），不等则放弃剩余
+/// - 会话取消：每个后台任务在【启动前】与【读源完成后、写 LRU 前】双检查
+///   warm_session_matches(session_id, generation)，不匹配则丢弃结果放弃剩余
 /// - Local 形态 URL：read_media 内部直接跳过（不产生 IO）
 #[tauri::command]
-pub async fn warm_media_urls(urls: Vec<String>, epoch: u64) -> Result<(), String> {
+pub async fn warm_media_urls(
+    session_id: String,
+    generation: u64,
+    urls: Vec<String>,
+) -> Result<(), String> {
     const WARM_MAX: usize = 4;
     let mut seen = std::collections::HashSet::new();
     let urls: Vec<String> = urls.into_iter()
         .filter(|u| seen.insert(u.clone()))
         .take(WARM_MAX)
         .collect();
-    // 逐条（受信号量并发）read_and_cache(url)——失败静默；epoch 变更即停
+    // 逐条（受信号量并发）read_and_cache——失败静默；会话失效即停
     Ok(())
 }
 ```
 
-accounts.rs：`upsert_account_impl` / `delete_account_impl` 成功路径末尾 `crate::media_cache::clear_all();`。前端 tauri.ts：`export async function warmMediaUrls(urls: string[], epoch: number): Promise<void> { await invoke('warm_media_urls', { urls, epoch }); }`。ReaderView：`openBook` 时 `warmEpoch.value++`（session id）；`watch(currentSpreadIndex)`（或等价翻页信号）触发 `void warmMediaUrls(pageUrls.slice(next1, next3), warmEpoch.value)`——**前端不判源类型**（Local 形态由 Rust 侧跳过），卸载时 `warmEpoch.value++` 使在途预热作废。
+accounts.rs：`upsert_account_impl` / `delete_account_impl` 成功路径末尾 `crate::media_cache::clear_all();`。前端 tauri.ts：
 
-- [ ] **步骤 5：`cargo test -p mirapage-desktop-lib media_cache`（含 rev7 两个方向回归用例）+ `npx vitest run src/views/ReaderView.test.ts`（追加：非 Local descriptor 翻页触发 warmMediaUrls 且带 epoch；Local 不触发；openBook/卸载递增 epoch）→ PASS**
+```ts
+export async function advanceWarmSession(sessionId: string, generation: number): Promise<void> {
+  await invoke('advance_warm_session', { sessionId, generation });
+}
+export async function warmMediaUrls(sessionId: string, generation: number, urls: string[]): Promise<void> {
+  await invoke('warm_media_urls', { sessionId, generation, urls });
+}
+```
+
+ReaderView 接线：`const warmSessionId = crypto.randomUUID()`（挂载时一次）；`warmGen = ref(0)`；`openBook` 成功后 `warmGen.value++` + `void advanceWarmSession(warmSessionId, warmGen.value)`；`watch(currentSpreadIndex)`（或等价翻页信号）触发 `void warmMediaUrls(warmSessionId, warmGen.value, pageUrls.slice(next1, next3))`——**前端不判源类型**（Local 形态由 Rust 侧跳过）；`onUnmounted` 无条件 `void advanceWarmSession(warmSessionId, ++warmGen.value)` 使在途预热作废（跨卷 `navigateToVolume` 复用 openBook 路径天然递增）。
+
+- [ ] **步骤 5：`cargo test -p mirapage-desktop-lib media_cache`（含 rev7 两个方向回归用例 + rev8 会话判定纯函数用例：`warm_session_matches` 在 advance 后返回 false、同会话返回 true）+ `npx vitest run src/views/ReaderView.test.ts`（追加：非 Local descriptor 翻页触发 warmMediaUrls 带 sessionId+generation；Local 不触发；openBook/onUnmounted 调 advanceWarmSession）→ PASS**
 
 - [ ] **步骤 6：Commit**
 
@@ -2454,3 +2497,10 @@ M1 计划审查 4 必须 + 1 建议全采纳：
 1. **MediaLru 链表方向修正**：原稿 put 接 tail 与 touch「head=最新」语义相反——纯 put 序列会淘汰**最新**写入项，且原测试 `get("a")` 后的断言恰与错误行为一致（掩盖）。统一约定 **head=最新 / tail=最旧**：put 插入 head、淘汰 tail、touch 移回 head（摘链后重插，字节先扣后加净零）；新增两个方向回归用例 `consecutive_puts_evict_oldest_without_get`（无 touch 淘汰最早项）与 `touch_protects_entry_from_eviction`。
 2. **warm_media_urls 完整执行契约**：单次上限 WARM_MAX=4 静默截断 + 保序去重 + 只接受本应用 media URL（复用 read_media 完整解析/校验/DB 重建，任何失败跳过）+ 独立 Semaphore 并发 + **epoch 取消**（ReaderView openBook/卸载递增 session id，执行前比对，切书后陈旧预热作废）。
 3. **Range 绕过缓存写成显式条件**：handler GET 分支条件顺序 Local 跳过 → **带 Range 头跳过 LRU 直读源**（命中回 200 会破坏 Range 语义）→ 无 Range 远程 GET 才查/填 LRU。
+
+## 附：计划审查修订记录（rev8，2026-08-19）
+
+第五轮（任务 17 专项）1 必须 + 1 建议全采纳：
+
+1. **warm 会话协议定死**：原 rev7 的 `epoch` 只在前端 ref 递增、不通知后端——Rust in-flight 任务观察不到变化仍继续读网填缓存；且组件重挂载后本地计数归零无法区分新旧会话。改为显式协议：`advance_warm_session(sessionId, generation)`（Rust 侧 `OnceLock<Mutex<(String, u64)>>` 真值源；Reader 打开/切书/卸载**无条件**调用，覆盖即作废旧会话，兼作 begin 与 cancel）+ `warm_media_urls(sessionId, generation, urls)`（任务【启动前】与【读源完成写 LRU 前】双检查 `warm_session_matches`）。sessionId = ReaderView 挂载时 `crypto.randomUUID()`；generation = 同挂载内 openBook 递增（跨卷 navigateToVolume 复用 openBook 路径天然递增）。
+2. **OnceLock 定死**：`GLOBAL` 与 `WARM_SESSION` 均直接用 `std::sync::OnceLock`（Rust 1.70+ 标准库），删除「once_cell 或 OnceLock 二选一」占位说明，避免实现时意外引入未声明的 once_cell 直接依赖。

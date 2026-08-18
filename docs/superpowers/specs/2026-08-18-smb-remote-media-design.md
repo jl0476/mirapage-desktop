@@ -168,7 +168,7 @@ media:// 响应 `Cache-Control: no-store`（§3.1），WebView 无缓存可用�
 
 - **`media_cache.rs`**：`Mutex<LruCache<url_key, Arc<CachedMedia>>>`（bytes + mime + total size 记账），字节上限代码常量起步（256MB，非用户设置）。GET 命中直接回包（不经 factory IO，`Accept-Ranges` 语义由缓存切片实现或仅对未命中源生效——M1 从简：**命中只回 200 全量**，Range 请求走源读取，缓存只为预读加速不承担 Range 语义）；miss 读源后填充
 - **失效**：`upsert_account` / `delete_account` 成功后**整表清空**——账户 host/凭据变更后同 URL 可能指向不同内容，进程内清除零陈旧风险；Local 源不进缓存（文件系统页缓存已足够）
-- **预读触发**：新命令 `warm_media_urls(urls)`——复用 media handler 的解析/校验/重建路径预取填充 LRU，失败静默（预读是优化不是承诺）
+- **预读触发（rev8 会话协议）**：命令对 `advance_warm_session(sessionId, generation)` + `warm_media_urls(sessionId, generation, urls)`——Rust 侧持会话真值源，Reader 打开/切书/卸载无条件 advance（覆盖即作废旧会话）；warm 任务启动前与写缓存前双检查会话，失效即弃；单次 ≤4 URL、去重、仅本应用 media URL（完整校验链）、独立并发上限。失败一律静默（预读是优化不是承诺）
 - **接线**：阅读器 spread 切换预取后 2-3 张 pageUrl（仅非 Local descriptor 触发）；webtoon 的 ±2.5 屏窗口本就按需拉图，LRU 命中即快，不额外预取；masonry 原图点击才用，不预取
 - 缩略图不走此链路（自有磁盘缓存 + scheduler）
 
