@@ -36,11 +36,23 @@
 - RAR/7z 格式（`unrar`/`sevenz-rust` 另行模块，见 DESIGN §16.1）
 - ZIP 基于 Range 的随机读取优化（首期完整下载后解压）
 - WebDAV ETag 缓存失效（首期 size+mtime，ETag 后置可选字段）
-- `media://` 响应的 WebView 缓存复用（首期 `no-store`，见 §3.1；账户配置版本号方案后置）
+- `media://` 响应的 WebView 缓存复用（首期 `no-store`，见 §3.1；进程内 LRU 缓存见 §3.6，账户配置版本号方案后置）
 - 任何写操作（上传/删除/重命名——项目铁律不做编辑类）
 - SMB over QUIC / multichannel 等 smb-rs 高级特性
 - 通用"下载管理"（§16.5 远期方向）
 - 手写 OS 凭据加密（用 keyring crate）
+
+### 1.5 远程源能力矩阵（rev5 用户拍板：所有远程源必须支持）
+
+| 能力 | WebDAV | SMB | 远程 Archive | 交付 |
+|---|---|---|---|---|
+| 浏览 + 阅读 | ✓ | ✓ | ✓ | M1 / M2 / M3 |
+| 阅读历史（记录 + 重开） | ✓ | ✓ | ✓ | M1（descriptor 通用流程，验收 WebDAV；SMB 随 M2 复验） |
+| 喜欢（toggle + 浏览跳瀑布流） | ✓ | ✓ | ✓ | M1（含 `pendingOpenLocation` descriptor 化，见 §3.2）；SMB 随 M2 复验 |
+| 书签（添加 + 跳转） | ✓ | ✓ | ✓ | M1（bookId 驱动源无关，验收覆盖）；SMB 随 M2 复验 |
+| 瀑布流 + 缩略图 | ✓ | ✓ | ✓（包内条目 M3） | M1（§3.5）；SMB 随 M2 复验 |
+| 跨卷 | ✓ | ✓ | N/A（包即整书，无相邻卷语义；包内导航用 entry_prefix） | M1（WebDAV）/ M2（SMB） |
+| 预读预载 | ✓ | ✓ | ✓（整包预载 §5.3） | 图片级 M1（§3.6）/ 压缩包级 M3 |
 
 ## 2. 总体架构
 
@@ -121,6 +133,7 @@ pub struct FileStat { pub size: u64, pub modified_at: Option<i64> }  // 秒级 U
 
 - `useReaderBookLoader`：删 Local-only 抛错；`pageUrls = imageNames.map(name => mediaUrl(descriptor, joinRel(relPath, name)))`；`validateSourceRelativePath` 数据完整性校验保留（防 DB 脏数据，与 URL 无关）
 - History.vue / Likes.vue（含 132 行浏览按钮 `v-if`）/ FileBrowser 打开路径：`type !== 'local'` 防御统一删除，走 descriptor 通用流程
+- **Likes 浏览跳瀑布流 descriptor 化（rev5）**：`requestOpenLocation(rootPath, relPath)` 是 Local 形态（Likes.vue:55 传 `sd.rootPath`）——改为 `{ descriptor, relPath }`，FileBrowser 消费端参照 shortcut 打开的 descriptor 消费模式（§3.3 的 store descriptor 扩展）；Likes 是唯一 caller，直接换签名不留兼容
 - 书签 / 进度 / webtoon `list_image_dimensions`：已按 descriptor 派发，M1 验收逐项确认（不在 M1 提前改代码，坏了才修）
 - **跨卷泛化（rev4 新增 M1 任务）**：`find_next_volume` 现为 Local 专用（文件头注释明确「仅 Local 源」）；M1 泛化为按 descriptor 经 factory 列父目录（Local + WebDAV），兄弟排序/跳已读/directory_sort 逻辑本就操作 `MediaEntry` 与 location_key，随列举源切换自动生效；Smb/Archive descriptor 保留明确报错（M2/M3 扩展）
 
@@ -149,12 +162,22 @@ pub struct FileStat { pub size: u64, pub modified_at: Option<i64> }  // 秒级 U
 - **MasonryView.originalUrlFor**：`convertFileSrc(joinPath(...))` → `mediaUrl(descriptor, joinRel(currentPath, name))`
 - 生成策略/缓存 key/事件链全部不动（源信息已在 cache key 的 descriptor 序列化里）
 
-### 3.6 M1 验收
+### 3.6 远程图片预读预载（rev5，能力矩阵「预读预载」图片级落地）
+
+media:// 响应 `Cache-Control: no-store`（§3.1），WebView 无缓存可用——预读预载在 **Rust 侧进程内 LRU** 实现：
+
+- **`media_cache.rs`**：`Mutex<LruCache<url_key, Arc<CachedMedia>>>`（bytes + mime + total size 记账），字节上限代码常量起步（256MB，非用户设置）。GET 命中直接回包（不经 factory IO，`Accept-Ranges` 语义由缓存切片实现或仅对未命中源生效——M1 从简：**命中只回 200 全量**，Range 请求走源读取，缓存只为预读加速不承担 Range 语义）；miss 读源后填充
+- **失效**：`upsert_account` / `delete_account` 成功后**整表清空**——账户 host/凭据变更后同 URL 可能指向不同内容，进程内清除零陈旧风险；Local 源不进缓存（文件系统页缓存已足够）
+- **预读触发**：新命令 `warm_media_urls(urls)`——复用 media handler 的解析/校验/重建路径预取填充 LRU，失败静默（预读是优化不是承诺）
+- **接线**：阅读器 spread 切换预取后 2-3 张 pageUrl（仅非 Local descriptor 触发）；webtoon 的 ±2.5 屏窗口本就按需拉图，LRU 命中即快，不额外预取；masonry 原图点击才用，不预取
+- 缩略图不走此链路（自有磁盘缓存 + scheduler）
+
+### 3.7 M1 验收
 
 1. 本地目录阅读回归（single/double/webtoon 三模式 + 跨卷 + 书签 + 进度）
 2. 本地 CBZ：双击进 ZIP → 条目列表 → 双击图片阅读 → 翻页 → 退出再进（进度恢复）
 3. masonry 瀑布流回归（Local）+ **远程 masonry**（WebDAV 目录瀑布流 + 缩略图生成 + 原图打开）
-4. WebDAV（带密码的服务器）：添加账户 → test_connection 绿 → 浏览 → 阅读 → History/Likes 打开 → **末页跨卷到相邻目录卷**（rev4：跨卷 Local + WebDAV 同期交付）
+4. WebDAV（带密码的服务器）：添加账户 → test_connection 绿 → 浏览 → 阅读 → History 打开 → **喜欢 toggle + 「浏览」跳回瀑布流** → **书签添加 + 跳转** → **末页跨卷到相邻目录卷 + 自动档跳过已读卷**（rev4/5：能力矩阵全项）
 5. Range：devtools network 面板确认 img 请求行为与 206/416 语义
 6. URL 校验：伪造 accountId / `..` 路径 / 段数不符 / 类型不匹配 / 二次解码 → 404/403
 7. keyring 补偿：新建失败回滚、编辑改密码生效、删除后 keyring 无残留（Windows 凭据管理器目检）
@@ -302,3 +325,7 @@ ArchiveMediaSource 打开逻辑：
 ## 附：审查修订记录（rev4，2026-08-18）
 
 第三轮（M1 计划审查连带规格）：**跨卷范围矛盾修正**——原文「跨卷源无关自动成立」与 `find_next_volume.rs:7` 事实（仅 Local，非 Local 明确报错）及计划冲突；按用户要求 **WebDAV 需要跨卷**，M1 交付 Local + WebDAV（§1、§3.2 跨卷泛化任务、§3.6 验收 4），SMB 跨卷 M2、远程 Archive 无跨卷语义。
+
+## 附：审查修订记录（rev5，2026-08-19）
+
+用户拍板「所有远程源需要支持跨卷 / 阅读历史 / 喜欢 / 书签 / 预读预载 / 瀑布流」→ 新增 **§1.5 能力矩阵**（逐能力 × 逐源标注交付期；远程 Archive 跨卷 N/A 有明确理由）。两个真实缺口补入 M1：① §3.2 `pendingOpenLocation` descriptor 化（原 rootPath 形态，Likes 浏览跳转仅 Local 可达）② §3.6 远程图片预读预载（进程内 LRU + `warm_media_urls` 命令 + 阅读器 spread 预取；WebView `no-store` 下唯一可靠的预读层）。验收 4 扩为能力矩阵全项实测。

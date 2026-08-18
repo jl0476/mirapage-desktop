@@ -20,6 +20,7 @@
 
 **Rust 新建：**
 - `src-tauri/src/media_protocol.rs` —— URL codec（单段 encode/decode）、六形态解析、校验链、Range 头解析、HTTP 响应构造（纯函数为主，可单测）
+- `src-tauri/src/media_cache.rs` —— 远程图片进程内 LRU（预读预载载体，256MB 起步）
 - `src-tauri/src/credentials.rs` —— `CredentialStore` trait + `KeyringStore`（生产）+ `MemoryStore`（测试）+ account 行查询
 
 **Rust 修改：**
@@ -1806,10 +1807,11 @@ git commit -m "feat(reader): loader 去 Local-only——公开类型拓宽 Sourc
 
 ---
 
-### 任务 12：History / Likes 打开防御放开
+### 任务 12：History / Likes 打开防御放开 + 浏览跳转 descriptor 化
 
 **文件：**
-- 修改：`src/views/History.vue:57` / `src/views/Likes.vue:54,70,132`
+- 修改：`src/views/History.vue:57` / `src/views/Likes.vue:54,55,70,132`
+- 修改：`src/stores/fileBrowser.ts:234-249`（`PendingOpenLocation` 形态） / `src/components/filebrowser/FileBrowser.vue:396-408`（消费端）
 - 测试：`src/views/History.test.ts` / `src/views/Likes.test.ts`（追加）
 
 - [ ] **步骤 1：写失败测试（History.test.ts 追加）**
@@ -1822,21 +1824,50 @@ git commit -m "feat(reader): loader 去 Local-only——公开类型拓宽 Sourc
   });
 ```
 
-（Likes.test.ts 同款：`v-if type==='local'` 的浏览按钮对 webdav 行也渲染。测试体按两文件现有 mock 结构补全。）
+（Likes.test.ts 两款：`v-if type==='local'` 的浏览按钮对 webdav 行也渲染；**浏览跳转写 descriptor 形态意图**——`requestOpenLocation` 被调时首参是完整 descriptor 对象而非 `sd.rootPath`。测试体按两文件现有 mock 结构补全。）
 
 - [ ] **步骤 2：运行验证失败**
 
-- [ ] **步骤 3：实现**
+- [ ] **步骤 3a：实现（防御放开）**
 
 History.vue `openEntry`（57 行区域）与 Likes.vue（54/70 行）：删除 `if (sd.type !== 'local') return;` 防御行及其注释，流程直接走 `router.push(reader 路由)`。Likes.vue 132 行浏览按钮 `v-if="book.sourceDescriptor.type === 'local'"` 改 `v-if="!!book.sourceDescriptor"`。`openEntry` 内 Local 专用的 relPath 拼接分支（70 行）改为通用：`return entry.relPath`（webdav/smb 的 relPath 本就是源内相对路径；Local 语义不变——如原实现有 Local 特判路径，保留 Local 分支仅删类型门）。
 
-- [ ] **步骤 4：`npx vitest run src/views/History.test.ts src/views/Likes.test.ts` → PASS**
+- [ ] **步骤 3b：实现（浏览跳转 descriptor 化，spec rev5 §3.2）**
+
+fileBrowser.ts（234-249 区域，Likes 是唯一 caller，直接换形态不留兼容）：
+
+```ts
+  const pendingOpenLocation = ref<{ descriptor: SourceDescriptor; relPath: string } | null>(null);
+
+  function requestOpenLocation(descriptor: SourceDescriptor, relPath: string): void {
+    pendingOpenLocation.value = { descriptor, relPath };
+    savedNavigationContext.value = null;   // 原有语义保留：清陈旧导航上下文
+    shortcutsStore.clearActive();
+  }
+```
+
+FileBrowser.vue `openPendingLocation`（396-408）消费端改 descriptor 版：
+
+```ts
+async function openPendingLocation(p: { descriptor: SourceDescriptor; relPath: string }): Promise<void> {
+  const relCheck = validateSourceRelativePath(p.relPath);
+  if (!relCheck.ok) { /* 原日志保留 */ return; }
+  // descriptor 消费模式参照 openShortcut（3.0.5 跨源快捷方式唯一执行点）：
+  // Local → setRoot(rootPath)；非 Local → 任务 13 的 currentDescriptor 置入 + refreshWithDescriptor
+  await fb.openDescriptorAt(p.descriptor, relCheck.normalized);
+  fb.setViewMode('masonry');
+}
+```
+
+（`openDescriptorAt(descriptor, relPath)`：store 新增——Local 转 `setRoot(rootPath)`，非 Local 写 `currentDescriptor` 并走任务 13 的 `refreshWithDescriptor`；与 `openArchive` 共用取数主体。若任务 13 尚未执行，先在本任务内实现最小版并在任务 13 复用。）Likes.vue:55 调用改 `fb.requestOpenLocation(sd, book.absolutePath)`。
+
+- [ ] **步骤 4：`npx vitest run src/views/History.test.ts src/views/Likes.test.ts src/stores/fileBrowser.test.ts` → PASS**
 
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add src/views/History.vue src/views/Likes.vue src/views/History.test.ts src/views/Likes.test.ts
-git commit -m "feat(views): History/Likes 打开防御放开——非 Local 记录走同一 reader 流程"
+git add src/views/History.vue src/views/Likes.vue src/stores/fileBrowser.ts src/components/filebrowser/FileBrowser.vue src/views/History.test.ts src/views/Likes.test.ts
+git commit -m "feat(views): History/Likes 防御放开 + 浏览跳转 descriptor 化（远程源浏览跳瀑布流）"
 ```
 
 ---
@@ -2105,7 +2136,192 @@ git commit -m "feat(accounts): 密码框+type 编辑锁定+删除凭据残留 wa
 
 ---
 
-### 任务 17：全量验证 + 手测清单 + 收尾
+### 任务 17：远程图片预读预载（media LRU + warm 命令 + 阅读器预取）
+
+**文件：**
+- 创建：`src-tauri/src/media_cache.rs`（进程内 LRU）
+- 修改：`src-tauri/src/lib.rs`（handler 接缓存 + `warm_media_urls` 注册 + 账户变更清缓存）
+- 修改：`src-tauri/src/commands/accounts.rs`（upsert/delete 成功后 `media_cache::clear_all()`）
+- 修改：`src/lib/tauri.ts`（`warmMediaUrls`）+ `src/views/ReaderView.vue`（spread 切换预取）
+- 测试：`src-tauri/src/media_cache.rs` tests + `src/views/ReaderView.test.ts`（追加）
+
+**背景（spec rev5 §3.6）**：media:// 响应 `no-store`，预读预载在 Rust 侧进程内 LRU 实现；Local 不进缓存；命中只回 200 全量（Range 走源，缓存不承担 Range 语义）。
+
+- [ ] **步骤 1：写失败测试（media_cache.rs）**
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lru_evicts_oldest_and_counts_bytes() {
+        let mut c = MediaLru::new(10);
+        c.put("a".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // 4
+        c.put("b".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // 8
+        c.get("a");                                                        // a 变最新
+        c.put("c".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // 12 > 10 → 淘汰 b（最旧）
+        assert!(c.get("a").is_some());
+        assert!(c.get("b").is_none(), "最旧项被淘汰");
+        assert!(c.get("c").is_some());
+        assert_eq!(c.current_bytes(), 8);
+    }
+
+    #[test]
+    fn clear_all_resets() {
+        let mut c = MediaLru::new(10);
+        c.put("a".into(), CachedMedia { bytes: vec![0; 4], mime: "m".into() });
+        c.clear();
+        assert_eq!(c.current_bytes(), 0);
+        assert!(c.get("a").is_none());
+    }
+
+    #[test]
+    fn oversize_entry_not_cached() {
+        let mut c = MediaLru::new(4);
+        c.put("big".into(), CachedMedia { bytes: vec![0; 8], mime: "m".into() });
+        assert!(c.get("big").is_none());
+    }
+}
+```
+
+- [ ] **步骤 2：`cargo test -p mirapage-desktop-lib media_cache` → 编译失败**
+
+- [ ] **步骤 3：实现 media_cache.rs（纯 std 手写 LRU，无新依赖）**
+
+```rust
+//! media:// 进程内 LRU（spec rev5 §3.6）——预读预载的载体。
+//! Local 源不进缓存；命中只回 200 全量（Range 走源）；账户变更整表清空。
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub struct CachedMedia {
+    pub bytes: Vec<u8>,
+    pub mime: String,
+}
+
+struct Entry {
+    media: std::sync::Arc<CachedMedia>,
+    prev: Option<String>,
+    next: Option<String>,
+}
+
+pub struct MediaLru {
+    cap: usize, // 字节上限
+    bytes: usize,
+    map: HashMap<String, Entry>,
+    head: Option<String>, // 最新
+    tail: Option<String>, // 最旧
+}
+
+impl MediaLru {
+    pub fn new(cap_bytes: usize) -> Self {
+        Self { cap: cap_bytes, bytes: 0, map: HashMap::new(), head: None, tail: None }
+    }
+
+    pub fn get(&mut self, key: &str) -> Option<std::sync::Arc<CachedMedia>> {
+        let e = self.map.get(key)?;
+        let media = e.media.clone();
+        self.touch(key);
+        Some(media)
+    }
+
+    pub fn put(&mut self, key: String, media: CachedMedia) {
+        let sz = media.bytes.len();
+        if sz > self.cap { return; } // 单项超限不缓存
+        if self.map.contains_key(&key) { self.remove_oldest_link(&key.clone()); /* 旧值先摘链 */ }
+        while self.bytes + sz > self.cap {
+            let victim = self.tail.clone()?;
+            self.remove_oldest_link(&victim);
+        }
+        let old_tail = self.tail.clone();
+        self.bytes += sz;
+        self.map.insert(key.clone(), Entry {
+            media: std::sync::Arc::new(media), prev: old_tail, next: None,
+        });
+        if let Some(t) = &old_tail {
+            if let Some(e) = self.map.get_mut(t) { e.next = Some(key.clone()); }
+        }
+        if self.head.is_none() { self.head = Some(key.clone()); }
+        self.tail = Some(key);
+    }
+
+    pub fn clear(&mut self) {
+        self.bytes = 0; self.map.clear(); self.head = None; self.tail = None;
+    }
+
+    pub fn current_bytes(&self) -> usize { self.bytes }
+
+    fn touch(&mut self, key: &str) {
+        let (prev, next) = {
+            let e = match self.map.get(key) { Some(e) => e, None => return };
+            (e.prev.clone(), e.next.clone())
+        };
+        if self.head.as_deref() == Some(key) { return; }
+        // 摘出
+        if let Some(p) = &prev { if let Some(e) = self.map.get_mut(p) { e.next = next.clone(); } }
+        if let Some(n) = &next { if let Some(e) = self.map.get_mut(n) { e.prev = prev.clone(); } }
+        if self.tail.as_deref() == Some(key) { self.tail = prev; }
+        // 接到头
+        if let Some(h) = &self.head { if let Some(e) = self.map.get_mut(h) { e.prev = Some(key.to_string()); } }
+        if let Some(e) = self.map.get_mut(key) {
+            e.prev = None;
+            e.next = self.head.clone();
+        }
+        self.head = Some(key.to_string());
+    }
+
+    fn remove_oldest_link(&mut self, key: &str) {
+        let (prev, next, sz) = {
+            let e = match self.map.get(key) { Some(e) => e, None => return };
+            (e.prev.clone(), e.next.clone(), e.media.bytes.len())
+        };
+        self.map.remove(key);
+        self.bytes -= sz;
+        if let Some(p) = &prev { if let Some(e) = self.map.get_mut(p) { e.next = next.clone(); } }
+        if let Some(n) = &next { if let Some(e) = self.map.get_mut(n) { e.prev = prev.clone(); } }
+        if self.head.as_deref() == Some(key) { self.head = next; }
+        if self.tail.as_deref() == Some(key) { self.tail = prev; }
+    }
+}
+
+/// 全局单例（lib.rs manage；handler / warm / 账户清空共用）
+pub static GLOBAL: once_cell::sync::Lazy<Mutex<MediaLru>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(MediaLru::new(256 * 1024 * 1024)));
+
+pub fn clear_all() { GLOBAL.lock().unwrap().clear(); }
+```
+
+（`once_cell` 已是 tauri 生态传递依赖，若未直接声明则改用 `std::sync::OnceLock<Mutex<MediaLru>>`——以 Cargo.toml 现状为准，两者取一。）
+
+- [ ] **步骤 4：接线**
+
+lib.rs：media handler 的 GET 路径——`MediaTarget::Local` 跳过缓存直读；远程形态先 `GLOBAL.lock().get(url)`，命中回 200（`Cache-Control: no-store` 仍带——进程内缓存不是 HTTP 缓存），miss 读源成功后 `put` 再回包。新命令（`generate_handler!` 追加）：
+
+```rust
+#[tauri::command]
+pub async fn warm_media_urls(urls: Vec<String>) -> Result<(), String> {
+    // 复用 handle_media_request 的解析/校验/重建路径（抽无 responder 版本 read_media(url) -> Result<Vec<u8>, String>）
+    // 失败静默（log::warn），预读是优化不是承诺；已命中跳过
+    Ok(())
+}
+```
+
+accounts.rs：`upsert_account_impl` / `delete_account_impl` 成功路径末尾 `crate::media_cache::clear_all();`。前端 tauri.ts：`export async function warmMediaUrls(urls: string[]): Promise<void> { await invoke('warm_media_urls', { urls }); }`。ReaderView：`watch(currentSpreadIndex)`（或等价翻页信号）且 descriptor 非 Local 时 `void warmMediaUrls(pageUrls.slice(next1, next3))`——只对远程 URL 生效的过滤在 Rust 侧做（Local 形态直接跳过），前端不判类型。
+
+- [ ] **步骤 5：`cargo test -p mirapage-desktop-lib media_cache` + `npx vitest run src/views/ReaderView.test.ts`（追加：非 Local descriptor 翻页触发 warmMediaUrls，Local 不触发）→ PASS**
+
+- [ ] **步骤 6：Commit**
+
+```bash
+git add src-tauri/src/media_cache.rs src-tauri/src/lib.rs src-tauri/src/commands/accounts.rs src/lib/tauri.ts src/views/ReaderView.vue
+git commit -m "feat(media): 远程图片预读预载——进程内 LRU(256MB)+warm_media_urls+阅读器 spread 预取+账户变更清空"
+```
+
+---
+
+### 任务 18：全量验证 + 手测清单 + 收尾
 
 **文件：**
 - 修改：`AGENTS.md`（状态表加 3.2.0 行）/ `DESIGN.md` §16.1（划掉已完成项——注意 M1 只完成「显示层」部分，SMB 条目到 M2 才划）
@@ -2124,10 +2340,11 @@ cd src-tauri && cargo test         # 全绿
 1. 本地目录阅读回归：三模式翻页 + 跨卷 + 书签添加/跳转 + 进度恢复
 2. 本地 CBZ：双击 ZIP → 条目列表 → 双击图片阅读 → 退出再进（进度恢复）；面包屑 ZIP 名点击退出
 3. masonry：Local 目录瀑布流缩略图正常（回归）+ 远程（WebDAV）目录瀑布流缩略图生成 + 原图打开
-4. WebDAV 带密码服务器：账户添加（密码）→ 测试连接绿 → 浏览 → 阅读 → 历史记录点击再开 → **末页跨卷到相邻目录卷 + 自动档跳过已读卷**
-5. devtools network：图片请求 `media.localhost` 形态；构造 `Range` 请求（console fetch 带 Range 头）确认 206/416
-6. URL 攻击面：console fetch 伪造 `media://local/<encode('C:/Windows/win.ini')>` 之外再试 `..`、错段数 → 403/404
-7. keyring：Windows 凭据管理器查看 `top.racyan.mirapage-desktop` 条目；删除账户后条目消失（或 warning 提示）
+4. WebDAV 带密码服务器（能力矩阵全项，spec §1.5）：账户添加（密码）→ 测试连接绿 → 浏览 → 阅读 → 历史记录点击再开 → **喜欢 toggle +「浏览」跳回瀑布流** → **书签添加 + 跳转** → **末页跨卷 + 自动档跳过已读卷**
+5. **预读预载**：WebDAV 阅读翻页（预取后 2-3 张；devtools network 确认 warm 触发、回翻命中 LRU 秒出）；编辑账户后缓存清空不陈旧
+6. devtools network：图片请求 `media.localhost` 形态；构造 `Range` 请求（console fetch 带 Range 头）确认 206/416
+7. URL 攻击面：console fetch 伪造 `media://local/<encode('C:/Windows/win.ini')>` 之外再试 `..`、错段数 → 403/404
+8. keyring：Windows 凭据管理器查看 `top.racyan.mirapage-desktop` 条目；删除账户后条目消失（或 warning 提示）
 
 - [ ] **步骤 3：状态表 + tag**
 
@@ -2144,7 +2361,7 @@ git push origin main --tags
 
 ## 自检记录
 
-- **规格覆盖度**：spec §3.1（任务 5/6/7）、§3.2（11/12 + 跨卷泛化=任务 15）、§3.3（13）、§3.4（2/3/16、4 的 Basic Auth）、§3.5（9/14）、§3.6（17 手测清单，含 WebDAV 跨卷）——全覆盖；§4/§5 属 M2/M3 不在本计划。
+- **规格覆盖度**：spec §3.1（任务 5/6/7）、§3.2（11/12 含浏览跳转 descriptor 化 + 跨卷泛化=任务 15）、§3.3（13）、§3.4（2/3/16、4 的 Basic Auth）、§3.5（9/14）、§3.6 预读预载（17）、§3.7 验收（18 手测清单，能力矩阵全项）——全覆盖；§4/§5 属 M2/M3 不在本计划。
 - **占位符**：任务 4/9 的"步骤 0 确认签名"是显式探索步骤（带产出物），非占位；任务 11/12 测试中的注释骨架处已在紧邻行给出第一用例的完整模式供镜像，执行者须补全后再跑红——已在步骤内写明。
 - **类型一致性**：`FileStat`（任务 1 定义，4/7 使用）、`CredentialStore`（2 定义，3/4 使用）、`MediaTarget`（5 定义，7 使用）、`mediaUrl/joinRel`（10 定义，11/13/14 使用）、`DeleteAccountResult`（3 定义 Rust，16 定义 TS 镜像）、`PreparedRemoteTask/RemoteFetchRequest/FetchActorConfig`（9 定义并自洽使用）——一致。
 - **已知执行期风险**：convertFileSrc 二次编码行为（任务 7/10 已写实测修正路径）；Db 在 factory 中的持有形态（任务 4 步骤 0 定案后任务 8 跟随）。
@@ -2167,3 +2384,11 @@ M1 计划审查 4 必须 + 1 建议全采纳：
 2. **字段名对齐**：测试构造用 `ThumbnailRequestItem.file_size`（mod.rs:135 实际字段，非 `size`）。
 3. **`validate_abs_path` 段级校验**：只拒恰好等于 `..` 的 segment，`foo..bar.jpg` 合法（新增用例）。
 4. **跨卷范围修正（连带 spec rev4）**：spec 删「跨卷源无关自动成立」表述（与 `find_next_volume.rs:7` 仅 Local 事实冲突）；按用户要求 **WebDAV 需要跨卷**——新增任务 15（find_next_volume 泛化：Local 零回归 + WebDAV 走 factory 列目录 + SMB 明确报错留 M2），原任务 15/16 顺移 16/17，验收清单加 WebDAV 跨卷 + 跳已读。
+
+## 附：计划审查修订记录（rev6，2026-08-19）
+
+用户拍板「所有远程源需支持跨卷 / 阅读历史 / 喜欢 / 书签 / 预读预载 / 瀑布流」→ spec rev5 新增 §1.5 能力矩阵 + §3.6 图片预读预载。计划两处实质新增：
+
+1. **任务 12 扩展步骤 3b**：`pendingOpenLocation` 从 `{ rootPath, relPath }`（Local 形态，Likes.vue:55 传 `sd.rootPath`）改为 `{ descriptor, relPath }`——`requestOpenLocation` 换签名（Likes 唯一 caller 不留兼容），消费端新增 `openDescriptorAt`（Local 转 setRoot / 非 Local 走任务 13 的 descriptor 取数主体，模式参照 openShortcut 跨源快捷方式）。
+2. **新增任务 17 远程图片预读预载**：`media_cache.rs` 手写 LRU（纯 std，256MB 常量，单项超限不缓存/淘汰最旧/字节记账）+ handler 远程形态 GET 接缓存（Local 直读；命中只回 200 全量，Range 走源）+ `warm_media_urls` 命令（失败静默）+ 账户 upsert/delete 成功整表清空（防同 URL 陈旧）+ ReaderView 非 Local 翻页预取后 2-3 张；原收尾任务 17→18，验收清单 8 项（能力矩阵全项 + 预读预载实测）。
+3. 历史记录/喜欢/书签/瀑布流/跨卷：spec §1.5 矩阵逐项标注交付期（M1 验收 WebDAV 全项；SMB 随 M2 复验；远程 Archive 跨卷 N/A 包即整书）。
