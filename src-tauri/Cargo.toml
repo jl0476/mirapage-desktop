@@ -27,6 +27,8 @@ indexmap = { version = "1.9", features = ["std"] }
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-fs = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-fs" }
 tauri-plugin-dialog = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-dialog" }
+# 窗口状态持久化：退出保存大小/位置/最大化，下次启动恢复（用户需求 2026-08-18）
+tauri-plugin-window-state = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "v2", package = "tauri-plugin-window-state" }
 # tauri-plugin-log (Phase X 启用: production 文件日志 + devtools)
 # 注: v0.1.0-module1.7 启用后 exe 启动崩溃 (plugin init 失败),
 # 回退到只用 console.log + Rust tracing. 后续单独排查日志方案.

@@ -30,6 +30,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        // 窗口状态持久化：退出保存大小/位置/最大化，启动时恢复（覆盖 tauri.conf 默认 1280x800）
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         // Phase 1 决策：settings 走自家 DB（commands::settings + db/migrations 001），
         // 不需要 tauri-plugin-store。依赖已在 Cargo.toml 注释，此处同步移除注册。
         .setup(|app| {
@@ -60,6 +62,7 @@ pub fn run() {
             // (list_directory/read_file 通用,无需重复声明)
             // Phase 4 业务
             commands::bookmarks::list_bookmarks,
+            commands::bookmarks::list_all_bookmarks,
             commands::bookmarks::add_bookmark,
             commands::bookmarks::remove_bookmark,
             commands::history::list_history,
