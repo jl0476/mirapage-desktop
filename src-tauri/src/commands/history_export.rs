@@ -306,9 +306,12 @@ mod tests {
     }
 
     fn insert_library(conn: &rusqlite::Connection, is_favorite: bool) -> i64 {
+        // UNIQUE(source_descriptor, absolute_path)：同一用例多次插入需唯一键
+        static COUNTER: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         conn.execute(
-            "INSERT INTO library (title, source_descriptor, absolute_path, is_favorite) VALUES ('T', '{}', '/abs', ?1)",
-            rusqlite::params![is_favorite as i64],
+            "INSERT INTO library (title, source_descriptor, absolute_path, is_favorite) VALUES ('T', ?2, ?3, ?1)",
+            rusqlite::params![is_favorite as i64, format!("{{\"n\":{n}}}"), format!("/abs{n}")],
         ).unwrap();
         conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap()
     }
@@ -373,5 +376,66 @@ mod tests {
         assert!(json.starts_with("{\n  \"schemaVersion\": 2"));
         assert!(json.contains("\n  \"totalCount\""));
         assert!(!json.contains('\r'), "LF 换行");
+    }
+
+    #[test]
+    fn liked_joins_library_is_favorite() {
+        let conn = test_db();
+        let b1 = insert_library(&conn, true);
+        let b2 = insert_library(&conn, false);
+        seed(&conn, &local_sd(), "/a", "A", 100, Some(b1));
+        seed(&conn, &local_sd(), "/b", "B", 200, Some(b2));
+        seed(&conn, &local_sd(), "/c", "C", 300, None); // book_id NULL
+
+        let doc = build_export_doc(&conn).unwrap();
+        let by: HashMap<_, _> = doc.items.iter().map(|i| (i.rel_path.clone(), i.liked)).collect();
+        assert_eq!(by["/a"], true);
+        assert_eq!(by["/b"], false);
+        assert_eq!(by["/c"], false, "无 library 行 liked=false（非 null）");
+    }
+
+    #[test]
+    fn progress_hit_and_miss() {
+        let conn = test_db();
+        let b1 = insert_library(&conn, false);
+        seed(&conn, &local_sd(), "/hit", "H", 100, Some(b1));
+        seed(&conn, &local_sd(), "/miss", "M", 200, None);
+        insert_progress(&conn, b1, 12, "webtoon", 1);
+
+        let doc = build_export_doc(&conn).unwrap();
+        let hit = doc.items.iter().find(|i| i.rel_path == "/hit").unwrap();
+        let miss = doc.items.iter().find(|i| i.rel_path == "/miss").unwrap();
+
+        assert_eq!(hit.page_index, Some(12));
+        assert_eq!(hit.finished, Some(true), "finished 1 → true");
+        assert_eq!(hit.reader_mode.as_deref(), Some("VERTICAL_WEBTOON"));
+        assert_eq!(miss.page_index, None);
+        assert_eq!(miss.finished, None);
+        assert_eq!(miss.reader_mode, None);
+    }
+
+    #[test]
+    fn finished_zero_maps_false_and_reader_mode_variants() {
+        let conn = test_db();
+        let b = insert_library(&conn, false);
+        seed(&conn, &local_sd(), "/s", "S", 100, Some(b));
+        insert_progress(&conn, b, 3, "single", 0);
+
+        // 未知值原样大写
+        conn.execute(
+            "UPDATE progress SET reader_mode = 'weird' WHERE book_id = ?1",
+            rusqlite::params![b],
+        ).unwrap();
+
+        let doc = build_export_doc(&conn).unwrap();
+        assert_eq!(doc.items[0].finished, Some(false), "finished 0 → false");
+        assert_eq!(doc.items[0].reader_mode.as_deref(), Some("WEIRD"), "未知值原样大写");
+
+        // 三值映射逐一验证
+        for (input, expected) in [("single", "SINGLE"), ("double", "DOUBLE"), ("webtoon", "VERTICAL_WEBTOON")] {
+            conn.execute("UPDATE progress SET reader_mode = ?1 WHERE book_id = ?2", rusqlite::params![input, b]).unwrap();
+            let doc = build_export_doc(&conn).unwrap();
+            assert_eq!(doc.items[0].reader_mode.as_deref(), Some(expected), "{input} → {expected}");
+        }
     }
 }
