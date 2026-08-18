@@ -28,7 +28,8 @@
 - 远程缩略图与 masonry：缩略图服务放开 Local-only，远程源经 factory 取字节生成
 - SMB 全链路：账户（含 keyring 凭据）→ 测试连接 → 浏览目录 → 阅读图片 → Range 请求
 - 远程 Archive 物化缓存：SMB/WebDAV 上的 CBZ/ZIP 完整下载至本地缓存后解压，LRU + 失效 + 预载
-- 与 Likes / History / Shortcuts / 跨卷 / 书签 / 进度共用同一 descriptor 流程（源无关自动成立，验收确认）
+- 与 Likes / History / Shortcuts / 书签 / 进度共用同一 descriptor 流程（源无关，验收确认）
+- **跨卷（rev4 明确）**：`find_next_volume` 泛化按 descriptor 走 factory 列目录——M1 交付 **Local + WebDAV**（现状仅 Local，`find_next_volume.rs` 非 Local 返回明确错误）；SMB 跨卷随 M2 验收；远程 Archive（包内即整书）无跨卷语义
 
 **非目标**（YAGNI，不做清单）：
 
@@ -120,7 +121,8 @@ pub struct FileStat { pub size: u64, pub modified_at: Option<i64> }  // 秒级 U
 
 - `useReaderBookLoader`：删 Local-only 抛错；`pageUrls = imageNames.map(name => mediaUrl(descriptor, joinRel(relPath, name)))`；`validateSourceRelativePath` 数据完整性校验保留（防 DB 脏数据，与 URL 无关）
 - History.vue / Likes.vue（含 132 行浏览按钮 `v-if`）/ FileBrowser 打开路径：`type !== 'local'` 防御统一删除，走 descriptor 通用流程
-- 跨卷 `find_next_volume` / 书签 / 进度 / webtoon `list_image_dimensions`：已按 descriptor 派发，M1 验收逐项确认（不在 M1 提前改代码，坏了才修）
+- 书签 / 进度 / webtoon `list_image_dimensions`：已按 descriptor 派发，M1 验收逐项确认（不在 M1 提前改代码，坏了才修）
+- **跨卷泛化（rev4 新增 M1 任务）**：`find_next_volume` 现为 Local 专用（文件头注释明确「仅 Local 源」）；M1 泛化为按 descriptor 经 factory 列父目录（Local + WebDAV），兄弟排序/跳已读/directory_sort 逻辑本就操作 `MediaEntry` 与 location_key，随列举源切换自动生效；Smb/Archive descriptor 保留明确报错（M2/M3 扩展）
 
 ### 3.3 本地 ZIP 全链路（补齐 Phase 3）
 
@@ -152,7 +154,7 @@ pub struct FileStat { pub size: u64, pub modified_at: Option<i64> }  // 秒级 U
 1. 本地目录阅读回归（single/double/webtoon 三模式 + 跨卷 + 书签 + 进度）
 2. 本地 CBZ：双击进 ZIP → 条目列表 → 双击图片阅读 → 翻页 → 退出再进（进度恢复）
 3. masonry 瀑布流回归（Local）+ **远程 masonry**（WebDAV 目录瀑布流 + 缩略图生成 + 原图打开）
-4. WebDAV（带密码的服务器）：添加账户 → test_connection 绿 → 浏览 → 阅读 → History/Likes 打开
+4. WebDAV（带密码的服务器）：添加账户 → test_connection 绿 → 浏览 → 阅读 → History/Likes 打开 → **末页跨卷到相邻目录卷**（rev4：跨卷 Local + WebDAV 同期交付）
 5. Range：devtools network 面板确认 img 请求行为与 206/416 语义
 6. URL 校验：伪造 accountId / `..` 路径 / 段数不符 / 类型不匹配 / 二次解码 → 404/403
 7. keyring 补偿：新建失败回滚、编辑改密码生效、删除后 keyring 无残留（Windows 凭据管理器目检）
@@ -296,3 +298,7 @@ ArchiveMediaSource 打开逻辑：
 ## 附：审查修订记录（rev3，2026-08-18）
 
 第二轮 3 必须 + 2 建议全采纳：① Archive 双 stat 路径分离（协议层 entry size / 物化层容器 stat，§3.1 §5.1）② SMB 根路径唯一真值 account.share + initialPath 首段双侧校验（§4.2）③ 下载期间变更防护：rename 前二次 stat + 弃 .part 重排队 + 续传前一致性检查（§5.2）④ 缩略图远程取源独立异步阶段（并发/内存预算/取源期可取消，§3.5）⑤ 撤销「decode 后含 % 拒绝」误杀规则，安全性全靠结构化校验（§3.1）。另应「不引起回归」要求新增兼容性红线（§6）。
+
+## 附：审查修订记录（rev4，2026-08-18）
+
+第三轮（M1 计划审查连带规格）：**跨卷范围矛盾修正**——原文「跨卷源无关自动成立」与 `find_next_volume.rs:7` 事实（仅 Local，非 Local 明确报错）及计划冲突；按用户要求 **WebDAV 需要跨卷**，M1 交付 Local + WebDAV（§1、§3.2 跨卷泛化任务、§3.6 验收 4），SMB 跨卷 M2、远程 Archive 无跨卷语义。

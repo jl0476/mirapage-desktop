@@ -27,8 +27,9 @@
 - `src-tauri/src/source/local.rs` / `webdav_impl.rs` / `archive_impl.rs` / `smb_impl.rs` —— stat 实现（smb 留默认 NotImplemented）
 - `src-tauri/src/source/webdav_impl.rs` —— Range 强契约（206/长度校验）+ Basic Auth + 凭据
 - `src-tauri/src/commands/accounts.rs` —— keyring 补偿顺序 + type 不可变 + delete warning + test_connection 实装
-- `src-tauri/src/thumbnail/fetch.rs`（新文件，归 thumbnail 模块）—— 远程取源队列
+- `src-tauri/src/thumbnail/fetch.rs`（新文件，归 thumbnail 模块）—— 远程取源 actor（PreparedRemoteTask 快照）
 - `src-tauri/src/thumbnail/service.rs` —— `unsupported` 分支改远程取源
+- `src-tauri/src/commands/find_next_volume.rs` —— WebDAV 跨卷泛化（descriptor 分派 + factory 列目录）
 - `src-tauri/src/lib.rs` —— 注册 media 协议 + manage CredentialStore
 - `src-tauri/Cargo.toml` —— 启用 `keyring = "3"`
 
@@ -735,6 +736,8 @@ mod tests {
         // local 绝对路径走独立分支
         assert!(validate_abs_path("D:/x/y.jpg").is_ok());
         assert!(validate_abs_path("relative/path").is_err());
+        assert!(validate_abs_path("D:/comics/foo..bar.jpg").is_ok()); // rev5：连续点文件名合法，只拒 `..` 段
+        assert!(validate_abs_path("D:/comics/../secret").is_err());
     }
 }
 ```
@@ -814,11 +817,16 @@ pub fn validate_rel_path(p: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// 本地绝对路径校验（Windows 盘符或 UNC 开头；拒绝相对形态）
+/// 本地绝对路径校验（Windows 盘符或 UNC 开头；拒绝相对形态与 `..` 段）
+/// rev5：按路径段拒绝——只拒绝恰好等于 ".." 的 segment，`foo..bar.jpg` 等含连续点的合法文件名放行
 pub fn validate_abs_path(p: &str) -> Result<(), ProtocolError> {
     let ok = p.len() >= 3 && p.as_bytes()[1] == b':' && p.as_bytes()[2] == b'/'
         || p.starts_with(r"\\");
-    if ok && !p.contains("..") { Ok(()) } else { Err(ProtocolError::InvalidPath("非绝对路径")) }
+    if !ok { return Err(ProtocolError::InvalidPath("非绝对路径")); }
+    if p.split(['/', '\\']).any(|seg| seg == "..") {
+        return Err(ProtocolError::InvalidPath("含 .. 段"));
+    }
+    Ok(())
 }
 
 /// 解析 media 协议 path（`/type/...` 形态；Windows 下宿主是 media.localhost，path 即此处入参）
@@ -1255,7 +1263,9 @@ git commit -m "feat(accounts): test_connection 实装——webdav 真握手 / sm
 - 修改：`src-tauri/src/thumbnail/service.rs`（521-529 unsupported 分支；`request()` 是同步函数——**入队必须走 try_send，不得在其中 await**）
 - 修改：`src-tauri/src/thumbnail/mod.rs`（`pub mod fetch;`）
 
-**架构（rev4）**：`ThumbnailService::request()` 同步 → 只做 `actor.try_submit(req)`（unbounded channel 非阻塞入队）。后台 **RemoteFetchActor** 任务消费队列：in-flight 去重 → `Arc<Semaphore>`（并发上限）+ `Arc<Semaphore>`（**在途字节预算**，按 `file_size` `acquire_many_owned` 预留、完成归还）→ epoch 双检查（取源前 + 取源后，取消的任务不 fetch、在途完成结果不进解码链）→ 成功回调把 bytes 组装成解码任务提交 scheduler。
+**架构（rev5）**：`ThumbnailService::request()` 同步 → 只做 `actor.try_submit(prepared)`（unbounded channel 非阻塞入队）。后台 **RemoteFetchActor** 任务消费队列：in-flight 去重 → `Arc<Semaphore>`（并发上限）+ `Arc<Semaphore>`（**在途字节预算**，按 `file_size` `acquire_many_owned` 预留、完成归还）→ epoch 双检查（取源前 + 取源后，取消的任务不 fetch、在途完成结果不进解码链）。
+
+**上下文完整性（rev5 关键）**：`classify_remote()` 一次性产出 `PreparedRemoteTask`——**分类时刻的完整快照**（cache_key/cache_abs/输出尺寸与质量参数/epoch/descriptor/item/完成事件元数据 + 待填充的解码任务模板）。actor 成功时把 **`PreparedRemoteTask` + bytes 整体**回传 `on_fetched`，service 在快照上下文里构造 bytes-based `GenerationJob` 并复用现有完成事件路径。**禁止**回调只传 `cache_key + bytes` 再回查索引/重算参数——取源期间缓存可能被清理、缩略图质量/尺寸设置可能变化，凭 key 重建会按新参数错误分类（竞态）。
 
 - [ ] **步骤 0：读三个现有文件确认签名**
 
@@ -1271,19 +1281,26 @@ mod tests {
     use std::sync::Arc;
 
     fn req(key: &str, size: u64, epoch: u64) -> RemoteFetchRequest {
+        // rev5：ThumbnailRequestItem 字段以 mod.rs:129-139 为准（file_size 非 size；
+        // source_width/source_height/required_width 按实际构造，其余字段步骤 0 确认补全）
         RemoteFetchRequest {
-            cache_key: key.into(),
-            descriptor: crate::source::descriptor::SourceDescriptor::WebDav {
-                account_id: 1, base_url: "https://x".into(), path: String::new(),
-            },
-            source_rel_path: format!("{key}.jpg"),
-            file_size: size,
-            epoch,
-            item: ThumbnailRequestItem {
-                path: format!("{key}.jpg"),
+            prepared: PreparedRemoteTask {
+                cache_key: key.into(),
+                descriptor: crate::source::descriptor::SourceDescriptor::WebDav {
+                    account_id: 1, base_url: "https://x".into(), path: String::new(),
+                },
                 source_rel_path: format!("{key}.jpg"),
-                width: 100, height: 100, size,
-                modified_at: None,
+                file_size: size,
+                epoch,
+                item: ThumbnailRequestItem {
+                    path: format!("{key}.jpg"),
+                    source_rel_path: format!("{key}.jpg"),
+                    file_size: size,
+                    modified_at: None,
+                    source_width: 100, source_height: 100, required_width: 64,
+                },
+                cache_abs: std::path::PathBuf::from(format!("C:/cache/{key}.webp")),
+                decode_template: (), // 测试中不消费；生产为策略参数快照（步骤 3 见 fetch fn 签名注释）
             },
         }
     }
@@ -1403,19 +1420,31 @@ mod tests {
 //! - in-flight 按 cache_key 去重
 
 use crate::source::descriptor::SourceDescriptor;
+use crate::thumbnail::ThumbnailRequestItem;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
-#[derive(Debug, Clone)]
-pub struct RemoteFetchRequest {
+/// 分类时刻的完整快照（rev5）：取源完成后构造解码任务所需的**全部**上下文。
+/// classify_remote() 一次性创建；actor 只透传，不回查索引/不重算参数——
+/// 取源期间缓存清理、设置变化均不影响本任务（消除竞态）。
+pub struct PreparedRemoteTask {
     pub cache_key: String,
     pub descriptor: SourceDescriptor,
     pub source_rel_path: String,
-    pub file_size: u64, // 字节预算预留依据（list_directory 的 entry.size）
+    pub file_size: u64, // 字节预算预留依据（ThumbnailRequestItem.file_size）
     pub epoch: u64,
-    pub item: crate::thumbnail::ThumbnailRequestItem,
+    pub item: ThumbnailRequestItem,
+    pub cache_abs: PathBuf,          // 分类时刻的缓存目标路径（generation 输出位置）
+    /// 解码策略快照（分类时刻的 quality/输出档位等——具体形状对齐步骤 0 读到的
+    /// classify_item 产出的 Generate 任务字段；携带进 on_fetched 供组装 GenerationJob）
+    pub decode_template: crate::thumbnail::fetch::DecodeTemplate,
+}
+
+pub struct RemoteFetchRequest {
+    pub prepared: PreparedRemoteTask,
 }
 
 pub type FetchFn = Arc<
@@ -1423,15 +1452,16 @@ pub type FetchFn = Arc<
         + Send
         + Sync,
 >;
-pub type OnFetched = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
-pub type OnFailed = Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// rev5：回传完整快照 + bytes（不是裸 key）——service 在此上下文构造解码任务
+pub type OnFetched = Arc<dyn Fn(PreparedRemoteTask, Vec<u8>) + Send + Sync>;
+pub type OnFailed = Arc<dyn Fn(&PreparedRemoteTask, &str) + Send + Sync>;
 
 pub struct FetchActorConfig {
     pub concurrency: usize,
     pub byte_budget: usize, // 在途 bytes 上限（常量起步，如 64MB；单文件超预算直接失败）
     pub fetch: FetchFn,
-    pub on_fetched: OnFetched, // bytes 到手 → 组装解码任务提交 scheduler + emit
-    pub on_failed: OnFailed,   // 取源失败 → emit failed
+    pub on_fetched: OnFetched, // 快照 + bytes → 组装 GenerationJob 提交 scheduler + emit
+    pub on_failed: OnFailed,   // 快照 + 错误 → emit failed（事件带 item.path 关联前端）
 }
 
 pub struct RemoteFetchActor {
@@ -1451,22 +1481,23 @@ impl RemoteFetchActor {
             let (epoch, permits, budget, inflight) = (epoch.clone(), permits.clone(), budget.clone(), inflight.clone());
             async move {
                 while let Some(req) = rx.recv().await {
-                    if epoch.load(Ordering::SeqCst) != req.epoch { continue; } // 入队即过期
+                    let prepared = req.prepared;
+                    if epoch.load(Ordering::SeqCst) != prepared.epoch { continue; } // 入队即过期
                     {
                         let mut g = inflight.lock().await;
-                        if g.contains(&req.cache_key) { continue; }
-                        g.insert(req.cache_key.clone());
+                        if g.contains(&prepared.cache_key) { continue; }
+                        g.insert(prepared.cache_key.clone());
                     }
                     let (permits, budget, inflight, epoch) = (permits.clone(), budget.clone(), inflight.clone(), epoch.clone());
                     let fetch = cfg.fetch.clone();
                     let on_fetched = cfg.on_fetched.clone();
                     let on_failed = cfg.on_failed.clone();
                     tokio::spawn(async move {
-                        let want = req.file_size.max(1) as u32;
-                        if req.file_size > budget_total {
+                        let want = prepared.file_size.max(1) as u32;
+                        if prepared.file_size > budget_total {
                             // 单文件超预算：快速失败，不占预算也不死等
-                            inflight.lock().await.remove(&req.cache_key);
-                            on_failed(&req.cache_key, "file exceeds remote fetch byte budget");
+                            inflight.lock().await.remove(&prepared.cache_key);
+                            on_failed(&prepared, "file exceeds remote fetch byte budget");
                             return;
                         }
                         // 并发 + 字节预算双闸（await 拿 permit，均 Arc::clone 后 acquire_owned/many_owned）
@@ -1477,22 +1508,22 @@ impl RemoteFetchActor {
                             (Ok(a), Ok(b)) => (a, b),
                             _ => return, // semaphore closed
                         };
-                        if epoch.load(Ordering::SeqCst) != req.epoch {
-                            inflight.lock().await.remove(&req.cache_key);
+                        if epoch.load(Ordering::SeqCst) != prepared.epoch {
+                            inflight.lock().await.remove(&prepared.cache_key);
                             return; // 未开始即取消：不 fetch
                         }
-                        let res = (fetch)(req.descriptor.clone(), req.source_rel_path.clone()).await;
+                        let res = (fetch)(prepared.descriptor.clone(), prepared.source_rel_path.clone()).await;
                         drop((p1, p2)); // 归还预算与并发
-                        inflight.lock().await.remove(&req.cache_key);
+                        inflight.lock().await.remove(&prepared.cache_key);
                         match res {
                             Ok(bytes) => {
-                                if epoch.load(Ordering::SeqCst) == req.epoch {
-                                    on_fetched(&req.cache_key, bytes); // 取源后再查：取消的结果不进解码链
+                                if epoch.load(Ordering::SeqCst) == prepared.epoch {
+                                    on_fetched(prepared, bytes); // 取源后再查：取消的结果不进解码链（rev5：整快照回传）
                                 }
                             }
                             Err(e) => {
-                                if epoch.load(Ordering::SeqCst) == req.epoch {
-                                    on_failed(&req.cache_key, &e);
+                                if epoch.load(Ordering::SeqCst) == prepared.epoch {
+                                    on_failed(&prepared, &e);
                                 }
                             }
                         }
@@ -1518,25 +1549,18 @@ service.rs 接线（`request()` 内 521-529 的 `if !local` 分支替换——**
 
 ```rust
                 if !local {
-                    // rev3 §3.5 / rev4：远程源——索引命中直返；未命中 try_submit 入取源 actor
+                    // rev3 §3.5 / rev5：远程源——索引命中直返；未命中 classify_remote 产出完整快照入 actor
                     match classify_remote(&conn, &cache_root, &descriptor_json, item, epoch, quality) {
-                        Ok(ItemClass::Cached { cache_key, cache_abs, width, height }) => results.push(RequestResult {
+                        Ok(RemoteClass::Cached { cache_key, cache_abs, width, height }) => results.push(RequestResult {
                             path: item.path.clone(), status: "cached".into(),
                             cache_path: Some(cache_abs.to_string_lossy().into()),
                             cache_key: Some(cache_key), width: Some(width), height: Some(height), error_kind: None,
                         }),
-                        Ok(ItemClass::UseOriginal) => results.push(RequestResult {
+                        Ok(RemoteClass::UseOriginal) => results.push(RequestResult {
                             path: item.path.clone(), status: "original".into(), ..unset(&item.path)
                         }),
-                        Ok(ItemClass::Generate { .. }) => {
-                            self.remote_fetch.try_submit(RemoteFetchRequest {
-                                cache_key: /* 步骤 0 确认的 key 计算，与 classify_remote 同源 */,
-                                descriptor: descriptor.clone(),
-                                source_rel_path: item.source_rel_path.clone(),
-                                file_size: item.size,
-                                epoch,
-                                item: item.clone(),
-                            });
+                        Ok(RemoteClass::Fetch(prepared)) => {
+                            self.remote_fetch.try_submit(RemoteFetchRequest { prepared });
                             results.push(RequestResult { path: item.path.clone(), status: "queued".into(), ..unset(&item.path) });
                         }
                         Err(e) => results.push(err_result(&item.path, &e)),
@@ -1545,7 +1569,7 @@ service.rs 接线（`request()` 内 521-529 的 `if !local` 分支替换——**
                 }
 ```
 
-`classify_remote`：复制 `classify_item` 去掉 `verify_disk_file`（远程没有本地文件可验），输入用 `item.source_rel_path`。`on_fetched` 回调（service 构造时装配）：组装 bytes-based QueuedTask（generate 闭包用 `std::io::Cursor::new(bytes)` 替代 `File::open`，其余复用生产 generate fn 逻辑）→ scheduler 提交 → emit 完成事件（复用现有 emit 路径）；`on_failed` → emit failed 事件。`FetchActorConfig.fetch` 生产闭包 = `factory.resolve(&d).read_file(&d, &rel, None)` 映射错误。actor 在 `ThumbnailService` 字段持有（`new()`/lib.rs 初始化处 spawn），`service.new_epoch()` 同时调 `scheduler.new_epoch` 与 `remote_fetch.new_epoch`。
+`classify_remote`（rev5）：复制 `classify_item` 去掉 `verify_disk_file`（远程没有本地文件可验），输入用 `item.source_rel_path`；返回 `RemoteClass` 枚举——`Cached { .. }` / `UseOriginal` / **`Fetch(PreparedRemoteTask)`**（Generate 分支在分类时刻组装完整快照：cache_key/cache_abs/descriptor/item/file_size/epoch + `DecodeTemplate`——即 classify_item 产出的 Generate 任务里除「从本地文件读字节」外的全部策略参数与 `CompletionMeta`）。**on_fetched 回调（service 构造时装配）**：拿 `PreparedRemoteTask + bytes` → 用 `DecodeTemplate` 参数构造 bytes-based GenerationJob（generate 闭包 `std::io::Cursor::new(bytes)` 替代 `File::open`，输出到 `prepared.cache_abs`）→ scheduler 提交 → 按 `prepared.item.path` 走现有完成事件 emit 路径；`on_failed` → emit failed（同样用快照内 item 关联前端）。`FetchActorConfig.fetch` 生产闭包 = `factory.resolve(&d).read_file(&d, &rel, None)` 映射错误。actor 在 `ThumbnailService` 字段持有（`new()`/lib.rs 初始化处 spawn），`service.new_epoch()` 同时调 `scheduler.new_epoch` 与 `remote_fetch.new_epoch`。
 
 - [ ] **步骤 4：`cargo test -p mirapage-desktop-lib thumbnail` → PASS（既有 105 缩略图用例 + fetch 2 个新用例）**
 
@@ -1738,7 +1762,7 @@ npm run type-check
 按报错清单逐一处理下游（**只在真正做本地路径计算处收窄**，其余保持宽类型直传）：
 
 - `ReaderView.vue` / `useReaderActions.ts` / `useCrossVolume.ts` 中读 `snapshot.descriptor.rootPath` / `book.descriptor.rootPath` 的位置 → 包 `descriptor.type === 'local'` 收窄（TS 自动 narrowing）或提局部 `const localDesc = descriptor.type === 'local' ? descriptor : null`；
-- 跨卷/`findNextVolume` 相关：`NextVolumeTarget` 拓宽后 `useCrossVolume` 里对 `target.descriptor.rootPath` 的访问同理收窄（M1 阶段跨卷仍只对 Local 生效——`find_next_volume` Rust 端仅 Local 目录卷，收窄分支保持现有行为即可，非 Local 走既有 fallback/禁用路径，不扩功能）；
+- 跨卷/`findNextVolume` 相关：`NextVolumeTarget` 拓宽后 `useCrossVolume` 里对 `target.descriptor.rootPath` 的访问同理收窄——本任务只做编译适配（WebDAV descriptor 走 `path` 语义无 `rootPath`）；**WebDAV 跨卷行为在任务 15 交付**（find_next_volume 泛化），此步不改跨卷行为；
 - 事件/emit 参数若显式标 `SourceDescriptorLocal` 一并拓宽。
 
 预期：`npm run type-check` 0 error 后再进步骤 2。
@@ -1947,7 +1971,84 @@ git commit -m "feat(masonry): 原图 URL 切 media://（descriptor 优先，Loca
 
 ---
 
-### 任务 15：Accounts.vue 密码框 + type 锁定 + 删除 warning + i18n
+### 任务 15：WebDAV 跨卷（find_next_volume 泛化）
+
+**文件：**
+- 修改：`src-tauri/src/commands/find_next_volume.rs`（文件头「仅 Local 源」收窄决策解除；descriptor 分派 + 父目录列举走 factory）
+- 测试：`src-tauri/src/commands/find_next_volume.rs` tests 模块（41 个既有用例不红 + 新增分派/路径纯函数用例）
+
+**背景（spec rev4 §3.2）**：现状 `find_next_volume.rs:7` 明确「仅 Local 源，非 Local 返回明确错误」。用户要求 WebDAV 支持跨卷。兄弟排序（`cmp_sibling`）/跳已读（`sibling_is_finished`）/directory_sort（`location_key_of`）本就操作 `MediaEntry` 与 descriptor JSON，**随列举源切换自动生效**——要改的只有「父目录列举」和「descriptor 分派」两处。
+
+- [ ] **步骤 0：读 find_next_volume.rs 全文**
+
+确认三处：① 入口对 descriptor 的 Local 匹配/报错位置（238 行 `descriptor` 字段注释「本版实际只用 Local」）；② 父目录列举当前实现（std::fs 还是 LocalMediaSource）；③ `NextVolumeResult` 组装处（descriptor 如何构造返回）。
+
+- [ ] **步骤 1：写失败测试（分派与路径纯函数）**
+
+```rust
+    #[test]
+    fn webdav_descriptor_accepted_local_still_works_smb_rejected() {
+        // 纯分派函数：descriptor 类型 → 列举策略
+        let local = SourceDescriptor::Local { root_path: "F:/c".into() };
+        let webdav = SourceDescriptor::WebDav { account_id: 1, base_url: "https://d/x".into(), path: "comics/v1".into() };
+        let smb = SourceDescriptor::Smb { account_id: 1, initial_path: "s".into(), path: "v1".into(), port: 445 };
+        assert!(matches!(listing_kind(&local), ListingKind::Local));
+        assert!(matches!(listing_kind(&webdav), ListingKind::ViaFactory));
+        assert!(listing_kind(&smb).is_err()); // M2 前明确报错
+    }
+
+    #[test]
+    fn parent_of_webdav_path() {
+        assert_eq!(parent_rel_path("comics/v1"), Some("comics".into()));
+        assert_eq!(parent_rel_path("v1"), Some(String::new())); // 根下第一层：parent = ""
+        assert_eq!(parent_rel_path(""), None);                    // 已在 base 根：无父
+    }
+```
+
+- [ ] **步骤 2：`cargo test -p mirapage-desktop-lib find_next_volume` → 新用例 FAIL**
+
+- [ ] **步骤 3：实现**
+
+```rust
+enum ListingKind { Local, ViaFactory }
+
+fn listing_kind(d: &SourceDescriptor) -> Result<ListingKind, String> {
+    match d {
+        SourceDescriptor::Local { .. } => Ok(ListingKind::Local),
+        SourceDescriptor::WebDav { .. } => Ok(ListingKind::ViaFactory),
+        _ => Err("跨卷当前仅支持 Local / WebDAV 源（SMB module 3.3.0）".into()),
+    }
+}
+
+/// WebDAV relPath 的父目录（"/" 分隔；根下第一层 parent = ""；已在根 = None）
+fn parent_rel_path(p: &str) -> Option<String> {
+    let p = p.trim_matches('/');
+    if p.is_empty() { return None; }
+    match p.rfind('/') {
+        Some(i) => Some(p[..i].to_string()),
+        None => Some(String::new()),
+    }
+}
+```
+
+主体改造：入口 `listing_kind(descriptor)` 分派——`Local` 走**现有列举实现不动**（零回归）；`ViaFactory` 用 `factory.resolve(descriptor).list_directory(parent_descriptor, parent_rel)` 拿 `Vec<MediaEntry>` 喂给既有 `pick_sibling_where` 链（排序/跳已读/directory_sort 原样）。`NextVolumeResult` 返回同类型 WebDav descriptor（account_id/base_url 不变，path=新卷 relPath）。factory 传入方式：命令签名加 `factory: tauri::State<MediaSourceFactory>`（lib.rs 已 manage）。文件头注释更新为「Local + WebDAV（3.2.0）；Smb 3.3.0；Archive 无跨卷语义」。
+
+- [ ] **步骤 4：`cargo test -p mirapage-desktop-lib find_next_volume` → 全 PASS（41 既有 + 新增）**
+
+- [ ] **步骤 5：前端确认（跨卷链本就 descriptor 驱动）**
+
+`grep -n "type === 'local'\|type !== 'local'" src/composables/useCrossVolume.ts src/views/ReaderView.vue`——跨卷按钮 enable/调用链若有 Local 门则放开为「Local | WebDAV」；`useCrossVolume` 其余逻辑不动。有改动则补对应 vitest 用例。
+
+- [ ] **步骤 6：Commit**
+
+```bash
+git add src-tauri/src/commands/find_next_volume.rs src/composables/useCrossVolume.ts src/views/ReaderView.vue
+git commit -m "feat(cross-volume): find_next_volume 泛化——WebDAV 跨卷（factory 列目录），Local 零回归"
+```
+
+---
+
+### 任务 16：Accounts.vue 密码框 + type 锁定 + 删除 warning + i18n
 
 **文件：**
 - 修改：`src/views/Accounts.vue`（draft 表单 + remove + 编辑态）
@@ -2004,7 +2105,7 @@ git commit -m "feat(accounts): 密码框+type 编辑锁定+删除凭据残留 wa
 
 ---
 
-### 任务 16：全量验证 + 手测清单 + 收尾
+### 任务 17：全量验证 + 手测清单 + 收尾
 
 **文件：**
 - 修改：`AGENTS.md`（状态表加 3.2.0 行）/ `DESIGN.md` §16.1（划掉已完成项——注意 M1 只完成「显示层」部分，SMB 条目到 M2 才划）
@@ -2023,7 +2124,7 @@ cd src-tauri && cargo test         # 全绿
 1. 本地目录阅读回归：三模式翻页 + 跨卷 + 书签添加/跳转 + 进度恢复
 2. 本地 CBZ：双击 ZIP → 条目列表 → 双击图片阅读 → 退出再进（进度恢复）；面包屑 ZIP 名点击退出
 3. masonry：Local 目录瀑布流缩略图正常（回归）+ 远程（WebDAV）目录瀑布流缩略图生成 + 原图打开
-4. WebDAV 带密码服务器：账户添加（密码）→ 测试连接绿 → 浏览 → 阅读 → 历史记录点击再开
+4. WebDAV 带密码服务器：账户添加（密码）→ 测试连接绿 → 浏览 → 阅读 → 历史记录点击再开 → **末页跨卷到相邻目录卷 + 自动档跳过已读卷**
 5. devtools network：图片请求 `media.localhost` 形态；构造 `Range` 请求（console fetch 带 Range 头）确认 206/416
 6. URL 攻击面：console fetch 伪造 `media://local/<encode('C:/Windows/win.ini')>` 之外再试 `..`、错段数 → 403/404
 7. keyring：Windows 凭据管理器查看 `top.racyan.mirapage-desktop` 条目；删除账户后条目消失（或 warning 提示）
@@ -2043,9 +2144,9 @@ git push origin main --tags
 
 ## 自检记录
 
-- **规格覆盖度**：spec §3.1（任务 5/6/7）、§3.2（11/12）、§3.3（13）、§3.4（2/3/15、4 的 Basic Auth）、§3.5（9/14）、§3.6（16 手测清单）——全覆盖；§4/§5 属 M2/M3 不在本计划。
+- **规格覆盖度**：spec §3.1（任务 5/6/7）、§3.2（11/12 + 跨卷泛化=任务 15）、§3.3（13）、§3.4（2/3/16、4 的 Basic Auth）、§3.5（9/14）、§3.6（17 手测清单，含 WebDAV 跨卷）——全覆盖；§4/§5 属 M2/M3 不在本计划。
 - **占位符**：任务 4/9 的"步骤 0 确认签名"是显式探索步骤（带产出物），非占位；任务 11/12 测试中的注释骨架处已在紧邻行给出第一用例的完整模式供镜像，执行者须补全后再跑红——已在步骤内写明。
-- **类型一致性**：`FileStat`（任务 1 定义，4/7 使用）、`CredentialStore`（2 定义，3/4 使用）、`MediaTarget`（5 定义，7 使用）、`mediaUrl/joinRel`（10 定义，11/13/14 使用）、`DeleteAccountResult`（3 定义 Rust，15 定义 TS 镜像）、`RemoteFetchRequest/FetchActorConfig`（9 定义并自洽使用）——一致。
+- **类型一致性**：`FileStat`（任务 1 定义，4/7 使用）、`CredentialStore`（2 定义，3/4 使用）、`MediaTarget`（5 定义，7 使用）、`mediaUrl/joinRel`（10 定义，11/13/14 使用）、`DeleteAccountResult`（3 定义 Rust，16 定义 TS 镜像）、`PreparedRemoteTask/RemoteFetchRequest/FetchActorConfig`（9 定义并自洽使用）——一致。
 - **已知执行期风险**：convertFileSrc 二次编码行为（任务 7/10 已写实测修正路径）；Db 在 factory 中的持有形态（任务 4 步骤 0 定案后任务 8 跟随）。
 
 ## 附：计划审查修订记录（rev4，2026-08-18）
@@ -2057,3 +2158,12 @@ M1 计划审查 4 必须 + 1 建议全采纳：
 3. **任务 10 补 `origin=local` 分支**：既有 descriptor 契约变体与 origin 缺省同形态（`archive/local/`，Rust 重建为 origin:None 语义等价）；非 local/webdav/smb 的 origin 类型抛错兜底（契约扩展时编译期暴露）；两端测试覆盖。
 4. **任务 11 加类型拓宽步骤（1b）**：`BookIdentity`/`NextVolumeTarget`/`ReaderBookSnapshot` 的 `descriptor` 从 `SourceDescriptorLocal` 拓宽为 `SourceDescriptor`，下游仅在本地面径计算处收窄（跨卷 M1 仍 Local-only 行为不变）；验证含 `npm run type-check`。
 5. **任务 3 编辑路径加快照回滚**：keyring 写失败时回滚 DB UPDATE 到旧值，保持账户配置与凭据一致；新增 `upsert_edit_keyring_failure_rolls_back_db` 用例。
+
+## 附：计划审查修订记录（rev5，2026-08-18）
+
+第二轮计划审查 1 必须 + 2 建议 + 1 规格矛盾全采纳：
+
+1. **任务 9 上下文完整性**：`classify_remote()` 一次性产出 `PreparedRemoteTask`（cache_key/cache_abs/file_size/epoch/descriptor/item/DecodeTemplate 策略快照），actor 成功**整快照 + bytes** 回传 `on_fetched`——禁止凭裸 key 回查重建（取源期间缓存清理/设置变化的竞态）；`on_failed` 同带快照。
+2. **字段名对齐**：测试构造用 `ThumbnailRequestItem.file_size`（mod.rs:135 实际字段，非 `size`）。
+3. **`validate_abs_path` 段级校验**：只拒恰好等于 `..` 的 segment，`foo..bar.jpg` 合法（新增用例）。
+4. **跨卷范围修正（连带 spec rev4）**：spec 删「跨卷源无关自动成立」表述（与 `find_next_volume.rs:7` 仅 Local 事实冲突）；按用户要求 **WebDAV 需要跨卷**——新增任务 15（find_next_volume 泛化：Local 零回归 + WebDAV 走 factory 列目录 + SMB 明确报错留 M2），原任务 15/16 顺移 16/17，验收清单加 WebDAV 跨卷 + 跳已读。
