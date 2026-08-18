@@ -492,4 +492,117 @@ mod tests {
         assert_eq!(it.webdav_account_id, Some(7));
         assert_eq!(it.smb_host, None);
     }
+
+    #[test]
+    fn archive_origin_none_maps_archive_fields_only() {
+        let conn = test_db();
+        let sd = SourceDescriptor::Archive {
+            archive_path: "D:/books/a.cbz".into(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Cbz,
+            origin: None,
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        seed(&conn, &sd, "/a.cbz", "A", 100, None);
+
+        let doc = build_export_doc(&conn).unwrap();
+        let it = &doc.items[0];
+        assert_eq!(it.source_type, "archive");
+        assert_eq!(it.archive_file_uri.as_deref(), Some("D:/books/a.cbz"));
+        assert_eq!(it.archive_format.as_deref(), Some("cbz"));
+        assert_eq!(it.archive_origin_type, None, "origin=None → originType null");
+        assert_eq!(it.archive_origin_root_uri, None);
+        assert_eq!(it.archive_origin_host, None);
+        assert_eq!(it.archive_origin_entry_path, None);
+        assert_eq!(it.archive_archive_rel_path, None);
+    }
+
+    #[test]
+    fn archive_origin_local_flattens_and_sevenz_maps_7z() {
+        let conn = test_db();
+        let sd = SourceDescriptor::Archive {
+            archive_path: "D:/cache/tmp.7z".into(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::SevenZ,
+            origin: Some(Box::new(SourceDescriptor::Local { root_path: "E:/src".into() })),
+            origin_entry_path: Some("comics/vol1.7z".into()),
+            archive_rel_path: Some("cache/tmp.7z".into()),
+        };
+        seed(&conn, &sd, "/vol1", "V1", 100, None);
+
+        let doc = build_export_doc(&conn).unwrap();
+        let it = &doc.items[0];
+        assert_eq!(it.archive_format.as_deref(), Some("7z"), "sevenz → 7z");
+        assert_eq!(it.archive_origin_type.as_deref(), Some("local"));
+        assert_eq!(it.archive_origin_root_uri.as_deref(), Some("E:/src"));
+        assert_eq!(it.archive_origin_host, None);
+        assert_eq!(it.archive_origin_initial_path, None);
+        assert_eq!(it.archive_origin_entry_path.as_deref(), Some("comics/vol1.7z"));
+        assert_eq!(it.archive_archive_rel_path.as_deref(), Some("cache/tmp.7z"));
+    }
+
+    #[test]
+    fn archive_origin_smb_flattens_with_account_host() {
+        let conn = test_db();
+        let acc = insert_account(&conn, Some("10.0.0.2"));
+        let sd = SourceDescriptor::Archive {
+            archive_path: "D:/cache/b.cbz".into(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Zip,
+            origin: Some(Box::new(SourceDescriptor::Smb { account_id: acc, initial_path: "share".into(), path: "sub".into(), port: 445 })),
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        seed(&conn, &sd, "/b", "B", 100, None);
+
+        let doc = build_export_doc(&conn).unwrap();
+        let it = &doc.items[0];
+        assert_eq!(it.archive_origin_type.as_deref(), Some("smb"));
+        assert_eq!(it.archive_origin_host.as_deref(), Some("10.0.0.2"), "origin smb host 联 account");
+        assert_eq!(it.archive_origin_initial_path.as_deref(), Some("share"));
+        assert_eq!(it.archive_origin_path.as_deref(), Some("sub"));
+        assert_eq!(it.archive_origin_account_id, Some(acc));
+        assert_eq!(it.archive_origin_port, Some(445));
+        assert_eq!(it.smb_host, None, "顶层 smb 命名空间不沾 origin 的值");
+    }
+
+    #[test]
+    fn warnings_skip_broken_descriptor_and_unsupported_origin() {
+        let conn = test_db();
+        // 直接 SQL 插一条非法 descriptor（record_history_inner 会校验拒绝，绕过）
+        conn.execute(
+            "INSERT INTO browse_history (source_descriptor, rel_path, display_name, last_visited_at) VALUES ('not-json', '/bad', 'Bad', 100)",
+            [],
+        ).unwrap();
+        seed(&conn, &local_sd(), "/good", "Good", 200, None);
+        // origin=WebDav：Android v2 schema 无对应字段位 → 跳过
+        let sd = SourceDescriptor::Archive {
+            archive_path: "D:/c.zip".into(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Zip,
+            origin: Some(Box::new(SourceDescriptor::WebDav { account_id: 1, base_url: "https://d".into(), path: "/".into() })),
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        seed(&conn, &sd, "/wd", "WD", 300, None);
+
+        let doc = build_export_doc(&conn).unwrap();
+        assert_eq!(doc.items.len(), 1, "两条坏行跳过，仅 /good 导出");
+        assert_eq!(doc.total_count, 1, "totalCount 不含跳过行");
+        assert_eq!(doc.items[0].rel_path, "/good");
+        assert_eq!(doc.items[0].id, 1, "跳过行不占序号");
+        assert_eq!(doc.warnings.len(), 2);
+        // warnings 顺序跟随主查询 DESC 行序，断言顺序无关
+        assert!(
+            doc.warnings.iter().any(|w| w.contains("/bad") && w.contains("解析失败")),
+            "含 descriptor 解析失败明细: {:?}",
+            doc.warnings
+        );
+        assert!(
+            doc.warnings.iter().any(|w| w.contains("/wd") && w.contains("webdav")),
+            "含 origin 形态明细: {:?}",
+            doc.warnings
+        );
+    }
 }
