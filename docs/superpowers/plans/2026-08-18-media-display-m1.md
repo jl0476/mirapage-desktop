@@ -2405,7 +2405,7 @@ export async function warmMediaUrls(sessionId: string, generation: number, urls:
 }
 ```
 
-ReaderView 接线：`const warmSessionId = crypto.randomUUID()`（挂载时一次）；`warmGen = ref(0)`；`openBook` 成功后 `warmGen.value++` + `void advanceWarmSession(warmSessionId, warmGen.value)`；`watch(currentSpreadIndex)`（或等价翻页信号）触发 `void warmMediaUrls(warmSessionId, warmGen.value, pageUrls.slice(next1, next3))`——**前端不判源类型**（Local 形态由 Rust 侧跳过）；`onUnmounted` 无条件 `void advanceWarmSession(warmSessionId, ++warmGen.value)` 使在途预热作废（跨卷 `navigateToVolume` 复用 openBook 路径天然递增）。
+ReaderView 接线：`const warmSessionId = crypto.randomUUID()`（挂载时一次）；`warmGen = ref(0)`；`openBook` 成功后 `warmGen.value++` + **`await advanceWarmSession(warmSessionId, warmGen.value)`（openBook 本就是 async，必须 await——rev9：void 发起时紧随的 warmMediaUrls 可能因 IPC 调度先到后端，被当作旧会话丢弃，偶发少预热一次）**；之后 `watch(currentSpreadIndex)`（或等价翻页信号）触发 `void warmMediaUrls(warmSessionId, warmGen.value, pageUrls.slice(next1, next3))`（advance 已完成，fire-and-forget 安全）——**前端不判源类型**（Local 形态由 Rust 侧跳过）；`onUnmounted` 无条件 `void advanceWarmSession(warmSessionId, ++warmGen.value)` 使在途预热作废（跨卷 `navigateToVolume` 复用 openBook 路径天然递增；卸载场景无需 await，乱序无害——作废旧会话与到达顺序无关）。
 
 - [ ] **步骤 5：`cargo test -p mirapage-desktop-lib media_cache`（含 rev7 两个方向回归用例 + rev8 会话判定纯函数用例：`warm_session_matches` 在 advance 后返回 false、同会话返回 true）+ `npx vitest run src/views/ReaderView.test.ts`（追加：非 Local descriptor 翻页触发 warmMediaUrls 带 sessionId+generation；Local 不触发；openBook/onUnmounted 调 advanceWarmSession）→ PASS**
 
@@ -2504,3 +2504,7 @@ M1 计划审查 4 必须 + 1 建议全采纳：
 
 1. **warm 会话协议定死**：原 rev7 的 `epoch` 只在前端 ref 递增、不通知后端——Rust in-flight 任务观察不到变化仍继续读网填缓存；且组件重挂载后本地计数归零无法区分新旧会话。改为显式协议：`advance_warm_session(sessionId, generation)`（Rust 侧 `OnceLock<Mutex<(String, u64)>>` 真值源；Reader 打开/切书/卸载**无条件**调用，覆盖即作废旧会话，兼作 begin 与 cancel）+ `warm_media_urls(sessionId, generation, urls)`（任务【启动前】与【读源完成写 LRU 前】双检查 `warm_session_matches`）。sessionId = ReaderView 挂载时 `crypto.randomUUID()`；generation = 同挂载内 openBook 递增（跨卷 navigateToVolume 复用 openBook 路径天然递增）。
 2. **OnceLock 定死**：`GLOBAL` 与 `WARM_SESSION` 均直接用 `std::sync::OnceLock`（Rust 1.70+ 标准库），删除「once_cell 或 OnceLock 二选一」占位说明，避免实现时意外引入未声明的 once_cell 直接依赖。
+
+## 附：计划审查修订记录（rev9，2026-08-19，非阻塞建议采纳）
+
+第五轮通过后 1 条非阻塞建议：openBook 内 `advanceWarmSession` 改 **await**（原 void 发起时紧随的 `warmMediaUrls` 可能因 IPC 调度先到后端被当作旧会话丢弃，偶发少预热一次）；openBook 本就是 async，零成本。之后的翻页 warm 保持 fire-and-forget（advance 已完成）；卸载场景 advance 乱序无害（作废旧会话与到达顺序无关）。
