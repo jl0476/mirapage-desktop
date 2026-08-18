@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::source::descriptor::{ArchiveFormat, SourceDescriptor};
 
@@ -150,6 +151,35 @@ pub(crate) fn build_export_doc(conn: &rusqlite::Connection) -> Result<ExportDoc,
 
     let total_count = items.len();
     Ok(ExportDoc { schema_version: 2, total_count, warnings, items })
+}
+
+/// 导出全部阅览记录。前端传默认文件名（本地时间戳由前端生成）。
+/// 用户取消对话框 → Ok(exported=false)，不算错误。
+#[tauri::command]
+pub fn export_browse_history(
+    app: tauri::AppHandle,
+    db: tauri::State<crate::db::Db>,
+    default_file_name: String,
+) -> Result<ExportOutcome, String> {
+    // sync command 在 IPC 处理线程（非主线程）执行，blocking 变体符合插件约束
+    let Some(file_path) = app
+        .dialog()
+        .file()
+        .set_file_name(&default_file_name)
+        .add_filter("JSON", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(ExportOutcome { exported: false, path: None, total_count: 0 });
+    };
+    let path = file_path.into_path().map_err(|e| e.to_string())?;
+    let doc = build_export_doc(&db.conn())?;
+    let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json.as_bytes()).map_err(|e| e.to_string())?;
+    Ok(ExportOutcome {
+        exported: true,
+        path: Some(path.to_string_lossy().into_owned()),
+        total_count: doc.total_count,
+    })
 }
 
 /// reader_mode → Android 样本大写口径（spec §3.4；未知值原样大写）。

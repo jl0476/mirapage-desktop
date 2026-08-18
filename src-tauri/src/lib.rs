@@ -68,6 +68,8 @@ pub fn run() {
             commands::history::list_history,
             commands::history::record_history,
             commands::history::delete_history,
+            // 阅览记录导出 JSON（module3.1.2）
+            commands::history_export::export_browse_history,
             commands::library::list_library,
             commands::library::set_favorite,
             commands::library::create_book,
