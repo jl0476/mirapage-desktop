@@ -339,6 +339,35 @@ mod tests {
         let out = delete_account_impl(&db, &s, id).unwrap();
         assert!(out.warning.is_some()); // 凭据残留警告
     }
+
+    #[test]
+    fn upsert_edit_keyring_failure_rolls_back_db() {
+        // rev4：编辑时 keyring 写失败 → DB 字段回滚到旧值（配置与凭据一致性）
+        struct FailSet;
+        impl CredentialStore for FailSet {
+            fn set_password(&self, _: &str, _: &str) -> Result<(), String> { Err("boom".into()) }
+            fn get_password(&self, _: &str) -> Result<Option<String>, String> { Ok(None) }
+            fn delete_password(&self, _: &str) -> Result<(), String> { Ok(()) }
+        }
+        let (db, store) = setup();
+        let ok: Arc<dyn CredentialStore> = store.clone();
+        let id = upsert_account_impl(&db, &ok, UpsertAccountArgs {
+            id: None, name: "old-name".into(), kind: "webdav".into(),
+            host: Some("https://old".into()), port: None, share: None,
+            username: Some("old-user".into()), password: Some("p".into()) }).unwrap();
+        let fail: Arc<dyn CredentialStore> = Arc::new(FailSet);
+        let r = upsert_account_impl(&db, &fail, UpsertAccountArgs {
+            id: Some(id), name: "new-name".into(), kind: "webdav".into(),
+            host: Some("https://new".into()), port: None, share: None,
+            username: Some("new-user".into()), password: Some("p2".into()) });
+        assert!(r.is_err());
+        let conn = db.conn();
+        let (name, host, user): (String, Option<String>, Option<String>) = conn.query_row(
+            "SELECT name, host, username FROM account WHERE id = ?1", rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
+        assert_eq!((name.as_str(), host.as_deref(), user.as_deref()),
+                   ("old-name", Some("https://old"), Some("old-user"))); // 旧值完整回滚
+    }
 }
 ```
 
@@ -372,12 +401,23 @@ pub fn upsert_account_impl(
             if existing != args.kind {
                 return Err("账户类型不可修改；如需更换请删除后重新添加".into());
             }
+            // rev4：快照旧字段——keyring 写失败时回滚 DB，保持「账户配置 ↔ 凭据」一致
+            let (old_name, old_host, old_port, old_share, old_user): (String, Option<String>, Option<i64>, Option<String>, Option<String>) =
+                conn.query_row("SELECT name, host, port, share, username FROM account WHERE id = ?1", rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .map_err(|e| e.to_string())?;
             conn.execute(
                 "UPDATE account SET name = ?1, host = ?2, port = ?3, share = ?4, username = ?5 WHERE id = ?6",
                 rusqlite::params![args.name, args.host, args.port, args.share, args.username, id],
             ).map_err(|e| e.to_string())?;
             if let Some(p) = args.password.filter(|p| !p.is_empty()) {
-                creds.set_password(&crate::credentials::account_key(&args.kind, id), &p)?;
+                if let Err(e) = creds.set_password(&crate::credentials::account_key(&args.kind, id), &p) {
+                    let _ = conn.execute(
+                        "UPDATE account SET name = ?1, host = ?2, port = ?3, share = ?4, username = ?5 WHERE id = ?6",
+                        rusqlite::params![old_name, old_host, old_port, old_share, old_user, id],
+                    );
+                    return Err(format!("凭据保存失败，本次修改已回滚: {e}"));
+                }
             }
             Ok(id)
         }
@@ -1208,122 +1248,277 @@ git commit -m "feat(accounts): test_connection 实装——webdav 真握手 / sm
 
 ---
 
-### 任务 9：缩略图远程取源异步阶段
+### 任务 9：缩略图远程取源 actor（并发上限 + 字节预算 + epoch 取消）
 
 **文件：**
 - 创建：`src-tauri/src/thumbnail/fetch.rs`
-- 修改：`src-tauri/src/thumbnail/service.rs`（521-529 unsupported 分支 + 533 local_abs_path 分流）
+- 修改：`src-tauri/src/thumbnail/service.rs`（521-529 unsupported 分支；`request()` 是同步函数——**入队必须走 try_send，不得在其中 await**）
 - 修改：`src-tauri/src/thumbnail/mod.rs`（`pub mod fetch;`）
+
+**架构（rev4）**：`ThumbnailService::request()` 同步 → 只做 `actor.try_submit(req)`（unbounded channel 非阻塞入队）。后台 **RemoteFetchActor** 任务消费队列：in-flight 去重 → `Arc<Semaphore>`（并发上限）+ `Arc<Semaphore>`（**在途字节预算**，按 `file_size` `acquire_many_owned` 预留、完成归还）→ epoch 双检查（取源前 + 取源后，取消的任务不 fetch、在途完成结果不进解码链）→ 成功回调把 bytes 组装成解码任务提交 scheduler。
 
 - [ ] **步骤 0：读三个现有文件确认签名**
 
 `thumbnail/scheduler.rs`（QueuedTask/GenerationJob/GenerateFn 形状、提交入口）、`thumbnail/key.rs`（cache_key 计算函数签名）、`thumbnail/service.rs` 240-330（生产 generate fn 如何读本地文件——bytes 变体要镜像它）。以下代码按 3.0.7 报告的形状写，**执行时以实际签名为准对齐字段名**。
 
-- [ ] **步骤 1：写失败测试（fetch 队列单测，mock 取源闭包）**
+- [ ] **步骤 1：写失败测试（真并发 + 真取消，rev4 重写）**
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
+    fn req(key: &str, size: u64, epoch: u64) -> RemoteFetchRequest {
+        RemoteFetchRequest {
+            cache_key: key.into(),
+            descriptor: crate::source::descriptor::SourceDescriptor::WebDav {
+                account_id: 1, base_url: "https://x".into(), path: String::new(),
+            },
+            source_rel_path: format!("{key}.jpg"),
+            file_size: size,
+            epoch,
+            item: ThumbnailRequestItem {
+                path: format!("{key}.jpg"),
+                source_rel_path: format!("{key}.jpg"),
+                width: 100, height: 100, size,
+                modified_at: None,
+            },
+        }
+    }
+
+    /// 并发上限 + 未开始任务被 epoch 取消（不调 fetch） + 在途完成结果不进回调链
     #[tokio::test]
-    async fn fetch_queue_limits_concurrency_and_cancels_by_epoch() {
-        let active = Arc::new(AtomicUsize::new(0));
+    async fn concurrency_limited_and_epoch_cancels_pending_and_drops_results() {
+        let started = Arc::new(AtomicUsize::new(0));     // fetch 实际进入数
         let peak = Arc::new(AtomicUsize::new(0));
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut q = RemoteFetchQueue::new(2, {
-            let (active, peak, tx) = (active.clone(), peak.clone(), tx.clone());
-            Arc::new(move |key: String| {
-                let (active, peak, tx) = (active.clone(), peak.clone(), tx.clone());
-                Box::pin(async move {
-                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    tx.send(key).unwrap();
-                    Ok(Vec::new())
-                })
+        let hold = Arc::new(tokio::sync::Notify::new()); // 受控 barrier：fetch 挂起等放行
+        let (decode_tx, mut decode_rx) = tokio::sync::mpsc::unbounded_channel::<(String, Vec<u8>)>();
+
+        let started_c = started.clone();
+        let peak_c = peak.clone();
+        let hold_c = hold.clone();
+        let fetch: FetchFn = Arc::new(move |_path: String| {
+            let (started_c, peak_c, hold_c) = (started_c.clone(), peak_c.clone(), hold_c.clone());
+            Box::pin(async move {
+                let now = started_c.fetch_add(1, Ordering::SeqCst) + 1;
+                peak_c.fetch_max(now, Ordering::SeqCst);
+                hold_c.notified().await; // 挂起直到测试放行
+                started_c.fetch_sub(1, Ordering::SeqCst);
+                Ok(vec![1u8, 2, 3])
             })
         });
-        for i in 0..6 { q.submit(format!("k{i}"), SourceToFetch { key: format!("k{i}") }, 1).await; }
-        q.new_epoch(2); // 取消未完成的
-        let mut got = 0;
-        while rx.try_recv().is_ok() { got += 1; }
-        assert!(got <= 6);
-        assert!(peak.load(Ordering::SeqCst) <= 2, "并发不得超过信号量上限");
+
+        let actor = RemoteFetchActor::spawn(FetchActorConfig {
+            concurrency: 2,
+            byte_budget: 1_000_000,
+            fetch,
+            on_fetched: {
+                let decode_tx = decode_tx.clone();
+                Arc::new(move |key: &str, bytes: Vec<u8>| { let _ = decode_tx.send((key.to_string(), bytes)); })
+            },
+            on_failed: Arc::new(|_: &str, _: &str| {}),
+        });
+
+        // 6 个任务全部 try_submit（同步、立即返回）——两个占满并发，4 个排队
+        for i in 0..6 { actor.try_submit(req(&format!("k{i}"), 10, 1)); }
+
+        // 等 2 个进入 fetch（在 barrier 挂起）
+        for _ in 0..200 {
+            if started.load(Ordering::SeqCst) == 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 2, "并发上限 2 生效");
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+
+        // 切目录：epoch 1 → 2。随后放行 barrier——
+        actor.new_epoch(2);
+        hold.notify_waiters();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // 在途 2 个完成但结果被丢弃（epoch 已变）；排队 4 个永远不开始
+        assert!(decode_rx.try_recv().is_err(), "在途完成结果不得进解码链");
+        assert_eq!(started.load(Ordering::SeqCst), 0);
+        // 再等一轮，确认剩余 4 个未 fetch
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(peak.load(Ordering::SeqCst), 2, "取消后排队任务不得启动 fetch");
+    }
+
+    /// 字节预算：单文件超预算直接失败；两个文件合计超预算则串行
+    #[tokio::test]
+    async fn byte_budget_reserves_and_rejects_oversize() {
+        let started = Arc::new(AtomicUsize::new(0));
+        let (fail_tx, mut fail_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let hold = Arc::new(tokio::sync::Notify::new());
+        let started_c = started.clone();
+        let hold_c = hold.clone();
+        let fetch: FetchFn = Arc::new(move |_| {
+            let (started_c, hold_c) = (started_c.clone(), hold_c.clone());
+            Box::pin(async move { started_c.fetch_add(1, Ordering::SeqCst); hold_c.notified().await; Ok(vec![0u8; 4]) })
+        });
+        let actor = RemoteFetchActor::spawn(FetchActorConfig {
+            concurrency: 8,                      // 并发放大，只考察字节预算
+            byte_budget: 10,                     // 每文件 8 字节 → 同时最多 1 个
+            fetch,
+            on_fetched: Arc::new(|_, _| {}),
+            on_failed: { let fail_tx = fail_tx.clone(); Arc::new(move |key: &str, _: &str| { let _ = fail_tx.send(key.into()); }) },
+        });
+        actor.try_submit(req("big", 100, 1));    // 超预算 → 直接失败回调
+        actor.try_submit(req("a", 8, 1));
+        actor.try_submit(req("b", 8, 1));
+        for _ in 0..200 {
+            if fail_rx.try_recv().is_ok() { break; } // big 的失败到达
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // a 占满 8/10 预算，b 必须等 a 完成才能开始
+        for _ in 0..200 {
+            if started.load(Ordering::SeqCst) >= 1 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(started.load(Ordering::SeqCst), 1, "字节预算内只允许 1 个在途");
+        hold.notify_waiters(); // 放行 a → b 才能开始
+        for _ in 0..200 {
+            if started.load(Ordering::SeqCst) >= 2 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        hold.notify_waiters();
+        assert_eq!(started.load(Ordering::SeqCst), 2);
     }
 }
 ```
 
-- [ ] **步骤 2：运行验证失败**
+（`ThumbnailRequestItem` 字段以 `src/lib/thumbnail.ts` / Rust 镜像实际为准——步骤 0 确认后对齐构造。）
+
+- [ ] **步骤 2：运行验证失败**（`cargo test -p mirapage-desktop-lib fetch` → 编译失败）
 
 - [ ] **步骤 3：实现 fetch.rs**
 
 ```rust
-//! 远程取源异步阶段（spec rev3 §3.5）：独立并发上限 + 在途预算，
-//! bytes 到手才进解码队列；epoch 取消在取源期即生效。
+//! 远程取源 actor（spec rev3 §3.5 / 计划 rev4）：
+//! - 同步 request() 只 try_submit（非阻塞），actor 后台消费
+//! - 并发上限（Arc<Semaphore>）+ 在途字节预算（按 file_size acquire_many_owned 预留、完成归还）
+//! - epoch 双检查：取源前（取消的不 fetch）+ 取源后（取消的结果不进解码链）
+//! - in-flight 按 cache_key 去重
 
+use crate::source::descriptor::SourceDescriptor;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 
-pub struct SourceToFetch {
-    pub key: String, // cache_key（in-flight 去重用）
+#[derive(Debug, Clone)]
+pub struct RemoteFetchRequest {
+    pub cache_key: String,
+    pub descriptor: SourceDescriptor,
+    pub source_rel_path: String,
+    pub file_size: u64, // 字节预算预留依据（list_directory 的 entry.size）
+    pub epoch: u64,
+    pub item: crate::thumbnail::ThumbnailRequestItem,
 }
 
-pub type FetchFn = Arc<dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>> + Send + Sync>;
+pub type FetchFn = Arc<
+    dyn Fn(SourceDescriptor, String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
+        + Send
+        + Sync,
+>;
+pub type OnFetched = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
+pub type OnFailed = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
-pub struct RemoteFetchQueue {
-    sem: Semaphore,
-    inflight: tokio::sync::Mutex<HashSet<String>>,
-    fetch: FetchFn,
-    on_done: tokio::sync::mpsc::UnboundedSender<(String, Result<Vec<u8>, String>)>,
-    epoch: std::sync::atomic::AtomicU64,
+pub struct FetchActorConfig {
+    pub concurrency: usize,
+    pub byte_budget: usize, // 在途 bytes 上限（常量起步，如 64MB；单文件超预算直接失败）
+    pub fetch: FetchFn,
+    pub on_fetched: OnFetched, // bytes 到手 → 组装解码任务提交 scheduler + emit
+    pub on_failed: OnFailed,   // 取源失败 → emit failed
 }
 
-impl RemoteFetchQueue {
-    /// on_done：取源完成（成功带 bytes）→ service 侧组装解码任务提交 scheduler
-    pub fn new(concurrency: usize, fetch: FetchFn) -> (Self, tokio::sync::mpsc::UnboundedReceiver<(String, Result<Vec<u8>, String)>) {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        (Self {
-            sem: Semaphore::new(concurrency),
-            inflight: tokio::sync::Mutex::new(HashSet::new()),
-            fetch,
-            on_done: tx,
-            epoch: std::sync::atomic::AtomicU64::new(0),
-        }, rx)
+pub struct RemoteFetchActor {
+    tx: tokio::sync::mpsc::UnboundedSender<RemoteFetchRequest>,
+    epoch: Arc<AtomicU64>,
+}
+
+impl RemoteFetchActor {
+    pub fn spawn(cfg: FetchActorConfig) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RemoteFetchRequest>();
+        let epoch = Arc::new(AtomicU64::new(0));
+        let permits = Arc::new(Semaphore::new(cfg.concurrency));
+        let budget = Arc::new(Semaphore::new(cfg.byte_budget));
+        let inflight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let budget_total = cfg.byte_budget as u64;
+        tokio::spawn({
+            let (epoch, permits, budget, inflight) = (epoch.clone(), permits.clone(), budget.clone(), inflight.clone());
+            async move {
+                while let Some(req) = rx.recv().await {
+                    if epoch.load(Ordering::SeqCst) != req.epoch { continue; } // 入队即过期
+                    {
+                        let mut g = inflight.lock().await;
+                        if g.contains(&req.cache_key) { continue; }
+                        g.insert(req.cache_key.clone());
+                    }
+                    let (permits, budget, inflight, epoch) = (permits.clone(), budget.clone(), inflight.clone(), epoch.clone());
+                    let fetch = cfg.fetch.clone();
+                    let on_fetched = cfg.on_fetched.clone();
+                    let on_failed = cfg.on_failed.clone();
+                    tokio::spawn(async move {
+                        let want = req.file_size.max(1) as u32;
+                        if req.file_size > budget_total {
+                            // 单文件超预算：快速失败，不占预算也不死等
+                            inflight.lock().await.remove(&req.cache_key);
+                            on_failed(&req.cache_key, "file exceeds remote fetch byte budget");
+                            return;
+                        }
+                        // 并发 + 字节预算双闸（await 拿 permit，均 Arc::clone 后 acquire_owned/many_owned）
+                        let (p1, p2) = match tokio::join!(
+                            Arc::clone(&permits).acquire_owned(),
+                            Arc::clone(&budget).acquire_many_owned(want),
+                        ) {
+                            (Ok(a), Ok(b)) => (a, b),
+                            _ => return, // semaphore closed
+                        };
+                        if epoch.load(Ordering::SeqCst) != req.epoch {
+                            inflight.lock().await.remove(&req.cache_key);
+                            return; // 未开始即取消：不 fetch
+                        }
+                        let res = (fetch)(req.descriptor.clone(), req.source_rel_path.clone()).await;
+                        drop((p1, p2)); // 归还预算与并发
+                        inflight.lock().await.remove(&req.cache_key);
+                        match res {
+                            Ok(bytes) => {
+                                if epoch.load(Ordering::SeqCst) == req.epoch {
+                                    on_fetched(&req.cache_key, bytes); // 取源后再查：取消的结果不进解码链
+                                }
+                            }
+                            Err(e) => {
+                                if epoch.load(Ordering::SeqCst) == req.epoch {
+                                    on_failed(&req.cache_key, &e);
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        });
+        Self { tx, epoch }
+    }
+
+    /// 同步入队（request() 内调用；send 失败=actor 已停，忽略）
+    pub fn try_submit(&self, req: RemoteFetchRequest) {
+        let _ = self.tx.send(req);
     }
 
     pub fn new_epoch(&self, e: u64) {
-        self.epoch.store(e, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub async fn submit(&self, key: String, _src: SourceToFetch, epoch_at_submit: u64) {
-        {
-            let mut g = self.inflight.lock().await;
-            if g.contains(&key) { return; }
-            g.insert(key.clone());
-        }
-        let permit = self.sem.clone().acquire_owned().await;
-        if self.epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch_at_submit {
-            self.inflight.lock().await.remove(&key);
-            return; // 已切目录，丢弃
-        }
-        let fut = (self.fetch)(key.clone());
-        let out = fut.await;
-        let _ = permit;
-        self.inflight.lock().await.remove(&key);
-        let _ = self.on_done.send((key, out));
+        self.epoch.store(e, Ordering::SeqCst);
     }
 }
 ```
 
-service.rs 接线（`request()` 内 521-529 的 `if !local` 分支替换）：
+service.rs 接线（`request()` 内 521-529 的 `if !local` 分支替换——**无 await**）：
 
 ```rust
                 if !local {
-                    // rev3 §3.5：远程源——索引命中直返；未命中走远程取源队列（不占解码 worker）
+                    // rev3 §3.5 / rev4：远程源——索引命中直返；未命中 try_submit 入取源 actor
                     match classify_remote(&conn, &cache_root, &descriptor_json, item, epoch, quality) {
                         Ok(ItemClass::Cached { cache_key, cache_abs, width, height }) => results.push(RequestResult {
                             path: item.path.clone(), status: "cached".into(),
@@ -1333,11 +1528,15 @@ service.rs 接线（`request()` 内 521-529 的 `if !local` 分支替换）：
                         Ok(ItemClass::UseOriginal) => results.push(RequestResult {
                             path: item.path.clone(), status: "original".into(), ..unset(&item.path)
                         }),
-                        Ok(ItemClass::Generate { task: _, cache_abs }) => {
-                            // 占位 queued；取源完成事件由 fetch_done 回调提交真任务并 emit（模式同 thumbnail://progress）
-                            let ck = cache_abs.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-                            let _ = ck;
-                            self.remote_fetch.submit(item.source_rel_path_key(), SourceToFetch { key: item.cache_key() }, epoch).await;
+                        Ok(ItemClass::Generate { .. }) => {
+                            self.remote_fetch.try_submit(RemoteFetchRequest {
+                                cache_key: /* 步骤 0 确认的 key 计算，与 classify_remote 同源 */,
+                                descriptor: descriptor.clone(),
+                                source_rel_path: item.source_rel_path.clone(),
+                                file_size: item.size,
+                                epoch,
+                                item: item.clone(),
+                            });
                             results.push(RequestResult { path: item.path.clone(), status: "queued".into(), ..unset(&item.path) });
                         }
                         Err(e) => results.push(err_result(&item.path, &e)),
@@ -1346,15 +1545,15 @@ service.rs 接线（`request()` 内 521-529 的 `if !local` 分支替换）：
                 }
 ```
 
-`classify_remote`：复制 `classify_item` 去掉 `verify_disk_file`（远程没有本地文件可验），输入用 `item.source_rel_path`。`item.cache_key()`：若 `ThumbnailRequestItem` 无该字段，用与 `classify_item` 相同的 key 计算函数（步骤 0 确认 key.rs 签名后内联调用）。取源完成回调（`fetch.rs` 的 on_done 消费方）：在 service 持有的后台任务里 `while let Some((key, res)) = rx.recv().await` → 成功则构造 bytes-based QueuedTask（generate 闭包用 `std::io::Cursor::new(bytes.clone())` 替代 `File::open`，其余复用生产 generate fn 逻辑）→ scheduler 提交 → emit 完成事件（复用现有 emit 路径）；失败则 emit failed 事件。service 构造处（lib.rs 初始化 ThumbnailService 处）spawn 该消费循环。
+`classify_remote`：复制 `classify_item` 去掉 `verify_disk_file`（远程没有本地文件可验），输入用 `item.source_rel_path`。`on_fetched` 回调（service 构造时装配）：组装 bytes-based QueuedTask（generate 闭包用 `std::io::Cursor::new(bytes)` 替代 `File::open`，其余复用生产 generate fn 逻辑）→ scheduler 提交 → emit 完成事件（复用现有 emit 路径）；`on_failed` → emit failed 事件。`FetchActorConfig.fetch` 生产闭包 = `factory.resolve(&d).read_file(&d, &rel, None)` 映射错误。actor 在 `ThumbnailService` 字段持有（`new()`/lib.rs 初始化处 spawn），`service.new_epoch()` 同时调 `scheduler.new_epoch` 与 `remote_fetch.new_epoch`。
 
-- [ ] **步骤 4：`cargo test -p mirapage-desktop-lib thumbnail` → PASS（既有 105 缩略图用例 + fetch 新用例不红）**
+- [ ] **步骤 4：`cargo test -p mirapage-desktop-lib thumbnail` → PASS（既有 105 缩略图用例 + fetch 2 个新用例）**
 
 - [ ] **步骤 5：Commit**
 
 ```bash
 git add src-tauri/src/thumbnail/fetch.rs src-tauri/src/thumbnail/service.rs src-tauri/src/thumbnail/mod.rs src-tauri/src/lib.rs
-git commit -m "feat(thumbnail): 远程取源异步阶段——独立并发+in-flight 去重+epoch 取消，bytes 到手才进解码队列"
+git commit -m "feat(thumbnail): 远程取源 actor——try_submit 非阻塞入队+Arc<Semaphore> 并发/字节预算双闸+epoch 双检查取消"
 ```
 
 ---
@@ -1399,6 +1598,16 @@ describe('mediaUrl', () => {
 
   it('archive(local)：archivePath + entryPath 单段', () => {
     const ar = { type: 'archive', archivePath: 'D:/a.cbz', entryPrefix: '', format: 'cbz' } as SourceDescriptor;
+    const url = mediaUrl(ar, 'inner/p1.jpg');
+    expect(url).toBe('http://media.localhost/archive/local/' + encodeURIComponent('D:/a.cbz') + '/' + encodeURIComponent('inner/p1.jpg'));
+  });
+
+  it('archive(origin=local)：既有契约变体，与 origin 缺省同形态（rev4）', () => {
+    const ar = {
+      type: 'archive', archivePath: 'D:/a.cbz', entryPrefix: '', format: 'cbz',
+      origin: { type: 'local', rootPath: 'D:/' },          // 既有 descriptor 契约允许
+      originEntryPath: 'a.cbz', archiveRelPath: 'a.cbz',
+    } as SourceDescriptor;
     const url = mediaUrl(ar, 'inner/p1.jpg');
     expect(url).toBe('http://media.localhost/archive/local/' + encodeURIComponent('D:/a.cbz') + '/' + encodeURIComponent('inner/p1.jpg'));
   });
@@ -1452,17 +1661,22 @@ export function mediaUrl(descriptor: SourceDescriptor, relPath: string): string 
       return convertFileSrc(`smb/${descriptor.accountId}/${seg(descriptor.initialPath)}/${seg(relPath)}`, 'media');
     case 'archive': {
       const origin = descriptor.origin;
-      if (!origin) {
+      // rev4：origin 缺省 与 origin=local 同形态（既有契约变体——本地 ZIP 无论 origin 字段如何，
+      // 读取都只依赖 archivePath；Rust 端 /archive/local/ 重建为 origin:None，语义等价）
+      if (!origin || origin.type === 'local') {
         return convertFileSrc(`archive/local/${seg(descriptor.archivePath)}/${seg(relPath)}`, 'media');
       }
       if (origin.type === 'webdav') {
         return convertFileSrc(`archive/webdav/${origin.accountId}/${seg(descriptor.archiveRelPath ?? '')}/${seg(relPath)}`, 'media');
       }
-      // smb origin（M2 验收；M1 代码先行）
-      return convertFileSrc(
-        `archive/smb/${origin.accountId}/${seg(origin.initialPath)}/${seg(descriptor.archiveRelPath ?? '')}/${seg(relPath)}`,
-        'media',
-      );
+      if (origin.type === 'smb') {
+        return convertFileSrc(
+          `archive/smb/${origin.accountId}/${seg(origin.initialPath)}/${seg(descriptor.archiveRelPath ?? '')}/${seg(relPath)}`,
+          'media',
+        );
+      }
+      // TS 穷尽检查兜底（契约加新源时编译期暴露，不静默走错分支）
+      throw new Error(`mediaUrl: unsupported archive origin type: ${(origin as { type: string }).type}`);
     }
   }
 }
@@ -1484,10 +1698,11 @@ git commit -m "feat(media): 前端 mediaUrl——四类源单段 encode + conver
 ### 任务 11：阅读器 loader 通用化
 
 **文件：**
-- 修改：`src/composables/useReaderBookLoader.ts`（116-160 区域）
+- 修改：`src/composables/useReaderBookLoader.ts`（19-45 类型区 + 116-160 运行时区）
+- 修改：下游 Local 收窄点（步骤 1b 探明，预计 `src/views/ReaderView.vue` / `src/composables/useReaderActions.ts` / `src/composables/useCrossVolume.ts`）
 - 测试：`src/composables/useReaderBookLoader.test.ts`（追加用例）
 
-- [ ] **步骤 1：写失败测试**
+- [ ] **步骤 1a：写失败测试**
 
 ```ts
   it('webdav descriptor 不再抛「非本地资源」且 pageUrls 走 media://', async () => {
@@ -1512,7 +1727,23 @@ git commit -m "feat(media): 前端 mediaUrl——四类源单段 encode + conver
 
 （第二条按第一条模式补全代码；现有测试文件的 mock 结构照抄。）
 
-- [ ] **步骤 2：`npx vitest run src/composables/useReaderBookLoader.test.ts` → 新用例 FAIL（现有用例应仍 PASS）**
+- [ ] **步骤 1b：公开类型拓宽（rev4——编译前置，否则 WebDAV 用例与下游调用点编译不过）**
+
+`useReaderBookLoader.ts` 三个公开接口（22/28/41 行）的 `descriptor: SourceDescriptorLocal` 改为 `descriptor: SourceDescriptor`。然后：
+
+```bash
+npm run type-check
+```
+
+按报错清单逐一处理下游（**只在真正做本地路径计算处收窄**，其余保持宽类型直传）：
+
+- `ReaderView.vue` / `useReaderActions.ts` / `useCrossVolume.ts` 中读 `snapshot.descriptor.rootPath` / `book.descriptor.rootPath` 的位置 → 包 `descriptor.type === 'local'` 收窄（TS 自动 narrowing）或提局部 `const localDesc = descriptor.type === 'local' ? descriptor : null`；
+- 跨卷/`findNextVolume` 相关：`NextVolumeTarget` 拓宽后 `useCrossVolume` 里对 `target.descriptor.rootPath` 的访问同理收窄（M1 阶段跨卷仍只对 Local 生效——`find_next_volume` Rust 端仅 Local 目录卷，收窄分支保持现有行为即可，非 Local 走既有 fallback/禁用路径，不扩功能）；
+- 事件/emit 参数若显式标 `SourceDescriptorLocal` 一并拓宽。
+
+预期：`npm run type-check` 0 error 后再进步骤 2。
+
+- [ ] **步骤 2：`npx vitest run src/composables/useReaderBookLoader.test.ts` → 新用例 FAIL（现有用例应仍 PASS；类型已拓宽故编译通过）**
 
 - [ ] **步骤 3：实现（116-160 区域改造）**
 
@@ -1540,13 +1771,13 @@ git commit -m "feat(media): 前端 mediaUrl——四类源单段 encode + conver
 
 （`mediaUrl`/`joinRel` import 自 `@/lib/mediaUrl`；`joinPath` 沿用文件内现有 import；`rootPath` 在类型收窄后访问。Local 分支删除原 `descriptor.type !== 'local'` 抛错行。）
 
-- [ ] **步骤 4：`npx vitest run src/composables/useReaderBookLoader.test.ts` → 全 PASS（含 Local 既有用例——它们断言 absDir 语义而非 convertFileSrc 具体 URL，若有 URL 断言同步改为 mediaUrl 断言）**
+- [ ] **步骤 4：`npx vitest run src/composables/useReaderBookLoader.test.ts` 全 PASS + `npm run type-check` 0 error（含 Local 既有用例——它们断言 absDir 语义而非 convertFileSrc 具体 URL，若有 URL 断言同步改为 mediaUrl 断言）**
 
 - [ ] **步骤 5：Commit**
 
 ```bash
-git add src/composables/useReaderBookLoader.ts src/composables/useReaderBookLoader.test.ts
-git commit -m "feat(reader): loader 去 Local-only——四类源统一 mediaUrl（Local absPath/远程 relPath 语义分流）"
+git add src/composables/useReaderBookLoader.ts src/composables/useReaderBookLoader.test.ts src/views/ReaderView.vue src/composables/useReaderActions.ts src/composables/useCrossVolume.ts
+git commit -m "feat(reader): loader 去 Local-only——公开类型拓宽 SourceDescriptor+四类源统一 mediaUrl"
 ```
 
 ---
@@ -1814,5 +2045,15 @@ git push origin main --tags
 
 - **规格覆盖度**：spec §3.1（任务 5/6/7）、§3.2（11/12）、§3.3（13）、§3.4（2/3/15、4 的 Basic Auth）、§3.5（9/14）、§3.6（16 手测清单）——全覆盖；§4/§5 属 M2/M3 不在本计划。
 - **占位符**：任务 4/9 的"步骤 0 确认签名"是显式探索步骤（带产出物），非占位；任务 11/12 测试中的注释骨架处已在紧邻行给出第一用例的完整模式供镜像，执行者须补全后再跑红——已在步骤内写明。
-- **类型一致性**：`FileStat`（任务 1 定义，4/7 使用）、`CredentialStore`（2 定义，3/4 使用）、`MediaTarget`（5 定义，7 使用）、`mediaUrl/joinRel`（10 定义，11/13/14 使用）、`DeleteAccountResult`（3 定义 Rust，15 定义 TS 镜像）——一致。
+- **类型一致性**：`FileStat`（任务 1 定义，4/7 使用）、`CredentialStore`（2 定义，3/4 使用）、`MediaTarget`（5 定义，7 使用）、`mediaUrl/joinRel`（10 定义，11/13/14 使用）、`DeleteAccountResult`（3 定义 Rust，15 定义 TS 镜像）、`RemoteFetchRequest/FetchActorConfig`（9 定义并自洽使用）——一致。
 - **已知执行期风险**：convertFileSrc 二次编码行为（任务 7/10 已写实测修正路径）；Db 在 factory 中的持有形态（任务 4 步骤 0 定案后任务 8 跟随）。
+
+## 附：计划审查修订记录（rev4，2026-08-18）
+
+M1 计划审查 4 必须 + 1 建议全采纳：
+
+1. **任务 9 重写为 actor 架构**：`request()` 是同步函数不可 await——改 `try_submit` 非阻塞入队 + 后台 `RemoteFetchActor`；`Semaphore` 用 `Arc` 包裹后 `acquire_owned`/`acquire_many_owned`；**在途字节预算建模**（按 `file_size` 预留/完成归还，单文件超预算快速失败）。
+2. **任务 9 测试重写**：tokio::spawn 并发 + `Notify` 受控 barrier——真实验证并发上限（peak==2）、未开始任务被 epoch 取消后不调 fetch、在途完成结果不进解码/事件链；另加字节预算用例（超预算拒绝 + 预算内串行）。
+3. **任务 10 补 `origin=local` 分支**：既有 descriptor 契约变体与 origin 缺省同形态（`archive/local/`，Rust 重建为 origin:None 语义等价）；非 local/webdav/smb 的 origin 类型抛错兜底（契约扩展时编译期暴露）；两端测试覆盖。
+4. **任务 11 加类型拓宽步骤（1b）**：`BookIdentity`/`NextVolumeTarget`/`ReaderBookSnapshot` 的 `descriptor` 从 `SourceDescriptorLocal` 拓宽为 `SourceDescriptor`，下游仅在本地面径计算处收窄（跨卷 M1 仍 Local-only 行为不变）；验证含 `npm run type-check`。
+5. **任务 3 编辑路径加快照回滚**：keyring 写失败时回滚 DB UPDATE 到旧值，保持账户配置与凭据一致；新增 `upsert_edit_keyring_failure_rolls_back_db` 用例。
