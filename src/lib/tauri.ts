@@ -117,6 +117,17 @@ export async function deleteHistory(
   await invoke<void>('delete_history', { sourceDescriptor, relPath });
 }
 
+// ─── 阅览记录导出 JSON（module3.1.2，schema 对齐 Android v2）───
+export interface BrowseHistoryExportOutcome {
+  exported: boolean;
+  path: string | null;
+  totalCount: number;
+}
+
+export async function exportBrowseHistory(defaultFileName: string): Promise<BrowseHistoryExportOutcome> {
+  return invoke<BrowseHistoryExportOutcome>('export_browse_history', { defaultFileName });
+}
+
 // ─── Library / Book (v0.1.0-module3.0: 11 列对齐 Android LibraryEntity) ───
 export interface BookItem {
   id: number;
