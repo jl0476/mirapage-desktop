@@ -2,7 +2,7 @@
 
 - 日期：2026-08-18
 - 模块号：3.1.2（跨机器打 tag 前需 `git fetch github main` 确认未被占用）
-- 参考契约：`docs/reference/2026-08-18-browse-history-export-reference.md` + 实际样本 `docs/reference/browse_history_20260818_161925.json`
+- 参考契约：`docs/reference/2026-08-18-browse-history-export-reference.md`（实际导出样本 `browse_history_20260818_161925.json` 因含真实内网 IP 与阅览记录标题，仅本地参考、不入仓）
 - 状态：已与用户对齐三项口径（§1.3）
 
 ---
