@@ -36,6 +36,7 @@ vi.mock('@/lib/tauri', async () => {
     listHistory: vi.fn(async () => [...sample].sort((a, b) => b.lastVisitedAt - a.lastVisitedAt)),
     recordHistory: vi.fn(async () => undefined),
     deleteHistory: vi.fn(async () => undefined),
+    exportBrowseHistory: vi.fn(async () => ({ exported: false, path: null, totalCount: 0 })),
   };
 });
 
@@ -133,5 +134,41 @@ describe('History.vue', () => {
       sample[1]!.sourceDescriptor,  // Vol.01
       sample[1]!.relPath,
     );
+  });
+
+  it('渲染导出按钮，点击调 exportBrowseHistory 且成功后显示条数', async () => {
+    const { exportBrowseHistory } = await import('@/lib/tauri');
+    vi.mocked(exportBrowseHistory).mockResolvedValue({ exported: true, path: 'X:/o.json', totalCount: 3 });
+    const wrapper = mount(History, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="btn-export"]');
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain('导出');
+
+    await btn.trigger('click');
+    await flushPromises();
+    expect(exportBrowseHistory).toHaveBeenCalledWith(
+      expect.stringMatching(/^browse_history_\d{8}_\d{6}\.json$/)
+    );
+    expect(wrapper.find('[data-test="btn-export"]').text()).toContain('3');
+  });
+
+  it('导出中按钮 disabled，完成后恢复', async () => {
+    const { exportBrowseHistory } = await import('@/lib/tauri');
+    let resolveFn: (v: { exported: boolean; path: string | null; totalCount: number }) => void = () => {};
+    vi.mocked(exportBrowseHistory).mockImplementation(
+      () => new Promise((res) => { resolveFn = res; })
+    );
+    const wrapper = mount(History, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+
+    await wrapper.find('[data-test="btn-export"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('[data-test="btn-export"]').attributes('disabled')).toBeDefined();
+
+    resolveFn({ exported: false, path: null, totalCount: 0 });
+    await flushPromises();
+    expect(wrapper.find('[data-test="btn-export"]').attributes('disabled')).toBeUndefined();
   });
 });

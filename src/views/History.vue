@@ -22,12 +22,16 @@ import ListSearchInput from '@/components/common/ListSearchInput.vue';
 import PaginationBar from '@/components/common/PaginationBar.vue';
 import { usePagination } from '@/composables/usePagination';
 import type { BrowseHistoryEntry } from '@/lib/tauri';
+import { useHistoryExport } from '@/composables/useHistoryExport';
 
 const { t } = useI18n();
 const router = useRouter();
 const store = useHistoryStore();
 const { items } = storeToRefs(store);
 const fb = useFileBrowserStore();
+
+// 阅览记录导出 JSON（module3.1.2）：状态机与 Settings maintenance 共享
+const { buttonText: exportButtonText, state: exportState, trigger: triggerExport } = useHistoryExport(t);
 
 // 客户端搜索：按显示名/相对路径子串过滤（大小写不敏感）
 const searchQuery = ref('');
@@ -82,6 +86,14 @@ const ICON_X = 'M18 6 6 18M6 6l12 12';
         {{ t('history.title') }}
       </h2>
       <div class="flex items-center gap-3">
+        <button
+          data-test="btn-export"
+          class="text-xs px-2.5 py-1.5 rounded xp-bd bg-transparent text-text-secondary hover:text-text-primary hover:bg-surface-2 transition-colors disabled:opacity-50 whitespace-nowrap"
+          :disabled="exportState === 'exporting'"
+          @click="triggerExport"
+        >
+          {{ exportButtonText }}
+        </button>
         <ListSearchInput v-model="searchQuery" :placeholder="t('history.searchPlaceholder')" />
         <RouterLink
           to="/"
