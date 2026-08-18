@@ -2157,14 +2157,38 @@ mod tests {
     #[test]
     fn lru_evicts_oldest_and_counts_bytes() {
         let mut c = MediaLru::new(10);
-        c.put("a".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // 4
-        c.put("b".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // 8
-        c.get("a");                                                        // a 变最新
-        c.put("c".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // 12 > 10 → 淘汰 b（最旧）
+        c.put("a".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // head=a
+        c.put("b".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // head=b, tail=a
+        c.get("a");                                                        // touch → head=a, tail=b
+        c.put("c".into(), CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() }); // 12 > 10 → 淘汰 tail=b
         assert!(c.get("a").is_some());
-        assert!(c.get("b").is_none(), "最旧项被淘汰");
+        assert!(c.get("b").is_none(), "touch 后 b 是最旧，被淘汰");
         assert!(c.get("c").is_some());
         assert_eq!(c.current_bytes(), 8);
+    }
+
+    /// rev7 方向回归：连续 put 无 get 时，必须淘汰**最早写入**的 a（原错误实现淘汰最新 b）
+    #[test]
+    fn consecutive_puts_evict_oldest_without_get() {
+        let mut c = MediaLru::new(8);
+        c.put("a".into(), CachedMedia { bytes: vec![0; 4], mime: "m".into() });
+        c.put("b".into(), CachedMedia { bytes: vec![0; 4], mime: "m".into() });
+        c.put("c".into(), CachedMedia { bytes: vec![0; 4], mime: "m".into() }); // 12 > 8
+        assert!(c.get("a").is_none(), "无 touch 时最早写入的 a 被淘汰");
+        assert!(c.get("b").is_some());
+        assert!(c.get("c").is_some());
+    }
+
+    /// rev7 方向回归：touch 保护条目——get("a") 后 a 不可被淘汰
+    #[test]
+    fn touch_protects_entry_from_eviction() {
+        let mut c = MediaLru::new(8);
+        c.put("a".into(), CachedMedia { bytes: vec![0; 4], mime: "m".into() });
+        c.put("b".into(), CachedMedia { bytes: vec![0; 4], mime: "m".into() });
+        assert!(c.get("a").is_some()); // a → head（最新）
+        c.put("c".into(), CachedMedia { bytes: vec![0; 4], mime: "m".into() });
+        assert!(c.get("a").is_some(), "被 touch 的 a 不被淘汰");
+        assert!(c.get("b").is_none(), "淘汰未被 touch 的 b");
     }
 
     #[test]
@@ -2227,24 +2251,29 @@ impl MediaLru {
         Some(media)
     }
 
+    /// rev7 方向统一：**head=最新、tail=最旧**——新条目插入 head，淘汰淘汰 tail，
+    /// touch 把条目移回 head。（原稿 put 接 tail 与 touch 的 head 最新语义相反，
+    /// 纯 put 序列会淘汰最新项；consecutive_puts_evict_oldest_without_get 用例守护）
     pub fn put(&mut self, key: String, media: CachedMedia) {
         let sz = media.bytes.len();
         if sz > self.cap { return; } // 单项超限不缓存
-        if self.map.contains_key(&key) { self.remove_oldest_link(&key.clone()); /* 旧值先摘链 */ }
+        if self.map.contains_key(&key) { self.detach(&key); } // 旧值先摘链（bytes 已扣）
         while self.bytes + sz > self.cap {
-            let victim = self.tail.clone()?;
-            self.remove_oldest_link(&victim);
+            let victim = match self.tail.clone() { Some(v) => v, None => break };
+            self.detach(&victim); // 淘汰最旧
         }
-        let old_tail = self.tail.clone();
+        let old_head = self.head.clone();
         self.bytes += sz;
         self.map.insert(key.clone(), Entry {
-            media: std::sync::Arc::new(media), prev: old_tail, next: None,
+            media: std::sync::Arc::new(media), prev: None, next: old_head.clone(),
         });
-        if let Some(t) = &old_tail {
-            if let Some(e) = self.map.get_mut(t) { e.next = Some(key.clone()); }
+        if let Some(h) = &old_head {
+            if let Some(e) = self.map.get_mut(h) { e.prev = Some(key.clone()); }
+        } else {
+            // 空表：新条目同时是 tail
+            self.tail = Some(key.clone());
         }
-        if self.head.is_none() { self.head = Some(key.clone()); }
-        self.tail = Some(key);
+        self.head = Some(key);
     }
 
     pub fn clear(&mut self) {
@@ -2253,26 +2282,25 @@ impl MediaLru {
 
     pub fn current_bytes(&self) -> usize { self.bytes }
 
+    /// 把 key 移回 head（最新端）。detach 会删 map 条目，故先取 media 再重插（字节记账先扣后加，净零）
     fn touch(&mut self, key: &str) {
-        let (prev, next) = {
-            let e = match self.map.get(key) { Some(e) => e, None => return };
-            (e.prev.clone(), e.next.clone())
-        };
         if self.head.as_deref() == Some(key) { return; }
-        // 摘出
-        if let Some(p) = &prev { if let Some(e) = self.map.get_mut(p) { e.next = next.clone(); } }
-        if let Some(n) = &next { if let Some(e) = self.map.get_mut(n) { e.prev = prev.clone(); } }
-        if self.tail.as_deref() == Some(key) { self.tail = prev; }
-        // 接到头
-        if let Some(h) = &self.head { if let Some(e) = self.map.get_mut(h) { e.prev = Some(key.to_string()); } }
-        if let Some(e) = self.map.get_mut(key) {
-            e.prev = None;
-            e.next = self.head.clone();
+        let media = match self.map.get(key) { Some(e) => e.media.clone(), None => return };
+        self.detach(key);
+        let old_head = self.head.clone();
+        let sz = media.bytes.len();
+        self.bytes += sz;
+        self.map.insert(key.to_string(), Entry { media, prev: None, next: old_head.clone() });
+        if let Some(h) = &old_head {
+            if let Some(e) = self.map.get_mut(h) { e.prev = Some(key.to_string()); }
+        } else {
+            self.tail = Some(key.to_string()); // detach 后表空，key 兼任 tail
         }
         self.head = Some(key.to_string());
     }
 
-    fn remove_oldest_link(&mut self, key: &str) {
+    /// 通用摘链（不删 map 项的调用方负责；本函数同时移除 map 条目并扣字节）
+    fn detach(&mut self, key: &str) {
         let (prev, next, sz) = {
             let e = match self.map.get(key) { Some(e) => e, None => return };
             (e.prev.clone(), e.next.clone(), e.media.bytes.len())
@@ -2281,8 +2309,8 @@ impl MediaLru {
         self.bytes -= sz;
         if let Some(p) = &prev { if let Some(e) = self.map.get_mut(p) { e.next = next.clone(); } }
         if let Some(n) = &next { if let Some(e) = self.map.get_mut(n) { e.prev = prev.clone(); } }
-        if self.head.as_deref() == Some(key) { self.head = next; }
-        if self.tail.as_deref() == Some(key) { self.tail = prev; }
+        if self.head.as_deref() == Some(key) { self.head = next.clone(); }
+        if self.tail.as_deref() == Some(key) { self.tail = prev.clone(); }
     }
 }
 
@@ -2297,20 +2325,46 @@ pub fn clear_all() { GLOBAL.lock().unwrap().clear(); }
 
 - [ ] **步骤 4：接线**
 
-lib.rs：media handler 的 GET 路径——`MediaTarget::Local` 跳过缓存直读；远程形态先 `GLOBAL.lock().get(url)`，命中回 200（`Cache-Control: no-store` 仍带——进程内缓存不是 HTTP 缓存），miss 读源成功后 `put` 再回包。新命令（`generate_handler!` 追加）：
+lib.rs：media handler 的 GET 路径按**显式条件**接缓存（rev7 明确化）：
 
 ```rust
+// 条件顺序（伪码对应 handle_media_request 内 GET 分支）：
+// 1. MediaTarget::Local        → 跳过 LRU，直读源（文件系统页缓存已够）
+// 2. 请求带 Range 头           → 跳过 LRU，直读源并按 §3.1 回 206/416
+//    （缓存条目只有全量 bytes，命中回 200 会破坏 Range 语义——设计如此，接线必须是条件而非"先查 LRU"）
+// 3. 无 Range 的远程 GET       → GLOBAL.lock().get(url) 命中 → 回 200 全量（仍带 no-store）
+//                              → miss → 读源 → put(url, bytes, mime) → 回包
+```
+
+新命令（`generate_handler!` 追加）——**完整执行契约（rev7）**：
+
+```rust
+/// 图片预读。契约：
+/// - 每次调用最多取前 WARM_MAX（=4）个 URL，超出静默截断——单次调用的资源边界
+/// - 去重（保持顺序）
+/// - 只接受本应用 media 协议 URL：复用 read_media(url) 的完整解析/校验/DB 重建路径，
+///   任何一步失败（含伪造 host/形态）→ 跳过该条，静默 log::warn
+/// - 并发上限：与阅读器预取语义匹配的 Semaphore(WARM_MAX)（Arc<Semaphore> acquire_owned），
+///   不复用缩略图 actor（预算语义不同）
+/// - epoch 取消：参数带 epoch（ReaderView 每次 openBook 递增的 session id）；
+///   执行前比对全局 AtomicU64（reader 卸载/切书时推进），不等则放弃剩余
+/// - Local 形态 URL：read_media 内部直接跳过（不产生 IO）
 #[tauri::command]
-pub async fn warm_media_urls(urls: Vec<String>) -> Result<(), String> {
-    // 复用 handle_media_request 的解析/校验/重建路径（抽无 responder 版本 read_media(url) -> Result<Vec<u8>, String>）
-    // 失败静默（log::warn），预读是优化不是承诺；已命中跳过
+pub async fn warm_media_urls(urls: Vec<String>, epoch: u64) -> Result<(), String> {
+    const WARM_MAX: usize = 4;
+    let mut seen = std::collections::HashSet::new();
+    let urls: Vec<String> = urls.into_iter()
+        .filter(|u| seen.insert(u.clone()))
+        .take(WARM_MAX)
+        .collect();
+    // 逐条（受信号量并发）read_and_cache(url)——失败静默；epoch 变更即停
     Ok(())
 }
 ```
 
-accounts.rs：`upsert_account_impl` / `delete_account_impl` 成功路径末尾 `crate::media_cache::clear_all();`。前端 tauri.ts：`export async function warmMediaUrls(urls: string[]): Promise<void> { await invoke('warm_media_urls', { urls }); }`。ReaderView：`watch(currentSpreadIndex)`（或等价翻页信号）且 descriptor 非 Local 时 `void warmMediaUrls(pageUrls.slice(next1, next3))`——只对远程 URL 生效的过滤在 Rust 侧做（Local 形态直接跳过），前端不判类型。
+accounts.rs：`upsert_account_impl` / `delete_account_impl` 成功路径末尾 `crate::media_cache::clear_all();`。前端 tauri.ts：`export async function warmMediaUrls(urls: string[], epoch: number): Promise<void> { await invoke('warm_media_urls', { urls, epoch }); }`。ReaderView：`openBook` 时 `warmEpoch.value++`（session id）；`watch(currentSpreadIndex)`（或等价翻页信号）触发 `void warmMediaUrls(pageUrls.slice(next1, next3), warmEpoch.value)`——**前端不判源类型**（Local 形态由 Rust 侧跳过），卸载时 `warmEpoch.value++` 使在途预热作废。
 
-- [ ] **步骤 5：`cargo test -p mirapage-desktop-lib media_cache` + `npx vitest run src/views/ReaderView.test.ts`（追加：非 Local descriptor 翻页触发 warmMediaUrls，Local 不触发）→ PASS**
+- [ ] **步骤 5：`cargo test -p mirapage-desktop-lib media_cache`（含 rev7 两个方向回归用例）+ `npx vitest run src/views/ReaderView.test.ts`（追加：非 Local descriptor 翻页触发 warmMediaUrls 且带 epoch；Local 不触发；openBook/卸载递增 epoch）→ PASS**
 
 - [ ] **步骤 6：Commit**
 
@@ -2392,3 +2446,11 @@ M1 计划审查 4 必须 + 1 建议全采纳：
 1. **任务 12 扩展步骤 3b**：`pendingOpenLocation` 从 `{ rootPath, relPath }`（Local 形态，Likes.vue:55 传 `sd.rootPath`）改为 `{ descriptor, relPath }`——`requestOpenLocation` 换签名（Likes 唯一 caller 不留兼容），消费端新增 `openDescriptorAt`（Local 转 setRoot / 非 Local 走任务 13 的 descriptor 取数主体，模式参照 openShortcut 跨源快捷方式）。
 2. **新增任务 17 远程图片预读预载**：`media_cache.rs` 手写 LRU（纯 std，256MB 常量，单项超限不缓存/淘汰最旧/字节记账）+ handler 远程形态 GET 接缓存（Local 直读；命中只回 200 全量，Range 走源）+ `warm_media_urls` 命令（失败静默）+ 账户 upsert/delete 成功整表清空（防同 URL 陈旧）+ ReaderView 非 Local 翻页预取后 2-3 张；原收尾任务 17→18，验收清单 8 项（能力矩阵全项 + 预读预载实测）。
 3. 历史记录/喜欢/书签/瀑布流/跨卷：spec §1.5 矩阵逐项标注交付期（M1 验收 WebDAV 全项；SMB 随 M2 复验；远程 Archive 跨卷 N/A 包即整书）。
+
+## 附：计划审查修订记录（rev7，2026-08-19）
+
+第四轮（任务 17 专项）2 必须 + 1 建议全采纳：
+
+1. **MediaLru 链表方向修正**：原稿 put 接 tail 与 touch「head=最新」语义相反——纯 put 序列会淘汰**最新**写入项，且原测试 `get("a")` 后的断言恰与错误行为一致（掩盖）。统一约定 **head=最新 / tail=最旧**：put 插入 head、淘汰 tail、touch 移回 head（摘链后重插，字节先扣后加净零）；新增两个方向回归用例 `consecutive_puts_evict_oldest_without_get`（无 touch 淘汰最早项）与 `touch_protects_entry_from_eviction`。
+2. **warm_media_urls 完整执行契约**：单次上限 WARM_MAX=4 静默截断 + 保序去重 + 只接受本应用 media URL（复用 read_media 完整解析/校验/DB 重建，任何失败跳过）+ 独立 Semaphore 并发 + **epoch 取消**（ReaderView openBook/卸载递增 session id，执行前比对，切书后陈旧预热作废）。
+3. **Range 绕过缓存写成显式条件**：handler GET 分支条件顺序 Local 跳过 → **带 Range 头跳过 LRU 直读源**（命中回 200 会破坏 Range 语义）→ 无 Range 远程 GET 才查/填 LRU。
