@@ -26,6 +26,7 @@ vi.mock('@/lib/tauri', () => ({
     protectedExceedsLimit: false, source: 'manual',
   })),
   updateMaintenanceSettings: vi.fn(async () => undefined),
+  exportBrowseHistory: vi.fn(async () => ({ exported: false, path: null, totalCount: 0 })),
 }));
 
 import Settings from './Settings.vue';
@@ -178,5 +179,22 @@ describe('Settings.vue fileBrowser section (任务 12)', () => {
     const restoreRowAfter = wrapper.find('[data-test="restore-browse-position"]');
     const restoreBtnAfter = restoreRowAfter.find('button');
     expect((restoreBtnAfter.element as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('maintenance 渲染导出阅览记录行，点击触发导出', async () => {
+    const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+    await flushPromises();
+
+    const btn = wrapper.find('[data-test="maintenance-export-history"]');
+    expect(btn.exists()).toBe(true);
+    expect(btn.text()).toContain(i18n.global.t('history.export'));
+
+    await btn.trigger('click');
+    await flushPromises();
+    const { exportBrowseHistory } = await import('@/lib/tauri');
+    expect(exportBrowseHistory).toHaveBeenCalledTimes(1);
+    expect(exportBrowseHistory).toHaveBeenCalledWith(
+      expect.stringMatching(/^browse_history_\d{8}_\d{6}\.json$/)
+    );
   });
 });

@@ -12,6 +12,7 @@ import {
   type ScaleMode, type ReadDirection,
 } from '@/lib/readerSettings';
 import { useSectionAnchors } from '@/composables/useSectionAnchors';
+import { useHistoryExport } from '@/composables/useHistoryExport';
 import EnumRow from '@/components/settings/EnumRow.vue';
 import BooleanRow from '@/components/settings/BooleanRow.vue';
 import ThumbnailCacheSettings from '@/components/settings/ThumbnailCacheSettings.vue';
@@ -29,6 +30,10 @@ onMounted(() => {
   maintenance.loadSummary();
 });
 const mb = (bytes: number) => Math.round((bytes || 0) / 1_000_000);
+
+// 阅览记录导出 JSON（module3.1.2）：状态机与 History 页共享
+const { buttonText: exportButtonText, state: exportState, trigger: triggerExportHistory } = useHistoryExport(t);
+
 async function setAutoEnabled(v: boolean) { await maintenance.saveConfig({ autoCleanupEnabled: v }); }
 async function setMaxEntries(v: number) { await maintenance.saveConfig({ historyMaxEntries: v }); }
 async function setRetentionDays(v: number) { await maintenance.saveConfig({ historyRetentionDays: v }); }
@@ -409,6 +414,20 @@ async function setThumbnailDetailPopover(v: boolean) {
                   data-test="maintenance-max-entries"
                   @change="setMaxEntries"
                 />
+                <div class="flex items-center justify-between gap-4">
+                  <div class="flex flex-col gap-0.5">
+                    <p class="text-xs font-semibold text-text-secondary">{{ t('settings.maintenance.exportHistory') }}</p>
+                    <p class="text-xs text-text-muted">{{ t('settings.maintenance.exportHistoryDesc') }}</p>
+                  </div>
+                  <button
+                    data-test="maintenance-export-history"
+                    class="text-xs px-2.5 py-1.5 rounded xp-bd bg-transparent text-text-secondary hover:text-text-primary hover:bg-surface-2 transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
+                    :disabled="exportState === 'exporting'"
+                    @click="triggerExportHistory"
+                  >
+                    {{ exportButtonText }}
+                  </button>
+                </div>
               </div>
             </div>
 
