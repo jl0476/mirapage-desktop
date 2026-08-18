@@ -1,6 +1,6 @@
 # SMB / 远程媒体访问统一层设计（M1-M3）
 
-> 日期：2026-08-18（rev2：按审查修订——URL codec、stat 接口、Archive 依赖方向、远程缩略图范围、异步协议 API、Range 强契约、缓存策略、keyring 补偿）
+> 日期：2026-08-18（rev3：第二轮审查——Archive 双 stat 路径分离、SMB 根路径唯一真值、下载期间变更防护、缩略图取源独立阶段、撤销 % 误杀规则、兼容性红线；rev2 存档见附录）
 > 状态：设计定稿，待审查
 > 来源：brainstorming 会话（用户蓝图 + 代码探索整合）+ 用户技术审查 10 条全采纳；DESIGN.md §5 Phase 7/8、§7.7 参考
 > 关联：DESIGN.md §16.1「SMB 协议层」条目将随本设计推进划掉
@@ -91,7 +91,8 @@ media://archive/webdav/{accountId}/{archiveRelPath}/{entryPath}              ←
 ```
 
 - URL **不携带**：密码、主机、WebDAV base URL、port（信任源是 DB；port 从 account 表重建）
-- `initialPath` 是 descriptor 身份（用户从哪层进入），原样进 URL；handler 校验链：**段数与类型匹配 → 逐段 decode → accountId 查库存在且 `type` 列匹配 → 路径规范化**（decode 后拒绝绝对路径、`..`、空段；decode 恰好一次，拒绝二次 decode 后含 `%` 的异常段）
+- `initialPath` 是 descriptor 身份（用户从哪层进入），原样进 URL；SMB 的 initialPath 首段必须等于 account.share（§4.2 根路径契约），不符即 403
+- handler 校验链：**段数与类型匹配 → accountId 查库存在且 `type` 列匹配 → 逐段 decode 恰好一次 → 结构化路径校验**（拒绝绝对路径、`..`、空段、反斜杠）。decode 结果含 `%` 是合法文件名（`100%25.jpg` → `100%.jpg`），不作为拒绝依据——安全性由结构化校验保证，不靠字符黑名单（rev3）
 - 不向前端回传连接细节或凭据；错误响应只带状态码 + 短文案
 
 **注册方式（rev2）**：`register_asynchronous_uri_scheme_protocol`——handler 收 `http::Request<Vec<u8>>` + `UriSchemeResponder`，异步 IO 完成后 `responder.respond(response)` 回写，无阻塞主线程、无空响应契约缺口（同步 `register_uri_scheme_protocol` + 手动 spawn 缺 responder 契约，不采用）。
@@ -104,7 +105,7 @@ pub struct FileStat { pub size: u64, pub modified_at: Option<i64> }  // 秒级 U
 ```
 
 - 用途：HEAD 请求（不读 body）、416 的 `Content-Range: bytes */{total}`、206 的 `Content-Range` 组装、materializer 的 size+mtime 失效判定
-- 四个实现：Local（`std::fs::metadata`）、SMB（query file info，spike 确认 API）、WebDAV（HEAD 请求，`Content-Length` + `Last-Modified`）、Archive（对**已物化**文件 stat；origin 未物化时返回 NotImplemented——物化路径的 stat 语义见 §5.2）
+- 四个实现：Local（`std::fs::metadata`）、SMB（query file info，spike 确认 API）、WebDAV（HEAD 请求，`Content-Length` + `Last-Modified`）、Archive（rev3：`stat(descriptor, entryPath)` = `ensure_cached` → 开 ZIP central directory → 返回 **entryPath 条目的解压后 size**（`ZipFile::size()`），`modified_at = None`（DOS 时间精度低且无消费方）——语义是「压缩包内这张图」，不是 ZIP 容器）。远端压缩包**容器**的 size/mtime 只由 Materializer 对 origin 调 `origin.stat` 获取，两条 stat 路径不混用（§5.1）
 
 **Range 强契约（rev2 新增）**：`read_file` 带 `ByteRange` 时，实现**必须**返回恰好该区间的字节，无法满足即返回错误——禁止静默回退全量。`webdav_impl` 相应修复：请求 Range 后必须收到 206（或 200 且 body 长度 == 请求长度，兼容个别服务器），否则 `MediaSourceError::Network("server ignored range")`。此契约是 M3 分块下载拼 `.part` 的正确性前提。
 
@@ -142,7 +143,7 @@ pub struct FileStat { pub size: u64, pub modified_at: Option<i64> }  // 秒级 U
 
 审查确认 `thumbnail/service.rs` 非 Local 返回 unsupported、`MasonryView` 原图 URL 拼本地路径，两处都在 M1 通用化：
 
-- **thumbnail service**：`unsupported` 分支（525/550/679 三处）改为经 `factory.resolve(descriptor).read_file()` 取源字节（Local 保留现有 std::fs 直读快路径）；字节读取走 blocking 线程（与现有一致），远程慢 IO 由 scheduler 的优先级/取消机制自然背压
+- **thumbnail service**（rev3 分两阶段）：`unsupported` 分支改为新增**「远程取源」异步阶段**——独立信号量并发上限（代码常量起步，spike 量测后再调）+ 在途 bytes 内存预算，bytes 到手才进现有解码队列；Local 保留现有 std::fs 直读快路径（进解码队列原状，不新增取源阶段）。慢 SMB/WebDAV 不占满解码 worker，epoch 取消在取源阶段即可生效（不被 `await read_file` 卡住）
 - **MasonryView.originalUrlFor**：`convertFileSrc(joinPath(...))` → `mediaUrl(descriptor, joinRel(currentPath, name))`
 - 生成策略/缓存 key/事件链全部不动（源信息已在 cache key 的 descriptor 序列化里）
 
@@ -176,7 +177,8 @@ pub struct FileStat { pub size: u64, pub modified_at: Option<i64> }  // 秒级 U
 
 - 5 方法实装（含 rev2 新增 stat）：`list_directory`（query → MediaEntry 映射，mtime 秒级对齐）/ `read_file`（`read_block`，Range 强契约）/ `stat` / `file_count` / `test`（真连接 + 列根一次）
 - **连接管理器**（SMB 有状态，与 WebDAV 最大差异）：`HashMap<accountId, Arc<Client>>` + 每条目 `last_used` + 空闲 TTL 回收（代码常量 5 分钟，非用户设置）+ 懒清理；操作失败且错误为连接级 → 重建连接重试一次 → 再失败上抛（media:// 层映射 502）
-- 凭据：account 表 username + keyring 密码；`Smb { account_id, initial_path, path, port }` 的 UNC = `\\{host}\{initial_path}\{path}`（initial_path 首段即 share）
+- **根路径契约（rev3 定死唯一真值）**：`account.share` 是固定共享根，Accounts 表单必填（NULL 视为配置错误，`test_connection` 失败）。`descriptor.initial_path` 形如 `{share}` 或 `{share}/subdir...`（深层入口身份），**首段必须等于 account.share**——前端导航构造天然满足，协议 handler 与 `SmbMediaSource` 双侧校验，不符即 403 / PathEscape 错误，杜绝「账户配置 share A、URL 访问 share B」的越权模糊。UNC = `\\{host}\{initial_path}\{path}`
+- 凭据：account 表 username + keyring 密码
 
 ### 4.3 M2 验收（用户清单 1-4 + 8）
 
@@ -200,13 +202,17 @@ ArchiveMediaSource 打开逻辑：
 
 书签/历史/喜欢/进度 identity 与 DB 全程不见缓存路径（descriptor 不变，`id()` 稳定）。
 
-物化路径的 `stat` 语义（rev2）：对 origin 未物化的 Archive descriptor，`stat` 返回 NotImplemented；物化后 stat 缓存文件。远端 size/mtime 的获取走 **origin 源的 stat**（materializer 直接调 concrete source，不经 ArchiveMediaSource）——materializer 持三源 Arc（§2），无循环。
+两条 stat 路径严格分离（rev3）：
+
+- **协议层 entry stat**：`ArchiveMediaSource.stat(descriptor, entryPath)` = `ensure_cached` → 开 ZIP central directory → 返回 entryPath 条目解压后 size——供 `media://archive/...` 的 HEAD / `Content-Range` / 416 使用，语义是「压缩包内这张图」，不是 ZIP 容器
+- **物化层容器 stat**：远端压缩包**容器**的 size/mtime 由 Materializer 对 origin 调 `origin.stat(descriptor.origin, archiveRelPath)` 获取（materializer 持三源 Arc，§2，无循环），供 cache key 与失效判定使用
 
 ### 5.2 物化器（`archive/materializer.rs`）
 
 - cache key：canonical origin descriptor JSON + `archiveRelPath` + `size` + `modifiedAt` → hash（canonical 化逻辑复用 migration 013 模式，无 pub helper 则提取）；**size/mtime 经 origin 源 `stat` 获取**（rev2：不经 list_directory 间接推断）
 - 失效判定：打开/预载前 `stat` 远端，size 或 mtime 变更即失效重下（ETag 后置；SMB 无 ETag，语义统一）
-- 下载：chunked `read_file` Range 循环（依赖 §3.1 Range 强契约保证分块正确）→ `.part` 临时文件 → 完成原子改名；`.part` 存在则从其当前 size 断点续传；字节不过 IPC 不进内存（流式写盘）
+- 下载：chunked `read_file` Range 循环（依赖 §3.1 Range 强契约保证分块正确）→ `.part` 临时文件 → 完成原子改名；字节不过 IPC 不进内存（流式写盘）
+- **下载期间变更防护（rev3）**：任务开始时 stat 快照（size/mtime）；下载完成、rename 前**再 stat 一次**，与快照一致才原子改名；不一致 → 删 `.part` → 按新版本重新排队（epoch 防死循环）。断点续传前同样先做一致性检查（远端 size < `.part` size = 文件已换/截断，弃 `.part` 重来）
 - index：SQLite `archive_cache` 表（key → cache_path / size / mtime / last_access），migration 新版本号
 
 ### 5.3 预载调度（复用 3.0.7 thumbnail scheduler 模式）
@@ -238,14 +244,24 @@ ArchiveMediaSource 打开逻辑：
 ## 6. 安全边界汇总
 
 - URL 不含凭据/主机/base URL；信任源是 DB（accountId 校验 + descriptor 重建）
-- URL 每逻辑字段单段 encode，段数固定；decode 一次；路径规范化拒绝绝对路径 / `..` / 空段 / 二次编码
+- URL 每逻辑字段单段 encode，段数固定；decode 恰好一次；结构化校验拒绝绝对路径 / `..` / 空段 / 反斜杠；decode 结果含 `%` 不拒绝（合法文件名）
+- SMB initialPath 首段 === account.share 双侧校验（§4.2），杜绝跨 share 越权
 - `media://local/` 与 asset protocol 同信任级别（本地单机、WebView 内自家代码），无降级
 - keyring 存密码，DB 的 `encrypted_password` 列保持 NULL 不再使用；补偿顺序见 §3.4
 - 协议 handler 错误响应不含连接细节（主机名/内部路径只进日志）
 
+**兼容性红线（rev3，回归门槛）**：
+
+- descriptor 契约字段零改动（Smb/Archive/WebDav 现有字段名与序列化不变；Android 备份互导不受影响）
+- `account` 表结构不动（`encrypted_password` 列保留 NULL）；keyring 为纯增量
+- Local 阅读全路径行为基线不变：排序（fileSort）、进度/书签/历史写入语义、webtoon 状态机、slideshow 续播、跨卷排序——M1 只换 URL 构造，不动这些模块
+- 缩略图：Local 快路径不重排（命中率/事件链/LRU 行为不变），只增远程分支
+- fileBrowser 现有视图/搜索/虚拟列表/瀑布流浏览位置逻辑不动
+- 既有 Rust + 前端测试全绿是每期 tag 的硬门槛；改动面触及上述模块时先补回归用例再动
+
 ## 7. 测试策略
 
-- **Rust 单测**：URL codec（每类源合法/非法样本、`%2F` 段内分隔符、二次解码、段数不符）、stat 接口（四实现）、Range 闭开区间转换、Range 强契约（webdav 收 200 整包时报错）、cache key 稳定性、失效判定、连接管理器 TTL/重连（mock Client）、materializer 状态机（下载/续传/原子改名/回滚）
+- **Rust 单测**：URL codec（每类源合法/非法样本、`%2F` 段内分隔符、含 `%` 合法文件名 `100%25.jpg`、段数不符）、SMB initialPath 首段 = account.share 校验、stat 接口（四实现，含 Archive entry size 与容器 stat 分离）、Range 闭开区间转换、Range 强契约（webdav 收 200 整包时报错）、cache key 稳定性、失效判定、连接管理器 TTL/重连（mock Client）、materializer 状态机（下载/续传/原子改名/回滚/**下载中 stat 变更 → 弃 .part 重排队/续传前一致性检查**）
 - **集成测**：media handler 对 mock MediaSource 的 200/206/416/403/404/502 矩阵（含 HEAD）；ZIP 物化 + 解压管线（tempdir）
 - **前端 vitest**：`mediaUrl` 构造（四类源快照，断言每字段单段）、loader 通用化（Local/Archive/Smb descriptor 用例）、History/Likes 打开防御删除后的行为、ZIP 进入/退出导航、keyring 补偿（upsert 失败回滚/删除 warning）
 - **实机**：M1 手测清单（3.6）、M2 NAS（4.3）、M3（5.5）；smb-rs 互操作风险由 spike 前置消解
@@ -276,3 +292,7 @@ ArchiveMediaSource 打开逻辑：
 ## 附：审查修订记录（rev2，2026-08-18）
 
 10 条全采纳：① URL 每逻辑字段单段 encode（§3.1 重写）② MediaSource 加 `stat`（§3.1 + 四实现）③ Archive 依赖方向定死（§2 构造顺序 + §5.1 物化 stat 语义）④ 缩略图 Local-only 纳入 M1（§0.4 + §3.5 新节）⑤ 本地 ZIP archivePath 绝对路径（§3.3）⑥ `register_asynchronous_uri_scheme_protocol`（§3.1）⑦ Range 强契约 + webdav 206 验证（§3.1 + §7）⑧ `Cache-Control: no-store`、去掉错误缓存理由（§3.1）⑨ keyring 补偿顺序 + type 不可变（§3.4）⑩ 优先级四项即 ①②③④。
+
+## 附：审查修订记录（rev3，2026-08-18）
+
+第二轮 3 必须 + 2 建议全采纳：① Archive 双 stat 路径分离（协议层 entry size / 物化层容器 stat，§3.1 §5.1）② SMB 根路径唯一真值 account.share + initialPath 首段双侧校验（§4.2）③ 下载期间变更防护：rename 前二次 stat + 弃 .part 重排队 + 续传前一致性检查（§5.2）④ 缩略图远程取源独立异步阶段（并发/内存预算/取源期可取消，§3.5）⑤ 撤销「decode 后含 % 拒绝」误杀规则，安全性全靠结构化校验（§3.1）。另应「不引起回归」要求新增兼容性红线（§6）。
