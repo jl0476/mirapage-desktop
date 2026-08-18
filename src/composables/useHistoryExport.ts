@@ -7,13 +7,15 @@
  * exporting 中重复 trigger 忽略；组件卸载清理定时器。
  */
 import { computed, onUnmounted, ref } from 'vue';
-import type { ComposerTranslation } from 'vue-i18n';
 import { exportBrowseHistory } from '@/lib/tauri';
 import { browseHistoryExportFileName } from '@/lib/format';
 
 export type HistoryExportState = 'idle' | 'exporting' | 'done' | 'failed';
 
-export function useHistoryExport(t: ComposerTranslation) {
+/** 结构化翻译函数签名（vue-i18n ComposerTranslation 的字面量 locale 泛型不协变，取结构兼容面） */
+export type TranslateFn = (key: string, named?: Record<string, unknown>) => string;
+
+export function useHistoryExport(t: TranslateFn) {
   const state = ref<HistoryExportState>('idle');
   const exportedCount = ref(0);
   let timer: ReturnType<typeof setTimeout> | null = null;
