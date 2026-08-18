@@ -34,7 +34,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
-import { type BookItem, addBookmark, setFavorite, recordHistory } from '@/lib/tauri';
+import { type BookItem, type BookmarkItem, addBookmark, listBookmarks, setFavorite, recordHistory } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { useSlideshowStore } from '@/stores/slideshow';
@@ -52,8 +52,10 @@ import {
 import { useCrossVolume } from '@/composables/useCrossVolume';
 import { useToast } from '@/composables/useToast';
 import { log } from '@/lib/logger';
+import { imageIndexForBookmark } from '@/lib/bookmarkPage';
 import ReaderScreen from '@/components/reader/ReaderScreen.vue';
 import ReaderMainMenu from '@/components/reader/ReaderMainMenu.vue';
+import BookmarkJumpDialog from '@/components/reader/BookmarkJumpDialog.vue';
 import ReaderContextMenu from '@/components/reader/ReaderContextMenu.vue';
 import SlideshowToast from '@/components/reader/SlideshowToast.vue';
 import ContinueNextVolumeToast from '@/components/reader/ContinueNextVolumeToast.vue';
@@ -189,6 +191,17 @@ async function onToggleLike(): Promise<void> {
   }
 }
 
+/** 加书签：页码统一为 0-based canonical 图片索引（paged 取 spread 首图，webtoon 取当前顶部图）。 */
+async function addCurrentBookmark(): Promise<void> {
+  if (book.value?.id == null) return;
+  const page = isWebtoon.value ? webtoonPageIndex.value : (reader.spreads[reader.currentSpreadIndex]?.start ?? 0);
+  try {
+    await addBookmark(book.value.id, page, null);
+  } catch (e) {
+    log('[ReaderView] addBookmark failed', e);
+  }
+}
+
 // v0.1.0-reader-review: 跳页 dialog
 function openJumpDialog(): void {
   jumpDialogValue.value = isWebtoon.value ? webtoonPageIndex.value + 1 : reader.currentSpreadIndex + 1;
@@ -225,6 +238,32 @@ function submitJumpDialog(ev: Event): void {
   closeJumpDialog();
 }
 
+// ── 书签跳转选框（主菜单/右键「跳转至书签」）：列当前书书签，选中即跳 ──
+const showBookmarkJump = ref(false);
+const bookmarkJumpList = ref<BookmarkItem[]>([]);
+
+async function openBookmarkJumpDialog(): Promise<void> {
+  if (book.value?.id == null) return;
+  try {
+    bookmarkJumpList.value = await listBookmarks(book.value.id);
+  } catch (e) {
+    log('[ReaderView] listBookmarks failed', e);
+    return;
+  }
+  showBookmarkJump.value = true;
+}
+
+function closeBookmarkJumpDialog(): void {
+  showBookmarkJump.value = false;
+}
+
+/** 书签行点击：折算 canonical 图片索引（legacy spread → 首图）后复用 doJumpToPage（1-based） */
+function jumpToBookmark(bm: BookmarkItem): void {
+  const imageIndex = imageIndexForBookmark(bm.page, bm.positionKind, reader.spreads);
+  doJumpToPage(imageIndex + 1);
+  closeBookmarkJumpDialog();
+}
+
 // 2026-08-12 跨卷任务 8 (spec §11.1): 不再用 computed 包 route.params.bookId,
 // loadRouteBook 直接接 watch source 参数。
 
@@ -235,6 +274,13 @@ const initialImageName = computed<string | null>(() => {
   const v = route.query.at;
   return typeof v === 'string' ? decodeURIComponent(v) : null;
 });
+const bookmarkPage = computed<number | null>(() => {
+  const v = route.query.bookmarkPage;
+  if (typeof v !== 'string' || !/^\d+$/.test(v)) return null;
+  return Number(v);
+});
+const bookmarkPositionKind = computed<'image' | 'spread'>(() =>
+  route.query.bookmarkKind === 'spread' ? 'spread' : 'image');
 
 function saveProgressForCurrentMode(): Promise<void> {
   return settings.readerDefaultMode === 'webtoon'
@@ -398,6 +444,8 @@ async function loadRouteBook(bookId: number): Promise<void> {
   try {
     const snapshot = await loader.loadBookById(bookId, {
       explicitImageName: initialImageName.value ?? undefined,
+      bookmarkPage: bookmarkPage.value ?? undefined,
+      bookmarkPositionKind: bookmarkPositionKind.value,
     });
     // P0-3: 旧卷晚返回丢弃 (activeLoadSeq 自增后, 旧 seq 不再匹配)
     if (seq !== activeLoadSeq) return;
@@ -698,6 +746,7 @@ onUnmounted(() => {
       :current-page-override="isWebtoon ? webtoonPageIndex + 1 : null"
       :total-pages-override="isWebtoon ? pageUrls.length : null"
       @open-jump-input="openJumpDialog"
+      @open-bookmark-jump="openBookmarkJumpDialog"
       @back="goBackToFileBrowser()"
       @cycle-mode="onToggleReaderMode"
       @cycle-direction="() => settings.cycleReadDirection()"
@@ -706,7 +755,7 @@ onUnmounted(() => {
       @toggle-slideshow-direction="onToggleSlideshowDirection"
       @navigate="(p: string) => router.push(p)"
       @toggle-like="onToggleLike"
-      @add-bookmark="book?.id != null && addBookmark(book.id, isWebtoon ? webtoonPageIndex : reader.currentSpreadIndex, null)"
+      @add-bookmark="addCurrentBookmark"
       @reset-zoom="() => webtoonScreenRef?.getWebtoonViewer()?.setZoom(1)"
     >
     </ReaderMainMenu>
@@ -726,6 +775,8 @@ onUnmounted(() => {
       @cycle-direction="onCtxCycleDirection"
       @toggle-slideshow="onCtxToggleSlideshow"
       @jump-page="onCtxJumpPage"
+      @add-bookmark="addCurrentBookmark"
+      @open-bookmark-jump="openBookmarkJumpDialog"
       @back="onCtxBack"
     />
 
@@ -764,6 +815,14 @@ onUnmounted(() => {
         </div>
       </form>
     </dialog>
+
+    <!-- 书签跳转选框 (主菜单/右键「跳转至书签」共用组件) -->
+    <BookmarkJumpDialog
+      :show="showBookmarkJump"
+      :bookmarks="bookmarkJumpList"
+      @jump="jumpToBookmark"
+      @close="closeBookmarkJumpDialog"
+    />
 
     <!-- v0.1.0-module3.0.3: 幻灯片切换提示胶囊 (监听 isPlaying flip; 自带 1500ms auto-hide) -->
     <SlideshowToast />

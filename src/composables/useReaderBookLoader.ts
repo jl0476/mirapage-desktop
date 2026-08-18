@@ -11,6 +11,7 @@ import { sortEntries, type SortField } from '@/lib/fileSort';
 import { isImage } from '@/lib/mime';
 import { SpreadPlanner, type PageRange } from '@/lib/spreadPlanner';
 import { validateSourceRelativePath } from '@/lib/relativePath';
+import { imageIndexForBookmark } from '@/lib/bookmarkPage';
 import { useDirectorySortStore } from '@/stores/directorySort';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useSettingsStore } from '@/stores/settings';
@@ -31,6 +32,8 @@ export interface NextVolumeTarget {
 
 export interface LoadBookOptions {
   explicitImageName?: string;
+  bookmarkPage?: number;
+  bookmarkPositionKind?: 'image' | 'spread';
 }
 
 export interface ReaderBookSnapshot {
@@ -77,12 +80,21 @@ function joinPath(...parts: string[]): string {
 function resolveInitialSpreadIndex(
   progress: Awaited<ReturnType<typeof getProgress>>,
   explicitImageName: string | undefined,
+  bookmarkPage: number | undefined,
+  bookmarkPositionKind: 'image' | 'spread' | undefined,
   imageNames: string[],
   spreads: PageRange[],
 ): number {
   if (explicitImageName && imageNames.includes(explicitImageName)) {
     return Math.max(0, Math.min(
       SpreadPlanner.spreadIndexForPage(imageNames.indexOf(explicitImageName), spreads),
+      Math.max(0, spreads.length - 1),
+    ));
+  }
+  if (bookmarkPage != null) {
+    const imageIndex = imageIndexForBookmark(bookmarkPage, bookmarkPositionKind, spreads);
+    return Math.max(0, Math.min(
+      SpreadPlanner.spreadIndexForPage(imageIndex, spreads),
       Math.max(0, spreads.length - 1),
     ));
   }
@@ -145,22 +157,31 @@ export function useReaderBookLoader() {
     const pageUrls = imageNames.map((name) => convertFileSrc(joinPath(absDir, name)));
     const spreads = SpreadPlanner.plan(pageUrls.length, true, settings.readerDefaultMode === 'single');
     const explicitHit = opts.explicitImageName ? imageNames.includes(opts.explicitImageName) : false;
+    // 书签定位（query.at 优先级更高）：统一折算成 canonical 图片索引后再转 spread
+    const bookmarkImageIndex = opts.bookmarkPage != null
+      ? imageIndexForBookmark(opts.bookmarkPage, opts.bookmarkPositionKind, spreads)
+      : null;
     let progress: Awaited<ReturnType<typeof getProgress>> = null;
     let initialSpreadIndex: number;
     if (explicitHit) {
       const last = Math.max(0, spreads.length - 1);
       initialSpreadIndex = Math.max(0, Math.min(
         SpreadPlanner.spreadIndexForPage(imageNames.indexOf(opts.explicitImageName!), spreads), last));
+    } else if (bookmarkImageIndex != null) {
+      initialSpreadIndex = Math.max(0, Math.min(
+        SpreadPlanner.spreadIndexForPage(bookmarkImageIndex, spreads), Math.max(0, spreads.length - 1)));
     } else {
       progress = await getProgress(bookId);
-      initialSpreadIndex = resolveInitialSpreadIndex(progress, undefined, imageNames, spreads);
+      initialSpreadIndex = resolveInitialSpreadIndex(progress, undefined, undefined, undefined, imageNames, spreads);
     }
     const restoreImageIndex = explicitHit
       ? imageNames.indexOf(opts.explicitImageName!)
-      : (!progress || progress.finished) ? 0
-      : (progress.imageName && imageNames.includes(progress.imageName))
-        ? imageNames.indexOf(progress.imageName)
-        : Math.max(0, Math.min(Math.max(0, progress.page), imageNames.length - 1));
+      : bookmarkImageIndex != null
+        ? Math.min(bookmarkImageIndex, imageNames.length - 1)
+        : (!progress || progress.finished) ? 0
+        : (progress.imageName && imageNames.includes(progress.imageName))
+          ? imageNames.indexOf(progress.imageName)
+          : Math.max(0, Math.min(Math.max(0, progress.page), imageNames.length - 1));
     return { book: b, descriptor, relPath: normalizedRel, imageNames, pageUrls, spreads, initialSpreadIndex, restoreImageIndex };
   }
 

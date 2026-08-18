@@ -42,6 +42,10 @@ vi.mock('@/lib/tauri', async () => {
     markFinished: vi.fn(async () => undefined),
     listImageDimensions: vi.fn(async () => []),
     addBookmark: vi.fn(async () => ({ id: 1, bookId: 7, page: 0, label: null, createdAt: 0 })),
+    listBookmarks: vi.fn(async () => [
+      { id: 11, bookId: 7, page: 2, positionKind: 'image', label: '中段', createdAt: 300 },
+      { id: 12, bookId: 7, page: 1, positionKind: 'spread', label: null, createdAt: 100 },
+    ]),
     recordHistory: vi.fn(async () => undefined),
     createBook: vi.fn(async () => 8),
   };
@@ -1292,13 +1296,14 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     wtStub.__registry.el.scrollBy.mockClear();
   });
 
-  /** webtoon 模式挂载：settings 默认模式切 webtoon 后 mount。 */
+  /** webtoon 模式挂载：settings 默认模式切 webtoon 后 mount。
+   *  stubs.teleport：BookmarkJumpDialog / ReaderMainMenu 的 Teleport 内容渲染进 wrapper（可 find）。 */
   async function mountWebtoon() {
     const settings = useSettingsStore();
     settings.readerDefaultMode = 'webtoon';
     const router = makeRouter();
     await router.isReady();
-    return mount(ReaderView, { global: { plugins: [i18n, router] } });
+    return mount(ReaderView, { global: { plugins: [i18n, router], stubs: { teleport: true } } });
   }
   function findViewer(w: ReturnType<typeof mount>) {
     return w.findComponent({ name: 'WebtoonViewer' });
@@ -1640,6 +1645,33 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     w.findComponent({ name: 'ReaderMainMenu' }).vm.$emit('add-bookmark');
     await flushPromises();
     expect(addBookmark).toHaveBeenCalledWith(7, 2, null);
+    w.unmount();
+  });
+
+  it('跳转至书签 dialog：列出当前书书签，选中 image kind 滚到对应图', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    w.findComponent({ name: 'ReaderMainMenu' }).vm.$emit('open-bookmark-jump');
+    await flushPromises();
+    expect(w.find('[data-test="bookmark-jump-dialog"]').exists()).toBe(true);
+    // image kind page=2 → 第 3 张图 c.jpg
+    wtStub.__registry.scrollTargets.length = 0;
+    await w.get('[data-test="bookmark-jump-item-11"]').trigger('click');
+    await flushPromises();
+    expect(wtStub.__registry.scrollTargets).toContain('c.jpg');
+    w.unmount();
+  });
+
+  it('跳转至书签 dialog：legacy spread kind 折算首图后跳', async () => {
+    const w = await mountWebtoon();
+    await flushPromises();
+    w.findComponent({ name: 'ReaderMainMenu' }).vm.$emit('open-bookmark-jump');
+    await flushPromises();
+    // spread kind page=1：webtoon（single plan, 每页一图）折算 spreads[1].start=1 → b.jpg
+    wtStub.__registry.scrollTargets.length = 0;
+    await w.get('[data-test="bookmark-jump-item-12"]').trigger('click');
+    await flushPromises();
+    expect(wtStub.__registry.scrollTargets).toContain('b.jpg');
     w.unmount();
   });
 

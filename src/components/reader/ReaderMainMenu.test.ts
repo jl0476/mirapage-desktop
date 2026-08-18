@@ -180,12 +180,14 @@ describe('ReaderMainMenu.vue', () => {
   });
 
   // v0.1.0-module3.0.7: 删"加入书库"按钮(menu-lib-add)
-  // v0.1.0-module3.0.12: 删"显示触控区"按钮(menu-lib-regions, 9 宫格整体移除), 剩 3 个 lib 按钮
-  it('渲染书签工具组 3 项 (独立 id: like/bookmark/bookmarks)', () => {
+  // v0.1.0-module3.0.12: 删"显示触控区"按钮(menu-lib-regions, 9 宫格整体移除)
+  // 书签修复: 加"跳转至书签"(menu-lib-bookmark-jump), 剩 4 个 lib 按钮
+  it('渲染书签工具组 4 项 (like/bookmark/bookmark-jump/bookmarks)', () => {
     mountMenu();
     expect(findInBody('menu-lib-add')).toBeFalsy();
     expect(findInBody('menu-lib-like')).toBeTruthy();
     expect(findInBody('menu-lib-bookmark')).toBeTruthy();
+    expect(findInBody('menu-lib-bookmark-jump')).toBeTruthy();
     expect(findInBody('menu-lib-bookmarks')).toBeTruthy();
     expect(findInBody('menu-lib-regions')).toBeFalsy();
   });
@@ -212,7 +214,15 @@ describe('ReaderMainMenu.vue', () => {
     expect(w.emitted('update:show')?.[0]).toEqual([false]);
   });
 
-  it('点打开书签 → emit navigate(/bookmarks) + 关闭', async () => {
+  it('点跳转至书签 → emit open-bookmark-jump + 关闭', async () => {
+    const w = mountMenu();
+    (findInBody('menu-lib-bookmark-jump') as HTMLElement).click();
+    await w.vm.$nextTick();
+    expect(w.emitted('open-bookmark-jump')).toBeTruthy();
+    expect(w.emitted('update:show')?.[0]).toEqual([false]);
+  });
+
+  it('点打开书签 → emit navigate(/bookmarks)（全局聚合视图,不带 bookId）', async () => {
     const w = mountMenu();
     (findInBody('menu-lib-bookmarks') as HTMLElement).click();
     await w.vm.$nextTick();

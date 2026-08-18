@@ -18,6 +18,15 @@ export default {
     retry: '重试',
     back: '返回',
     settings: '设置',
+    searchPlaceholder: '搜索',
+    searchNoResults: '没有匹配项',
+    prevPage: '上一页',
+    nextPage: '下一页',
+    firstPage: '第一页',
+    lastPage: '最后一页',
+    pagePrefix: '第',
+    pageSuffix: '/ {pages} 页',
+    totalItems: '· 共 {count} 条',
   },
   nav: {
     fileBrowser: '文件浏览器',
@@ -58,6 +67,7 @@ export default {
     liked: '已喜欢',
     unlike: '取消喜欢',
     openBookmarks: '打开书签',
+    jumpToBookmark: '跳转至书签',
     menu: {
       back: '返回',
       title: '阅读控制',
@@ -171,8 +181,10 @@ export default {
     page: '页码',
     label: '标签',
     add: '添加',
+    addBookmark: '添加书签',
     remove: '删除',
     openBookFirst: '请先打开一本书',
+    searchPlaceholder: '搜索书签',
   },
   likes: {
     title: '喜欢',
@@ -180,10 +192,12 @@ export default {
     toggleOff: '取消喜欢',
     browse: '浏览',
     browseTitle: '在文件浏览器中打开（瀑布流视图）',
+    searchPlaceholder: '搜索喜欢的书',
   },
   history: {
     title: '阅览记录',
     empty: '还没有阅览记录',
+    searchPlaceholder: '搜索阅览记录',
   },
   tags: {
     title: '标签',
@@ -220,6 +234,7 @@ export default {
     open: '打开',
     delete: '删除',
     confirmDelete: '删除该快捷方式？',
+    searchPlaceholder: '搜索快捷方式',
   },
   // v0.1.0-module1.22: 详情面板
   properties: {
@@ -278,6 +293,8 @@ export default {
       // module3.0.11：角标点击弹生成详情开关
       thumbnailDetailPopover: '点击角标显示生成详情',
       thumbnailDetailPopoverDesc: '开启后点击缩略图阶段/错误角标可查看生成阶段耗时与失败详情',
+      listPageSize: '列表每页条数',
+      listPageSizeDesc: '快捷方式/喜欢/书签/阅览记录四个列表页的分页大小',
     },
     reader: {
       mode: '默认阅读模式',

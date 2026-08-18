@@ -43,6 +43,23 @@ describe('ReaderContextMenu', () => {
     expect(wrapper.emitted('scale-change')?.[0]).toEqual(['fit-width']);
   });
 
+  it('显示添加书签并发出 add-bookmark', async () => {
+    const wrapper = mountMenu();
+    const button = wrapper.find('[data-test="add-bookmark"]');
+    expect(button.exists()).toBe(true);
+    await button.trigger('click');
+    expect(wrapper.emitted('add-bookmark')).toEqual([[]]);
+  });
+
+  it('显示跳转至书签并发出 open-bookmark-jump + close', async () => {
+    const wrapper = mountMenu();
+    const button = wrapper.find('[data-test="jump-to-bookmark"]');
+    expect(button.exists()).toBe(true);
+    await button.trigger('click');
+    expect(wrapper.emitted('open-bookmark-jump')).toEqual([[]]);
+    expect(wrapper.emitted('close')).toBeTruthy();
+  });
+
   it('点返回 emit back', async () => {
     const wrapper = mountMenu();
     await wrapper.findAll('[data-test="ctx-item"]')[5].trigger('click');

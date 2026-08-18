@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   createBook: vi.fn(),
   convertFileSrc: vi.fn((path: string) => `asset://${path}`),
   resolveSort: vi.fn(),
+  readerMode: 'single' as 'single' | 'double' | 'webtoon',
 }));
 
 vi.mock('@/lib/tauri', async () => {
@@ -22,7 +23,7 @@ vi.mock('@/stores/directorySort', () => ({
   useDirectorySortStore: () => ({ resolve: mocks.resolveSort }),
 }));
 vi.mock('@/stores/settings', () => ({
-  useSettingsStore: () => ({ readerDefaultMode: 'single' }),
+  useSettingsStore: () => ({ get readerDefaultMode() { return mocks.readerMode; } }),
 }));
 vi.mock('@/lib/logger', () => ({ log: vi.fn() }));
 
@@ -46,6 +47,7 @@ function progress(overrides: Partial<ProgressItem> = {}): ProgressItem {
 beforeEach(() => {
   setActivePinia(createPinia());
   vi.clearAllMocks();
+  mocks.readerMode = 'single';
   mocks.getBook.mockResolvedValue(book);
   mocks.listDirectory.mockResolvedValue(entries);
   mocks.getProgress.mockResolvedValue(null);
@@ -150,6 +152,43 @@ describe('useReaderBookLoader', () => {
     const snapshot = await useReaderBookLoader().loadBookById(7, { explicitImageName: 'p3.jpg' });
     expect(snapshot.initialSpreadIndex).toBeGreaterThan(0);
     expect(mocks.getProgress).not.toHaveBeenCalled();
+  });
+
+  it('bookmarkPage image kind: canonical 图片索引直取（single 模式 1:1）', async () => {
+    const snapshot = await useReaderBookLoader().loadBookById(7, { bookmarkPage: 1, bookmarkPositionKind: 'image' });
+    expect(snapshot.initialSpreadIndex).toBe(1);
+    expect(snapshot.restoreImageIndex).toBe(1);
+    expect(mocks.getProgress).not.toHaveBeenCalled();
+  });
+
+  it('bookmarkPage spread kind（double 模式）: legacy spread 索引折算为首图索引', async () => {
+    mocks.readerMode = 'double';
+    // 6 张图 + coverStandalone → spreads [{0..1},{1..3},{3..5},{5..6}]
+    // legacy spread 索引 2 → 首图索引 3（spreads[2].start），落在 spread 2
+    mocks.listDirectory.mockResolvedValue(
+      Array.from({ length: 6 }, (_, i) => ({ name: `p${i}.jpg`, path: `p${i}.jpg`, isDirectory: false, isArchive: false, size: 1 })),
+    );
+    const snapshot = await useReaderBookLoader().loadBookById(7, { bookmarkPage: 2, bookmarkPositionKind: 'spread' });
+    expect(snapshot.restoreImageIndex).toBe(3);
+    expect(snapshot.initialSpreadIndex).toBe(2);
+  });
+
+  it('bookmarkPage 越界: webtoon 恢复钳位末图, paged 链 spreadIndexForPage 无匹配回首页', async () => {
+    const snapshot = await useReaderBookLoader().loadBookById(7, { bookmarkPage: 999, bookmarkPositionKind: 'image' });
+    const last = snapshot.imageNames.length - 1;
+    expect(snapshot.restoreImageIndex).toBe(last);
+    expect(snapshot.initialSpreadIndex).toBe(0); // spreadIndexForPage 越界 fallback 0（与 progress.page 链一致）
+  });
+
+  it('explicitImageName 优先于 bookmarkPage', async () => {
+    mocks.getProgress.mockResolvedValue(progress({ page: 0, imageName: 'page10.jpg' }));
+    const snapshot = await useReaderBookLoader().loadBookById(7, {
+      explicitImageName: 'page2.jpg',
+      bookmarkPage: 1,
+      bookmarkPositionKind: 'image',
+    });
+    expect(snapshot.restoreImageIndex).toBe(0); // page2.jpg 在排序后 index 0
+    expect(snapshot.initialSpreadIndex).toBe(0);
   });
 
   it('ensureBookId 使用最小 CreateBookArgs 映射并返回 id', async () => {

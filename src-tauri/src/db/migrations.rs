@@ -134,6 +134,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 15 {
+        apply_015_bookmark_position_kind(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (15, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -611,6 +619,21 @@ fn apply_013_descriptor_canonical_dedupe(conn: &Connection) -> anyhow::Result<()
 /// 9 宫格功能整体移除后前端不再读写任何 touch_* key，此处一并清理。幂等：重跑无行可删。
 fn apply_014_drop_touch_zone_settings(conn: &Connection) -> anyhow::Result<()> {
     conn.execute("DELETE FROM settings WHERE key LIKE 'touch_%'", [])?;
+    Ok(())
+}
+
+/// Migration 015 —— bookmark 表加 position_kind 区分页码语义。
+/// 背景：历史 add_bookmark 无模式标记，paged 模式写 spread 索引、webtoon 模式写图片索引，
+/// 两种 0-based 索引混在同一 `page` 列无法区分。此后新写入统一 `'image'`（canonical 图片索引），
+/// 旧行默认 `'spread'` 按 legacy spread 索引解释。
+/// 已知偏差：migration 015 之前 webtoon 模式创建的旧行实际存的是图片索引，却被一刀切标为
+/// `'spread'`——恢复时会多经一次 `spreads[n].start` 转换，跳转位置可能偏深（clamp 兜底不越界）。
+/// 旧行无创建模式记录，无法无损区分，接受该过渡期偏差。
+fn apply_015_bookmark_position_kind(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "ALTER TABLE bookmark ADD COLUMN position_kind TEXT NOT NULL DEFAULT 'spread'",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1293,14 +1316,14 @@ mod tests {
 
     #[test]
     fn migration_010_run_bumps_version_to_10() {
-        // 走完整 run()，验证版本号到最新且幂等（migration 014 后,完整 run 到 14）
+        // 走完整 run()，验证版本号到最新且幂等（migration 015 后,完整 run 到 15）
         let conn = Connection::open_in_memory().unwrap();
         super::run(&conn).unwrap();
 
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 14, "完整 run 后版本号应为 14");
+        assert_eq!(v, 15, "完整 run 后版本号应为 15");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -1317,6 +1340,23 @@ mod tests {
 
         // 幂等
         super::run(&conn).expect("重复 run 应幂等无错");
+    }
+
+    #[test]
+    fn migration_015_bookmark_position_kind_default_spread() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap();
+
+        // 列存在且默认 'spread'（旧行按 legacy spread 索引解释）
+        conn.execute(
+            "INSERT INTO bookmark (book_id, page, label, created_at) VALUES (1, 2, NULL, 0)",
+            [],
+        )
+        .unwrap();
+        let kind: String = conn
+            .query_row("SELECT position_kind FROM bookmark WHERE book_id = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(kind, "spread", "未显式指定 position_kind 的行应默认 spread");
     }
 
     #[test]
@@ -1632,7 +1672,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 14, "完整 run 后版本号应为 14");
+        assert_eq!(v, 15, "完整 run 后版本号应为 15");
 
         // 幂等：run() 的 current<12 守卫使重复调用不再执行 012
         super::run(&conn).expect("重复 run 应幂等无错");
@@ -1641,7 +1681,7 @@ mod tests {
         let v2: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 14, "重复 run 不应再升版本号");
+        assert_eq!(v2, 15, "重复 run 不应再升版本号");
     }
 
     /// 任务 7：EXPLAIN QUERY PLAN 手动验证（`--ignored --nocapture` 跑，输出写入报告）。

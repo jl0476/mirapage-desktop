@@ -45,11 +45,22 @@ export interface BookmarkItem {
   id: number;
   bookId: number;
   page: number;
+  positionKind: 'image' | 'spread';
   label: string | null;
   createdAt: number;
 }
 export async function listBookmarks(bookId: number): Promise<BookmarkItem[]> {
   return invoke<BookmarkItem[]>('list_bookmarks', { bookId });
+}
+/** 跨书聚合行：Rust BookmarkRow（serde flatten 后 = BookmarkItem 字段 + bookTitle/bookPath） */
+export interface BookmarkRow extends BookmarkItem {
+  bookTitle: string;
+  /** 展示用完整路径（rootPath + '\\' + absolutePath；解析失败为 absolutePath 原样） */
+  bookPath: string;
+}
+/** 全部书签（跨书，created_at DESC）；侧栏 `/bookmarks` 无 bookId 视图数据源 */
+export async function listAllBookmarks(): Promise<BookmarkRow[]> {
+  return invoke<BookmarkRow[]>('list_all_bookmarks');
 }
 export async function addBookmark(
   bookId: number,

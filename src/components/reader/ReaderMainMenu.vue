@@ -66,6 +66,7 @@ const emit = defineEmits<{
   (e: 'navigate', path: string): void;
   (e: 'toggle-like'): void;
   (e: 'add-bookmark'): void;
+  (e: 'open-bookmark-jump'): void;
   (e: 'reset-zoom'): void;
 }>();
 
@@ -113,6 +114,7 @@ function onNav(path: string): void {
 
 function onToggleLike(): void { close(); emit('toggle-like'); }
 function onAddBookmark(): void { close(); emit('add-bookmark'); }
+function onJumpToBookmark(): void { close(); emit('open-bookmark-jump'); }
 function onOpenBookmarks(): void {
   close();
   emit('navigate', '/bookmarks');
@@ -247,7 +249,12 @@ function onOpenBookmarks(): void {
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="menu-lib-bookmark"
           @click="onAddBookmark"
-        >{{ t('bookmarks.add') }}</button>
+        >{{ t('bookmarks.addBookmark') }}</button>
+        <button
+          class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
+          data-test="menu-lib-bookmark-jump"
+          @click="onJumpToBookmark"
+        >{{ t('reader.jumpToBookmark') }}</button>
         <button
           class="w-full text-left px-3 py-2 rounded text-sm text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors"
           data-test="menu-lib-bookmarks"

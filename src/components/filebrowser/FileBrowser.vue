@@ -17,7 +17,9 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { getSetting, setSetting, setFavorite, getBookStatus } from '@/lib/tauri';
+import { useRouter } from 'vue-router';
+import { getSetting, setSetting, setFavorite, getBookStatus, addBookmark, listBookmarks, type BookmarkItem } from '@/lib/tauri';
+import BookmarkJumpDialog from '@/components/reader/BookmarkJumpDialog.vue';
 import { useFileBrowserStore, setScrollToIndexCallback } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
@@ -27,6 +29,7 @@ import { useMasonrySettings } from '@/composables/useMasonrySettings';
 import { useToast } from '@/composables/useToast';
 import { isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
+import { bookmarkPageForImage } from '@/lib/bookmarkPage';
 import { validateSourceRelativePath } from '@/lib/relativePath';
 import { findNextVolume } from '@/lib/tauri';
 import FileList from './FileList.vue';
@@ -48,6 +51,7 @@ import { PathUtils } from '@/lib/path';
 import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
+const router = useRouter();
 const fb = useFileBrowserStore();
 const shortcuts = useShortcutsStore();
 const readStatus = useReadStatusStore();
@@ -567,8 +571,64 @@ function onRowContextMenu(entry: MediaEntry, x: number, y: number) {
   }
 }
 
-function onCtxClose() {
+function onCtxClose(): void {
   ctxMenu.value = null;
+}
+
+/** 右键图片"添加书签"：书 = 当前目录（library 行身份），页码 = 当前排序下该图 0-based 索引。 */
+async function onAddBookmarkFromCtx(entry: MediaEntry): Promise<void> {
+  if (entry.isDirectory || !isImage(entry.name) || fb.rootPath === null || fb.lastFetchedPath === null) return;
+  try {
+    const status = await getBookStatus(
+      { type: 'local', rootPath: fb.rootPath },
+      fb.lastFetchedPath,
+    );
+    if (!status) {
+      pushToast(t('bookmarks.openBookFirst'));
+      return;
+    }
+    const page = bookmarkPageForImage(
+      fb.sortedEntries.filter((e) => !e.isDirectory && isImage(e.name)).map((e) => e.name),
+      entry.name,
+    );
+    if (page === null) return;
+    await addBookmark(status.bookId, page, null);
+  } catch (e) {
+    log('[FileBrowser] addBookmark failed', e);
+    pushToast(t('error.unknown'));
+  }
+}
+
+// ── 右键图片"跳转至书签"：弹该书书签选框，选中进阅读器定位 ──
+const bookmarkJumpShow = ref(false);
+const bookmarkJumpList = ref<BookmarkItem[]>([]);
+
+async function onJumpBookmarkFromCtx(): Promise<void> {
+  if (fb.rootPath === null || fb.lastFetchedPath === null) return;
+  try {
+    const status = await getBookStatus(
+      { type: 'local', rootPath: fb.rootPath },
+      fb.lastFetchedPath,
+    );
+    if (!status) {
+      pushToast(t('bookmarks.openBookFirst'));
+      return;
+    }
+    bookmarkJumpList.value = await listBookmarks(status.bookId);
+    bookmarkJumpShow.value = true;
+  } catch (e) {
+    log('[FileBrowser] jump-bookmark listBookmarks failed', e);
+    pushToast(t('error.unknown'));
+  }
+}
+
+function onBookmarkJumpSelected(bm: BookmarkItem): void {
+  bookmarkJumpShow.value = false;
+  fb.saveNavigationContext();
+  void router.push({
+    path: `/reader/${bm.bookId}`,
+    query: { bookmarkPage: String(bm.page), bookmarkKind: bm.positionKind },
+  });
 }
 
 /** 右键"重新生成缩略图"：多选时批量转发到 FileList.regenerateBatch，单图走 regenerateThumbnail。 */
@@ -1141,7 +1201,17 @@ function onReadNowFromCtx(entry: MediaEntry) {
       @read-now="onReadNowFromCtx"
       @toggle-like="onToggleLikeFromCtx"
       :like-favorite="ctxLikeFavorite"
+      @add-bookmark="onAddBookmarkFromCtx"
+      @jump-bookmark="onJumpBookmarkFromCtx"
       @regenerate-thumbnail="onRegenerateThumbnail"
+    />
+
+    <!-- 右键图片"跳转至书签"选框：选中进阅读器定位 -->
+    <BookmarkJumpDialog
+      :show="bookmarkJumpShow"
+      :bookmarks="bookmarkJumpList"
+      @jump="onBookmarkJumpSelected"
+      @close="bookmarkJumpShow = false"
     />
   </main>
 </template>

@@ -10,12 +10,13 @@
  */
 import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
-import { listBookmarks, addBookmark, removeBookmark } from '@/lib/tauri';
+import { listBookmarks, listAllBookmarks, addBookmark, removeBookmark, type BookmarkRow } from '@/lib/tauri';
 
 export interface BookmarkItem {
   id: number;
   bookId: number;
   page: number;
+  positionKind: 'image' | 'spread';
   label: string | null;
   createdAt: number;
 }
@@ -23,6 +24,8 @@ export interface BookmarkItem {
 export const useBookmarksStore = defineStore('bookmarks', () => {
   const items = ref<BookmarkItem[]>([]);
   const currentBookId = ref<number | null>(null);
+  /** 跨书聚合行（侧栏 `/bookmarks` 无 bookId 视图） */
+  const allItems = ref<BookmarkRow[]>([]);
 
   /** 按页升序 */
   const sorted = computed<BookmarkItem[]>(() =>
@@ -36,6 +39,12 @@ export const useBookmarksStore = defineStore('bookmarks', () => {
     return sorted.value;
   }
 
+  /** 跨书聚合（created_at DESC，后端已排序） */
+  async function listAll(): Promise<BookmarkRow[]> {
+    allItems.value = await listAllBookmarks();
+    return allItems.value;
+  }
+
   /** 新增 */
   async function add(bookId: number, page: number, label: string | null = null): Promise<BookmarkItem> {
     const bm = await addBookmark(bookId, page, label);
@@ -47,13 +56,15 @@ export const useBookmarksStore = defineStore('bookmarks', () => {
   async function remove(id: number): Promise<void> {
     await removeBookmark(id);
     items.value = items.value.filter((b) => b.id !== id);
+    allItems.value = allItems.value.filter((b) => b.id !== id);
   }
 
   /** 清空缓存 */
   function clear(): void {
     items.value = [];
+    allItems.value = [];
     currentBookId.value = null;
   }
 
-  return { items, sorted, currentBookId, list, add, remove, clear };
+  return { items, sorted, allItems, currentBookId, list, listAll, add, remove, clear };
 });

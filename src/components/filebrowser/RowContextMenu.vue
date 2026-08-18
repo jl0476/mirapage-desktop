@@ -34,6 +34,10 @@ interface Emits {
   (e: 'close'): void;
   (e: 'read-now', entry: MediaEntry): void;
   (e: 'toggle-like', entry: MediaEntry): void;
+  /** 图片单选添加书签。 */
+  (e: 'add-bookmark', entry: MediaEntry): void;
+  /** 图片单选跳转至书签（弹该书书签选框）。 */
+  (e: 'jump-bookmark', entry: MediaEntry): void;
   /** 单图: entry; 多选: entries 数组。统一用此签名。 */
   (e: 'regenerate-thumbnail', items: MediaEntry[]): void;
 }
@@ -147,7 +151,21 @@ function onRegenerate() {
     >
       {{ t('fileBrowser.contextMenu.resetProgress') }}
     </button>
-    <!-- 图片：强制重建缩略图（删旧缓存后重新生成），支持多选 -->
+    <!-- 图片：添加书签仅单选，书签页码由 FileBrowser 按当前排序计算 -->
+    <button
+      v-if="!isBatch && firstItem && !firstItem.isDirectory && isImage(firstItem.name)"
+      data-test="add-bookmark"
+      class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
+      @click="emit('add-bookmark', firstItem); emit('close')"
+    >＋ {{ t('bookmarks.addBookmark') }}</button>
+    <!-- 图片：跳转至书签（弹该书书签选框，选中进阅读器定位） -->
+    <button
+      v-if="!isBatch && firstItem && !firstItem.isDirectory && isImage(firstItem.name)"
+      data-test="jump-bookmark"
+      class="block w-full text-left px-3 py-1.5 text-text-secondary hover:bg-surface-light hover:text-text-primary transition-colors duration-100"
+      @click="emit('jump-bookmark', firstItem); emit('close')"
+    >{{ t('reader.jumpToBookmark') }}</button>
+
     <button
       v-if="firstItem && !firstItem.isDirectory && isImage(firstItem.name)"
       data-test="regenerate-thumbnail"

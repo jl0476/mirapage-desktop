@@ -34,6 +34,8 @@ const emit = defineEmits<{
   (e: 'cycle-mode'): void;
   (e: 'cycle-direction'): void;
   (e: 'toggle-slideshow'): void;
+  (e: 'add-bookmark'): void;
+  (e: 'open-bookmark-jump'): void;
   (e: 'jump-page', page: number): void;
   (e: 'back'): void;
 }>();
@@ -188,6 +190,17 @@ onUnmounted(() => {
         >Go</button>
       </form>
     </div>
+
+    <button
+      data-test="add-bookmark"
+      class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary"
+      @click="emit('add-bookmark'); emit('close')"
+    >{{ t('bookmarks.addBookmark') }}</button>
+    <button
+      data-test="jump-to-bookmark"
+      class="flex w-full items-center justify-between px-3 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-light hover:text-text-primary"
+      @click="emit('open-bookmark-jump'); emit('close')"
+    >{{ t('reader.jumpToBookmark') }}</button>
 
     <div class="my-1 xp-divider-h" />
 

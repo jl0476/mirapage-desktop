@@ -17,6 +17,15 @@ export default {
     retry: 'Retry',
     back: 'Back',
     settings: 'Settings',
+    searchPlaceholder: 'Search',
+    searchNoResults: 'No matches',
+    prevPage: 'Prev',
+    nextPage: 'Next',
+    firstPage: 'First page',
+    lastPage: 'Last page',
+    pagePrefix: 'Page',
+    pageSuffix: ' / {pages}',
+    totalItems: '· {count} items',
   },
   nav: {
     fileBrowser: 'File Browser',
@@ -57,6 +66,7 @@ export default {
     liked: 'Liked',
     unlike: 'Unlike',
     openBookmarks: 'Open bookmarks',
+    jumpToBookmark: 'Jump to bookmark',
     menu: {
       back: 'Back',
       title: 'Reader controls',
@@ -169,8 +179,10 @@ export default {
     page: 'Page',
     label: 'Label',
     add: 'Add',
+    addBookmark: 'Add bookmark',
     remove: 'Delete',
     openBookFirst: 'Please open a book first',
+    searchPlaceholder: 'Search bookmarks',
   },
   likes: {
     title: 'Likes',
@@ -178,10 +190,12 @@ export default {
     toggleOff: 'Unlike',
     browse: 'Browse',
     browseTitle: 'Open in file browser (masonry view)',
+    searchPlaceholder: 'Search likes',
   },
   history: {
     title: 'History',
     empty: 'No history yet',
+    searchPlaceholder: 'Search history',
   },
   tags: {
     title: 'Tags',
@@ -218,6 +232,7 @@ export default {
     open: 'Open',
     delete: 'Delete',
     confirmDelete: 'Delete this shortcut?',
+    searchPlaceholder: 'Search shortcuts',
   },
   // v0.1.0-module1.22: properties panel
   properties: {
@@ -276,6 +291,8 @@ export default {
       // module3.0.11: badge click shows generation details
       thumbnailDetailPopover: 'Show generation details on badge click',
       thumbnailDetailPopoverDesc: 'Click a thumbnail phase/error badge to view stage timings and failure details',
+      listPageSize: 'List page size',
+      listPageSizeDesc: 'Items per page for shortcuts / likes / bookmarks / history lists',
     },
     reader: {
       mode: 'Default reading mode',

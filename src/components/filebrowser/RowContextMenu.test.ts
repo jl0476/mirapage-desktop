@@ -49,6 +49,26 @@ describe('RowContextMenu 重新生成缩略图', () => {
     expect(w.find('[data-test="regenerate-thumbnail"]').exists()).toBe(true);
   });
 
+  it('图片：显示添加书签并发出 entry', async () => {
+    const e = imgEntry('bookmark.jpg');
+    const w = await mountCtx(e);
+    await w.find('[data-test="add-bookmark"]').trigger('click');
+    expect(w.emitted('add-bookmark')).toEqual([[e]]);
+  });
+
+  it('图片：显示跳转至书签并发出 jump-bookmark + close', async () => {
+    const e = imgEntry('jump.jpg');
+    const w = await mountCtx(e);
+    await w.find('[data-test="jump-bookmark"]').trigger('click');
+    expect(w.emitted('jump-bookmark')).toEqual([[e]]);
+    expect(w.emitted('close')).toBeTruthy();
+  });
+
+  it('目录：不显示 jump-bookmark 项', async () => {
+    const w = await mountCtx(dirEntry());
+    expect(w.find('[data-test="jump-bookmark"]').exists()).toBe(false);
+  });
+
   it('目录：不显示 regenerate-thumbnail 项', async () => {
     const w = await mountCtx(dirEntry());
     expect(w.find('[data-test="regenerate-thumbnail"]').exists()).toBe(false);

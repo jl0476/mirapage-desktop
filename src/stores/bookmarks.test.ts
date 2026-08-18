@@ -10,14 +10,15 @@ import { setActivePinia, createPinia } from 'pinia';
 
 vi.mock('@/lib/tauri', () => ({
   listBookmarks: vi.fn(async (_bookId: number) => [
-    { id: 1, bookId: 1, page: 5, label: null, createdAt: 100 },
-    { id: 2, bookId: 1, page: 2, label: null, createdAt: 200 },
-    { id: 3, bookId: 1, page: 8, label: null, createdAt: 300 },
+    { id: 1, bookId: 1, page: 5, positionKind: 'image', label: null, createdAt: 100 },
+    { id: 2, bookId: 1, page: 2, positionKind: 'image', label: null, createdAt: 200 },
+    { id: 3, bookId: 1, page: 8, positionKind: 'image', label: null, createdAt: 300 },
   ]),
   addBookmark: vi.fn(async (bookId: number, page: number, label: string | null) => ({
     id: 99,
     bookId,
     page,
+    positionKind: 'image',
     label,
     createdAt: 999,
   })),
