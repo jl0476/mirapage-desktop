@@ -27,8 +27,10 @@ use smb::{Client, ClientConfig, UncPath, Error as SmbError};
 //         公共字段：file_name / attributes / end_of_file / last_write_time: FileTime
 // 读：resource.as_file() → file.read_block(&mut buf, pos, None, false) -> io::Result<usize>
 //     （短读语义：返回实际字节数，EOF 返 0——Range 强契约需循环包装）
-// stat：open_existing → query_info::<FileStandardInformation>()（含 end_of_file / last_write_time）
-// 时间：FileTime::date_time() -> time::PrimitiveDateTime → .assume_utc().unix_timestamp()
+// stat：size = query_info::<FileStandardInformation>()（无 mtime 字段！FileInformation 家族）；
+//       mtime = resource.handle().modified() -> PrimitiveDateTime（time 0.3.45，assume_utc().unix_timestamp()）
+// 时间：FileTime::since_epoch()（相对 1601 的 Duration，纯整数换算）；
+//       ResourceHandle::modified() -> PrimitiveDateTime → .assume_utc().unix_timestamp()
 // 错误：SmbError::{TransportError, IoError, OperationTimeout, ReceivedErrorMessage(Status, _),
 //       NotFound(String), InvalidState, ...}——连接级 = Transport/IoError/Timeout/InvalidState 类
 ```
@@ -716,14 +718,49 @@ mod tests {
         assert_eq!(log.created.lock().unwrap().len(), 1, "文件级错误不重建");
     }
 
+    /// P1-2（rev3）：确定性并发测试——mock factory 用 Barrier 挂住建连，
+    /// 确保两个请求都越过阶段 1（slot 未命中）后才放行，然后断言最终 slot 收敛为 1。
     #[tokio::test]
     async fn concurrent_connect_deduplicates_to_one_slot() {
-        // P1-1 阶段 3 写回语义：并发两请求各自建连（实例 2 个），最终 slot 只留一个
-        // 且两者都成功返回可用 transport
-        let (mgr, log) = manager_with_log(std::time::Duration::from_secs(300));
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use tokio::sync::Barrier;
+
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let creds = Arc::new(MemoryStore::new());
+        creds.set_password("smb-1", "p").unwrap();
+        {
+            let conn = db.conn();
+            conn.execute(
+                "INSERT INTO account (name, type, host, port, share, username, encrypted_password)
+                 VALUES ('nas', 'smb', '192.168.1.1', 445, 'media', 'u', NULL)", []).unwrap();
+        }
+        // Barrier(2)：工厂闭包内 await——两个请求都进入建连阶段（各自过了阶段 1 的 slot miss）
+        // 之后才一起放行。若只有一个请求建连，另一个 await 永远凑不齐 → 测试超时失败。
+        let barrier = Arc::new(Barrier::new(2));
+        let created = Arc::new(AtomicU32::new(0));
+        let factory: TransportFactory = {
+            let barrier = barrier.clone();
+            let created = created.clone();
+            Arc::new(move || {
+                let barrier = barrier.clone();
+                let created = created.clone();
+                Box::pin(async move {
+                    let m = Arc::new(MockSmbTransport::new());
+                    created.fetch_add(1, Ordering::SeqCst);
+                    barrier.wait().await; // 挂住直到第二个建连请求到达
+                    m as Arc<dyn SmbTransport>
+                })
+            })
+        };
+        let mgr = SmbConnectionManager::new(db, creds, factory, Duration::from_secs(300));
+
         let (a, b) = tokio::join!(mgr.stat(1, "media", "f"), mgr.stat(1, "media", "f"));
-        assert!(a.is_err() && b.is_err()); // 未脚本化 FileNotFound——但两请求都走通了 transport
-        assert_eq!(log.created.lock().unwrap().len(), 2, "并发竞态各自建连（去重=复用先到者，非阻止建连）");
+        // 未脚本化 → FileNotFound（两请求都走通了完整链路到 transport）
+        assert!(matches!(a, Err(TransportError::FileNotFound(_))));
+        assert!(matches!(b, Err(TransportError::FileNotFound(_))));
+        // 策略断言（后到者复用先到者）：两请求各自建连（2 实例），但 slot 收敛为 1
+        assert_eq!(created.load(Ordering::SeqCst), 2, "Barrier 放行证明两请求都越过阶段 1（各自建连）");
+        assert_eq!(mgr.slot_count(), 1, "阶段 3 写回去重：slot 单份");
     }
 
     #[tokio::test]
@@ -785,6 +822,12 @@ impl SmbConnectionManager {
 
     pub fn new(db: Db, creds: Arc<dyn CredentialStore>, factory: TransportFactory, ttl: Duration) -> Self {
         Self { db, creds, factory, ttl, slots: Mutex::new(HashMap::new()) }
+    }
+
+    /// 测试观察器：当前存活连接数（并发去重断言用）。
+    #[cfg(test)]
+    pub fn slot_count(&self) -> usize {
+        self.slots.lock().unwrap().len()
     }
 
     /// 查 account 行 + keyring 密码 → ConnectParams。share NULL / 契约不符即错误。
@@ -1322,8 +1365,9 @@ fn to_raw(info: &smb_fscc::FileIdBothDirectoryInformation) -> RawDirEntry {
         name: info.file_name.clone(),
         is_directory: info.attributes.directory(),
         size: info.end_of_file,
-        modified_unix_secs: super::transport::file_time_to_unix_secs(info.last_write_time.date_time_unix_100ns())
-            .unwrap_or(0),
+        // FileTime 无 unix_100ns 访问器（rev3 修正）——用 since_epoch()（相对 1601 的 Duration）
+        let since1601 = info.last_write_time.since_epoch().as_nanos() as u64 / 100; // 100ns
+        modified_unix_secs: super::transport::file_time_to_unix_secs(since1601).unwrap_or(0),
     }
 }
 
@@ -1404,20 +1448,26 @@ impl SmbTransport for SmbClientTransport {
     async fn stat(&self, rel: &str) -> Result<RawStat, TransportError> {
         let tree = self.tree().await?;
         let resource = tree
-            .open_existing(&rel.replace('/', "\\"), Self::access())
+            .open_existing(&rel.replace('/', "\"), Self::access())
             .await
             .map_err(map_smb_error)?;
-        // query_info::<FileStandardInformation>（end_of_file/last_write_time）；
-        // 若 trait bound 不满足（编译期发现），fallback：as_file + end_of_file 字段 + handle.modified()
+        // P1-1（rev3）：FileStandardInformation 属 FileInformation 家族——只有
+        // allocation_size/end_of_file/链接数/布尔标记，**没有 mtime**（mtime 字段在
+        // DirectoryInformation 家族）。size 走 query_info::<FileStandardInformation>()；
+        // mtime 走 ResourceHandle::modified() -> time::PrimitiveDateTime
+        // （smb Cargo.toml 依赖 time 0.3.45；assume_utc/unix_timestamp 是 0.3 标准方法）。
         let std_info: smb_fscc::FileStandardInformation = resource
             .query_info()
             .await
             .map_err(map_smb_error)?;
+        let modified_unix_secs = resource
+            .handle()
+            .modified()
+            .assume_utc()
+            .unix_timestamp();
         Ok(RawStat {
             size: std_info.end_of_file,
-            modified_unix_secs: super::transport::file_time_to_unix_secs(
-                std_info.last_write_time.date_time_unix_100ns(),
-            ),
+            modified_unix_secs: Some(modified_unix_secs),
         })
     }
 }
@@ -1468,13 +1518,17 @@ mod tests {
    ```
    `to_raw`/`stat` 内统一走一个小 helper `fn ft_100ns(ft: &smb_dtyp::FileTime) -> u64`。
 2. `AccessMask` vs `FileAccessMask` 的导入路径（`Tree::open_existing` 参数类型为准）。
-3. `query_info::<T>()` 的 trait bound；不满足则 stat 改 `resource.as_file()` + `GetLen` + `handle.modified().assume_utc().unix_timestamp()`。
+3. ~~`query_info::<T>()` 的 trait bound~~（rev3 定案）：size 走 `query_info::<FileStandardInformation>()`；mtime **不走** query_info（FileStandardInformation 无 mtime 字段）——走 `resource.handle().modified().assume_utc().unix_timestamp()`（smb 依赖 time 0.3.45，两方法为 0.3 标准）。若 `handle()` 访问器路径编译不符，备选 `FileBasicInformation`（common_info.rs，含 last_write_time）query_info 一次拿双字段。
 4. `smb::resource::Directory::query` 的模块路径（`smb::resource::directory::Directory` re-export 形态以编译器为准）。
 5. `Status::U32_*` 常量名以 `smb-msg` 实际导出为准（U32_OBJECT_NAME_NOT_FOUND 等；缺的变体删除对应 match 臂即可，分类兜底走 `Other`）。
 6. `smb` crate 的 feature：`Cargo.toml` 的 `smb = "0.11"` 默认 feature 是否含 `async`（`query` 带 `#[cfg(feature = "async")]`）——若默认无 async，改 `smb = { version = "0.11", features = ["async"] }`。**先查 `smb-0.11.2/Cargo.toml` 的 `[features] default` 再定**。
 7. `futures_util` 依赖：`Cargo.toml` 若无则加（StreamExt 消费 QueryDirectoryStream 必需）。
+8. `time = "0.3"` 依赖：本项目 `Cargo.toml` 需加（`assume_utc()/unix_timestamp()` 标准方法；
+   smb crate 内部 time 0.3.45 同 minor 版本，类型互通）。
 
-- [ ] **步骤 2：`cargo check -j 2` 通过（含上述微调落地）+ `cargo test -j 2 error_classification` PASS**
+- [ ] **步骤 2：`cargo check -j 2` 通过（含上述微调落地）+ `cargo test -j 2 error_classification status_code` PASS**
+
+**stat 路径的编译级锁定（P1-1）**：`FileStandardInformation` 无 `last_write_time` 是编译期事实——若实现误写 `std_info.last_write_time` 直接编译失败；`resource.handle().modified().assume_utc().unix_timestamp()` 链编译通过即证明真实 API 路径成立（mtime 数值正确性由 spike 实机输出复核）。
 
 - [ ] **步骤 3：Commit**
 
@@ -1645,6 +1699,13 @@ git push origin main --tags
 3. **P1 端口静默忽略**：核实 smb-transport 源码——`TransportUtils::parse_socket_address` 对无 `:` endpoint 补 `:0` 走 `TcpTransport::default_port()=445`，**server 字符串承载端口**（`host:port` 形态过 `check_no_separators`）——修法为非 445 拼 `format!("{host}:{port}")`（crate 支持，不需拒绝）；`resolve_params` 加端口 1-65535 校验；test_connection 用账户行 port（删硬编码）；spike 补自定义端口验证点。
 4. **P1 错误映射假设错误**：核实 error.rs——实际 `ReceivedErrorMessage(u32, ErrorResponse)`（`Status::U32_*` 是 u32 常量，用 guard 比较非枚举 match）；映射表按真实变体重写，`ConnectionStopped`/`InvalidState`/`NegotiationError` 归连接级、`MissingPermissions`→PermissionDenied；状态码分派独立纯函数 `map_status_code(u32)` 全常量锁定测试；「编译器提示后删 match 臂」降级为缺常量时的兜底手段而非常规策略。
 5. **建议**：test_connection 测试改零网络路径（share 缺失/端口越界两用例，不打真实 IP）；spike 补深层 initialPath 验证点；read_file 全量 `usize::try_from` + 256MB 钳制（`MAX_SMB_READ_BYTES`）。
+
+## 附：计划审查修订记录（rev3，2026-08-19）
+
+第二轮复审：前轮 P0 + 3 P1 已确认闭环；本轮 2 P1 全采纳（均先经 registry 源码复核）：
+
+1. **P1 stat 方案编译必败**：复核确认 `FileStandardInformation` 属 FileInformation 家族（allocation_size/end_of_file/链接数/布尔标记），**无 mtime 字段**（last_write_time 在 DirectoryInformation 家族的宏基座）；`date_time_unix_100ns()` 系计划内虚构 API。修正：size 走 `query_info::<FileStandardInformation>()`，mtime 走 `resource.handle().modified().assume_utc().unix_timestamp()`（ResourceHandle::modified 已核对存在；smb 依赖 time 0.3.45，两方法为 0.3 标准）；`to_raw` 的 list 路径同步改 `FileTime::since_epoch()` 纯整数换算；本项目 Cargo.toml 补 `time = "0.3"`；不确定点第 3 条定案（备选 FileBasicInformation 双字段查询）；编译级锁定写进任务 6 验证（误用 std_info.last_write_time 直接编译失败，handle().modified() 链编译通过即真实路径证明）+ spike 实机 mtime 复核。
+2. **P1 并发测试预期不稳**：采纳时序分析（即时 mock + join! 顺序 poll → 首 future 完成后第二个命中 slot，实例数实为 1）。重写为 Barrier(2) 确定性测试：工厂闭包内 await barrier——两请求都越过阶段 1（slot miss）后一起放行（否则超时失败）；断言改为「建连 2 实例（策略=各自建连）+ slot 收敛 1（阶段 3 写回去重）」；connection.rs 补 `slot_count()` 测试观察器。
 
 ## 附：执行顺序依赖
 
