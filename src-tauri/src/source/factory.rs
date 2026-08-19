@@ -7,7 +7,8 @@
 use crate::source::archive_impl::ArchiveMediaSource;
 use crate::source::descriptor::SourceDescriptor;
 use crate::source::local::LocalMediaSource;
-use crate::source::smb_impl::SmbMediaSource;
+use crate::source::smb::connection::SmbConnectionManager;
+use crate::source::smb::source::SmbMediaSource;
 use crate::source::trait_def::MediaSource;
 use crate::source::webdav_impl::WebDavMediaSource;
 use std::sync::Arc;
@@ -29,7 +30,9 @@ impl MediaSourceFactory {
         Self {
             local: Arc::new(LocalMediaSource::new()),
             archive: Arc::new(ArchiveMediaSource::new()),
-            smb: Arc::new(SmbMediaSource::new()),
+            smb: Arc::new(SmbMediaSource::new(Arc::new(
+                SmbConnectionManager::new_production(db.clone(), creds.clone()),
+            ))),
             webdav: Arc::new(WebDavMediaSource::new(db, creds)),
         }
     }
