@@ -4,7 +4,8 @@
 //!
 //! - 强类型 `VolumeDirection`（P2：非法值在 serde 反序列化边界报错，不静默当 next）
 //! - 强类型解析 `SourceDescriptor`（P1-5：不在 command 内反复操作 `serde_json::Value`）
-//! - 仅 Local 源（spec §1.2 收窄决策；非 Local 返回明确错误，不静默 fallback）
+//! - Local + WebDAV 源（module3.2.0 spec rev4 §3.2 泛化：factory 列父目录，Local 零回归；
+//!   Smb 3.3.0 前明确报错；Archive 无跨卷语义——包即整书）
 //! - `NextVolumeResult` 无 `is_archive` 字段（仅 Local 目录卷）
 //! - 删除 `filter` 参数（P1-3：reader / masonry 在仅 Local 目录卷下语义一致）
 //!
@@ -15,6 +16,15 @@ use tauri::State;
 
 use crate::algorithm::path::PathUtils;
 use crate::source::{MediaSourceFactory, SourceDescriptor};
+
+/// 跨卷列举源分派（module3.2.0 spec rev4 §3.2）。
+/// Local 走既有实现；WebDAV 经 factory 列父目录；Smb/Archive 明确报错。
+fn listing_kind(d: &SourceDescriptor) -> Result<(), String> {
+    match d {
+        SourceDescriptor::Local { .. } | SourceDescriptor::WebDav { .. } => Ok(()),
+        _ => Err("跨卷当前仅支持 Local / WebDAV 源（SMB module 3.3.0；Archive 无跨卷语义）".into()),
+    }
+}
 
 /// 跨卷方向（强类型 IPC 入参，非法值在 serde 反序列化边界报错）。
 ///
@@ -230,12 +240,12 @@ fn sibling_is_finished(
 
 /// IPC 入参（spec §5.1）
 ///
-/// P1-3 修复：无 `filter` 字段（reader / masonry 在仅 Local 目录卷下语义一致）。
+/// P1-3 修复：无 `filter` 字段（reader / masonry 在目录卷下语义一致）。
 /// P2 修复：`direction` 强类型枚举，非法值在反序列化边界报错。
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FindNextVolumeArgs {
-    /// 当前卷的 `SourceDescriptor`（本版实际只用 Local）
+    /// 当前卷的 `SourceDescriptor`（module3.2.0 起 Local + WebDAV）
     pub descriptor: serde_json::Value,
     /// 当前卷相对 `rootPath` 的完整路径（如 `"comics/vol1"`）
     pub current_path: String,
@@ -274,11 +284,10 @@ pub async fn find_next_volume_impl(
     let descriptor: SourceDescriptor = serde_json::from_value(args.descriptor.clone())
         .map_err(|e| format!("invalid descriptor: {e}"))?;
 
-    // 2. 本版只支持 Local（收窄决策）。非 Local 返回明确错误，不静默 fallback。
-    //    `matches!` 只验证 variant —— root_path 不单独绑定，避免 unused variable warning。
-    if !matches!(descriptor, SourceDescriptor::Local { .. }) {
-        return Err("find_next_volume: 非 Local 源暂不支持跨卷（见 spec §1.2）".into());
-    }
+    // 2. 分派校验（module3.2.0 spec rev4 §3.2）：Local 走现有实现零回归；WebDAV 经
+    //    factory 列目录（兄弟排序/跳已读/directory_sort 操作 MediaEntry 与 location_key，
+    //    随列举源切换自动生效）；Smb M2 前明确报错；Archive 无跨卷语义。
+    listing_kind(&descriptor)?;
 
     // 3. parent_path = current_path 的父目录；current_basename = 末段
     let parent_path = PathUtils::parent(&args.current_path);
@@ -365,6 +374,32 @@ mod tests {
     use crate::source::descriptor::MediaEntry;
     use std::fs;
     use std::path::Path;
+
+    // ---- module3.2.0: 跨卷源分派（listing_kind） ----
+
+    #[test]
+    fn listing_kind_accepts_local_and_webdav_rejects_smb_archive() {
+        let local = SourceDescriptor::Local { root_path: "F:/c".into() };
+        let webdav = SourceDescriptor::WebDav { account_id: 1, base_url: "https://d/x".into(), path: "comics/v1".into() };
+        let smb = SourceDescriptor::Smb { account_id: 1, initial_path: "s".into(), path: "v1".into(), port: 445 };
+        let archive = SourceDescriptor::Archive {
+            archive_path: "D:/a.cbz".into(), entry_prefix: String::new(),
+            format: crate::source::descriptor::ArchiveFormat::Cbz,
+            origin: None, origin_entry_path: None, archive_rel_path: None,
+        };
+        assert!(listing_kind(&local).is_ok());
+        assert!(listing_kind(&webdav).is_ok());
+        assert!(listing_kind(&smb).is_err());   // M2 前明确报错
+        assert!(listing_kind(&archive).is_err()); // 包即整书，无相邻卷语义
+    }
+
+    #[test]
+    fn parent_path_semantics_for_rel_paths() {
+        // PathUtils.parent 对源内相对路径（Local relPath / WebDAV path 同构）
+        assert_eq!(PathUtils::parent("comics/v1"), "comics");
+        assert_eq!(PathUtils::parent("v1"), ""); // 根下第一层：parent = 根
+        assert_eq!(PathUtils::parent(""), "");   // 已在根：parent 仍是根（跨根无语义）
+    }
 
     // ---- pick_sibling 纯函数测试（任务 1 保留） ----
 
@@ -598,9 +633,9 @@ mod tests {
         serde_json::json!({"type": "local", "rootPath": root_path})
     }
 
-    /// 1) 非 Local descriptor 返回明确 Err —— 不静默 fallback（spec §1.2）。
+    /// 1) SMB descriptor 返回明确 Err —— 不静默 fallback（module3.2.0：WebDAV 已放开）。
     #[tokio::test]
-    async fn non_local_descriptor_returns_err() {
+    async fn smb_descriptor_returns_err() {
         let factory = make_factory();
         let args = FindNextVolumeArgs {
             descriptor: serde_json::json!({
@@ -614,11 +649,11 @@ mod tests {
             skip_finished: None,
         };
         let result = find_next_volume_impl(args, &factory, None).await;
-        assert!(result.is_err(), "非 Local 应返回 Err");
+        assert!(result.is_err(), "SMB 跨卷应返回 Err（3.3.0 前不支持）");
         let err = result.unwrap_err();
         assert!(
-            err.contains("非 Local") || err.contains("Local"),
-            "错误信息应明确提到 Local: {err}"
+            err.contains("Local") || err.contains("WebDAV") || err.contains("SMB"),
+            "错误信息应说明支持的源: {err}"
         );
     }
 
