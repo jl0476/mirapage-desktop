@@ -199,8 +199,14 @@ impl MediaSource for ArchiveMediaSource {
         match range {
             None => Ok(full),
             Some(r) => {
-                let start = (r.offset as usize).min(full.len());
-                let end = ((r.offset + r.length) as usize).min(full.len());
+                let end = r.offset.checked_add(r.length).ok_or_else(|| {
+                    MediaSourceError::Other("archive range overflow".into())
+                })?;
+                if end > full.len() as u64 {
+                    return Err(MediaSourceError::Other("archive range exceeds entry size".into()));
+                }
+                let start = r.offset as usize;
+                let end = end as usize;
                 Ok(full[start..end].to_vec())
             }
         }
@@ -372,6 +378,23 @@ mod tests {
         let bytes = rt.block_on(src.read_file(&descriptor, "page1.png", Some(ByteRange::new(0, 4)))).unwrap();
         assert_eq!(bytes.len(), 4);
         assert_eq!(bytes[0], 0x89);
+    }
+
+    #[test]
+    fn read_cbz_entry_rejects_range_beyond_entry() {
+        let path = create_test_cbz(&["page1.png"]);
+        let descriptor = SourceDescriptor::Archive {
+            archive_path: path.to_string_lossy().to_string(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Cbz,
+            origin: None,
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        let src = ArchiveMediaSource::new();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(src.read_file(&descriptor, "page1.png", Some(ByteRange::new(4, 8))));
+        assert!(result.is_err(), "Range 强契约不允许静默返回短数据");
     }
 
     #[test]

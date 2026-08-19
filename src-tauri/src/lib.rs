@@ -186,6 +186,7 @@ async fn handle_media_request(
         Ok(s) => s,
         Err(e) => return error_to_status(e),
     };
+    let has_range_header = request.headers().contains_key("range");
     let range = match parse_range_header(
         request.headers().get("range").and_then(|v| v.to_str().ok()),
         stat.size,
@@ -218,7 +219,7 @@ async fn handle_media_request(
     // 1. Local → 跳过 LRU 直读（文件系统页缓存已够）
     // 2. 带 Range 头 → 跳过 LRU 直读源（缓存条目只有全量 bytes，命中回 200 会破坏 Range 语义）
     // 3. 无 Range 的远程 GET → 命中回 200 全量；miss 读源后填充
-    let cacheable = range.is_none() && !matches!(target, MediaTarget::Local { .. });
+    let cacheable = !has_range_header && !matches!(target, MediaTarget::Local { .. });
     if cacheable {
         if let Some(hit) = media_cache::global().lock().unwrap().get(&path) {
             return finish(
@@ -274,14 +275,7 @@ pub(crate) fn rebuild_descriptor(
     let db = app.state::<crate::db::Db>();
     let not_found = || (StatusCode::NOT_FOUND, "account not found".to_string());
     Ok(match t {
-        MediaTarget::Local { abs_path } => {
-            // resolve_path = root.join(rel)：root = 文件所在目录、rel = 文件名（跨盘 join 安全）
-            let norm = abs_path.replace('\\', "/");
-            let (dir, file) = norm
-                .rsplit_once('/')
-                .ok_or_else(|| (StatusCode::FORBIDDEN, "forbidden".to_string()))?;
-            (SourceDescriptor::Local { root_path: dir.to_string() }, file.to_string())
-        }
+        MediaTarget::Local { abs_path } => local_descriptor_for_abs_path(abs_path)?,
         MediaTarget::WebDav { account_id, rel_path } => {
             let (host, _) = account_row(&db, *account_id, "webdav")?;
             let base_url = host.ok_or_else(not_found)?;
@@ -373,6 +367,23 @@ pub(crate) fn rebuild_descriptor(
             }
         }
     })
+}
+
+/// 将本地文件绝对路径拆为 `root.join(file)`；保留盘符根与 POSIX 根的尾随 `/`，
+/// 避免 `D:` / 空字符串在 Windows 上退化为当前工作目录相对路径。
+fn local_descriptor_for_abs_path(
+    abs_path: &str,
+) -> Result<(source::descriptor::SourceDescriptor, String), (tauri::http::StatusCode, String)> {
+    let norm = abs_path.replace('\\', "/");
+    let (dir, file) = norm
+        .rsplit_once('/')
+        .ok_or_else(|| (tauri::http::StatusCode::FORBIDDEN, "forbidden".to_string()))?;
+    let root = if dir.is_empty() || dir.ends_with(':') {
+        format!("{dir}/")
+    } else {
+        dir.to_string()
+    };
+    Ok((source::descriptor::SourceDescriptor::Local { root_path: root }, file.to_string()))
 }
 
 fn account_row(
@@ -579,5 +590,16 @@ mod tests {
         let conn = open_settings_db();
         // 干净 DB：该 key 不存在 → 默认 2
         assert_eq!(read_thumbnail_worker_limit(&conn), 2);
+    }
+
+    #[test]
+    fn local_media_file_at_filesystem_root_keeps_absolute_root() {
+        let (descriptor, file) = local_descriptor_for_abs_path("D:/x.jpg").unwrap();
+        assert!(matches!(descriptor, source::descriptor::SourceDescriptor::Local { root_path } if root_path == "D:/"));
+        assert_eq!(file, "x.jpg");
+
+        let (descriptor, file) = local_descriptor_for_abs_path("/x.jpg").unwrap();
+        assert!(matches!(descriptor, source::descriptor::SourceDescriptor::Local { root_path } if root_path == "/"));
+        assert_eq!(file, "x.jpg");
     }
 }

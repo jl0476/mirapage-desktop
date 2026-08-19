@@ -37,11 +37,7 @@ pub fn parse_range_header(v: Option<&str>, total: u64) -> RangeResolution {
         },
         None => total - 1,
     };
-    if start == 0 && end == total - 1 {
-        RangeResolution::Full
-    } else {
-        RangeResolution::Partial(ByteRange::new(start, end - start + 1))
-    }
+    RangeResolution::Partial(ByteRange::new(start, end - start + 1))
 }
 
 pub fn format_content_range(start: u64, end: u64, total: u64) -> String {
@@ -124,11 +120,15 @@ pub fn validate_rel_path(p: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-/// 本地绝对路径校验（Windows 盘符或 UNC 开头；拒绝相对形态与 `..` 段）。
+/// 本地绝对路径校验（Windows 盘符、UNC 或 POSIX `/` 开头；拒绝相对形态与 `..` 段）。
 /// 按路径段拒绝——只拒绝恰好等于 ".." 的 segment，`foo..bar.jpg` 等含连续点的合法文件名放行。
 pub fn validate_abs_path(p: &str) -> Result<(), ProtocolError> {
-    let ok = p.len() >= 3 && p.as_bytes()[1] == b':' && p.as_bytes()[2] == b'/'
-        || p.starts_with(r"\\");
+    let bytes = p.as_bytes();
+    let ok = (p.len() >= 3
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\'))
+        || p.starts_with(r"\\")
+        || p.starts_with('/');
     if !ok {
         return Err(ProtocolError::InvalidPath("非绝对路径"));
     }
@@ -220,8 +220,14 @@ mod tests {
     fn range_header_parsing() {
         use RangeResolution::*;
         assert!(matches!(parse_range_header(None, 100), Full));
-        assert!(matches!(parse_range_header(Some("bytes=0-"), 100), Full));            // 覆盖全文 = 全量
-        assert!(matches!(parse_range_header(Some("bytes=0-99"), 100), Full));
+        assert_eq!(
+            parse_range_header(Some("bytes=0-"), 100),
+            Partial(crate::source::trait_def::ByteRange::new(0, 100)),
+        ); // 覆盖全文仍是 Range，handler 必须回 206 且绕过 LRU
+        assert_eq!(
+            parse_range_header(Some("bytes=0-99"), 100),
+            Partial(crate::source::trait_def::ByteRange::new(0, 100)),
+        );
         match parse_range_header(Some("bytes=10-19"), 100) {
             Partial(r) => assert_eq!((r.offset, r.length), (10, 10)),
             _ => panic!(),
@@ -323,6 +329,8 @@ mod tests {
         assert!(validate_rel_path("100%.jpg").is_ok());    // % 合法（rev3）
         // local 绝对路径走独立分支
         assert!(validate_abs_path("D:/x/y.jpg").is_ok());
+        assert!(validate_abs_path(r"D:\x\y.jpg").is_ok());
+        assert!(validate_abs_path("/home/user/comics/p1.jpg").is_ok());
         assert!(validate_abs_path("relative/path").is_err());
         assert!(validate_abs_path("D:/comics/foo..bar.jpg").is_ok()); // rev5：连续点文件名合法，只拒 `..` 段
         assert!(validate_abs_path("D:/comics/../secret").is_err());

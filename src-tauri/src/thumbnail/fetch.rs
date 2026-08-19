@@ -122,7 +122,13 @@ impl RemoteFetchActor {
                         match res {
                             Ok(bytes) => {
                                 if epoch.load(Ordering::SeqCst) == prepared.epoch {
-                                    on_fetched(prepared, bytes); // 取源后再查：取消的结果不进解码链（整快照回传）
+                                    // file_size 是目录枚举的可信元数据；此处只作实际响应的硬上限，
+                                    // 不重记已归还的在途预算，避免到手 bytes 反向影响调度账本。
+                                    if bytes.len() as u64 > budget_total {
+                                        on_failed(&prepared, "response exceeds remote fetch byte budget");
+                                    } else {
+                                        on_fetched(prepared, bytes); // 取源后再查：取消的结果不进解码链（整快照回传）
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -321,5 +327,33 @@ mod tests {
         }
         hold.notify_waiters();
         assert_eq!(started.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn actual_response_over_budget_fails_before_decode() {
+        let (fetched_tx, mut fetched_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (failed_tx, mut failed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let fetch: FetchFn = Arc::new(|_: SourceDescriptor, _: String| {
+            Box::pin(async { Ok(vec![0u8; 11]) })
+        });
+        let actor = RemoteFetchActor::spawn(FetchActorConfig {
+            concurrency: 1,
+            byte_budget: 10,
+            fetch,
+            on_fetched: Arc::new(move |p: PreparedRemoteTask, _: Vec<u8>| {
+                let _ = fetched_tx.send(p.cache_key);
+            }),
+            on_failed: Arc::new(move |p: &PreparedRemoteTask, _: &str| {
+                let _ = failed_tx.send(p.cache_key.to_string());
+            }),
+        });
+        actor.new_epoch(1);
+        actor.try_submit(req("underreported", 1, 1));
+        let failed = tokio::time::timeout(std::time::Duration::from_secs(1), failed_rx.recv())
+            .await
+            .expect("超预算响应必须失败")
+            .expect("失败回调必须携带任务");
+        assert_eq!(failed, "underreported");
+        assert!(fetched_rx.try_recv().is_err(), "超预算 bytes 不得进入解码链");
     }
 }

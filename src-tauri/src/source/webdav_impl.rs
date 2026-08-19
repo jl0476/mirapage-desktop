@@ -146,16 +146,41 @@ fn local_name(name: &[u8]) -> &str {
 }
 
 /// Range 响应校验（强契约，spec rev3 §3.1）：请求 range 时返回字节必须恰好等于请求区间。
-/// 206 直接过；200 仅当 body 长度恰等（个别服务器忽略 Range 却刚好截断）；其余一律报错，
+/// 206 必须有匹配请求 offset 的 Content-Range；200 仅当 body 长度恰等（个别服务器忽略 Range 却刚好截断）；其余一律报错，
 /// 防止 M3 分块下载把整包/短读拼进 .part。
-fn verify_range_response(status: u16, body_len: usize, expected_len: u64) -> Result<()> {
-    if status == 206 || (status == 200 && body_len as u64 == expected_len) {
+fn verify_range_response(
+    status: u16,
+    content_range: Option<&str>,
+    expected_offset: u64,
+    body_len: usize,
+    expected_len: u64,
+) -> Result<()> {
+    let valid = match status {
+        206 => content_range_start(content_range) == Some(expected_offset)
+            && body_len as u64 == expected_len,
+        200 => body_len as u64 == expected_len,
+        _ => false,
+    };
+    if valid {
         Ok(())
     } else {
         Err(MediaSourceError::Network(format!(
-            "server ignored range: status {status}, body {body_len} != expected {expected_len}"
+            "invalid range response: status {status}, content-range {:?}, body {body_len} != expected offset {expected_offset}, length {expected_len}",
+            content_range,
         )))
     }
+}
+
+/// 仅提取 RFC 7233 `Content-Range: bytes <start>-<end>/<total>` 的起始偏移。
+fn content_range_start(value: Option<&str>) -> Option<u64> {
+    let value = value?;
+    let (unit, range_and_total) = value.split_once(' ')?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (range, _) = range_and_total.split_once('/')?;
+    let (start, _) = range.split_once('-')?;
+    start.parse().ok()
 }
 
 /// RFC 7231 HTTP-date → Unix 秒（"Sun, 06 Nov 1994 08:49:37 GMT" → 784111777）。
@@ -327,13 +352,18 @@ impl MediaSource for WebDavMediaSource {
             return Err(MediaSourceError::Network(format!("GET status {}", resp.status())));
         }
         let status = resp.status().as_u16();
+        let content_range = resp
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let bytes = resp
             .bytes()
             .await
             .map_err(|e| MediaSourceError::Network(format!("read: {e}")))?;
         // Range 强契约（spec rev3 §3.1）：请求区间时返回字节必须恰好等长
         if let Some(r) = range {
-            verify_range_response(status, bytes.len(), r.length)?;
+            verify_range_response(status, content_range.as_deref(), r.offset, bytes.len(), r.length)?;
         }
         Ok(bytes.to_vec())
     }
@@ -437,11 +467,25 @@ mod tests {
     #[test]
     fn range_response_must_be_206_or_exact_length() {
         // spec rev3 §3.1 Range 强契约
-        assert!(verify_range_response(206, 100, 100).is_ok());      // 206 且长度等
-        assert!(verify_range_response(200, 100, 100).is_ok());      // 兼容：200 整段恰好等长
-        assert!(verify_range_response(200, 999, 100).is_err());     // 200 整包≠请求长度 → 拒绝
-        assert!(verify_range_response(200, 50, 100).is_err());      // 短读 → 拒绝
-        assert!(verify_range_response(404, 0, 100).is_err());       // 非成功状态（上游已拦）
+        assert!(verify_range_response(206, Some("bytes 100-199/1000"), 100, 100, 100).is_ok());
+        assert!(verify_range_response(206, None, 100, 100, 100).is_err()); // 206 缺 Content-Range（RFC 7233 违规）
+        assert!(verify_range_response(206, Some("bytes 300-399/1000"), 100, 100, 100).is_err());
+        assert!(verify_range_response(206, Some("bytes 100-149/1000"), 100, 50, 100).is_err());
+        assert!(verify_range_response(200, None, 100, 100, 100).is_ok());
+        assert!(verify_range_response(200, None, 100, 999, 100).is_err());
+        assert!(verify_range_response(200, None, 100, 50, 100).is_err());
+        assert!(verify_range_response(404, None, 100, 0, 100).is_err());
+    }
+
+    #[test]
+    fn content_range_start_parses_and_rejects_malformed() {
+        assert_eq!(content_range_start(Some("bytes 100-199/1000")), Some(100));
+        assert_eq!(content_range_start(Some("bytes 0-99/100")), Some(0)); // offset 0 是有效 Some(0)
+        assert_eq!(content_range_start(Some("Bytes 5-9/*")), Some(5)); // unit 大小写不敏感 + total 通配
+        assert_eq!(content_range_start(None), None);
+        assert_eq!(content_range_start(Some("chunks 5-9/100")), None); // 非 bytes 单位
+        assert_eq!(content_range_start(Some("bytes */1000")), None);   // 416 形态（无区间）
+        assert_eq!(content_range_start(Some("garbage")), None);
     }
 
     #[test]
