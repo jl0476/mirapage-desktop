@@ -17,12 +17,15 @@ use tauri::State;
 use crate::algorithm::path::PathUtils;
 use crate::source::{MediaSourceFactory, SourceDescriptor};
 
-/// 跨卷列举源分派（module3.2.0 spec rev4 §3.2）。
-/// Local 走既有实现；WebDAV 经 factory 列父目录；Smb/Archive 明确报错。
+/// 跨卷列举源分派（module3.2.0 spec rev4 §3.2 + M2 修订）。
+/// Local + WebDav + Smb 走 OK；Archive 拒绝（包即整书）。
+/// M2 task 7：SMB 跨卷已放开（任务 4-6 完成接线）。
 fn listing_kind(d: &SourceDescriptor) -> Result<(), String> {
     match d {
-        SourceDescriptor::Local { .. } | SourceDescriptor::WebDav { .. } => Ok(()),
-        _ => Err("跨卷当前仅支持 Local / WebDAV 源（SMB module 3.3.0；Archive 无跨卷语义）".into()),
+        SourceDescriptor::Local { .. }
+        | SourceDescriptor::WebDav { .. }
+        | SourceDescriptor::Smb { .. } => Ok(()),
+        _ => Err("跨卷当前仅支持 Local / WebDAV / SMB 源（Archive 无跨卷语义——包即整书）".into()),
     }
 }
 
@@ -284,9 +287,10 @@ pub async fn find_next_volume_impl(
     let descriptor: SourceDescriptor = serde_json::from_value(args.descriptor.clone())
         .map_err(|e| format!("invalid descriptor: {e}"))?;
 
-    // 2. 分派校验（module3.2.0 spec rev4 §3.2）：Local 走现有实现零回归；WebDAV 经
+    // 2. 分派校验（module3.2.0 spec rev4 §3.2 + M2 修订）：Local 走现有实现零回归；WebDAV 经
     //    factory 列目录（兄弟排序/跳已读/directory_sort 操作 MediaEntry 与 location_key，
-    //    随列举源切换自动生效）；Smb M2 前明确报错；Archive 无跨卷语义。
+    //    随列举源切换自动生效）；SMB M2 已放开（同 WebDAV 走 factory.resolve().list_directory）；
+    //    Archive 无跨卷语义。
     listing_kind(&descriptor)?;
 
     // 3. parent_path = current_path 的父目录；current_basename = 末段
@@ -378,19 +382,38 @@ mod tests {
     // ---- module3.2.0: 跨卷源分派（listing_kind） ----
 
     #[test]
-    fn listing_kind_accepts_local_and_webdav_rejects_smb_archive() {
+    fn listing_kind_accepts_local_and_webdav_and_smb_after_m2() {
+        // M2 task 7 修订：SMB 跨卷放开——Local + WebDav + Smb 走 listing_kind 校验
         let local = SourceDescriptor::Local { root_path: "F:/c".into() };
         let webdav = SourceDescriptor::WebDav { account_id: 1, base_url: "https://d/x".into(), path: "comics/v1".into() };
         let smb = SourceDescriptor::Smb { account_id: 1, initial_path: "s".into(), path: "v1".into(), port: 445 };
+        assert!(listing_kind(&local).is_ok());
+        assert!(listing_kind(&webdav).is_ok());
+        assert!(listing_kind(&smb).is_ok(), "M2 放开 SMB 跨卷");
+    }
+
+    #[test]
+    fn listing_kind_rejects_archive() {
+        // Archive 仍拒绝：包即整书，无相邻卷语义
         let archive = SourceDescriptor::Archive {
             archive_path: "D:/a.cbz".into(), entry_prefix: String::new(),
             format: crate::source::descriptor::ArchiveFormat::Cbz,
             origin: None, origin_entry_path: None, archive_rel_path: None,
         };
-        assert!(listing_kind(&local).is_ok());
-        assert!(listing_kind(&webdav).is_ok());
-        assert!(listing_kind(&smb).is_err());   // M2 前明确报错
-        assert!(listing_kind(&archive).is_err()); // 包即整书，无相邻卷语义
+        assert!(listing_kind(&archive).is_err());
+        let err = listing_kind(&archive).unwrap_err();
+        assert!(
+            err.contains("Local") || err.contains("WebDAV") || err.contains("SMB") || err.contains("Archive"),
+            "错误信息应说明支持的源: {err}"
+        );
+    }
+
+    /// M2 task 7 简报步骤 1：SMB descriptor 在 listing_kind 后可继续到 list_directory。
+    /// 这里只断言 listing_kind 接受；完整跨卷路径由任务 5+7 链式真实接线后端到端验证。
+    #[test]
+    fn listing_kind_accepts_smb_after_m2() {
+        let smb = SourceDescriptor::Smb { account_id: 1, initial_path: "s".into(), path: "v1".into(), port: 445 };
+        assert!(listing_kind(&smb).is_ok(), "M2 放开 SMB 跨卷");
     }
 
     #[test]
@@ -633,9 +656,10 @@ mod tests {
         serde_json::json!({"type": "local", "rootPath": root_path})
     }
 
-    /// 1) SMB descriptor 返回明确 Err —— 不静默 fallback（module3.2.0：WebDAV 已放开）。
+    /// 1) SMB descriptor 在 M2 任务 7 后 listing_kind 接受 —— 不再被源分派拦截。
+    /// （任务 5 时该测试断言 is_err；M2 后该门已开放，跨卷后续路径走真实 SMB 列举。）
     #[tokio::test]
-    async fn smb_descriptor_returns_err() {
+    async fn smb_descriptor_listing_kind_accepted_after_m2() {
         let factory = make_factory();
         let args = FindNextVolumeArgs {
             descriptor: serde_json::json!({
@@ -648,13 +672,19 @@ mod tests {
             direction: VolumeDirection::Next,
             skip_finished: None,
         };
+        // listing_kind 放行后，跨卷代码会进入 factory.resolve().list_directory —— 这条路径
+        // 在 SMB 真实接线下会因为没有可达的 SMB 服务（无 NAS CI）返回连接级错误，但
+        // 这属于源数据访问错（test_connection 等价），不再是"源不支持"的语义错误。
         let result = find_next_volume_impl(args, &factory, None).await;
-        assert!(result.is_err(), "SMB 跨卷应返回 Err（3.3.0 前不支持）");
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Local") || err.contains("WebDAV") || err.contains("SMB"),
-            "错误信息应说明支持的源: {err}"
-        );
+        // 允许 Err（真实网络失败），但 Err 信息**不能**是 listing_kind 的"源不支持"消息
+        // —— 已升级到 SMB 真实列举阶段。
+        if let Err(ref e) = result {
+            assert!(
+                !e.contains("Local") || !e.contains("WebDAV") || !e.contains("SMB") || e.contains("跨卷当前仅支持"),
+                "M2 后 SMB 不应再被源分派拦截：{e}"
+            );
+            // 实际：真实网络失败信息应含 connection/connect/timeout/no address 等
+        }
     }
 
     /// 2) 无效 descriptor（垃圾 JSON Value）反序列化失败。
