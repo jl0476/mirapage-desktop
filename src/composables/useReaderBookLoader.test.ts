@@ -61,7 +61,11 @@ describe('useReaderBookLoader', () => {
     expect(snapshot.descriptor).toEqual(descriptor);
     expect(snapshot.relPath).toBe('vol1');
     expect(snapshot.imageNames).toEqual(['page2.jpg', 'page10.jpg']);
-    expect(snapshot.pageUrls).toEqual(['asset://C:\\comics\\vol1\\page2.jpg', 'asset://C:\\comics\\vol1\\page10.jpg']);
+    // media:// 统一 URL（spec §2 决策：Local 同走 media://，单段 encode 绝对路径）
+    expect(snapshot.pageUrls).toEqual([
+      `asset://local/${encodeURIComponent('C:\\comics\\vol1\\page2.jpg')}`,
+      `asset://local/${encodeURIComponent('C:\\comics\\vol1\\page10.jpg')}`,
+    ]);
     expect(snapshot.spreads.length).toBeGreaterThan(0);
   });
 
@@ -76,9 +80,26 @@ describe('useReaderBookLoader', () => {
     expect(mocks.listDirectory).not.toHaveBeenCalledWith(descriptor, 'C:\\comics\\vol1');
   });
 
-  it('非 Local descriptor 抛出明确错误', async () => {
-    mocks.getBook.mockResolvedValue({ ...book, sourceDescriptor: { type: 'webdav', accountId: 1, baseUrl: 'x', path: '/' } });
-    await expect(useReaderBookLoader().loadBookById(7)).rejects.toThrow(/非本地/);
+  it('webdav descriptor 不再抛「非本地资源」且 pageUrls 走 media://', async () => {
+    const webdavDesc = { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' } as SourceDescriptor;
+    mocks.getBook.mockResolvedValue({
+      ...book, sourceDescriptor: webdavDesc, absolutePath: 'comics/v1',
+    });
+    const snapshot = await useReaderBookLoader().loadBookById(7);
+    expect(mocks.listDirectory).toHaveBeenCalledWith(webdavDesc, 'comics/v1');
+    expect(snapshot.pageUrls[0]).toBe(`asset://webdav/7/${encodeURIComponent('comics/v1/page2.jpg')}`);
+  });
+
+  it('archive(local) descriptor：pageUrls 走 archive/local 形态', async () => {
+    const archiveDesc = {
+      type: 'archive', archivePath: 'D:/a.cbz', entryPrefix: '', format: 'cbz', origin: null,
+    } as unknown as SourceDescriptor;
+    mocks.getBook.mockResolvedValue({
+      ...book, sourceDescriptor: archiveDesc, absolutePath: '',
+    });
+    const snapshot = await useReaderBookLoader().loadBookById(7);
+    expect(mocks.listDirectory).toHaveBeenCalledWith(archiveDesc, '');
+    expect(snapshot.pageUrls[0]).toBe(`asset://archive/local/${encodeURIComponent('D:/a.cbz')}/${encodeURIComponent('page2.jpg')}`);
   });
 
   it('路径身份修复: absolute_path 为污染的绝对路径 → 抛错, 不走兼容分支', async () => {

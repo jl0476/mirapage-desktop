@@ -1,4 +1,3 @@
-import { convertFileSrc } from '@tauri-apps/api/core';
 import {
   createBook,
   getBook,
@@ -9,6 +8,7 @@ import {
 } from '@/lib/tauri';
 import { sortEntries, type SortField } from '@/lib/fileSort';
 import { isImage } from '@/lib/mime';
+import { mediaUrl, joinRel } from '@/lib/mediaUrl';
 import { SpreadPlanner, type PageRange } from '@/lib/spreadPlanner';
 import { validateSourceRelativePath } from '@/lib/relativePath';
 import { imageIndexForBookmark } from '@/lib/bookmarkPage';
@@ -16,16 +16,17 @@ import { useDirectorySortStore } from '@/stores/directorySort';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { useSettingsStore } from '@/stores/settings';
 import { log } from '@/lib/logger';
-import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
+import { descriptorId } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 export interface BookIdentity {
-  descriptor: SourceDescriptorLocal;
+  descriptor: SourceDescriptor;
   relPath: string;
   bookId: number;
 }
 
 export interface NextVolumeTarget {
-  descriptor: SourceDescriptorLocal;
+  descriptor: SourceDescriptor;
   relPath: string;
   title: string;
 }
@@ -38,7 +39,7 @@ export interface LoadBookOptions {
 
 export interface ReaderBookSnapshot {
   book: BookItem;
-  descriptor: SourceDescriptorLocal;
+  descriptor: SourceDescriptor;
   relPath: string;
   imageNames: string[];
   pageUrls: string[];
@@ -52,25 +53,31 @@ export function sameBookIdentity(a: BookIdentity | null, b: BookIdentity | null)
   return a !== null && b !== null
     && a.bookId === b.bookId
     && a.relPath === b.relPath
-    && a.descriptor.rootPath === b.descriptor.rootPath;
+    && descriptorId(a.descriptor) === descriptorId(b.descriptor);
 }
 
 function parseSourceDescriptor(raw: unknown): SourceDescriptor | null {
   if (raw == null) return null;
+  let parsed: unknown = raw;
   if (typeof raw === 'string') {
     try {
-      const parsed: unknown = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' && 'rootPath' in parsed
-        ? parsed as SourceDescriptor : null;
+      parsed = JSON.parse(raw);
     } catch {
       return null;
     }
   }
-  if (typeof raw === 'object' && 'rootPath' in raw
-    && typeof (raw as { rootPath: unknown }).rootPath === 'string') {
-    return raw as SourceDescriptor;
+  if (typeof parsed !== 'object' || parsed == null) return null;
+  const type = (parsed as { type?: unknown }).type;
+  // 按 variant type 判别（与 Rust SourceDescriptor serde tag 对齐）
+  if (type === 'local' || type === 'archive' || type === 'smb' || type === 'webdav') {
+    return parsed as SourceDescriptor;
   }
   return null;
+}
+
+/** descriptor type → library.sourceType 列值（'Local' | 'Webdav' | ...，与 useReaderActions 一致） */
+function sourceTypeOf(descriptor: SourceDescriptor): string {
+  return descriptor.type === 'local' ? 'Local' : descriptor.type.charAt(0).toUpperCase() + descriptor.type.slice(1);
 }
 
 function joinPath(...parts: string[]): string {
@@ -123,10 +130,7 @@ export function useReaderBookLoader() {
     const b = await getBook(bookId);
     if (!b) throw new Error(`找不到 bookId ${bookId}`);
     const descriptor = parseSourceDescriptor(b.sourceDescriptor);
-    if (!descriptor || descriptor.type !== 'local' || !descriptor.rootPath) {
-      throw new Error('source descriptor 解析失败或非本地资源');
-    }
-    const rootPath = descriptor.rootPath.replace(/[\\/]+$/, '');
+    if (!descriptor) throw new Error('source descriptor 解析失败');
     // 路径身份修复 (2026-08-12): 移除 isAlreadyAbs 兼容分支（为污染数据开的逃生通道）。
     // library.absolute_path 必须 source-relative; 绝对值属污染数据, 校验失败显式报错
     // 而非静默走绝对路径掩盖问题（spec §4.3 兼容掩盖风险）。
@@ -137,9 +141,11 @@ export function useReaderBookLoader() {
       throw new Error(`书库记录路径异常（absolute_path="${relPath}"），请重新从正确根目录打开`);
     }
     const normalizedRel = relCheck.normalized;
-    // listDirectory 的 path 参数必须 source-relative (Rust resolve_path = root.join(path),
-    // 传绝对路径会触发 PathEscape 校验)。convertFileSrc 才需要完整绝对路径。
-    const absDir = normalizedRel.length > 0 ? joinPath(rootPath, normalizedRel) : rootPath;
+    // Local 保留 absDir 概念仅用于 mediaUrl 的文件绝对路径；URL 统一 mediaUrl
+    // （spec §2 决策：Local 同走 media://）；listDirectory 的 path 必须 source-relative。
+    const absDir = descriptor.type === 'local'
+      ? joinPath(descriptor.rootPath.replace(/[\\/]+$/, ''), normalizedRel)
+      : normalizedRel;
     const targetEntries: MediaEntry[] = await listDirectory(descriptor, normalizedRel);
     const imageEntries = targetEntries.filter((e) => !e.isDirectory && !e.isArchive && isImage(e.name));
     let sortField: SortField = fb.sortField;
@@ -154,7 +160,11 @@ export function useReaderBookLoader() {
     const sorted = sortEntries(imageEntries, sortField, ascending);
     const imageNames = sorted.map((e) => e.name);
     if (imageNames.length === 0) throw new Error(`${absDir} 下找不到图片`);
-    const pageUrls = imageNames.map((name) => convertFileSrc(joinPath(absDir, name)));
+    // 四类源统一 mediaUrl（spec §3.2）：Local 传文件绝对路径；远程传源内相对路径
+    const pageUrls = imageNames.map((name) =>
+      mediaUrl(descriptor, descriptor.type === 'local'
+        ? joinPath(absDir, name)
+        : joinRel(normalizedRel, name)));
     const spreads = SpreadPlanner.plan(pageUrls.length, true, settings.readerDefaultMode === 'single');
     const explicitHit = opts.explicitImageName ? imageNames.includes(opts.explicitImageName) : false;
     // 书签定位（query.at 优先级更高）：统一折算成 canonical 图片索引后再转 spread
@@ -194,7 +204,7 @@ export function useReaderBookLoader() {
     }
     const args: CreateBookArgs = {
       title: target.title, sourceDescriptor: target.descriptor, absolutePath: relCheck.normalized,
-      sourceType: 'Local', favorite: false, coverEntryPath: null, coverEntryName: null, pageCount: 0,
+      sourceType: sourceTypeOf(target.descriptor), favorite: false, coverEntryPath: null, coverEntryName: null, pageCount: 0,
     };
     return createBook(args);
   }

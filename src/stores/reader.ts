@@ -16,7 +16,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import { saveProgress } from '@/lib/tauri';
 import { log } from '@/lib/logger';
-import type { SourceDescriptorLocal } from '@/lib/sourceDescriptor';
+import type { SourceDescriptor } from '@/lib/sourceDescriptor';
 
 export type ReaderStatus = 'idle' | 'ready' | 'error';
 export type ReaderErrorKind =
@@ -32,9 +32,9 @@ export interface OpenBookPayload {
   pages: string[];
   spreads: Array<{ start: number; end: number }>;
   initialSpreadIndex: number;
-  /** 2026-08-12 跨卷任务 4: 当前卷的 SourceDescriptorLocal（仅 Local 目录卷，
+  /** 2026-08-12 跨卷任务 4: 当前卷 descriptor（module3.2.0 拓宽为四类源，
    *  跨卷路由身份 + CrossVolumeController identity 校验依赖此字段）。 */
-  sourceDescriptor?: SourceDescriptorLocal;
+  sourceDescriptor?: SourceDescriptor;
   /** 2026-08-12 跨卷任务 4: 当前卷相对 rootPath 的完整路径（如 "comics/vol1"）。 */
   currentRelPath?: string;
 }
@@ -73,8 +73,8 @@ export const useReaderStore = defineStore('reader', () => {
   // v0.1.0-module3.0.2 (L3): 删 continueSwipePull / accumulateContinuePull
   // 这两个字段/actions 0 引用, 跨卷 swip-pulling 进度语义未实现
   const errorKind = ref<ReaderErrorKind | null>(null);
-  // 2026-08-12 跨卷任务 4: 当前卷 SourceDescriptorLocal（openBook 时写入，closeBook 清）。
-  const sourceDescriptor = ref<SourceDescriptorLocal | null>(null);
+  // 2026-08-12 跨卷任务 4: 当前卷 descriptor（openBook 时写入，closeBook 清）。
+  const sourceDescriptor = ref<SourceDescriptor | null>(null);
   // 2026-08-12 跨卷任务 4: 当前卷相对 rootPath 路径。
   const currentRelPath = ref<string>('');
 
