@@ -1075,8 +1075,29 @@ git commit -m "feat(webdav): PROPFIND 条目 is_archive 按扩展名判定（远
 ```rust
     #[test]
     fn startup_cleanup_removes_orphans_and_parts() {
-        // tempdir：part/{k}.part 孤儿 + 无表行的 {k2}.zip + 有表行的 {k3}.zip
-        // 断言：.part 删、孤儿 zip 删、表行对应的 k3.zip 保留
+        // tempdir：无表行的 {k2}.zip（孤儿 ready）+ 有表行的 {k3}.zip + 无 sidecar 的 part/{k4}.part
+        // 断言（rev2+ 语义）：孤儿 zip 删、表行对应的 k3.zip 保留、无 sidecar 的 .part 删
+    }
+
+    /// rev6 终审建议：重启续传不得被启动清理误伤（rev3 修过的方向守卫——
+    /// 旧实现枚举到 .part.meta 拼出 .part.part.meta 判失败，把有效 sidecar 删了）
+    #[test]
+    fn startup_cleanup_keeps_resumable_part_with_valid_sidecar() {
+        // tempdir part/ 布局与断言：
+        // ① k1.part（半截 5 字节）+ 有效 k1.part.meta（六字段 PartSidecar，downloaded=5）
+        //    → **两者均保留**——重启续传可用（下次 ensure_cached 四关校验通过后从 5 续传）
+        // ② k2.part 无 sidecar → 删
+        // ③ k3.part + 损坏 sidecar（半截 JSON）→ 删两者
+        // ④ k4.part.meta 单独存在（.part 已 rename 走，sidecar 残留）→ 非候选不处理
+        //    （保留；正常路径 ready 时已顺手删，此为极端残留）
+        // 断言：①④在、②③不在
+    }
+
+    /// rev6 方向守卫：目录只有 .meta/.meta.tmp（无 .part）时 cleanup 不误删 sidecar
+    #[test]
+    fn startup_cleanup_ignores_meta_files_as_part_candidates() {
+        // part/ 只有 k5.part.meta（无 k5.part）→ 保留；
+        // k6.part.meta.tmp（原子写残留）→ 删除
     }
 ```
 
@@ -1579,3 +1600,7 @@ M3 审查 3 必须 + 1 建议全采纳：
 第七轮 1 必须（清缓存闸门 TOCTOU）采纳：
 
 - **闸门与注册原子化**：`clearing` 从独立 `AtomicBool` 移入 `InflightState { clearing, map }`，与 in-flight 注册表同受一把 `async Mutex` 保护。`ensure_cached_inner` 删掉入口独立检查，「查 clearing + 查重 + 注册」在**单一临界区**原子完成；`begin_clearing()` 持同锁先置位再 `cancel_all()`——并发 `ensure_cached` 要么先注册（map 可见，drain 等它退出）、要么看到 clearing=true 被拒，不存在「读到 false → clear 观察空表 → 迟到注册带新代际穿透」的中间态。`end_clearing()` 同锁复位；命令侧两处调用补 `.await`；`inflight_empty`/清理路径读 `st.map`。rev4 的 Notified 持锁 `enable()` 预注册保留（两窗口修复叠加生效）。
+
+## 附：计划审查修订记录（rev6，2026-08-19，终审通过 + 1 建议采纳）
+
+终审通过（TOCTOU 由 InflightState 单锁封住、锁序与 Notify 预注册一致，无新阻断项）。建议采纳：任务 6 测试补两个方向守卫用例——`startup_cleanup_keeps_resumable_part_with_valid_sidecar`（有效 .part+sidecar **保留**、无/坏 sidecar 删、裸 .meta 非候选）与 `startup_cleanup_ignores_meta_files_as_part_candidates`（纯 .meta 目录不误删，.meta.tmp 残留清）；首用例描述同步 rev2+ 语义（原注释还是「.part 删」旧语义）。**计划定稿，可进入实现。**
