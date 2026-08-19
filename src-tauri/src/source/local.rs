@@ -152,6 +152,27 @@ impl MediaSource for LocalMediaSource {
             .count() as u64)
     }
 
+    async fn stat(
+        &self,
+        descriptor: &SourceDescriptor,
+        path: &str,
+    ) -> Result<crate::source::trait_def::FileStat> {
+        let full_path = self.resolve_path(descriptor, path)?;
+        let meta = fs::metadata(&full_path).await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(full_path.display().to_string()),
+            std::io::ErrorKind::PermissionDenied => MediaSourceError::PermissionDenied(full_path.display().to_string()),
+            _ => MediaSourceError::Io(e),
+        })?;
+        Ok(crate::source::trait_def::FileStat {
+            size: meta.len(),
+            modified_at: meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64),
+        })
+    }
+
     async fn test(&self, descriptor: &SourceDescriptor) -> Result<()> {
         match descriptor {
             SourceDescriptor::Local { root_path } => {
@@ -227,5 +248,20 @@ mod tests {
         let src = LocalMediaSource::new();
         let err = src.resolve_path(&local_desc("C:/comics"), "../escape").unwrap_err();
         assert!(matches!(err, MediaSourceError::PathEscape(_)));
+    }
+
+    #[tokio::test]
+    async fn stat_returns_size_and_mtime() {
+        let dir = std::env::temp_dir().join("mirapage-stat-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("a.bin");
+        std::fs::write(&f, b"0123456789").unwrap();
+        let src = LocalMediaSource::new();
+        let d = SourceDescriptor::Local { root_path: dir.to_string_lossy().to_string() };
+        let st = src.stat(&d, "a.bin").await.unwrap();
+        assert_eq!(st.size, 10);
+        assert!(st.modified_at.is_some());
+        // 越界路径拒绝
+        assert!(src.stat(&d, "../a.bin").await.is_err());
     }
 }

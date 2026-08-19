@@ -53,6 +53,14 @@ impl ByteRange {
     }
 }
 
+/// 文件元信息（spec rev3 §3.1：协议层 HEAD/416/物化失效判定的数据源）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStat {
+    pub size: u64,
+    /// 秒级 Unix；None = 源不提供（如 ZIP 内条目）
+    pub modified_at: Option<i64>,
+}
+
 /// `MediaSource` trait
 ///
 /// **设计原则**：所有方法都基于 `SourceDescriptor` 描述的位置，无状态。
@@ -92,6 +100,18 @@ pub trait MediaSource: Send + Sync {
 
     /// 测试连接 / 验证路径（用于添加账户、保存前）
     async fn test(&self, descriptor: &SourceDescriptor) -> Result<()>;
+
+    /// 文件元信息（HEAD / Content-Range / 缓存失效判定）
+    ///
+    /// 默认 NotImplemented；Local/WebDav/Archive 覆盖，Smb M2 覆盖。
+    async fn stat(
+        &self,
+        descriptor: &SourceDescriptor,
+        path: &str,
+    ) -> Result<FileStat> {
+        let _ = (descriptor, path);
+        Err(MediaSourceError::NotImplemented("stat 未实现".into()))
+    }
 }
 
 /// 统一格式化 `Result<T, MediaSourceError>` 为字符串（用于 Tauri command 返回）
