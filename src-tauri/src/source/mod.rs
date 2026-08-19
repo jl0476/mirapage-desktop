@@ -13,6 +13,7 @@ pub mod archive_impl;
 pub mod descriptor;
 pub mod factory;
 pub mod local;
+pub mod smb;
 pub mod smb_impl;
 pub mod trait_def;
 pub mod webdav_impl;
