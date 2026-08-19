@@ -39,7 +39,11 @@ pub fn run() {
         // 固定段数 URL 解析 → DB 重建 descriptor → factory 分发 → GET/HEAD/Range
         .register_asynchronous_uri_scheme_protocol("media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
-            tokio::spawn(async move {
+            // Windows 上 scheme handler 在主线程回调（无 tokio reactor）——裸 tokio::spawn
+            // 首个 media:// 请求即 panic，且闭包不可 unwind 直接 abort 全进程
+            // （2026-08-19 实机撞过：浏览目录瀑布流加载首图时崩溃）。必须走
+            // tauri::async_runtime（与 thumbnail scheduler/fetch actor 同款约束）。
+            tauri::async_runtime::spawn(async move {
                 let resp = handle_media_request(&app, request).await;
                 let _ = responder.respond(resp);
             });
