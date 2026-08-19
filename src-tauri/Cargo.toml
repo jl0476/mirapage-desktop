@@ -47,6 +47,13 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # 远程源（Phase 7-8 启用）
 # smb-rs 重命名为 smb（afiffon/smb-rs 项目）, 0.11 是当前可用版本
 smb = "0.11"
+# futures-util 是 smb 默认 feature `async` 启用的间接依赖；本项目显式声明以便
+# `use futures_util::StreamExt;` 在 smb::Directory::query 消费 stream 时走稳定路径
+# （不用 futures_util 直接访问 smb 私有依赖图）
+futures-util = "0.3"
+# time 0.3 显式声明：smb ResourceHandle::modified() 返回 time::PrimitiveDateTime，
+# 转 Unix 秒需 `assume_utc().unix_timestamp()`（smb 内部用 0.3.45，本项目 type 同 major.minor 互通）
+time = { version = "0.3", features = ["macros"] }
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
 quick-xml = "0.36"   # WebDAV PROPFIND 响应 XML 解析
 
