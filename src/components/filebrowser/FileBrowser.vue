@@ -58,7 +58,9 @@ const readStatus = useReadStatusStore();
 const settings = useSettingsStore();
 const readerActions = useReaderActions({
   resolveRootPath: () => fb.rootPath ?? '',
-  buildSourceDescriptor: (rootPath) => ({ type: 'local', rootPath }),
+  // module3.2.0：跨源目录（WebDAV 浏览/ZIP 视图）立即阅读用 currentDescriptor；
+  // Local 兜底行为不变
+  buildSourceDescriptor: (rootPath) => fb.currentDescriptor ?? { type: 'local', rootPath },
   // v0.1.0-module3.0.3-hotfix2: 用 lastFetchedPath 而非 currentPath.
   // fileBrowser store 中:
   //   - currentPath: navigate() 同步更新 (用户在视觉上"想去"的位置)
@@ -221,11 +223,10 @@ const canUp = computed(() => fb.currentPath !== '');
 
 // v0.1.0-module3.0.5-masonry (阶段 E2): 瀑布流视图的 source descriptor
 // (MasonryView 需要 descriptor 才能 prefetch image dimensions via Rust IPC)
-// Phase 1 只 Local; SMB/WebDAV descriptor 留 Phase 7-8 扩展.
-const masonryDescriptor = computed<SourceDescriptorLocal>(() => ({
-  type: 'local',
-  rootPath: fb.rootPath || '',
-}));
+// module3.2.0：currentDescriptor 优先（跨源目录/ZIP 条目视图），Local 兜底。
+const masonryDescriptor = computed<SourceDescriptor>(() => (
+  fb.currentDescriptor ?? { type: 'local', rootPath: fb.rootPath || '' }
+));
 
 // v0.1.0-module3.0.5-masonry (阶段 E3): 工具栏图标按钮 + ⚙ popup 状态 +
 // per-folder masonryParams resolve. 首次切到 masonry 用全局默认值, resolve 完成后更新.
@@ -258,16 +259,14 @@ watch([() => fb.viewMode, hasImages], ([mode, has]) => {
 // 切到 masonry 或进新目录时 resolve per-folder 参数
 watch([() => fb.viewMode, () => fb.currentPath], async ([mode]) => {
   if (mode === 'masonry' && fb.rootPath) {
-    const desc = { type: 'local' as const, rootPath: fb.rootPath };
-    masonryParams.value = await masonrySettings.resolve(desc, fb.currentPath);
+    masonryParams.value = await masonrySettings.resolve(masonryDescriptor.value, fb.currentPath);
   }
 });
 
 function onMasonryChange(partial: { colCount?: number; hGap?: number; vGap?: number }) {
   masonryParams.value = { ...masonryParams.value, ...partial };
   if (!fb.rootPath) return;
-  const desc = { type: 'local' as const, rootPath: fb.rootPath };
-  masonrySettings.set(desc, fb.currentPath, partial);
+  masonrySettings.set(masonryDescriptor.value, fb.currentPath, partial);
 }
 function onMasonryPopupClose() {
   masonryPopupOpen.value = false;
@@ -730,13 +729,14 @@ const swapping = ref(false);
 async function onCrossNextVolume() {
   if (swapping.value) return;
   const pathAtRequestStart = fb.lastFetchedPath;
-  const rootAtRequestStart = masonryDescriptor.value.rootPath;
-  if (!pathAtRequestStart || !rootAtRequestStart) return;
+  // module3.2.0：跨源身份比对用 descriptorId（rootPath 仅 Local 存在）
+  const rootAtRequestStart = descriptorId(masonryDescriptor.value);
+  if (!pathAtRequestStart || !fb.rootPath) return;
   swapping.value = true;
   try {
     await fileListRef.value?.masonryFlushNow();
     const result = await findNextVolume(masonryDescriptor.value, pathAtRequestStart, 'next');
-    if (fb.lastFetchedPath !== pathAtRequestStart || masonryDescriptor.value.rootPath !== rootAtRequestStart) return;
+    if (fb.lastFetchedPath !== pathAtRequestStart || descriptorId(masonryDescriptor.value) !== rootAtRequestStart) return;
     if (!result) {
       pushToast(t('reader.crossVolume.none'));
       return;
@@ -766,8 +766,7 @@ let nextVolumeRequestSeq = 0;
 
 async function prefetchNextVolume(): Promise<void> {
   const path = fb.lastFetchedPath;
-  const root = masonryDescriptor.value.rootPath;
-  if (!path || !root) {
+  if (!path || !fb.rootPath) {
     // 审查修复 (2026-08-13): 早返必须关 loading — watcher 切目录时同步置了 true,
     // 若不清 false, 根目录 (lastFetchedPath='') 底栏右段会永远显示「…」
     // (StatusBar nextVolumeLabel loading 优先于 null 判定) 而非「已是最后一卷」。

@@ -3,7 +3,7 @@
 // 职责：管理 measuredMap、触发 header 预读、渲染可见区 MasonryRow。
 // 复用 useVirtualList 的 containerRef/scroll/resize；布局由 useMasonryLayout 算。
 import { ref, computed, watch, onMounted, onUnmounted, nextTick, toRef } from 'vue';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { mediaUrl, joinRel } from '@/lib/mediaUrl';
 import { useI18n } from 'vue-i18n';
 import { useVirtualList } from '@/composables/useVirtualList';
 import {
@@ -178,7 +178,13 @@ const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, regen
   dpr,
   quality: thumbQuality,
   scrollTop,
-  originalUrlFor: (e) => convertFileSrc(joinPath(joinPath(props.rootPath, props.currentPath), e.name)),
+  // module3.2.0（spec §3.5）：原图 URL 统一 media://（Local 传文件绝对路径，远程/ZIP 传源内相对路径）
+  originalUrlFor: (e) => mediaUrl(
+    props.descriptor,
+    props.descriptor.type === 'local'
+      ? joinPath(props.rootPath, props.currentPath, e.name)
+      : joinRel(props.currentPath, e.name),
+  ),
 });
 
 // ─── module3.0.11：单张生成详情 popover（round-1 P2 / round-2 / round-3）──────
