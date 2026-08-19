@@ -21,6 +21,8 @@ use smb::{Client, ClientConfig, UncPath, Error as SmbError};
 // 连接：Client::new(ClientConfig::default()) → client.share_connect(&unc, username, password)
 //       → client.get_tree(&unc) -> Arc<Tree>（Client 内部按 UncPath 缓存 connection/session/tree）
 // UncPath builder：UncPath::new(server)?.with_share(share)?.with_path(path)（path 相对 share）
+// 类型导入：smb::FileIdBothDirectoryInformation / smb::FileStandardInformation（经 smb 的 pub use smb_fscc::* re-export——
+//         项目不直引 smb-fscc 传递依赖，P1 rev5）
 // 列目录：tree.open_existing(rel, access) -> Resource → resource.as_dir() →
 //         Directory::query::<FileIdBothDirectoryInformation>(this: &Arc<Self>, "*")
 //         -> QueryDirectoryStream（futures Stream；同 Directory 实例不可并发 query——每次 open 新实例）
@@ -72,7 +74,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use smb::resource::Resource;
 use smb::{Client, ClientConfig, UncPath};
-use smb_fscc::FileIdBothDirectoryInformation;
+use smb::FileIdBothDirectoryInformation; // smb::FileStandardInformation 等同经 pub use smb_fscc::* re-export（P1 rev5：不直引传递依赖）
 use futures_util::StreamExt;
 use smb::resource::directory::Directory;
 
@@ -111,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     // 顺序（rev4 修正）：unwrap_file 消耗 Resource——必须先 query_info（size）+
     // handle().modified()（mtime，FileStandardInformation 无 mtime 字段），最后再 unwrap_file。
     let fres = tree.open_existing(big_file, smb::AccessMask::new().with_generic_read(true)).await?;
-    let std_info: smb_fscc::FileStandardInformation = fres.query_info().await?;
+    let std_info: smb::FileStandardInformation = fres.query_info().await?;
     let mtime = fres.handle().modified().assume_utc().unix_timestamp();
     let file = fres.unwrap_file();
     println!("[3] stat size={} mtime(unix)={}", std_info.end_of_file, mtime);
@@ -1362,7 +1364,7 @@ fn map_status_code(code: u32, ctx: String) -> TransportError {
 
 /// FileIdBothDirectoryInformation 公共字段（file_name/attributes/end_of_file/last_write_time）
 /// 的中立抽取——避开 source.rs 直接依赖 smb-fscc 类型。
-fn to_raw(info: &smb_fscc::FileIdBothDirectoryInformation) -> RawDirEntry {
+fn to_raw(info: &smb::FileIdBothDirectoryInformation) -> RawDirEntry {
     // FileTime 无 unix_100ns 访问器（rev3 修正）——用 since_epoch()（相对 1601 的 Duration）
     let since1601_100ns = info.last_write_time.since_epoch().as_nanos() as u64 / 100;
     RawDirEntry {
@@ -1409,7 +1411,7 @@ impl SmbTransport for SmbClientTransport {
             .map_err(map_smb_error)?;
         let dir = Arc::new(resource.unwrap_dir());
         let mut stream =
-            smb::resource::Directory::query::<smb_fscc::FileIdBothDirectoryInformation>(&dir, "*")
+            smb::Directory::query::<smb::FileIdBothDirectoryInformation>(&dir, "*")
                 .await
                 .map_err(map_smb_error)?;
         let mut out = Vec::new();
@@ -1458,7 +1460,7 @@ impl SmbTransport for SmbClientTransport {
         // DirectoryInformation 家族）。size 走 query_info::<FileStandardInformation>()；
         // mtime 走 ResourceHandle::modified() -> time::PrimitiveDateTime
         // （smb Cargo.toml 依赖 time 0.3.45；assume_utc/unix_timestamp 是 0.3 标准方法）。
-        let std_info: smb_fscc::FileStandardInformation = resource
+        let std_info: smb::FileStandardInformation = resource
             .query_info()
             .await
             .map_err(map_smb_error)?;
@@ -1718,6 +1720,12 @@ git push origin main --tags
 3. **P1 spike stat 示例未随 rev3 同步**：`unwrap_file()` 消耗 `fres` 后又 `fres.query_info()`（move 后使用，编译必败）+ 仍访问不存在的 `FileStandardInformation.last_write_time`。重写为正确顺序：`query_info`（size）→ `fres.handle().modified().assume_utc().unix_timestamp()`（mtime）→ 最后 `unwrap_file()`。
 
 教训入档：多轮 python 脚本编辑 markdown 内嵌代码块时，反斜杠转义层级是系统性风险——rev4 后计划内 Rust 代码块建议执行者在抄录时以编译器为最终裁决（本计划的「执行期不确定点」机制已覆盖此风险）。
+
+## 附：计划审查修订记录（rev5，2026-08-19）
+
+第四轮复审 1 P1 采纳（方案 1）：
+
+1. **P1 smb_fscc 直引编译失败**：`smb_fscc::FileIdBothDirectoryInformation` / `smb_fscc::FileStandardInformation` 是 smb 的**传递依赖**，项目未直接声明不可 import。核实 smb-0.11.2 lib.rs：`pub use smb_fscc::*`（及 `pub use resource::{Directory, ...}` 顶层）——统一改为 `smb::FileIdBothDirectoryInformation` / `smb::FileStandardInformation` / `smb::Directory` re-export 路径（**零新依赖**，不采用方案 2 的 smb-fscc 版本锁定直引）。覆盖 spike（use + stat）/ to_raw / list query / real stat 五处 + 头部 API 摘要注明。
 
 ## 附：执行顺序依赖
 
