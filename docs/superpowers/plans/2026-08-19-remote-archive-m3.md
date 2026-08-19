@@ -455,8 +455,21 @@ git commit -m "feat(archive): materializer 纯函数——sha256 cache_key（\\0
 
     #[tokio::test]
     async fn resume_from_part() {
-        // 预置半截 .part（5/10 字节）+ 远端一致 → 只读后 5 字节
-        // 预置 .part 但远端截断（size < part size）→ 弃 .part 全量重下
+        // rev3 sidecar 严格校验（四关）：
+        // ① .part(5/10) + 有效 sidecar（同 key/origin/rel/快照/downloaded=5）+ 远端一致
+        //    → 只读后 5 字节（read_calls 断言）
+        // ② sidecar 缺失 / JSON 损坏 / cache_key 不符 / downloaded != .part 长度
+        //    → 弃 .part+sidecar 全量重下（各一子场景）
+        // ③ sidecar 快照 mtime 与远端现值不符（同 size 换文件）→ 弃重下
+        // ④ 远端截断（size < part size）→ 弃重下
+        ...
+    }
+
+    #[tokio::test]
+    async fn cancel_all_stops_forced_download_without_revive() {
+        // rev3 generation 四检查点：慢源强制 ensure_cached 进行中调 cancel_all()
+        // → 任务在 chunk/二次 stat/rename/upsert 之一处中止；
+        // 最终：表无行 + final_path 不存在（不复活）+ 新 ensure_cached 正常工作（代际恢复）
         ...
     }
 
@@ -522,8 +535,37 @@ pub struct Materializer {
     db: Db,
     cache_root: std::sync::RwLock<PathBuf>,
     inflight: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
-    /// epoch：预载切目录时推进；下载循环每 chunk 前检查（取消=不续发，.part 保留）
+    /// 窗口 epoch（rev2 双通道①）：预载切目录推进；仅 cancellable 任务检查
     epoch: std::sync::atomic::AtomicU64,
+    /// cancellation generation（rev2 双通道②）：cancel_all() 单调自增；
+    /// 预载与强制物化在每 chunk / 二次 stat 后 / rename 前 / upsert 前四检查点比对
+    cancel_gen: std::sync::atomic::AtomicU64,
+}
+
+/// sidecar 元数据（rev2 重启续传）：与 .part 同目录同名 + .meta
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct PartSidecar {
+    pub cache_key: String,            // 身份重算比对（防 .part 被移动/误放）
+    pub canonical_origin: String,     // serde_json::to_string(origin)——与 cache_key 输入同源
+    pub archive_rel_path: String,
+    pub snapshot_size: u64,
+    pub snapshot_mtime: Option<i64>,
+    pub downloaded: u64,              // 每 chunk 后更新（与 .part 文件长度一致性校验用）
+}
+
+pub fn sidecar_path(part_path: &std::path::Path) -> std::path::PathBuf {
+    let mut s = part_path.as_os_str().to_os_string();
+    s.push(".meta");
+    std::path::PathBuf::from(s)
+}
+
+/// sidecar 原子写（tmp + rename）——半截 JSON 会被续传校验拒绝，但原子写让这几乎不发生
+fn atomic_write_sidecar(part_path: &std::path::Path, sc: &PartSidecar) -> Result<(), MaterializeError> {
+    let target = sidecar_path(part_path);
+    let tmp = target.with_extension("meta.tmp");
+    std::fs::write(&tmp, serde_json::to_vec(sc).map_err(|e| MaterializeError::Other(e.to_string()))?)
+        .map_err(MaterializeError::Io)?;
+    std::fs::rename(&tmp, &target).map_err(MaterializeError::Io)
 }
 
 impl Materializer {
@@ -549,8 +591,36 @@ impl Materializer {
     pub fn new_epoch(&self, e: u64) { self.epoch.store(e, std::sync::atomic::Ordering::SeqCst); }
     fn current_epoch(&self) -> u64 { self.epoch.load(std::sync::atomic::Ordering::SeqCst) }
 
+    /// rev2 双通道②：单调自增，新任务取新代际——预载在 clear 后自然恢复
+    pub fn cancel_all(&self) { self.cancel_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+    pub fn cancel_generation(&self) -> u64 { self.cancel_gen.load(std::sync::atomic::Ordering::SeqCst) }
+    pub async fn inflight_empty(&self) -> bool { self.inflight.lock().await.is_empty() }
+    /// clear 用：等待在途任务退出（chunk/检查点粒度快速退出）；超时返回 false
+    pub async fn wait_inflight_drained(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while !self.inflight_empty().await {
+            if tokio::time::Instant::now() >= deadline { return false; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        true
+    }
+
+    /// 强制路径（用户打开/阅读）——不可被窗口 epoch 取消，但受 cancellation generation 约束
     pub async fn ensure_cached(
         &self, origin: &SourceDescriptor, archive_rel_path: &str,
+    ) -> Result<PathBuf, MaterializeError> {
+        self.ensure_cached_inner(origin, archive_rel_path, false).await
+    }
+
+    /// 预载路径——窗口 epoch 与 generation 双通道均可取消
+    pub async fn ensure_cached_cancellable(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str,
+    ) -> Result<PathBuf, MaterializeError> {
+        self.ensure_cached_inner(origin, archive_rel_path, true).await
+    }
+
+    async fn ensure_cached_inner(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, cancellable: bool,
     ) -> Result<PathBuf, MaterializeError> {
         let key = cache_key(origin, archive_rel_path);
         // 1. 表命中 → stat 失效判定
@@ -585,7 +655,7 @@ impl Materializer {
             g.insert(key.clone(), Arc::new(tokio::sync::Notify::new()));
         }
         // 3. 下载（退出时 notify + 移除 in-flight）
-        let result = self.download(origin, archive_rel_path, &key).await;
+        let result = self.download(origin, archive_rel_path, key, cancellable).await;
         {
             let mut g = self.inflight.lock().await;
             if let Some(n) = g.remove(&key) { n.notify_waiters(); }
@@ -594,7 +664,7 @@ impl Materializer {
     }
 
     async fn download(
-        &self, origin: &SourceDescriptor, archive_rel_path: &str, key: &str,
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, key: &str, cancellable: bool,
     ) -> Result<PathBuf, MaterializeError> {
         let src = self.origin_source(origin)?;
         let (final_path, part_path) = self.cache_paths(key);
@@ -604,22 +674,45 @@ impl Materializer {
         for attempt in 0..=1 {
             // 快照 stat
             let snap = src.stat(origin, archive_rel_path).await?;
-            // 断点续传检查：.part 已存在
-            let mut offset: u64 = match std::fs::metadata(&part_path) {
-                Ok(m) => {
-                    let have = m.len();
-                    if have > snap.size {
-                        let _ = std::fs::remove_file(&part_path); // 远端截断/换小文件 → 弃
-                        0
-                    } else { have }
+            // 断点续传（rev2 严格校验）：.part 存在 → 先验 sidecar，四关全过才续传
+            let mut offset: u64 = 0;
+            if let Ok(meta) = std::fs::metadata(&part_path) {
+                let have = meta.len();
+                let canonical = serde_json::to_string(origin).unwrap_or_default();
+                let sc_path = sidecar_path(&part_path);
+                let resume_ok = std::fs::read(&sc_path).ok()
+                    .and_then(|b| serde_json::from_slice::<PartSidecar>(&b).ok())
+                    .map(|sc| {
+                        sc.cache_key == key
+                            && sc.canonical_origin == canonical
+                            && sc.archive_rel_path == archive_rel_path
+                            && sc.snapshot_size == snap.size
+                            && sc.snapshot_mtime == snap.modified_at   // 快照 vs 远端 stat 一致
+                            && sc.downloaded == have                   // sidecar 记账 vs 文件长度
+                            && have <= snap.size
+                    })
+                    .unwrap_or(false);
+                if !resume_ok {
+                    // 身份/快照/记账任一不符（含 sidecar 缺失损坏、远端已换文件）→ 弃重下
+                    let _ = std::fs::remove_file(&part_path);
+                    let _ = std::fs::remove_file(&sc_path);
+                } else {
+                    offset = have; // 从 .part 当前偏移续传（重启恢复亦走此路径）
                 }
-                Err(_) => 0,
-            };
+            }
             let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&part_path)
                 .map_err(MaterializeError::Io)?;
             use std::io::Write;
-            // 写 sidecar（rev2）：本次下载的身份与快照（已存在且有效则复用）
-            write_sidecar(&part_path, origin, archive_rel_path, &snap)?;
+            // sidecar 初始化（rev2）：身份 + 本次快照 + 当前 downloaded（续传起点=offset）；
+            // 原子写（tmp+rename）防半截 JSON——侧函数 atomic_write_sidecar 实现
+            atomic_write_sidecar(&part_path, &PartSidecar {
+                cache_key: key.into(),
+                canonical_origin: serde_json::to_string(origin).unwrap_or_default(),
+                archive_rel_path: archive_rel_path.into(),
+                snapshot_size: snap.size,
+                snapshot_mtime: snap.modified_at,
+                downloaded: offset,
+            })?;
             let epoch_at_start = self.current_epoch();
             let gen_at_start = self.cancel_generation();
             while offset < snap.size {
@@ -637,11 +730,19 @@ impl Materializer {
                 }
                 f.write_all(&chunk).map_err(MaterializeError::Io)?;
                 offset += len;
+                // sidecar downloaded 记账随每个 chunk 更新（原子写）——重启续传的进度真值
+                atomic_write_sidecar(&part_path, &PartSidecar {
+                    cache_key: key.into(),
+                    canonical_origin: serde_json::to_string(origin).unwrap_or_default(),
+                    archive_rel_path: archive_rel_path.into(),
+                    snapshot_size: snap.size,
+                    snapshot_mtime: snap.modified_at,
+                    downloaded: offset,
+                })?;
                 emit_progress(key, archive_rel_path, offset, snap.size, "downloading");
             }
             drop(f);
-            // rename 前检查点 ②③（rev2 双通道取消）：generation 变更（清空缓存）→ 中止且不
-            // rename/upsert（防「复活」）；二次 stat 变更防护（spec §4.1）不变
+            // 检查点 ②（rev2）：二次 stat 前——generation 变更（清空缓存）→ 中止
             if self.cancel_generation() != gen_at_start {
                 let _ = std::fs::remove_file(&part_path);
                 let _ = std::fs::remove_file(sidecar_path(&part_path));
@@ -650,15 +751,29 @@ impl Materializer {
             let recheck = src.stat(origin, archive_rel_path).await?;
             if recheck.size != snap.size || recheck.modified_at != snap.modified_at {
                 let _ = std::fs::remove_file(&part_path);
+                let _ = std::fs::remove_file(sidecar_path(&part_path));
                 if attempt == 0 { continue; } // 按新版本重排队一次
                 return Err(MaterializeError::Other("远端在下载期间持续变更".into()));
+            }
+            // 检查点 ③（rev2）：二次 stat 的 await 之后、rename 前再查（stat 期间可能 clear）
+            if self.cancel_generation() != gen_at_start {
+                let _ = std::fs::remove_file(&part_path);
+                let _ = std::fs::remove_file(sidecar_path(&part_path));
+                return Err(MaterializeError::Other("cancelled by cache clear".into()));
             }
             std::fs::rename(&part_path, &final_path).map_err(MaterializeError::Io)?;
             let _ = std::fs::remove_file(sidecar_path(&part_path)); // ready 后 sidecar 无用
             // 表行（ready）——byte_size 复核 == origin_size
             let byte_size = std::fs::metadata(&final_path).map_err(MaterializeError::Io)?.len();
             if byte_size != snap.size {
+                let _ = std::fs::remove_file(&final_path);
                 return Err(MaterializeError::Other(format!("物化文件大小不符 {byte_size} != {}", snap.size)));
+            }
+            // 检查点 ④（rev2）：紧贴 upsert 前最后一查——rename 后若 generation 已变，
+            // 删文件不上表（宁可丢一次物化也不「复活」缓存）
+            if self.cancel_generation() != gen_at_start {
+                let _ = std::fs::remove_file(&final_path);
+                return Err(MaterializeError::Other("cancelled by cache clear".into()));
             }
             {
                 let conn = self.db.conn();
@@ -923,14 +1038,27 @@ pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) 
     if let Ok(rd) = std::fs::read_dir(cache_root.join("part")) {
         for entry in rd.flatten() {
             let p = entry.path();
-            let sidecar = p.with_extension("part.meta"); // {key}.part → 同目录 {key}.part.meta
-            let sidecar_ok = std::fs::read_to_string(&sidecar)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .is_some();
+            // rev3：只把扩展名恰为 .part 的数据文件当候选——sidecar（.part.meta）与
+            // 原子写残留（.meta.tmp）不是 part，绝不当候选（原实现会把 .meta 判为
+            // 无 sidecar 的孤儿而误删，下次启动无法续传）
+            if p.extension().and_then(|e| e.to_str()) != Some("part") {
+                if p.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    let _ = std::fs::remove_file(&p); // 原子写残留可清
+                }
+                continue;
+            }
+            // 结构化校验（非仅 JSON 可解析）：六字段齐全且类型正确才保留
+            let sidecar_ok = std::fs::read(&p.with_file_name({
+                let mut s = p.file_name().unwrap_or_default().to_os_string();
+                s.push(".meta");
+                s
+            }))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<PartSidecar>(&b).ok())
+            .is_some();
             if !sidecar_ok {
                 let _ = std::fs::remove_file(&p); // 无法安全续传的孤儿
-                let _ = std::fs::remove_file(&sidecar);
+                let _ = std::fs::remove_file(sidecar_path(&p));
             }
         }
     }
@@ -1014,6 +1142,17 @@ git commit -m "feat(archive): cache 根目录(app_cache_dir/archive-cache)+启�
     expect(d.archivePath).toBe('https://d/x/comics/book.cbz'); // 虚拟 URL 形态
   });
 
+  it('openArchive SMB 源：虚拟 archivePath 契约 smb://{accountId}/{initialPath}/{rel}', async () => {
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(
+      { type: 'smb', accountId: 3, initialPath: 'share/comics', path: '', port: 445 }, '');
+    const entry = { name: 'book.cbz', path: 'book.cbz', isDirectory: false, isArchive: true, size: 9, modifiedAt: 1 };
+    await fb.openArchive(entry);
+    const d = fb.currentDescriptor as any;
+    expect(d.archivePath).toBe('smb://3/share/comics/book.cbz'); // rev3 契约（非 UNC，无 smbHostOf）
+    expect(d.archiveRelPath).toBe('book.cbz');
+  });
+
   it('exitArchive 恢复远程源目录（openDescriptorAt 复用）', async () => {
     /* openArchive 后 exitArchive → activeDescriptor 回 webdav + currentPath 回 comics */
   });
@@ -1035,11 +1174,15 @@ git commit -m "feat(archive): cache 根目录(app_cache_dir/archive-cache)+启�
     const dir = currentPath.value;
     const relInside = dir ? `${dir}/${entry.name}` : entry.name;
     if (activeDescriptor.value && activeDescriptor.value.type !== 'local') {
-      // 远程源（M3 spec §6.2）：虚拟 archivePath + origin 语义
+      // 远程源（M3 spec §6.2 rev2 统一）：虚拟 archivePath——WebDAV=URL 形态 /
+      // SMB=`smb://{accountId}/{initialPath}/{rel}` 可读虚拟形态（非真 UNC：descriptor
+      // 不含 host，host 查表太重且虚拟路径零解析消费方，仅展示与身份用）
       const origin = activeDescriptor.value;
       const virtualPath = origin.type === 'webdav'
-        ? `${origin.baseUrl.replace(/\/+$/, '')}/${relInside}`                    // URL 形态
-        : `\\\\${smbHostOf(origin)}\\${(origin.initialPath + '/' + relInside).replace(/\/+/g, '\\')}`; // UNC 形态
+        ? `${origin.baseUrl.replace(/\/+$/, '')}/${relInside}`
+        : origin.type === 'smb'
+          ? `smb://${origin.accountId}/${(origin.initialPath ? origin.initialPath + '/' : '')}${relInside}`
+          : ''; // 不可达（外层已限定非 local）；空串防御
       archiveParent.value = { descriptor: origin, relPath: dir };
       currentDescriptor.value = {
         type: 'archive', archivePath: virtualPath, entryPrefix: '',
@@ -1075,7 +1218,7 @@ git commit -m "feat(archive): cache 根目录(app_cache_dir/archive-cache)+启�
   }
 ```
 
-（`activeDescriptor`/`smbHostOf`：`activeDescriptor` 为 M1 已有概念（openDescriptorAt 置入）——字段名以 store 现状为准；`smbHostOf(origin)`：SMB descriptor 不含 host（host 在 account 表）——**UNC 虚拟路径的 host 段从 account 查**太重，改为 **UNC 形态直接用 `\\{accountId}\...` 占位不行**（不可读且无消费方解析它——archivePath 虚拟路径唯一消费方是展示与身份，物化只走 origin+archiveRelPath）。**定案**：SMB 的虚拟 archivePath 用 `smb://{accountId}/{initialPath}/{relInside}` 可读形态（非真 UNC，避免 host 查询；零解析消费方）。测试同步用该形态。）
+（`activeDescriptor` 为 M1 已有概念（openDescriptorAt 置入）——字段名以 store 现状为准。SMB 虚拟路径契约 **`smb://{accountId}/{initialPath}/{rel}`**（rev3 代码与定案注释统一，`smbHostOf` 不存在）；测试断言同一契约——远程分支用例补 SMB 形态：`archivePath === 'smb://3/share/comics/book.cbz'`。）
 
 进度文案：FileBrowser.vue 或 fileBrowser.ts 挂 `archive://progress` 监听（`listen()` 防御同 3.0.8 isTauriEnv），`fb.archiveProgress = ref<{ downloaded: number; total: number } | null>`；fetch('') 期间 archive descriptor 时模板显示 `t('fileBrowser.archivePreparing', { downloaded: MB, total: MB })`（indeterminate 兜底：无进度数据时 `t('fileBrowser.archivePreparingIndeterminate')`）。i18n 双语：
 
@@ -1239,13 +1382,13 @@ pub async fn clear_archive_cache(
     db: tauri::State<'_, crate::db::Db>,
     mat: tauri::State<'_, std::sync::Arc<crate::source::archive::materializer::Materializer>>,
 ) -> Result<(), String> {
-    // rev2 清空流程：cancel_all()（内部 generation 单调自增——禁 u64::MAX 终值，前端
-    // epoch 小数重计数永远追不上会永久禁用预载）→ 等待在途任务退出（in-flight 表空，
-    // 超时 2s 兜底；三检查点保证在途不再 rename/upsert「复活」缓存）→ 删文件 → 清表
+    // rev3 清空流程：cancel_all()（generation 单调自增）→ **await** Materializer 的
+    // in-flight 排空（tokio::time::sleep——async 命令内禁 std::thread::sleep 阻塞
+    // runtime；四检查点保证在途任务 chunk/二次 stat/rename/upsert 处快速退出）→
+    // 超时返回忙碌错误**不继续删除**（防删一半又被 rename/upsert 复活）→ 删文件清表
     mat.cancel_all();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while !mat.inflight_empty() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    if !mat.wait_inflight_drained(std::time::Duration::from_secs(2)).await {
+        return Err("缓存正忙（有下载在途），请稍后重试".into());
     }
     let conn = db.conn();
     let roots = crate::source::archive::dao::clear_all(&conn).map_err(|e| e.to_string())?; // 返回路径列表改造或先查再清
@@ -1332,3 +1475,13 @@ M3 审查 3 必须 + 1 建议全采纳：
 2. **sidecar 断点续传（含重启恢复）**：原启动清理 `remove_dir_all(part/)` 与续传承诺直接冲突（重启必从 0 重下）。改为 `.part` + `.part.meta` sidecar（canonical origin/rel/快照 size+mtime/downloaded，每 chunk 更新）；续传前验 sidecar 身份+快照一致性；启动清理只删 sidecar 缺失/损坏的孤儿（保留有效 `.part`，启动零网络请求）；验收 4 扩为断网+重启双场景。
 3. **cancellation generation 取代 `new_epoch(u64::MAX)`**：终值 epoch 前端小数计数永远追不上（永久禁用预载）+ 强制物化不受 epoch 控制会 rename/upsert「复活」缓存。改 Materializer 内部单调 `AtomicU64` generation：`cancel_all()` 自增；预载与强制物化在每 chunk/rename 前/upsert 前三检查点比对；`clear_archive_cache` = cancel_all → 等 in-flight 空（2s 兜底）→ 删文件+清表；新任务取新代际自然恢复。
 4. **SMB 虚拟路径统一**：spec 的 UNC 表述与计划 `smb://{accountId}/...` 定案统一（见偏差记录②）。
+
+## 附：计划审查修订记录（rev3，2026-08-19）
+
+第五轮 5 必须（文档模板与 rev2 定案脱节）全采纳：
+
+1. **spec §10「migration 015 建表断言」→ 016**（正文统一后测试策略漏网）。
+2. **状态机模板补齐 rev2 语义**：`Materializer` 加 `cancel_gen` 字段 + `cancel_all/cancel_generation/inflight_empty/wait_inflight_drained` 方法；`ensure_cached`/`ensure_cached_cancellable` 双入口（`cancellable` 参数贯穿 `download`）；`PartSidecar` 结构体 + `sidecar_path`/`atomic_write_sidecar`；续传改**四关严格校验**（cache_key 重算 / canonical origin / rel / 快照 size+mtime vs 远端 stat / downloaded == .part 长度 / ≤ 远端 size），任一不符弃 `.part`+sidecar 重下——不再按裸文件长度续传后覆写 sidecar。chunk 循环每块后原子更新 sidecar `downloaded`。
+3. **启动清理只遍历 `.part` 数据文件**：原实现对 `.part.meta` 枚举会拼出 `.part.part.meta` 判失败而**误删有效 sidecar**（下次启动无法续传）；现仅扩展名恰为 `.part` 者为候选 + sidecar 六字段结构化校验；`.meta.tmp` 原子写残留顺手清。
+4. **清缓存防复活收口**：等待改 `await wait_inflight_drained`（`tokio::time::sleep`——async 命令内 `std::thread::sleep` 阻塞 runtime）；**超时返回忙碌错误不继续删除**；generation 检查点从 2 处扩到 **4 处**（chunk 前 / 二次 stat 前 / 二次 stat 后 rename 前 / 紧贴 upsert 前——rename 后若代际已变删文件不上表）。
+5. **SMB virtualPath 代码与定案统一**：`smbHostOf`+UNC 分支删除，改 `smb://{accountId}/{initialPath}/{rel}` + 防御空串；测试补 SMB 契约断言用例（`smb://3/share/comics/book.cbz`）。任务 3 测试补 `cancel_all_stops_forced_download_without_revive`（强制任务可被 generation 停止且不复活、新任务代际恢复）。

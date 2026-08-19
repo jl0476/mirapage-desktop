@@ -198,7 +198,7 @@ settings.remote.clearConfirm: 确认清空压缩包缓存（{count} 项 / {size}
 
 - **纯函数**：cache key 稳定性（同 descriptor+rel 同 key / 不同 origin 分 key）；`is_stale` 失效矩阵（size 变/mtime 变/mtime None）；UNC/URL 虚拟路径拼接
 - **Materializer（mock MediaSource：可控字节/错误/延迟）**：完整下载→原子改名→表行 ready；二次调用秒回（不再下载——mock 计数断言）；远端 size 变更→失效重下；rename 前二次 stat 不一致→弃 .part 重排队（≤1 次）；断点续传（.part 半截+远端一致→从偏移续；远端截断→弃重下）；并发去重（两任务同 key 单下载，Notify 双醒）；取消（epoch 失效后不续发 chunk）
-- **DAO**：archive_cache upsert/touch/evict（80% 水位 + protected）/clear（migration 015 建表断言）
+- **DAO**：archive_cache upsert/touch/evict（80% 水位 + protected）/clear（migration 016 建表断言，rev2 统一）
 - **ArchiveMediaSource**：origin None 零回归（M1 既有用例不红）；origin Some（mock materializer trait）分派正确
 - **webdav**：PROPFIND fixture 含 .cbz/.zip href → is_archive true；普通文件 false
 - **前端**：openArchive 远程分支 descriptor 构造（origin/archiveRelPath 断言）；exitArchive 恢复远程源；进度事件文案
