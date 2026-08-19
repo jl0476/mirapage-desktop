@@ -104,6 +104,7 @@ pub fn upsert_account_impl(
                     return Err(format!("凭据保存失败，本次修改已回滚: {e}"));
                 }
             }
+            crate::media_cache::clear_all(); // 账户配置变更：同 URL 可能指向不同内容（spec §3.6）
             Ok(id)
         }
         None => {
@@ -120,6 +121,7 @@ pub fn upsert_account_impl(
                     return Err(format!("凭据保存失败，账户未创建: {e}"));
                 }
             }
+            crate::media_cache::clear_all();
             Ok(id)
         }
     }
@@ -160,6 +162,7 @@ pub fn delete_account_impl(
     }
     conn.execute("DELETE FROM account WHERE id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
+    crate::media_cache::clear_all();
     Ok(DeleteAccountResult { warning })
 }
 

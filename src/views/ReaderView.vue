@@ -34,7 +34,7 @@
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
-import { type BookItem, type BookmarkItem, addBookmark, listBookmarks, setFavorite, recordHistory } from '@/lib/tauri';
+import { type BookItem, type BookmarkItem, addBookmark, listBookmarks, setFavorite, recordHistory, advanceWarmSession, warmMediaUrls } from '@/lib/tauri';
 import { useReaderStore } from '@/stores/reader';
 import { SpreadPlanner } from '@/lib/spreadPlanner';
 import { useSlideshowStore } from '@/stores/slideshow';
@@ -454,6 +454,10 @@ async function loadRouteBook(bookId: number): Promise<void> {
     bookLoadPhase.value = 'ready';
     status.value = 'ready';
     visibleReader.value = true;
+    // 预读会话推进（无条件 advance：覆盖即作废旧会话；跨卷 navigateToVolume 复用本路径天然递增）
+    warmGen += 1;
+    await advanceWarmSession(warmSessionId, warmGen).catch(() => { /* 静默 */ });
+    warmAhead();
     // webtoon 恢复链（spec §5）：loader 的 restoreImageIndex 图索引 → scrollToImage
     // 渐进到位（?at= 优先 / finished→0 / 无进度→0 均由 loader 折叠进该索引）。
     if (settings.readerDefaultMode === 'webtoon') {
@@ -494,6 +498,27 @@ async function loadRouteBook(bookId: number): Promise<void> {
  * 2026-08-12 跨卷任务 8: 加 sourceDescriptor / currentRelPath 写入 reader.openBook
  * (跨卷 CrossVolumeController.identity() 依赖这 2 字段).
  */
+// ─── module3.2.0（spec rev5 §3.6 / rev8/9）：远程图片预读预载 ───
+// 前端不判源类型（Local 形态由 Rust 侧跳过不产生 IO）；sessionId 挂载唯一，
+// generation 同挂载内每次成功加载递增；advance 必须 await（rev9：防紧随的
+// warmMediaUrls 因 IPC 调度先到被当作旧会话丢弃）。
+const warmSessionId = crypto.randomUUID();
+let warmGen = 0;
+
+/** 预取当前 spread 之后 3 张（webtoon 有自己的 ±2.5 屏按需窗口，不预取） */
+function warmAhead(): void {
+  if (settings.readerDefaultMode === 'webtoon') return;
+  const spread = reader.spreads[reader.currentSpreadIndex];
+  const nextPage = spread ? spread.end + 1 : 0;
+  const slice = pageUrls.value.slice(nextPage, nextPage + 3);
+  if (slice.length === 0) return;
+  void warmMediaUrls(warmSessionId, warmGen, slice).catch(() => { /* 预读失败静默 */ });
+}
+
+watch(() => reader.currentSpreadIndex, () => {
+  warmAhead();
+});
+
 function commitBookSnapshot(snapshot: ReaderBookSnapshot): void {
   book.value = snapshot.book;
   pageUrls.value = snapshot.pageUrls;
@@ -666,6 +691,9 @@ useKeepScreenOn(keepScreenOnRef);
 // 不变量 10 + 11.
 onUnmounted(() => {
   log('[ReaderView/onUnmounted] start; bookId=', reader.bookId, 'currentSpreadIndex=', reader.currentSpreadIndex);
+  // 预读会话作废（乱序无害——作废旧会话与到达顺序无关，spec rev8）
+  warmGen += 1;
+  void advanceWarmSession(warmSessionId, warmGen).catch(() => { /* 静默 */ });
   reader.setOnAtLastNextAttempt(null);  // 不变量 11: 清理 Pinia store 持有的旧组件闭包
   activeLoadSeq += 1;                    // P0-3: 使在途 Loader 失效, 卸载后不执行提交
   if (reader.bookId !== null) {

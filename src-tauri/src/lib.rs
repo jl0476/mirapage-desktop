@@ -11,6 +11,7 @@ mod credentials;
 mod db;
 mod log;
 mod maintenance;
+mod media_cache;
 mod media_protocol;
 mod source;
 pub mod thumbnail;
@@ -144,6 +145,9 @@ pub fn run() {
             commands::maintenance::get_maintenance_preview,
             commands::maintenance::run_maintenance,
             commands::maintenance::update_maintenance_settings,
+            // module3.2.0: 远程图片预读预载（warm 会话协议，spec rev5 §3.6）
+            commands::warm::advance_warm_session,
+            commands::warm::warm_media_urls,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -210,8 +214,32 @@ async fn handle_media_request(
             Vec::new(),
         );
     }
+    // 预读缓存条件（spec rev5 §3.6，rev7 显式顺序）：
+    // 1. Local → 跳过 LRU 直读（文件系统页缓存已够）
+    // 2. 带 Range 头 → 跳过 LRU 直读源（缓存条目只有全量 bytes，命中回 200 会破坏 Range 语义）
+    // 3. 无 Range 的远程 GET → 命中回 200 全量；miss 读源后填充
+    let cacheable = range.is_none() && !matches!(target, MediaTarget::Local { .. });
+    if cacheable {
+        if let Some(hit) = media_cache::global().lock().unwrap().get(&path) {
+            return finish(
+                Response::builder()
+                    .status(200)
+                    .header("Content-Type", hit.mime.clone())
+                    .header("Content-Length", hit.bytes.len().to_string())
+                    .header("Accept-Ranges", "bytes")
+                    .header("Cache-Control", "no-store"),
+                hit.bytes.to_vec(),
+            );
+        }
+    }
     match src.read_file(&descriptor, &file_path, range).await {
         Ok(bytes) => {
+            if cacheable {
+                media_cache::global().lock().unwrap().put(
+                    path,
+                    media_cache::CachedMedia { bytes: bytes.clone(), mime: mime.clone() },
+                );
+            }
             let b = if let Some(r) = range {
                 Response::builder()
                     .status(206)
@@ -236,7 +264,7 @@ async fn handle_media_request(
 
 /// 从 DB 重建 descriptor（URL 只带定位信息，host/port/凭据全在 DB）。
 /// Smb 分支同时执行根路径契约校验（initialPath 首段 === account.share，spec §4.2）。
-fn rebuild_descriptor(
+pub(crate) fn rebuild_descriptor(
     app: &tauri::AppHandle,
     t: &media_protocol::MediaTarget,
 ) -> Result<(source::descriptor::SourceDescriptor, String), (tauri::http::StatusCode, String)> {

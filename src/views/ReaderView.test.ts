@@ -13,6 +13,8 @@ vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
   return {
     ...actual,
+    advanceWarmSession: vi.fn(async () => undefined),
+    warmMediaUrls: vi.fn(async () => undefined),
     getBook: vi.fn(async () => ({
       id: 7,
       title: 'Manga 7',
@@ -1673,6 +1675,48 @@ describe('ReaderView.vue webtoon 编排（module3.1.0）', () => {
     await flushPromises();
     expect(wtStub.__registry.scrollTargets).toContain('b.jpg');
     w.unmount();
+  });
+
+  // ─── module3.2.0：远程图片预读预载（warm 会话协议）───
+
+  it('打开成功后调 advanceWarmSession 且翻页触发 warmMediaUrls（后 3 张）', async () => {
+    const { advanceWarmSession, warmMediaUrls, listDirectory } = await import('@/lib/tauri');
+    // 6 页书：翻到中段保证后向预取窗口非空（3 页书 spread 布局下 idx=1 已到尾部）
+    (listDirectory as any).mockResolvedValueOnce(
+      ['a', 'b', 'c', 'd', 'e', 'f'].map((n) => ({
+        name: `${n}.jpg`, path: `/test/manga/${n}.jpg`, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0,
+      })));
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    // openBook → advance（await，rev9）已发生，generation=1
+    expect(advanceWarmSession).toHaveBeenCalledWith(expect.any(String), 1);
+    // 打开后首屏预取一次
+    expect(warmMediaUrls).toHaveBeenCalledWith(expect.any(String), 1, expect.any(Array));
+
+    // 翻页（currentSpreadIndex 变更）触发后 3 张预取
+    (warmMediaUrls as any).mockClear();
+    const reader = useReaderStore();
+    reader.currentSpreadIndex = 1; // 值变更触发 watch（0 → 1），预取其后 1 张
+    await flushPromises();
+    expect(warmMediaUrls).toHaveBeenCalledTimes(1);
+    const urls = (warmMediaUrls as any).mock.calls[0][2] as string[];
+    expect(urls.length).toBeGreaterThan(0);
+    expect(urls.length).toBeLessThanOrEqual(3);
+    w.unmount();
+  });
+
+  it('卸载时 advanceWarmSession 作废在途预热（generation 递增）', async () => {
+    const { advanceWarmSession } = await import('@/lib/tauri');
+    const router = makeRouter();
+    await router.isReady();
+    const w = mount(ReaderView, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    (advanceWarmSession as any).mockClear();
+    w.unmount();
+    await flushPromises();
+    expect(advanceWarmSession).toHaveBeenCalledWith(expect.any(String), 2);
   });
 
 });

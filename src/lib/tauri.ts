@@ -584,6 +584,18 @@ export async function testConnection(id: number): Promise<boolean> {
   return invoke<boolean>('test_connection', { id });
 }
 
+// ─── module3.2.0: 远程图片预读预载（warm 会话协议，spec rev5 §3.6 / rev8）───
+
+/** Reader 打开/切书/卸载时无条件调用——既是 begin 也是 cancel（覆盖即作废旧会话） */
+export async function advanceWarmSession(sessionId: string, generation: number): Promise<void> {
+  await invoke('advance_warm_session', { sessionId, generation });
+}
+
+/** 图片预读（失败静默；Local 形态 Rust 侧跳过不产生 IO；单次上限 4 条） */
+export async function warmMediaUrls(sessionId: string, generation: number, urls: string[]): Promise<void> {
+  await invoke('warm_media_urls', { sessionId, generation, urls });
+}
+
 // ─── Continue Volume (Phase 5) ──────────────────────────────────────────
 // v0.1.0-module3.0.2 (H4): Rust 端 fn find_next_volume(args: FindNextVolumeArgs) 单结构体,
 // 走 v0.1.0-module2.1 的 `{ args: { ... } }` 包装契约 + camelCase.
