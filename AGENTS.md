@@ -138,7 +138,7 @@ cargo test -p mirapage-desktop-lib natural_compare
 | 4.5 | 书库 / 阅览记录 / directory_sort（Android schema 对齐） | ✅ `v0.1.0-module3.0`：`library` 11 列 + `browse_history` folder-level + `directory_sort` per-folder |
 | 5 | 跨卷连续阅读 + 幻灯片 | ✅ `findNextDirectory` + `slideshow` store |
 | 6 | i18n（中/英） | ✅ TDD 双语一致性 |
-| 7 | SMB 协议层 | ❌ stub（`smb_impl.rs` 多处 `NotImplemented`，`smb = "0.11"` 依赖已加未用） |
+| 7 | SMB 协议层 | ✅ `v0.1.0-module3.3.0-smb` 真实现（`source/smb/` 模块：`source` 5 方法实装 / `connection` TTL 懒回收 + 凭据解析 + 重建重试 / `real_transport` share_connect + query + read_block + 错误映射 / `mock_transport` 测试桩 / `transport` TransportError 分类 / `path` UNC 拼接 + share 根契约）；旧 `smb_impl.rs` 已删；accounts CRUD + keyring 凭据 + `test_connection` 沿用 M1（module3.2.0）。**待实机手测**：本机无 NAS/凭据管理器访问，spec §8 六项验收 spike 未实机跑（自动化 404 lib / 12 integration / 1126 前端单测 0 回归 + 编译/契约锁已覆盖） |
 | 8 | WebDAV 协议层 | ✅ 真实现（`reqwest` + PROPFIND + Range GET） |
 | 9 | 跨平台分发 | 🟡 CI 自动化 ✅；代码签名 / macOS `.dmg` / Linux `.AppImage` / 自动更新 ❌（`updater` 插件占位） |
 | 3.0+ | 设置面板完整化 | ✅ `v0.1.0-module3.0-settings`：Settings.vue 重写（5 section + 锚点 nav）+ 9 宫格触控方案 + theme 切换 + i18n 45 keys（spec：`docs/superpowers/specs/2026-08-03-settings-panel-design.md`） |

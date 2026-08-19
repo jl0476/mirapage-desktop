@@ -212,7 +212,7 @@ mirapage-desktop/
 │   │   │   ├── factory.rs        ← MediaSourceFactory
 │   │   │   ├── local.rs          ← LocalMediaSource（Phase 1）
 │   │   │   ├── archive_impl.rs   ← ArchiveMediaSource（Phase 3）
-│   │   │   ├── smb_impl.rs       ← SmbMediaSource（Phase 1 stub，Phase 7 实现）
+│   │   │   ├── smb/               ← M2 已交付：smb::source 5 方法实装 + smb::connection（TTL 懒回收/凭据解析/重建重试）+ smb::real_transport（share_connect/query/read_block）+ smb::transport（TransportError 分类）+ smb::path（UNC 拼接/share 根契约）+ smb::mock_transport（测试桩）
 │   │   │   └── webdav_impl.rs    ← WebDavMediaSource（Phase 1 stub，Phase 8 实现）
 │   │   ├── credentials/          ← 凭据加密
 │   │   │   ├── mod.rs
@@ -677,7 +677,7 @@ MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**
 
 | 路径 | 关键行 | 用途 |
 |---|---|---|
-| `data/source/SmbMediaSource.kt:1-254` | 完整实现（连接 / 列表 / 读 / Range） | `source/smb_impl.rs` 用 `smb-rs` crate 重写 |
+| `data/source/SmbMediaSource.kt:1-254` | 完整实现（连接 / 列表 / 读 / Range） | `source/smb/source.rs` + `source/smb/connection.rs` + `source/smb/real_transport.rs` 用 `smb-rs` crate 重写（M2 已交付，旧 `smb_impl.rs` 已删） |
 | `data/remote/smb/SmbSessionPool.kt:13-106` | 引用计数池（**只做参考**——Desktop 单进程无需池） | 直接 `connect` / `disconnect` |
 | `data/remote/smb/SmbConnectionTester.kt:1-48` | 测试连接 | `commands/accounts::test_connection` |
 | `data/security/CredentialCipher.kt:10-16` | 接口 | `credentials/cipher.rs::CredentialCipher` |
@@ -1591,7 +1591,7 @@ export function useReaderInput() {
 | 项 | 现状 | 说明 | 量级 |
 |---|---|---|---|
 | RAR / 7z 压缩包（Phase 3 收尾） | 🟡 ZIP 已通 | `unrar` / `sevenz-rust` 依赖已加未启，`ArchiveMediaSource` 实装两种格式；7z 末尾索引需整包读（先落 cacheDir 再读，见 §3 预研）；CBR 依赖 RAR | 中 |
-| SMB 协议层（Phase 7） | ❌ stub | `smb_impl.rs` 多处 `NotImplemented`（`smb = "0.11"` 已加未用）；accounts CRUD + keyring 凭据 + `test_connection` 已随 module3.2.0 M1 交付（media:// 统一协议见 `docs/superpowers/specs/2026-08-18-smb-remote-media-design.md`），剩 `SmbMediaSource` 5 方法实装（M2）与 spike | 大 |
+| SMB 协议层（Phase 7） | ✅ `v0.1.0-module3.3.0-smb` 真实现 | `source/smb/` 模块化交付（`source` 5 方法实装 / `connection` TTL 懒回收 / `real_transport` share_connect+query+read_block / `transport` 错误分类 / `path` UNC 拼接 / `mock_transport` 测试桩）；旧 `smb_impl.rs` 已删；M1（module3.2.0）交付的 accounts CRUD + keyring 凭据 + `test_connection` 真握手沿用。**待实机手测**：本机无 NAS/凭据管理器访问，spec §8 六项 + spike 未实机跑（自动化 404 lib + 12 integration + 1126 前端 + 0 回归 + 编译/契约锁覆盖语义等价）；详见 `docs/superpowers/reports/2026-08-19-smb-m2-spike.md`（如未生成 = spike 未跑） |
 | Phase 9 分发 | 🟡 Windows CI 已通 | 代码签名 / macOS `.dmg`（需 mac 环境 + notarization）/ Linux AppImage / 自动更新（`updater` 插件占位） | 中，依赖环境 |
 
 ### 16.2 遗留打磨项（文档点名「留后续」）
