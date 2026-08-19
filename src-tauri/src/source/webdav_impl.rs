@@ -14,7 +14,7 @@
 //! 复用 client 性能更佳但当前账户切换频率低;Phase 7+ 优化路径用 OnceCell 缓存。
 
 use crate::source::descriptor::{MediaEntry, SourceDescriptor};
-use crate::source::trait_def::{ByteRange, MediaSource, MediaSourceError, Result};
+use crate::source::trait_def::{ByteRange, FileStat, MediaSource, MediaSourceError, Result};
 use async_trait::async_trait;
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -25,12 +25,33 @@ use reqwest::{
 use std::time::Duration;
 
 pub struct WebDavMediaSource {
-    _private: (),
+    db: crate::db::Db,
+    creds: std::sync::Arc<dyn crate::credentials::CredentialStore>,
 }
 
 impl WebDavMediaSource {
-    pub fn new() -> Self {
-        Self { _private: () }
+    pub fn new(
+        db: crate::db::Db,
+        creds: std::sync::Arc<dyn crate::credentials::CredentialStore>,
+    ) -> Self {
+        Self { db, creds }
+    }
+
+    /// 从 account 表 + keyring 取 (username, password)（spec §3.4 Basic Auth）
+    fn credentials_for(&self, account_id: i64) -> Result<(Option<String>, Option<String>)> {
+        let conn = self.db.conn();
+        let username = conn
+            .query_row(
+                "SELECT username FROM account WHERE id = ?1 AND type = 'webdav'",
+                rusqlite::params![account_id],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .map_err(|_| MediaSourceError::NotFound(format!("webdav account {account_id}")))?;
+        let password = self
+            .creds
+            .get_password(&crate::credentials::account_key("webdav", account_id))
+            .map_err(MediaSourceError::Other)?;
+        Ok((username, password))
     }
 
     fn extract<'a>(&self, descriptor: &'a SourceDescriptor) -> Option<(i64, &'a str, &'a str)> {
@@ -124,10 +145,41 @@ fn local_name(name: &[u8]) -> &str {
     }
 }
 
-impl Default for WebDavMediaSource {
-    fn default() -> Self {
-        Self::new()
+/// Range 响应校验（强契约，spec rev3 §3.1）：请求 range 时返回字节必须恰好等于请求区间。
+/// 206 直接过；200 仅当 body 长度恰等（个别服务器忽略 Range 却刚好截断）；其余一律报错，
+/// 防止 M3 分块下载把整包/短读拼进 .part。
+fn verify_range_response(status: u16, body_len: usize, expected_len: u64) -> Result<()> {
+    if status == 206 || (status == 200 && body_len as u64 == expected_len) {
+        Ok(())
+    } else {
+        Err(MediaSourceError::Network(format!(
+            "server ignored range: status {status}, body {body_len} != expected {expected_len}"
+        )))
     }
+}
+
+/// RFC 7231 HTTP-date → Unix 秒（"Sun, 06 Nov 1994 08:49:37 GMT" → 784111777）。
+/// 手写解析避免引入 httpdate 依赖；失败返回 None（mtime 对缓存失效判定是辅助信息）。
+///
+/// 闰年 2 月末 ±1 天误差对缓存失效判定无实际影响——失效主判据是 size。
+fn parse_http_date_secs(s: &str) -> Option<i64> {
+    let rest = s.split_once(", ")?.1;
+    let (d, rest) = rest.split_once(' ')?;
+    let (mon, rest) = rest.split_once(' ')?;
+    let (y, rest) = rest.split_once(' ')?;
+    let (hms, _) = rest.split_once(' ').unwrap_or((rest, ""));
+    let months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+    let mon_idx = months.iter().position(|m| *m == mon)?;
+    let day: i64 = d.parse().ok()?;
+    let year: i64 = y.parse().ok()?;
+    let mut parts = hms.split(':');
+    let hh: i64 = parts.next()?.parse().ok()?;
+    let mm: i64 = parts.next()?.parse().ok()?;
+    let ss: i64 = parts.next()?.parse().ok()?;
+    // 简化儒略日（民用历足够；1970+ 有效）
+    let days = 365 * (year - 1970) + (year - 1969) / 4 - (year - 1901) / 100 + (year - 1601) / 400
+        + [0i64, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][mon_idx] + day - 1;
+    Some((days * 86400 + hh * 3600 + mm * 60 + ss).min(i64::MAX))
 }
 
 #[derive(Default)]
@@ -207,20 +259,25 @@ impl MediaSource for WebDavMediaSource {
         descriptor: &SourceDescriptor,
         path: &str,
     ) -> Result<Vec<MediaEntry>> {
-        let (_, base_url, _) = self.extract(descriptor).ok_or_else(|| {
+        let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
         })?;
+        let (user, pass) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
         let url = url.trim_end_matches('/');
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
-        let resp = client
+        let mut req = client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
             .header(HeaderName::from_static("depth"), "1")
             .header(header::CONTENT_TYPE, "application/xml")
-            .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>")
+            .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>");
+        if let (Some(u), Some(p)) = (&user, &pass) {
+            req = req.basic_auth(u, Some(p));
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| MediaSourceError::Network(format!("propfind: {e}")))?;
@@ -243,9 +300,10 @@ impl MediaSource for WebDavMediaSource {
         path: &str,
         range: Option<ByteRange>,
     ) -> Result<Vec<u8>> {
-        let (_, base_url, _) = self.extract(descriptor).ok_or_else(|| {
+        let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
         })?;
+        let (user, pass) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
@@ -254,6 +312,9 @@ impl MediaSource for WebDavMediaSource {
         let mut req = client.get(&url);
         if let Some(r) = range {
             req = req.header(header::RANGE, format!("bytes={}-{}", r.offset, r.offset + r.length - 1));
+        }
+        if let (Some(u), Some(p)) = (&user, &pass) {
+            req = req.basic_auth(u, Some(p));
         }
         let resp = req
             .send()
@@ -265,10 +326,15 @@ impl MediaSource for WebDavMediaSource {
         if !resp.status().is_success() {
             return Err(MediaSourceError::Network(format!("GET status {}", resp.status())));
         }
+        let status = resp.status().as_u16();
         let bytes = resp
             .bytes()
             .await
             .map_err(|e| MediaSourceError::Network(format!("read: {e}")))?;
+        // Range 强契约（spec rev3 §3.1）：请求区间时返回字节必须恰好等长
+        if let Some(r) = range {
+            verify_range_response(status, bytes.len(), r.length)?;
+        }
         Ok(bytes.to_vec())
     }
 
@@ -287,13 +353,17 @@ impl MediaSource for WebDavMediaSource {
     async fn test(&self, descriptor: &SourceDescriptor) -> Result<()> {
         match descriptor {
             SourceDescriptor::WebDav { account_id, base_url, path } => {
+                let (user, pass) = self.credentials_for(*account_id)?;
                 let client = Client::builder()
                     .timeout(Duration::from_secs(10))
                     .build()
                     .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
                 let url = format!("{}/{}", base_url.trim_end_matches('/'), path);
-                let resp = client
-                    .head(&url)
+                let mut req = client.head(&url);
+                if let (Some(u), Some(p)) = (&user, &pass) {
+                    req = req.basic_auth(u, Some(p));
+                }
+                let resp = req
                     .send()
                     .await
                     .map_err(|e| MediaSourceError::Network(format!("head: {e}")))?;
@@ -306,13 +376,50 @@ impl MediaSource for WebDavMediaSource {
                         resp.status()
                     )));
                 }
-                let _ = account_id; // reserved for auth lookup
                 Ok(())
             }
             _ => Err(MediaSourceError::NotImplemented(
                 "WebDavMediaSource::test 仅处理 WebDav descriptor".into(),
             )),
         }
+    }
+
+    async fn stat(&self, descriptor: &SourceDescriptor, path: &str) -> Result<FileStat> {
+        let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
+            MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
+        })?;
+        let (user, pass) = self.credentials_for(account_id)?;
+        let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
+        let mut req = client.head(&url);
+        if let (Some(u), Some(p)) = (&user, &pass) {
+            req = req.basic_auth(u, Some(p));
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| MediaSourceError::Network(format!("head: {e}")))?;
+        match resp.status() {
+            StatusCode::NOT_FOUND => return Err(MediaSourceError::NotFound(url)),
+            s if !s.is_success() => return Err(MediaSourceError::Network(format!("HEAD status {s}"))),
+            _ => {}
+        }
+        let size = resp
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok())
+            .ok_or_else(|| MediaSourceError::Other("HEAD 无 Content-Length".into()))?;
+        // Last-Modified: HTTP-date → Unix 秒（失败容忍为 None）
+        let modified_at = resp
+            .headers()
+            .get(header::LAST_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_http_date_secs);
+        Ok(FileStat { size, modified_at })
     }
 }
 
@@ -325,6 +432,23 @@ mod tests {
         assert_eq!(urlencoding_decode("hello%20world"), "hello world");
         assert_eq!(urlencoding_decode("plain"), "plain");
         assert_eq!(urlencoding_decode("%E4%B8%AD%E6%96%87"), "中文");
+    }
+
+    #[test]
+    fn range_response_must_be_206_or_exact_length() {
+        // spec rev3 §3.1 Range 强契约
+        assert!(verify_range_response(206, 100, 100).is_ok());      // 206 且长度等
+        assert!(verify_range_response(200, 100, 100).is_ok());      // 兼容：200 整段恰好等长
+        assert!(verify_range_response(200, 999, 100).is_err());     // 200 整包≠请求长度 → 拒绝
+        assert!(verify_range_response(200, 50, 100).is_err());      // 短读 → 拒绝
+        assert!(verify_range_response(404, 0, 100).is_err());       // 非成功状态（上游已拦）
+    }
+
+    #[test]
+    fn parse_http_date_secs_handles_rfc7231() {
+        assert_eq!(parse_http_date_secs("Sun, 06 Nov 1994 08:49:37 GMT"), Some(784111777));
+        assert_eq!(parse_http_date_secs("garbage"), None);
+        assert!(parse_http_date_secs("Wed, 01 Jan 2025 00:00:00 GMT").is_some());
     }
 
     #[test]

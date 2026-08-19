@@ -7,12 +7,16 @@ pub mod migrations;
 
 use rusqlite::Connection;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
 /// 应用全局数据库连接
+///
+/// `Clone`（内部 `Arc<Mutex<Connection>>`）：lib.rs manage 后同时把克隆句柄
+/// 注入 `MediaSourceFactory`（WebDAV 源读 account 行取凭据），`State<Db>` 命令零改动。
+#[derive(Clone)]
 pub struct Db {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl Db {
@@ -26,7 +30,7 @@ impl Db {
         let conn = Connection::open_in_memory()?;
         migrations::run(&conn)?;
         Ok(Db {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 }
@@ -50,6 +54,6 @@ pub fn init(app: &AppHandle) -> anyhow::Result<Db> {
     migrations::run(&conn)?;
 
     Ok(Db {
-        conn: Mutex::new(conn),
+        conn: Arc::new(Mutex::new(conn)),
     })
 }

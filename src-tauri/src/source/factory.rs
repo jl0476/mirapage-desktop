@@ -12,7 +12,7 @@ use crate::source::trait_def::MediaSource;
 use crate::source::webdav_impl::WebDavMediaSource;
 use std::sync::Arc;
 
-/// 工厂：持有 4 种 `MediaSource` 实现（其中 Smb / WebDav 现阶段为 stub）
+/// 工厂：持有 4 种 `MediaSource` 实现（WebDav 持 DB+凭据取 Basic Auth）
 #[derive(Clone)]
 pub struct MediaSourceFactory {
     local: Arc<LocalMediaSource>,
@@ -22,12 +22,15 @@ pub struct MediaSourceFactory {
 }
 
 impl MediaSourceFactory {
-    pub fn new() -> Self {
+    pub fn new(
+        db: crate::db::Db,
+        creds: std::sync::Arc<dyn crate::credentials::CredentialStore>,
+    ) -> Self {
         Self {
             local: Arc::new(LocalMediaSource::new()),
             archive: Arc::new(ArchiveMediaSource::new()),
             smb: Arc::new(SmbMediaSource::new()),
-            webdav: Arc::new(WebDavMediaSource::new()),
+            webdav: Arc::new(WebDavMediaSource::new(db, creds)),
         }
     }
 
@@ -39,11 +42,5 @@ impl MediaSourceFactory {
             SourceDescriptor::Smb { .. } => self.smb.clone(),
             SourceDescriptor::WebDav { .. } => self.webdav.clone(),
         }
-    }
-}
-
-impl Default for MediaSourceFactory {
-    fn default() -> Self {
-        Self::new()
     }
 }

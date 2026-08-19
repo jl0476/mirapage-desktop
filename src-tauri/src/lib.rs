@@ -39,14 +39,15 @@ pub fn run() {
             // 初始化数据库
             let app_handle = app.handle();
             let db = db::init(app_handle).expect("failed to init database");
-            app.manage(db);
+            app.manage(db.clone());
 
             // 凭据存储（spec §3.4：keyring 生产实现，密码不落 DB）
-            app.manage(std::sync::Arc::new(credentials::KeyringStore)
-                as std::sync::Arc<dyn credentials::CredentialStore>);
+            let creds = std::sync::Arc::new(credentials::KeyringStore)
+                as std::sync::Arc<dyn credentials::CredentialStore>;
+            app.manage(creds.clone());
 
-            // 初始化 MediaSourceFactory（注入 4 个实现）
-            let factory = source::MediaSourceFactory::new();
+            // 初始化 MediaSourceFactory（WebDav 源持 DB 克隆 + 凭据取 Basic Auth）
+            let factory = source::MediaSourceFactory::new(db, creds);
             app.manage(factory);
 
             // 初始化缩略图缓存服务（v0.1.0-module3.0.7）

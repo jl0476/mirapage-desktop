@@ -582,7 +582,10 @@ mod tests {
 
     /// 测试 helper：构造 MediaSourceFactory（真实实例，Local 指向 tempdir）。
     fn make_factory() -> MediaSourceFactory {
-        MediaSourceFactory::new()
+        MediaSourceFactory::new(
+            crate::db::Db::open_in_memory().expect("in-memory db"),
+            std::sync::Arc::new(crate::credentials::MemoryStore::new()),
+        )
     }
 
     /// 测试 helper：建 nested 子目录（如 `"comics/vol1"` 用 `create_dir_all`）。
