@@ -181,14 +181,16 @@ pub async fn test_connection_impl(
     factory: &crate::source::MediaSourceFactory,
     id: i64,
 ) -> Result<bool, String> {
-    let (kind, host) = {
+    let (kind, host, port, share) = {
         let conn = db.conn();
-        let (kind, host): (String, Option<String>) = conn
-            .query_row("SELECT type, host FROM account WHERE id = ?1", rusqlite::params![id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })
+        let (kind, host, port, share): (String, Option<String>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT type, host, port, share FROM account WHERE id = ?1",
+                rusqlite::params![id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
             .map_err(|e| format!("账户不存在: {e}"))?;
-        (kind, host)
+        (kind, host, port, share)
     };
     match kind.as_str() {
         "webdav" => {
@@ -199,7 +201,21 @@ pub async fn test_connection_impl(
             factory.resolve(&d).test(&d).await
                 .map(|_| true).map_err(|e| e.to_string())
         }
-        "smb" => Err("SMB 尚未实装（module 3.3.0 交付）".into()),
+        "smb" => {
+            // M2 task 7：真实握手（task 6 已接线 SmbClientTransport）。test 用 share 根做
+            // initial_path，path 留空（factory.resolve → SmbMediaSource::test → 列根）。
+            // port 来自账户行（默认 445）；port 越界在 SmbConnectionManager::resolve_params
+            // 校验返回 TransportError::InvalidPath（→ MediaSourceError::InvalidPath）。
+            let _host = host.clone().ok_or("smb 账户缺少 host")?;
+            let share = share.clone().ok_or("smb 账户缺少 share（固定共享根必填）")?;
+            let initial = share;
+            let port_val = port.unwrap_or(445);
+            let d = crate::source::descriptor::SourceDescriptor::Smb {
+                account_id: id, initial_path: initial, path: String::new(), port: port_val as i32,
+            };
+            factory.resolve(&d).test(&d).await
+                .map(|_| true).map_err(|e| e.to_string())
+        }
         _ => Err(format!("未知账户类型 {kind}")),
     }
 }
@@ -307,8 +323,51 @@ mod tests {
                    ("old-name", Some("https://old"), Some("old-user"))); // 旧值完整回滚
     }
 
+    /// M2 task 7 简报步骤 1：share 缺失时 resolve_params 前置校验（零网络）拒绝；
+    /// 错误信息不能再是「尚未实装」占位（任务 6 真实接线后即废弃）。
     #[tokio::test]
-    async fn test_connection_smb_not_implemented_yet() {
+    async fn test_connection_smb_rejects_missing_share_without_network() {
+        let (db, store) = setup();
+        let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
+            id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
+            port: Some(445), share: None, username: None, password: None }).unwrap();
+        let factory = crate::source::MediaSourceFactory::new(
+            db.clone(),
+            std::sync::Arc::new(crate::credentials::MemoryStore::new()),
+        );
+        let r = test_connection_impl(&db, &factory, id).await;
+        assert!(r.is_err(), "share 缺失应拒绝");
+        let msg = r.unwrap_err();
+        assert!(
+            msg.contains("share") || msg.contains("共享"),
+            "错误语义需体现 share 缺失: {msg}"
+        );
+        assert!(!msg.contains("尚未实装"), "M2 后不再有未实装占位错误: {msg}");
+    }
+
+    /// M2 task 7 简报步骤 1：port 越界（99999）在 resolve_params 校验直接拒绝，
+    /// 零网络。验证 test_connection 链路对端口越界有明确语义。
+    #[tokio::test]
+    async fn test_connection_smb_rejects_out_of_range_port() {
+        let (db, store) = setup();
+        let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
+            id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
+            port: Some(99999), share: Some("media".into()), username: None, password: None }).unwrap();
+        let factory = crate::source::MediaSourceFactory::new(
+            db.clone(),
+            std::sync::Arc::new(crate::credentials::MemoryStore::new()),
+        );
+        let r = test_connection_impl(&db, &factory, id).await;
+        assert!(r.is_err(), "端口越界应被拒绝而非静默忽略");
+        let msg = r.unwrap_err();
+        assert!(msg.contains("端口"), "端口越界语义需明确: {msg}");
+    }
+
+    /// M2 task 7 简报步骤 1：test_connection 走 factory.resolve(Smb).test() 真实路径
+    /// （而非直接 NOT_IMPLEMENTED 占位）。share 缺失情况下，断言链路已穿过占位错误
+    /// 走到 source 层 —— 错误消息不再是固定的「SMB 尚未实装」字符串。
+    #[tokio::test]
+    async fn test_connection_smb_uses_factory_handshake() {
         let (db, store) = setup();
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
@@ -317,6 +376,13 @@ mod tests {
             db.clone(),
             std::sync::Arc::new(crate::credentials::MemoryStore::new()),
         );
-        assert!(test_connection_impl(&db, &factory, id).await.is_err()); // M1：SMB 未实装，明确报错而非假 true
+        let r = test_connection_impl(&db, &factory, id).await;
+        // 无 NAS CI，本测试不依赖真实网络：链接到 factory.resolve → SmbMediaSource::test
+        // → ConnectionManager::list → get_or_connect → resolve_params（share_root_matches
+        // 通过）→ factory() → transport.connect —— 真实 transport 在 CI 环境连不上
+        // 192.168.1.1:445，返回 connection-level 错误（如 Disconnected）。**关键是错误
+        // 不再是占位「SMB 尚未实装`》。
+        let msg = r.unwrap_err();
+        assert!(!msg.contains("尚未实装"), "M2 后不应再走占位错误: {msg}");
     }
 }
