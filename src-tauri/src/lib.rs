@@ -7,6 +7,7 @@
 
 mod algorithm;
 mod commands;
+mod credentials;
 mod db;
 mod log;
 mod maintenance;
@@ -39,6 +40,10 @@ pub fn run() {
             let app_handle = app.handle();
             let db = db::init(app_handle).expect("failed to init database");
             app.manage(db);
+
+            // 凭据存储（spec §3.4：keyring 生产实现，密码不落 DB）
+            app.manage(std::sync::Arc::new(credentials::KeyringStore)
+                as std::sync::Arc<dyn credentials::CredentialStore>);
 
             // 初始化 MediaSourceFactory（注入 4 个实现）
             let factory = source::MediaSourceFactory::new();

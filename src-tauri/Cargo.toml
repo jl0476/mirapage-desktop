@@ -58,8 +58,8 @@ zip = "2"
 # 数据库（运行时依赖，原误置 [dev-dependencies]：db/* 与 commands/* 模块 use rusqlite）
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# 凭据（Phase 7 启用，注释：源码未 use）
-# keyring = "3"
+# 凭据（module3.2.0-media-display 启用：账户密码走 OS 凭据管理器，不落 DB）
+keyring = "3"
 
 # 错误处理
 thiserror = "1"
