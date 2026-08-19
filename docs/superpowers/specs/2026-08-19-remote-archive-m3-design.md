@@ -13,7 +13,7 @@
 3. **Range 强契约就绪**：WebDAV 206 Content-Range offset 匹配 + 等长校验（评审轮收紧）——分块下载拼 `.part` 的正确性前提满足。
 4. **缩略图链路已通用**：取源 actor 按 descriptor 经 `factory.resolve().read_file()`——远程 Archive 缩略图 = `ArchiveMediaSource.read_file` 接 `ensure_cached` 后自动生效（零新链路）。
 5. **远程目录的 `is_archive` 恒 false**（webdav_impl PROPFIND 解析硬编码）——远程 ZIP 浏览入口缺失，本设计补。
-6. **migration 最新 014**；`archive_cache` 用 015（实施前 `git fetch github main` 复核 racyan 占号——双机惯例）。
+6. **migration 最新 015**（014 触控区清理 + **015 position_kind 已被 module3.1.1 占用**——2026-08-19 计划期复核 github/main 发现原稿「最新 014」过期，撞号预警成真）；`archive_cache` 用 **016**。
 7. **FileBrowser `openArchive` 为 Local 形态**（archiveParent 记 `{rootPath, path}`）——远程源打开 ZIP 需泛化。
 
 ## 1. 目标 / 非目标
@@ -228,6 +228,6 @@ settings.remote.clearConfirm: 确认清空压缩包缓存（{count} 项 / {size}
 ## 13. 交付
 
 - tag：`v0.1.0-module3.4.0-remote-archive`
-- migration：015（archive_cache 表）
+- migration：016（archive_cache 表；015 已被 module3.1.1 position_kind 占用）
 - 新文件：`source/archive/mod.rs` + `source/archive/materializer.rs` + `source/archive/prefetch.rs` + DAO（并入 materializer 或独立 `archive_cache_dao.rs`）
 - 修改：`archive_impl.rs`（构造注入 + 路径解析）/ `factory.rs`（构造顺序）/ `webdav_impl.rs`（is_archive）/ `fileBrowser.ts` + `FileBrowser.vue`（openArchive 泛化 + 进度文案）/ `Settings.vue`（remote section）/ `commands/thumbnails.rs` 同款清空命令（新 command `clear_archive_cache` + `get_archive_cache_info`）/ i18n 双语
