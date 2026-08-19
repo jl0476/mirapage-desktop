@@ -2,6 +2,56 @@
 //! 编码铁律：每个逻辑字段整体 percent-encode 为恰好一个 segment（字段内 `/` → `%2F`），
 //! URL 段数固定，解析可逆。解码恰好一次，安全性靠结构化路径校验，不靠字符黑名单。
 
+use crate::source::trait_def::ByteRange;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum RangeResolution {
+    Full,
+    Partial(ByteRange),
+    Unsatisfiable, // → 416
+    Malformed,     // → 忽略 Range 按全量处理（HTTP 宽容语义；单段格式错误不当攻击）
+}
+
+/// 解析单段 `bytes=start-end`（闭区间）/ `bytes=start-`（开尾，clamp 到 total-1）。
+/// start >= total → Unsatisfiable；end >= total → clamp（对齐 nginx 行为）。
+pub fn parse_range_header(v: Option<&str>, total: u64) -> RangeResolution {
+    let Some(v) = v else { return RangeResolution::Full };
+    let Some(rest) = v.strip_prefix("bytes=") else { return RangeResolution::Malformed };
+    if rest.contains(',') {
+        return RangeResolution::Malformed; // 多段不支持（M1）
+    }
+    let (s, e) = match rest.split_once('-') {
+        Some((s, e)) if !s.is_empty() && !e.is_empty() => (s, Some(e)),
+        Some((s, "")) if !s.is_empty() => (s, None), // 开尾
+        _ => return RangeResolution::Malformed,      // 后缀范围 bytes=-N 等
+    };
+    let Ok(start) = s.parse::<u64>() else { return RangeResolution::Malformed };
+    if start >= total {
+        return RangeResolution::Unsatisfiable;
+    }
+    let end = match e {
+        Some(et) => match et.parse::<u64>() {
+            Ok(v) if v >= start => v.min(total - 1),
+            Ok(_) => return RangeResolution::Malformed,
+            Err(_) => return RangeResolution::Malformed,
+        },
+        None => total - 1,
+    };
+    if start == 0 && end == total - 1 {
+        RangeResolution::Full
+    } else {
+        RangeResolution::Partial(ByteRange::new(start, end - start + 1))
+    }
+}
+
+pub fn format_content_range(start: u64, end: u64, total: u64) -> String {
+    format!("bytes {start}-{end}/{total}")
+}
+
+pub fn format_unsatisfiable_range(total: u64) -> String {
+    format!("bytes */{total}")
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum MediaTarget {
     Local { abs_path: String },
@@ -165,6 +215,33 @@ pub fn parse_media_path(path: &str) -> Result<MediaTarget, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_header_parsing() {
+        use RangeResolution::*;
+        assert!(matches!(parse_range_header(None, 100), Full));
+        assert!(matches!(parse_range_header(Some("bytes=0-"), 100), Full));            // 覆盖全文 = 全量
+        assert!(matches!(parse_range_header(Some("bytes=0-99"), 100), Full));
+        match parse_range_header(Some("bytes=10-19"), 100) {
+            Partial(r) => assert_eq!((r.offset, r.length), (10, 10)),
+            _ => panic!(),
+        }
+        assert_eq!(
+            parse_range_header(Some("bytes=10-999"), 100),
+            Partial(crate::source::trait_def::ByteRange::new(10, 90)),
+        ); // clamp 尾界
+        assert!(matches!(parse_range_header(Some("bytes=100-"), 100), Unsatisfiable)); // start >= total
+        assert!(matches!(parse_range_header(Some("bytes=-5-"), 100), Malformed));      // 后缀范围不支持
+        assert!(matches!(parse_range_header(Some("bytes=5-1"), 100), Malformed));      // start > end
+        assert!(matches!(parse_range_header(Some("chunks=1-2"), 100), Malformed));     // 非 bytes 单位
+        assert!(matches!(parse_range_header(Some("bytes=1-2,5-9"), 100), Malformed));  // 多段不支持
+    }
+
+    #[test]
+    fn content_range_and_416_headers() {
+        assert_eq!(format_content_range(10, 19, 100), "bytes 10-19/100");
+        assert_eq!(format_unsatisfiable_range(100), "bytes */100");
+    }
 
     #[test]
     fn encode_single_segment() {

@@ -37,7 +37,7 @@ pub enum MediaSourceError {
 pub type Result<T> = std::result::Result<T, MediaSourceError>;
 
 /// 文件 Range（用于分块 / 流式读取）
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ByteRange {
     pub offset: u64,
     pub length: u64,
