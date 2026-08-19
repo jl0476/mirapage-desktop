@@ -106,7 +106,9 @@ mod tests {
         upsert(&conn, &row("k")).unwrap();
         let (count, bytes) = usage(&conn).unwrap();
         assert_eq!((count, bytes), (1, 100));
-        clear_all(&conn).unwrap();
+        // rev4：clear_all 返回被清路径（命令层实删文件依赖）
+        let paths = clear_all(&conn).unwrap();
+        assert_eq!(paths, vec!["C:/cache/k.zip".to_string()]);
         assert_eq!(usage(&conn).unwrap(), (0, 0));
         assert!(get(&conn, "k").unwrap().is_none());
     }
@@ -239,9 +241,14 @@ pub fn evict_to_limit(conn: &Connection, limit_bytes: i64, protected: &[String])
     }
 }
 
-pub fn clear_all(conn: &Connection) -> Result<()> {
+/// 清表并返回被清的 cache_abs_path 列表（rev4：命令层要实删文件——裸 Result<()> 会把
+/// 路径丢掉导致只清表不删文件）
+pub fn clear_all(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT cache_abs_path FROM archive_cache")?;
+    let paths: Vec<String> = stmt.query_map([], |r| r.get(0))?.collect::<Result<_>>()?;
+    drop(stmt);
     conn.execute("DELETE FROM archive_cache", [])?;
-    Ok(())
+    Ok(paths)
 }
 
 /// (条数, 字节总量)
@@ -540,6 +547,9 @@ pub struct Materializer {
     /// cancellation generation（rev2 双通道②）：cancel_all() 单调自增；
     /// 预载与强制物化在每 chunk / 二次 stat 后 / rename 前 / upsert 前四检查点比对
     cancel_gen: std::sync::atomic::AtomicU64,
+    /// 清空期准入闸门（rev4）：clear 期间新 ensure_cached 一律拒绝（忙碌错误），
+    /// 杜绝「排空后又入场写入」的竞态——闸门与 generation 双保险
+    clearing: std::sync::atomic::AtomicBool,
 }
 
 /// sidecar 元数据（rev2 重启续传）：与 .part 同目录同名 + .meta
@@ -572,7 +582,9 @@ impl Materializer {
     pub fn new(webdav: Arc<dyn MediaSource>, smb: Arc<dyn MediaSource>, db: Db, cache_root: PathBuf) -> Self {
         Self { webdav, smb, db, cache_root: std::sync::RwLock::new(cache_root),
                inflight: tokio::sync::Mutex::new(HashMap::new()),
-               epoch: std::sync::atomic::AtomicU64::new(0) }
+               epoch: std::sync::atomic::AtomicU64::new(0),
+               cancel_gen: std::sync::atomic::AtomicU64::new(0),    // rev4 补齐（漏初始化=编译失败）
+               clearing: std::sync::atomic::AtomicBool::new(false) }
     }
 
     fn origin_source(&self, origin: &SourceDescriptor) -> Result<&Arc<dyn MediaSource>, MaterializeError> {
@@ -594,6 +606,13 @@ impl Materializer {
     /// rev2 双通道②：单调自增，新任务取新代际——预载在 clear 后自然恢复
     pub fn cancel_all(&self) { self.cancel_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
     pub fn cancel_generation(&self) -> u64 { self.cancel_gen.load(std::sync::atomic::Ordering::SeqCst) }
+    /// rev4 清空闸门：begin = 置位 + cancel_all；end = 复位（新任务新代际自然恢复）
+    pub fn begin_clearing(&self) {
+        self.clearing.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.cancel_all();
+    }
+    pub fn end_clearing(&self) { self.clearing.store(false, std::sync::atomic::Ordering::SeqCst); }
+    pub fn cache_root(&self) -> PathBuf { self.cache_root.read().unwrap().clone() }
     pub async fn inflight_empty(&self) -> bool { self.inflight.lock().await.is_empty() }
     /// clear 用：等待在途任务退出（chunk/检查点粒度快速退出）；超时返回 false
     pub async fn wait_inflight_drained(&self, timeout: std::time::Duration) -> bool {
@@ -623,28 +642,45 @@ impl Materializer {
         &self, origin: &SourceDescriptor, archive_rel_path: &str, cancellable: bool,
     ) -> Result<PathBuf, MaterializeError> {
         let key = cache_key(origin, archive_rel_path);
+        // rev4 准入闸门：清空期间新任务一律拒绝（忙碌错误由调用方呈现）
+        if self.clearing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(MaterializeError::Other("cache clearing in progress".into()));
+        }
         // 1. 表命中 → stat 失效判定
+        //    rev4：Db 是 Mutex 包裹的连接——先读行后立刻 drop conn，再 await 远端 stat
+        //    （持连接跨网络 await 会锁住整个数据库）；touch/删除时重新获取连接
         {
-            let conn = self.db.conn();
-            if let Some(row) = super::dao::get(&conn, &key)
-                .map_err(|e| MaterializeError::Other(e.to_string()))? {
+            let row = {
+                let conn = self.db.conn();
+                super::dao::get(&conn, &key).map_err(|e| MaterializeError::Other(e.to_string()))?
+            };
+            if let Some(row) = row {
                 let src = self.origin_source(origin)?;
                 let cur = src.stat(origin, archive_rel_path).await?;
                 if !is_stale(row.origin_size, row.origin_mtime, &cur) {
+                    let conn = self.db.conn();
                     let _ = super::dao::touch(&conn, &key);
                     return Ok(PathBuf::from(&row.cache_abs_path));
                 }
                 // 失效：删行 + 删文件
-                let _ = conn.execute("DELETE FROM archive_cache WHERE cache_key = ?1", params![key]);
+                {
+                    let conn = self.db.conn();
+                    let _ = conn.execute("DELETE FROM archive_cache WHERE cache_key = ?1", params![key]);
+                }
                 let _ = std::fs::remove_file(&row.cache_abs_path);
             }
         }
-        // 2. in-flight 去重：同 key 下载中 → 挂起等待后重查
+        // 2. in-flight 去重（rev4 修丢唤醒窗口）：必须在**仍持有 inflight 锁时**创建
+        //    Notified future 并 enable() 预注册——下载任务在「drop 锁 → notified().await」
+        //    之间 remove+notify_waiters 的话，后注册的等待者会永久挂起
         {
             let mut g = self.inflight.lock().await;
             if let Some(notify) = g.get(&key).cloned() {
+                let mut notified = notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable(); // 持锁预注册——此后 notify_waiters 不可能丢失
                 drop(g);
-                notify.notified().await;
+                notified.await;
                 let conn = self.db.conn();
                 if let Some(row) = super::dao::get(&conn, &key)
                     .map_err(|e| MaterializeError::Other(e.to_string()))? {
@@ -654,8 +690,9 @@ impl Materializer {
             }
             g.insert(key.clone(), Arc::new(tokio::sync::Notify::new()));
         }
-        // 3. 下载（退出时 notify + 移除 in-flight）
-        let result = self.download(origin, archive_rel_path, key, cancellable).await;
+        // 3. 下载（退出时 notify + 移除 in-flight）——key 传借用（download 收 &str，
+        //    且此处后续还要用 key 清理 inflight，不能 move）
+        let result = self.download(origin, archive_rel_path, &key, cancellable).await;
         {
             let mut g = self.inflight.lock().await;
             if let Some(n) = g.remove(&key) { n.notify_waiters(); }
@@ -1353,11 +1390,17 @@ git commit -m "feat(archive): 三级预载——metadata stat 预热/内容低�
 mod tests {
     #[test]
     fn clear_removes_files_and_rows() {
-        // 内存库 + tempdir cache_root 放两个文件 + 表两行
-        // clear_archive_cache_impl → usage == (0,0) 且文件删除
+        // 内存库 + tempdir cache_root：两个 ready 文件 + 表两行 + 一个 .part+sidecar
+        // clear_archive_cache_impl → usage == (0,0) 且 ready 文件与 part/ 均被删除
     }
     #[test]
     fn info_reports_usage() { /* usage == (2, bytes) */ }
+
+    #[tokio::test]
+    async fn clearing_gate_rejects_new_tasks_and_recovers() {
+        // rev4 闸门：begin_clearing 后新 ensure_cached 返回 "clearing in progress"；
+        // end_clearing 后正常工作（且代际已变，旧 in-flight 即便漏网也不会 upsert）
+    }
 }
 ```
 
@@ -1382,19 +1425,33 @@ pub async fn clear_archive_cache(
     db: tauri::State<'_, crate::db::Db>,
     mat: tauri::State<'_, std::sync::Arc<crate::source::archive::materializer::Materializer>>,
 ) -> Result<(), String> {
-    // rev3 清空流程：cancel_all()（generation 单调自增）→ **await** Materializer 的
-    // in-flight 排空（tokio::time::sleep——async 命令内禁 std::thread::sleep 阻塞
-    // runtime；四检查点保证在途任务 chunk/二次 stat/rename/upsert 处快速退出）→
-    // 超时返回忙碌错误**不继续删除**（防删一半又被 rename/upsert 复活）→ 删文件清表
-    mat.cancel_all();
-    if !mat.wait_inflight_drained(std::time::Duration::from_secs(2)).await {
+    // rev4 清空流程（闸门 + 排空 + 实删三段）：
+    // ①准入闸门置位（期间新 ensure_cached 一律「clearing in progress」拒绝——排空后
+    //   又有新任务入场写入的竞态由闸门封死）+ cancel_all()（generation 单调自增）
+    // ②await 排空在途（tokio::time::sleep，禁 thread::sleep 阻塞 runtime；四检查点
+    //   保证在途任务快速退出）——超时：复位闸门 + 返回忙碌错误，**不删除任何东西**
+    // ③实删：ready 文件（clear_all 返回的路径逐个删）+ part/ 全部 .part/.part.meta + 清表
+    // ④finally 复位闸门——新任务（新代际）自然恢复
+    mat.begin_clearing(); // 内部：clearing=true + cancel_all()
+    let drained = mat.wait_inflight_drained(std::time::Duration::from_secs(2)).await;
+    if !drained {
+        mat.end_clearing();
         return Err("缓存正忙（有下载在途），请稍后重试".into());
     }
-    let conn = db.conn();
-    let roots = crate::source::archive::dao::clear_all(&conn).map_err(|e| e.to_string())?; // 返回路径列表改造或先查再清
-    let _ = roots;
-    // 简化实现：clear_all 前先 SELECT cache_abs_path 全量，逐个删文件，再 DELETE
-    Ok(())
+    let result = (|| -> Result<(), String> {
+        let conn = db.conn();
+        let roots = crate::source::archive::dao::clear_all(&conn).map_err(|e| e.to_string())?;
+        for abs in &roots {                       // rev4：实删 ready 文件（原来被丢弃）
+            let _ = std::fs::remove_file(abs);
+        }
+        // part/ 目录整体重建（.part + sidecar + .meta.tmp 一并清除）
+        let root = mat.cache_root();
+        let _ = std::fs::remove_dir_all(root.join("part"));
+        let _ = std::fs::create_dir_all(root.join("part"));
+        Ok(())
+    })();
+    mat.end_clearing();
+    result
 }
 ```
 
@@ -1485,3 +1542,14 @@ M3 审查 3 必须 + 1 建议全采纳：
 3. **启动清理只遍历 `.part` 数据文件**：原实现对 `.part.meta` 枚举会拼出 `.part.part.meta` 判失败而**误删有效 sidecar**（下次启动无法续传）；现仅扩展名恰为 `.part` 者为候选 + sidecar 六字段结构化校验；`.meta.tmp` 原子写残留顺手清。
 4. **清缓存防复活收口**：等待改 `await wait_inflight_drained`（`tokio::time::sleep`——async 命令内 `std::thread::sleep` 阻塞 runtime）；**超时返回忙碌错误不继续删除**；generation 检查点从 2 处扩到 **4 处**（chunk 前 / 二次 stat 前 / 二次 stat 后 rename 前 / 紧贴 upsert 前——rename 后若代际已变删文件不上表）。
 5. **SMB virtualPath 代码与定案统一**：`smbHostOf`+UNC 分支删除，改 `smb://{accountId}/{initialPath}/{rel}` + 防御空串；测试补 SMB 契约断言用例（`smb://3/share/comics/book.cbz`）。任务 3 测试补 `cancel_all_stops_forced_download_without_revive`（强制任务可被 generation 停止且不复活、新任务代际恢复）。
+（修正注：上一行 `#[test]` 应为 `#[tokio::test]`——clearing_gate 用例涉及 async。）
+
+## 附：计划审查修订记录（rev4，2026-08-19）
+
+第六轮 5 必须（模板编译错与竞态）全采纳：
+
+1. **`new()` 补 `cancel_gen`/`clearing` 初始化**（漏字段初始化 = 编译失败）。
+2. **`download` 调用传 `&key`**——形参 `&str` 且后续 `g.remove(&key)` 还要用 key，原 move 传值双重错误。
+3. **Notify 丢唤醒窗口封死**：等待者在**仍持有 inflight 锁时**创建 `notified()` future 并 `enable()` 预注册，再 drop 锁 await——下载任务在「drop 锁 → await 注册」间隙 remove+notify_waiters 的永久挂起消除。
+4. **DB 连接不跨网络 await**：表命中路径先读行 drop conn → await 远端 stat → 命中时重新取连接 touch、失效时重新取连接删行（原实现持 Mutex 连接 await 会锁住整个数据库）。
+5. **清空准入闸门 + 实删**：`clearing: AtomicBool` + `begin_clearing()`（置位+cancel_all）/`end_clearing()`；`ensure_cached` 入口闸门拒绝（"clearing in progress"）——排空后新任务入场写入的竞态封死；`clear_archive_cache` 四段式（闸门→排空→实删 ready 文件+part/ 全清→复位，超时复位闸门返回忙碌错误不动文件）；DAO `clear_all` 改返回 `Vec<String>` 路径（原 `let _ = roots` 只清表不删文件的空洞），测试断言返回值 + 新增闸门拒绝/恢复用例。
