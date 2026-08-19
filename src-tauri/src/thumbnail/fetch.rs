@@ -71,7 +71,10 @@ impl RemoteFetchActor {
         let budget = Arc::new(Semaphore::new(cfg.byte_budget));
         let inflight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let budget_total = cfg.byte_budget as u64;
-        tokio::spawn({
+        // setup() 同步上下文构造：必须走 tauri::async_runtime（裸 tokio::spawn
+        // 在无 reactor 时 panic「no reactor running」——2026-08-19 实机首发撞过；
+        // 与 service.rs scheduler 的 spawn 同款，见其 482 行注释）
+        tauri::async_runtime::spawn({
             let (epoch, permits, budget, inflight) =
                 (epoch.clone(), permits.clone(), budget.clone(), inflight.clone());
             async move {
@@ -204,6 +207,22 @@ mod tests {
                 },
             },
         }
+    }
+
+    /// 回归（2026-08-19 实机首发撞过）：setup() 同步上下文（无 tokio reactor）构造 actor
+    /// 不得 panic——spawn 曾用裸 tokio::spawn，#[tokio::test] 全绿但 app 首启即炸。
+    /// 生产 spawn 必须与 service.rs scheduler 同款走 tauri::async_runtime::spawn。
+    #[test]
+    fn actor_spawn_works_outside_tokio_context() {
+        let _actor = RemoteFetchActor::spawn(FetchActorConfig {
+            concurrency: 1,
+            byte_budget: 1024,
+            fetch: Arc::new(|_d: SourceDescriptor, _p: String| {
+                Box::pin(async move { Ok(Vec::new()) })
+            }),
+            on_fetched: Arc::new(|_p: PreparedRemoteTask, _b: Vec<u8>| {}),
+            on_failed: Arc::new(|_p: &PreparedRemoteTask, _e: &str| {}),
+        });
     }
 
     /// 并发上限 + 未开始任务被 epoch 取消（不调 fetch） + 在途完成结果不进回调链
