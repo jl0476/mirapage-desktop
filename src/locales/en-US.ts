@@ -228,6 +228,10 @@ export default {
     webdav: 'WebDAV',
     testedOk: 'Connection successful',
     testedFail: 'Connection failed',
+    // M2 task 7: tri-state failure classification (frontend routes by backend e.to_string() keyword)
+    testFailNetwork: 'Network error (check address/network)',
+    testFailAuth: 'Authentication failed (check credentials)',
+    testFailConfig: 'Configuration error (missing share or path contract)',
     passwordPlaceholder: 'Enter password',
     passwordKeep: 'Leave blank to keep',
     credentialWarning: 'Credential may remain in OS credential manager, please clean up manually',

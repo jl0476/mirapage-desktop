@@ -230,6 +230,10 @@ export default {
     webdav: 'WebDAV',
     testedOk: '连接成功',
     testedFail: '连接失败',
+    // M2 task 7：test_connection 错误三态分类（前端按后端 e.to_string() 关键字路由）
+    testFailNetwork: '网络错误（检查地址/网络）',
+    testFailAuth: '认证失败（检查用户名/密码）',
+    testFailConfig: '配置错误（缺少 share 或路径契约不符）',
     passwordPlaceholder: '输入密码',
     passwordKeep: '留空保持不变',
     credentialWarning: '凭据可能残留在系统凭据管理器，请手动清理',
