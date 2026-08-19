@@ -2156,6 +2156,25 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
     mockedShortcuts.mockResolvedValue([]);
   });
 
+  it('module3.2.0 打磨: webdav 打开后状态栏路径/面包屑根标签/详情基座用源信息（不再空白）', async () => {
+    mockedGet.mockResolvedValue(null);
+    setActivePinia(createPinia());
+    const fb = useFileBrowserStore();
+    fb.requestOpenLocation(
+      { type: 'webdav', accountId: 7, baseUrl: 'https://dav.example/dav', path: '' },
+      'comics/v1');
+    const wrapper = mountBrowser();
+    await flushPromises();
+
+    // 状态栏中段：displayRoot(baseUrl) + relPath，而非 rootPath(空) 恒空串
+    expect(wrapper.find('[data-test="statusbar-path"]').text())
+      .toContain('https://dav.example/dav/comics/v1');
+    // 面包屑根标签：URL host（非回退 nav.fileBrowser 通用标题）
+    expect(wrapper.find('[data-test="breadcrumb"]').text()).toContain('dav.example');
+    // 详情面板基座同源（root-path prop 用 displayRoot）
+    expect(fb.rootPath).toBeNull(); // 语义锚：远程源确实无本地 root
+  });
+
   it('消费 pending → setRoot + navigate + masonry，且 loadLayout 旧持久化值(list)不覆盖', async () => {
     // loadLayout 的 4 次 getSetting 依序: fb_sort_field / fb_sort_ascending / fb_view_mode / fb_hide_finished
     mockedGet

@@ -106,6 +106,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     return rootPath.value !== null ? toDescriptor(rootPath.value) : null;
   }
 
+  /** 当前是否已有可浏览数据源；远程 descriptor 不依赖本地 rootPath。 */
+  const hasActiveSource = computed(() => activeDescriptor() !== null);
+
   /** module3.2.0: 四类源打开指定目录（跨源浏览跳转/ZIP 进入共用）。
    *  Local → setRoot（rootPath 语义复用）；非 Local → currentDescriptor 置入后走同一取数链。 */
   async function openDescriptorAt(descriptor: SourceDescriptor, relPath: string): Promise<void> {
@@ -553,6 +556,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     up,
     // module3.2.0: 四类源取数/打开
     activeDescriptor,
+    hasActiveSource,
     openDescriptorAt,
     // module3.2.0（spec §3.3）: ZIP 进入/退出
     openArchive,

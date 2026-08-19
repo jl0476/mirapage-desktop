@@ -19,6 +19,11 @@ describe('mediaUrl', () => {
       'http://media.localhost/local/' + encodeURIComponent('F:/comics/vol1/001.jpg'));
   });
 
+  it('local：Windows 反斜杠绝对路径完整编码为单段', () => {
+    expect(mediaUrl(local, String.raw`C:\comics\001.jpg`)).toBe(
+      'http://media.localhost/local/' + encodeURIComponent(String.raw`C:\comics\001.jpg`));
+  });
+
   it('webdav：accountId + relPath 两段', () => {
     expect(mediaUrl(webdav, 'sub/页.jpg')).toBe(
       'http://media.localhost/webdav/7/' + encodeURIComponent('sub/页.jpg'));

@@ -48,7 +48,7 @@ import ICON_DETAILS_SVG from '@/icons/详情列表_view-list.svg?raw';
 import ICON_MASONRY_SVG from '@/icons/瀑布流.svg?raw';
 import { descriptorId } from '@/lib/sourceDescriptor';
 import { PathUtils } from '@/lib/path';
-import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 const { t } = useI18n();
 const router = useRouter();
@@ -73,11 +73,11 @@ const readerActions = useReaderActions({
   // 路径身份修复 (2026-08-12): 删除 `|| fb.rootPath || ''` fallback.
   //   旧实现把根目录合法的 '' 当 falsy 回退成绝对 rootPath, 经 readFromImage →
   //   createBook.absolutePath / recordHistory.relPath 污染 library/history 表.
-  //   现在用 `fb.rootPath === null ? null : fb.lastFetchedPath` 区分:
+  //   现在用活动数据源判断，避免 WebDAV 等远程源因没有本地 rootPath 被误判为未加载:
   //     - null  = 未加载 (readFromImage abort)
   //     - ''    = 根目录已加载 (合法, createBook/history 写 '')
   //     - 'a/b' = 子目录已加载
-  getLastFetchedPath: () => (fb.rootPath === null ? null : fb.lastFetchedPath),
+  getLastFetchedPath: () => (fb.hasActiveSource ? fb.lastFetchedPath : null),
   // ensureBookId 用 lastFetchedPath (entry.path 的基准) + entry.path 拼出 absPath
   getCurrentPath: () => fb.lastFetchedPath,
   // v0.1.0-module3.0.3-hotfix (Bug 2): reader 退出时恢复 currentPath.
@@ -143,9 +143,9 @@ const pendingLikeLookups = new Set<string>();
 // 审查 P1 竞态守卫：toggle 写状态时 bump epoch；in-flight 旧查询返回时 epoch 失配即作废
 const likeLookupEpoch = new Map<string, number>();
 
-function locationFor(entry: MediaEntry): { key: string; descriptor: SourceDescriptorLocal; absPath: string } | null {
-  if (!entry.isDirectory || fb.rootPath === null || fb.lastFetchedPath === null) return null;
-  const descriptor: SourceDescriptorLocal = { type: 'local', rootPath: fb.rootPath };
+function locationFor(entry: MediaEntry): { key: string; descriptor: SourceDescriptor; absPath: string } | null {
+  const descriptor = fb.activeDescriptor();
+  if (!entry.isDirectory || !descriptor || fb.lastFetchedPath === null) return null;
   const absPath = PathUtils.join(fb.lastFetchedPath, entry.path);
   return { key: `${descriptorId(descriptor)}|${absPath}`, descriptor, absPath };
 }
@@ -218,7 +218,7 @@ function onToggleLikeFromCtx(entry: MediaEntry) {
   void onToggleLike(entry);
 }
 
-const canSave = computed(() => fb.rootPath !== null);
+const canSave = computed(() => fb.hasActiveSource);
 const canUp = computed(() => fb.currentPath !== '');
 
 // v0.1.0-module3.0.5-masonry (阶段 E2): 瀑布流视图的 source descriptor
@@ -258,14 +258,14 @@ watch([() => fb.viewMode, hasImages], ([mode, has]) => {
 
 // 切到 masonry 或进新目录时 resolve per-folder 参数
 watch([() => fb.viewMode, () => fb.currentPath], async ([mode]) => {
-  if (mode === 'masonry' && fb.rootPath) {
+  if (mode === 'masonry' && fb.hasActiveSource) {
     masonryParams.value = await masonrySettings.resolve(masonryDescriptor.value, fb.currentPath);
   }
 });
 
 function onMasonryChange(partial: { colCount?: number; hGap?: number; vGap?: number }) {
   masonryParams.value = { ...masonryParams.value, ...partial };
-  if (!fb.rootPath) return;
+  if (!fb.hasActiveSource) return;
   masonrySettings.set(masonryDescriptor.value, fb.currentPath, partial);
 }
 function onMasonryPopupClose() {
@@ -297,12 +297,28 @@ const statusBarItemsText = computed(() => {
   return t('fileBrowser.statusBar.items', { count });
 });
 
-/** 当前路径: rootPath + '/' + currentPath (空时仅 rootPath). 统一 '/' 分隔符 (Windows rootPath 用 \, 项目 path.ts 用 /, 显示统一) */
+/**
+ * module3.2.0 打磨：当前数据源的显示根（四类源派生）。
+ * Local=rootPath；WebDAV=baseUrl；Smb=initialPath（host 在账户表，M2 前不可达）；
+ * Archive=压缩包路径。无源=''。状态栏路径 / 面包屑根标签 / 详情面板 location 基座共用。
+ */
+const displayRoot = computed(() => {
+  const desc = fb.currentDescriptor;
+  if (desc) {
+    switch (desc.type) {
+      case 'local': return desc.rootPath.replace(/\\/g, '/');
+      case 'webdav': return desc.baseUrl;
+      case 'smb': return desc.initialPath;
+      case 'archive': return desc.archivePath.replace(/\\/g, '/');
+    }
+  }
+  return fb.rootPath ? fb.rootPath.replace(/\\/g, '/') : '';
+});
+
+/** 当前路径: displayRoot + '/' + currentPath (空时仅 displayRoot). 统一 '/' 分隔符显示 */
 const displayPath = computed(() => {
-  if (!fb.rootPath) return '';
-  // 统一用 '/' 显示 — Windows / Unix 都接受, 对齐 path.ts crumbs() 实现
-  const root = fb.rootPath.replace(/\\/g, '/');
-  return fb.currentPath ? `${root}/${fb.currentPath}` : root;
+  if (!displayRoot.value) return '';
+  return fb.currentPath ? `${displayRoot.value}/${fb.currentPath}` : displayRoot.value;
 });
 
 const LAST_ROOT_KEY = 'file_browser_last_root';
@@ -483,7 +499,8 @@ function onSaveCancel() {
 }
 
 async function onSaveSubmit() {
-  if (!fb.rootPath) return;
+  const descriptor = fb.activeDescriptor();
+  if (!descriptor) return;
   // 路径身份修复 (2026-08-12): 保存快捷方式前校验 currentPath 必须 source-relative。
   // 防御性（currentPath 已在 navigate 时校验），非法则不写坏 shortcut。
   const relCheck = validateSourceRelativePath(fb.currentPath);
@@ -494,7 +511,6 @@ async function onSaveSubmit() {
   }
   const label = saveLabel.value.trim() || null;
   // v0.1.0-module3.0.5: 存当前所在目录 (descriptor + currentPath 作 relPath), 支持子目录快捷方式
-  const descriptor: SourceDescriptorLocal = { type: 'local', rootPath: fb.rootPath };
   await shortcuts.add(descriptor, relCheck.normalized, label);
   showSaveDialog.value = false;
   saveLabel.value = '';
@@ -570,10 +586,11 @@ function onCtxClose(): void {
 
 /** 右键图片"添加书签"：书 = 当前目录（library 行身份），页码 = 当前排序下该图 0-based 索引。 */
 async function onAddBookmarkFromCtx(entry: MediaEntry): Promise<void> {
-  if (entry.isDirectory || !isImage(entry.name) || fb.rootPath === null || fb.lastFetchedPath === null) return;
+  const descriptor = fb.activeDescriptor();
+  if (entry.isDirectory || !isImage(entry.name) || !descriptor || fb.lastFetchedPath === null) return;
   try {
     const status = await getBookStatus(
-      { type: 'local', rootPath: fb.rootPath },
+      descriptor,
       fb.lastFetchedPath,
     );
     if (!status) {
@@ -597,10 +614,11 @@ const bookmarkJumpShow = ref(false);
 const bookmarkJumpList = ref<BookmarkItem[]>([]);
 
 async function onJumpBookmarkFromCtx(): Promise<void> {
-  if (fb.rootPath === null || fb.lastFetchedPath === null) return;
+  const descriptor = fb.activeDescriptor();
+  if (!descriptor || fb.lastFetchedPath === null) return;
   try {
     const status = await getBookStatus(
-      { type: 'local', rootPath: fb.rootPath },
+      descriptor,
       fb.lastFetchedPath,
     );
     if (!status) {
@@ -630,18 +648,32 @@ function onRegenerateThumbnail(entries: MediaEntry[]) {
 }
 
 
+/**
+ * 面包屑/搜索态根标签（module3.2.0 打磨：四类源派生）。
+ * Local=末段目录名；WebDAV=URL host；Smb=initialPath 首段（share 名）；
+ * Archive=压缩包文件名（点根 = 退出压缩包，spec §3.3）。无源=通用标题。
+ */
 const rootLabel = computed(() => {
-  if (!fb.rootPath) return t('nav.fileBrowser');
-  const parts = fb.rootPath.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? fb.rootPath;
-});
-
-/** module3.2.0（spec §3.3）：ZIP 条目视图首段显示压缩包文件名，点根 = 退出压缩包 */
-const archiveRootLabel = computed(() => {
-  if (!fb.archiveParent || !fb.currentDescriptor || fb.currentDescriptor.type !== 'archive') {
-    return rootLabel.value;
+  if (!fb.hasActiveSource) return t('nav.fileBrowser');
+  const desc = fb.activeDescriptor();
+  if (!desc) return t('nav.fileBrowser');
+  switch (desc.type) {
+    case 'local': {
+      const parts = desc.rootPath.split(/[\\/]/).filter(Boolean);
+      return parts[parts.length - 1] ?? desc.rootPath;
+    }
+    case 'webdav': {
+      try {
+        return new URL(desc.baseUrl).host || desc.baseUrl;
+      } catch {
+        return desc.baseUrl;
+      }
+    }
+    case 'smb':
+      return desc.initialPath.split('/')[0] || desc.initialPath;
+    case 'archive':
+      return desc.archivePath.split(/[\\/]/).filter(Boolean).pop() ?? 'archive';
   }
-  return fb.currentDescriptor.archivePath.split(/[\\/]/).filter(Boolean).pop() ?? 'archive';
 });
 
 async function onBreadcrumbNavigate(path: string) {
@@ -731,7 +763,7 @@ async function onCrossNextVolume() {
   const pathAtRequestStart = fb.lastFetchedPath;
   // module3.2.0：跨源身份比对用 descriptorId（rootPath 仅 Local 存在）
   const rootAtRequestStart = descriptorId(masonryDescriptor.value);
-  if (!pathAtRequestStart || !fb.rootPath) return;
+  if (!pathAtRequestStart || !fb.hasActiveSource) return;
   swapping.value = true;
   try {
     await fileListRef.value?.masonryFlushNow();
@@ -766,7 +798,7 @@ let nextVolumeRequestSeq = 0;
 
 async function prefetchNextVolume(): Promise<void> {
   const path = fb.lastFetchedPath;
-  if (!path || !fb.rootPath) {
+  if (!path || !fb.hasActiveSource) {
     // 审查修复 (2026-08-13): 早返必须关 loading — watcher 切目录时同步置了 true,
     // 若不清 false, 根目录 (lastFetchedPath='') 底栏右段会永远显示「…」
     // (StatusBar nextVolumeLabel loading 优先于 null 判定) 而非「已是最后一卷」。
@@ -814,7 +846,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
   <main class="flex flex-col h-full gap-2 p-4" data-test="file-browser">
     <!-- empty state -->
     <div
-      v-if="fb.rootPath === null"
+      v-if="!fb.hasActiveSource"
       class="flex-1 flex flex-col items-center justify-center gap-5 p-8"
       data-test="empty-state"
     >
@@ -935,7 +967,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
           data-test="btn-next-volume"
           type="button"
           class="tb-btn"
-          :disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"
+          :disabled="swapping || !fb.hasActiveSource || !fb.lastFetchedPath"
           :title="t('fileBrowser.nextVolume')"
           @click="onCrossNextVolume"
         >
@@ -1064,7 +1096,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
       </div>
       <Breadcrumb
         v-else
-        :root-label="archiveRootLabel"
+        :root-label="rootLabel"
         :path="fb.currentPath"
         data-test="breadcrumb"
         @navigate="onBreadcrumbNavigate"
@@ -1114,7 +1146,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
           :selected-paths="fb.selectedPaths"
           :view-mode="fb.viewMode"
           :descriptor="masonryDescriptor"
-          :root-path="fb.rootPath"
+          :root-path="displayRoot"
           :current-path="fb.lastFetchedPath"
           :col-count="masonryParams.colCount"
           :h-gap="masonryParams.hGap"
@@ -1128,7 +1160,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
         <EntryDetailPanel
           v-if="showDetail && selectedEntry && fb.viewMode !== 'details'"
           :entry="selectedEntry"
-          :root-path="fb.rootPath"
+          :root-path="displayRoot"
           class="w-72 shrink-0 overflow-y-auto"
           @read-now="onReadNowClick"
           @toggle-like="onToggleLikeClick"
@@ -1150,7 +1182,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
         :items-text="statusBarItemsText"
         :next-volume-title="nextVolumeTitle"
         :next-volume-loading="nextVolumeLoading"
-        :next-volume-disabled="swapping || !fb.rootPath || !fb.lastFetchedPath"
+        :next-volume-disabled="swapping || !fb.hasActiveSource || !fb.lastFetchedPath"
         @next-volume="onCrossNextVolume"
       />
 

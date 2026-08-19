@@ -7,7 +7,7 @@ import { setActivePinia, createPinia } from 'pinia';
 import { useFileBrowserStore, setScrollToIndexCallback } from './fileBrowser';
 import { listDirectory, getSetting, setSetting } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
-import type { MediaEntry } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
@@ -88,6 +88,18 @@ describe('fileBrowser store — 基础', () => {
     await store.setRoot(null);
     expect(store.entries).toEqual([]);
     expect(store.selectedPaths.size).toBe(0);
+  });
+
+  it('非 Local descriptor 在无本地 root 时仍有活动数据源', async () => {
+    const descriptor: SourceDescriptor = {
+      type: 'webdav', accountId: 7, baseUrl: 'https://dav.example', path: '',
+    };
+    mockedList.mockResolvedValue(makeEntries('page1.jpg'));
+    const store = useFileBrowserStore();
+    await store.openDescriptorAt(descriptor, '');
+    expect(store.rootPath).toBeNull();
+    expect(store.hasActiveSource).toBe(true);
+    expect(mockedList).toHaveBeenCalledWith(descriptor, '');
   });
 
   it('navigate 更新 currentPath', async () => {
