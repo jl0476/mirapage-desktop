@@ -618,11 +618,15 @@ impl Materializer {
             let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&part_path)
                 .map_err(MaterializeError::Io)?;
             use std::io::Write;
+            // 写 sidecar（rev2）：本次下载的身份与快照（已存在且有效则复用）
+            write_sidecar(&part_path, origin, archive_rel_path, &snap)?;
             let epoch_at_start = self.current_epoch();
+            let gen_at_start = self.cancel_generation();
             while offset < snap.size {
-                if self.current_epoch() != epoch_at_start {
-                    // 取消：停止续发（.part 保留）；调用方（预载）静默丢弃，
-                    // 强制路径（ensure_cached 直调）此时不检查 epoch——见下注
+                // 双通道取消（rev2）：generation 检查对强制路径也生效（清空缓存必须能停）；
+                // epoch 检查仅 cancellable（预载）任务
+                if self.cancel_generation() != gen_at_start
+                    || (cancellable && self.current_epoch() != epoch_at_start) {
                     return Err(MaterializeError::Other("cancelled".into()));
                 }
                 let len = CHUNK.min(snap.size - offset);
@@ -636,7 +640,13 @@ impl Materializer {
                 emit_progress(key, archive_rel_path, offset, snap.size, "downloading");
             }
             drop(f);
-            // rename 前二次 stat（spec §4.1 下载期间变更防护）
+            // rename 前检查点 ②③（rev2 双通道取消）：generation 变更（清空缓存）→ 中止且不
+            // rename/upsert（防「复活」）；二次 stat 变更防护（spec §4.1）不变
+            if self.cancel_generation() != gen_at_start {
+                let _ = std::fs::remove_file(&part_path);
+                let _ = std::fs::remove_file(sidecar_path(&part_path));
+                return Err(MaterializeError::Other("cancelled by cache clear".into()));
+            }
             let recheck = src.stat(origin, archive_rel_path).await?;
             if recheck.size != snap.size || recheck.modified_at != snap.modified_at {
                 let _ = std::fs::remove_file(&part_path);
@@ -644,6 +654,7 @@ impl Materializer {
                 return Err(MaterializeError::Other("远端在下载期间持续变更".into()));
             }
             std::fs::rename(&part_path, &final_path).map_err(MaterializeError::Io)?;
+            let _ = std::fs::remove_file(sidecar_path(&part_path)); // ready 后 sidecar 无用
             // 表行（ready）——byte_size 复核 == origin_size
             let byte_size = std::fs::metadata(&final_path).map_err(MaterializeError::Io)?.len();
             if byte_size != snap.size {
@@ -682,8 +693,8 @@ fn emit_progress(cache_key: &str, rel: &str, downloaded: u64, total: u64, phase:
 ```
 
 **两个关键语义（写实现时不得偏移）**：
-- **取消只对预载生效**：`ensure_cached` 直调（强制预存/用户打开）**不**检查 epoch——用户主动打开必须完成。实现：`download` 内 epoch 检查改为参数 `cancellable: bool`（预载 true / 直调 false）；取消返回 `MaterializeError::Other("cancelled")` 由预载层吞掉。
-- **`.part` 与表解耦**：表只存 ready；断点续传只看 `.part` 文件存在与大小（spec §3）。
+- **取消双通道（rev2）**：①窗口 epoch 只取消预载（`cancellable: bool` 参数：预载 true / 直调 false——用户主动打开不受切目录影响）②**内部 cancellation generation**：`AtomicU64` 单调自增 + `cancel_all()` 自增；预载与强制物化在**每个 chunk、rename 前、DB upsert 前**三检查点比对，代际变更即中止——清空缓存后在途任务不得 rename/upsert「复活」缓存；新任务取新代际，预载自然恢复。**禁止 `new_epoch(u64::MAX)` 类终值写法**（前端 epoch 从小数重计数永远追不上，会永久禁用预载）。
+- **sidecar 断点续传（rev2，含重启恢复）**：下载开始写 `part/{cache_key}.part.meta`（JSON：canonical origin descriptor / archive_rel_path / 快照 size+mtime / downloaded，每 chunk 后更新 downloaded）；发现 `.part` 时先验 sidecar（cache_key 重算比对身份 + sidecar 快照 vs 远端 stat 一致）才续传，不一致或 sidecar 缺失/损坏 → 弃 `.part`+sidecar 重来。表只存 ready（不变）；重启后 sidecar 在磁盘上，恢复覆盖应用重启。
 
 `progress_emitter()`：lib.rs 加 `static PROGRESS_EMITTER: OnceLock<AppHandle>` + `pub fn progress_emitter() -> Option<&AppHandle>` + setup 里 set。单测无 app → 静默跳过（分支已写）。
 
@@ -904,9 +915,25 @@ git commit -m "feat(webdav): PROPFIND 条目 is_archive 按扩展名判定（远
 materializer.rs 追加：
 
 ```rust
-/// 启动清理（spec §8）：①part/ 全清（重启后无在途任务）②孤儿缓存文件（表无行）③超容量淘汰
+/// 启动清理（spec §8 rev2）：①part/ 只删 sidecar 缺失/损坏的 .part（**有效 sidecar 保留——
+/// 重启续传依据，原「全删 part/」与断点续传冲突已废弃**；一致性验证推迟到下次
+/// ensure_cached 的 sidecar 快照 vs 远端 stat，启动时零网络请求）②孤儿缓存文件（表无行）
+/// ③超容量淘汰
 pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) {
-    let _ = std::fs::remove_dir_all(cache_root.join("part"));
+    if let Ok(rd) = std::fs::read_dir(cache_root.join("part")) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let sidecar = p.with_extension("part.meta"); // {key}.part → 同目录 {key}.part.meta
+            let sidecar_ok = std::fs::read_to_string(&sidecar)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                .is_some();
+            if !sidecar_ok {
+                let _ = std::fs::remove_file(&p); // 无法安全续传的孤儿
+                let _ = std::fs::remove_file(&sidecar);
+            }
+        }
+    }
     let _ = std::fs::create_dir_all(cache_root.join("part"));
     let conn = db.conn();
     let known: std::collections::HashSet<String> = {
@@ -1212,8 +1239,14 @@ pub async fn clear_archive_cache(
     db: tauri::State<'_, crate::db::Db>,
     mat: tauri::State<'_, std::sync::Arc<crate::source::archive::materializer::Materializer>>,
 ) -> Result<(), String> {
-    // 取消在途（epoch 推进）→ 删文件 → 清表
-    mat.new_epoch(u64::MAX);
+    // rev2 清空流程：cancel_all()（内部 generation 单调自增——禁 u64::MAX 终值，前端
+    // epoch 小数重计数永远追不上会永久禁用预载）→ 等待在途任务退出（in-flight 表空，
+    // 超时 2s 兜底；三检查点保证在途不再 rename/upsert「复活」缓存）→ 删文件 → 清表
+    mat.cancel_all();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !mat.inflight_empty() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     let conn = db.conn();
     let roots = crate::source::archive::dao::clear_all(&conn).map_err(|e| e.to_string())?; // 返回路径列表改造或先查再清
     let _ = roots;
@@ -1265,7 +1298,7 @@ cd src-tauri && cargo test
 1. WebDAV 上的 CBZ：双击 →「正在准备压缩包」→ 条目视图 → 三模式阅读
 2. 二次打开同包秒开（devtools network 无请求）
 3. 远端换文件（改 size/mtime）→ 自动失效重下
-4. 断点续传：下载中断网 → 恢复 → `.part` 续传（devtools 看 Range offset ≠ 0）
+4. 断点续传（rev2 双场景）：断网恢复 + **下载中途退出应用重启**，均从 `.part`+sidecar 续传不重头（devtools 看请求 offset ≠ 0；重启场景 sidecar 快照与远端 stat 一致才续）
 5. 超容量 LRU 淘汰 + 手动清空
 6. 远程 ZIP masonry 缩略图 + 原图
 7. （NAS）SMB 上的 CBZ 复跑 1-6
@@ -1289,4 +1322,13 @@ git push origin main --tags
 - **migration 勘误**：spec 原「015」已勘误为 016（015 被 module3.1.1 占用，计划期复核确认）。
 - **占位符**：任务 3/4 测试中标注 `...` 的用例体均给出首用例完整模板与断言意图（执行者补全后才跑红——已写明）；无「待定/TODO」类步骤。
 - **类型一致性**：`NewCacheRow/CacheRow`（任务 1）、`cache_key/is_stale/MaterializeError/Materializer/emit_progress`（任务 2/3）、`Materialize` trait（任务 4 定义，factory 注入）、`startup_cleanup`（任务 6）、`ArchivePrefetcher`（任务 8）、命令（任务 9）——链路一致。
-- **有意偏差（记录在案）**：① spec §8 五项设置砍到 3 项 UI（窗口/并发常量化——spec 自身已批准此偏差）② SMB 虚拟 archivePath 用 `smb://{accountId}/...` 可读形态而非真 UNC（避免 host 查表；虚拟路径零解析消费方，任务 7 定案）③ `clear_all` 返回路径列表（删文件需要）。
+- **有意偏差（记录在案）**：① spec §8 五项设置砍到 3 项 UI（窗口/并发常量化——spec 自身已批准此偏差）② ~~SMB 虚拟 archivePath 与 spec UNC 不一致~~ **rev2 已统一**：spec/计划同为 `smb://{accountId}/...` 可读虚拟形态（非真 UNC；避免 host 查表，虚拟路径零解析消费方）③ `clear_all` 返回路径列表（删文件需要）。
+
+## 附：计划审查修订记录（rev2，2026-08-19）
+
+M3 审查 3 必须 + 1 建议全采纳：
+
+1. **migration 统一 016**：spec §3 标题漏改（正文两处已 016）——「按标题落地会撞 position_kind」；spec §3 标题/§10 DAO 用例断言/计划引用全部统一 016。
+2. **sidecar 断点续传（含重启恢复）**：原启动清理 `remove_dir_all(part/)` 与续传承诺直接冲突（重启必从 0 重下）。改为 `.part` + `.part.meta` sidecar（canonical origin/rel/快照 size+mtime/downloaded，每 chunk 更新）；续传前验 sidecar 身份+快照一致性；启动清理只删 sidecar 缺失/损坏的孤儿（保留有效 `.part`，启动零网络请求）；验收 4 扩为断网+重启双场景。
+3. **cancellation generation 取代 `new_epoch(u64::MAX)`**：终值 epoch 前端小数计数永远追不上（永久禁用预载）+ 强制物化不受 epoch 控制会 rename/upsert「复活」缓存。改 Materializer 内部单调 `AtomicU64` generation：`cancel_all()` 自增；预载与强制物化在每 chunk/rename 前/upsert 前三检查点比对；`clear_archive_cache` = cancel_all → 等 in-flight 空（2s 兜底）→ 删文件+清表；新任务取新代际自然恢复。
+4. **SMB 虚拟路径统一**：spec 的 UNC 表述与计划 `smb://{accountId}/...` 定案统一（见偏差记录②）。

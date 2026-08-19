@@ -8,7 +8,7 @@
 
 ## 0. 背景与事实基线（M1 后）
 
-1. **`ArchiveMediaSource` 本地路径直开**：list/read/stat 直接 `tokio::fs::read(archive_path)`；`origin: Some(_)` 时 archive_path 是虚拟 URL（WebDAV=`{baseUrl}/{relPath}`、SMB=UNC 形态）→ fs::read 必失败——远程包当前**不可达**（M1 有意留下，本设计接入物化器）。
+1. **`ArchiveMediaSource` 本地路径直开**：list/read/stat 直接 `tokio::fs::read(archive_path)`；`origin: Some(_)` 时 archive_path 是虚拟路径（WebDAV=`{baseUrl}/{relPath}`、**SMB=`smb://{accountId}/{initialPath}/{rel}` 可读虚拟形态**（rev2 与计划统一：非真 UNC——SMB descriptor 不含 host，虚拟路径零解析消费方，仅展示与身份用））→ fs::read 必失败——远程包当前**不可达**（M1 有意留下，本设计接入物化器）。
 2. **URL/重建链已通**：`media://archive/webdav|smb/...` 形态、`rebuild_descriptor` 构造 `origin: Some(Box<源 descriptor>)` + `origin_entry_path`/`archive_rel_path` 均已交付。
 3. **Range 强契约就绪**：WebDAV 206 Content-Range offset 匹配 + 等长校验（评审轮收紧）——分块下载拼 `.part` 的正确性前提满足。
 4. **缩略图链路已通用**：取源 actor 按 descriptor 经 `factory.resolve().read_file()`——远程 Archive 缩略图 = `ArchiveMediaSource.read_file` 接 `ensure_cached` 后自动生效（零新链路）。
@@ -50,7 +50,7 @@ lib.rs 启动构造顺序：
 
 **与 M2 的关系**：Materializer 的 smb 源 Arc 在 M2 交付前以现有 stub `SmbMediaSource` 注入（构造期存在即可，调用必 NotImplemented → 502）——M3 的 WebDAV 路径可独立开发验收，不被 M2 阻塞。
 
-## 3. `archive_cache` 表（migration 015）
+## 3. `archive_cache` 表（migration 016，rev2 勘误统一）
 
 ```sql
 CREATE TABLE archive_cache (
@@ -105,7 +105,8 @@ cache_key = sha256(canonical(origin) + '\0' + archive_rel_path)
        → upsert 表行（ready）→ notify 等待者 → 返回
 ```
 
-- **断点续传**：下载开始时发现 `.part` 已存在 → 先 stat 远端：远端 size < `.part` size（文件已换/截断）→ 弃 `.part` 重来；否则从 `.part` 当前偏移续传
+- **断点续传（rev2 含重启恢复）**：下载开始时写 **sidecar 元数据** `part/{cache_key}.part.meta`（JSON：canonical origin descriptor、archive_rel_path、快照 size/mtime、downloaded 字节数——每个 chunk 后更新 downloaded）。发现 `.part` 已存在时：读 sidecar → 与 `{cache_key}` 重算比对身份一致 → stat 远端与 sidecar 快照比对（size/mtime 一致才续传；不一致或 sidecar 缺失/损坏 → 弃 `.part` + sidecar 重来）。重启后 sidecar 在磁盘上，**恢复覆盖应用重启**（非仅同进程断网恢复）
+- **取消双通道（rev2）**：①窗口 epoch（前端切目录）只取消预载任务（强制路径不受影响）②**内部单调 cancellation generation**——`cancel_all()` 自增；预载与强制物化在**每个 chunk、rename 前、DB upsert 前**三检查点比对，代际变更即中止（防清空后缓存「复活」）；新任务取新代际，预载自然恢复。`clear_archive_cache` 流程：`cancel_all()` → 等待在途任务退出（in-flight 表空，超时 2s 兜底）→ 删文件+清表
 - **失败语义**：下载中途网络错误 → `.part` 保留（供续传）+ 上抛 `MaterializeError::Network`（media:// 层 502；UI 走重试）
 - **epoch 取消**：预载任务被取消（切目录）→ 停止发起新 chunk；已写 `.part` 保留
 
@@ -154,7 +155,7 @@ PROPFIND 解析处按 href 末段扩展名跑 `ArchiveFormat::from_extension` �
 - `archiveParent` 形态扩展：`{ descriptor: SourceDescriptor; relPath: string } | null`（进入前数据源，Local 或远程通用）
 - `openArchive(entry)`：
   - 当前源 Local → 现状（`archivePath` = root/dir/name 绝对路径，origin None）
-  - 当前源 WebDAV/SMB → 构造 `Archive { archivePath: 虚拟 URL/UNC, entryPrefix: '', format, origin: Some(当前 descriptor), originEntryPath: joinRel(currentPath, name), archiveRelPath: 同左 }` → `currentDescriptor` 置入 → `fetch('')`（首次 fetch 走 ensure_cached → 下载整包 → loading 态覆盖）
+  - 当前源 WebDAV/SMB → 构造 `Archive { archivePath: 虚拟路径（WebDAV=URL / SMB=`smb://{accountId}/...`，rev2 统一）, entryPrefix: '', format, origin: Some(当前 descriptor), originEntryPath: joinRel(currentPath, name), archiveRelPath: 同左 }` → `currentDescriptor` 置入 → `fetch('')`（首次 fetch 走 ensure_cached → 下载整包 → loading 态覆盖）
 - `exitArchive`：恢复 `archiveParent.descriptor`（`openDescriptorAt(parent.descriptor, parent.relPath)` 复用）
 - `up()` 顶层退出 / 面包屑 ZIP 名点击退出：同款恢复（现状逻辑，恢复目标从 rootPath 换 descriptor）
 - **「正在准备压缩包」占位**：`fetch` 期间现有 `fb.loading` 转圈文案即可；`archive://progress` 事件监听后文案细化（`fileBrowser.archivePreparing` i18n，显示 downloaded/total MB）——首期 indeterminate 文案 + 事件数据留增强
@@ -181,8 +182,8 @@ PROPFIND 解析处按 href 末段扩展名跑 `ArchiveFormat::from_extension` �
 
 - **位置**：`app_cache_dir()/archive-cache`（与 thumbnail 缓存分开目录分开设置，母 spec §5.4）
 - **LRU**：超容量（`archive_cache_max_mb`，默认 2048）按 `last_accessed_at` 淘汰至 80% 水位——复用 `evict_to_limit` 模式（batch 256 + protected 跳过在途 key，与 thumbnail_cache 同款）
-- **启动清理**：①删 `part/` 下孤儿 `.part`（无对应表行或重启遗留）②孤儿缓存文件（表无行）③超容量淘汰
-- **手动清空**：Settings maintenance 区按钮（取消在途 → 删文件 → 清表 → toast 结果；模式同 `clear_thumbnail_cache`）
+- **启动清理（rev2 重定义）**：①**保留带有效 sidecar 的 `.part`**（重启续传的依据——原「全删 part/」与断点续传承诺冲突，废弃）；只删 sidecar 缺失/损坏/JSON 解析失败的 `.part`（无法安全续传）②孤儿缓存文件（表无行）③超容量淘汰。续传的一致性验证推迟到下次 `ensure_cached`（sidecar 快照 vs 远端 stat），启动时**不做网络请求**
+- **手动清空**：Settings maintenance 区按钮（`cancel_all()` 自增 generation → 等待在途退出 → 删 `.part`+sidecar+ready 文件 → 清表 → toast 结果；模式同 `clear_thumbnail_cache`。**禁用 `new_epoch(u64::MAX)` 类终值写法**——前端 epoch 从小数重新计数永远追不上，会永久禁用预载；rev2 改内部 generation 单调自增）
 - **Settings remote section**（母 spec §5.4 五项）：`remote_archive_prefetch_enabled`（BooleanRow）/ `archive_cache_max_mb`（数值 Row，钳 512–32768）/ `archive_prefetch_window`（首期常量，设置项做只读展示或隐藏——**砍到 3 项 UI**，YAGNI：窗口与并发常量起步，不进设置页；母 spec 5 项中 2 项降级为代码常量，偏差记录在案）+ 清空按钮 + 缓存用量展示
 
 ## 9. i18n（双语）
@@ -209,7 +210,7 @@ settings.remote.clearConfirm: 确认清空压缩包缓存（{count} 项 / {size}
 1. 打开 WebDAV 上的 CBZ：首次「正在准备压缩包」→ 下载完成 → 条目视图 → 阅读（三模式）
 2. 二次打开同包：秒开（devtools 确认无网络请求——LRU/表命中）
 3. 远端压缩包更新（size 或 mtime 变）：缓存失效自动重下
-4. 断点续传：下载中途断网 → 恢复 → 从 `.part` 续传不重头（devtools 看请求 offset）
+4. 断点续传：下载中途断网 → 恢复，**以及下载中途退出应用 → 重启**，均从 `.part`+sidecar 续传不重头（devtools 看请求 offset ≠ 0；重启场景 sidecar 快照与远端 stat 一致）
 5. LRU：超容量淘汰最旧；手动清空按钮生效（文件 + 表 + 用量展示归零）
 6. 远程 ZIP 的 masonry 缩略图 + 原图打开（取源链 ensure_cached 复用）
 7. （M2 后）SMB 上的 CBZ 同 1-6 复验
