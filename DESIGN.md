@@ -1591,7 +1591,7 @@ export function useReaderInput() {
 | 项 | 现状 | 说明 | 量级 |
 |---|---|---|---|
 | RAR / 7z 压缩包（Phase 3 收尾） | 🟡 ZIP 已通 | `unrar` / `sevenz-rust` 依赖已加未启，`ArchiveMediaSource` 实装两种格式；7z 末尾索引需整包读（先落 cacheDir 再读，见 §3 预研）；CBR 依赖 RAR | 中 |
-| SMB 协议层（Phase 7） | ❌ stub | `smb_impl.rs` 多处 `NotImplemented`（`smb = "0.11"` 已加未用）；还差 accounts CRUD + keyring 凭据 + `test_connection` + Settings 账户页接线 | 大 |
+| SMB 协议层（Phase 7） | ❌ stub | `smb_impl.rs` 多处 `NotImplemented`（`smb = "0.11"` 已加未用）；accounts CRUD + keyring 凭据 + `test_connection` 已随 module3.2.0 M1 交付（media:// 统一协议见 `docs/superpowers/specs/2026-08-18-smb-remote-media-design.md`），剩 `SmbMediaSource` 5 方法实装（M2）与 spike | 大 |
 | Phase 9 分发 | 🟡 Windows CI 已通 | 代码签名 / macOS `.dmg`（需 mac 环境 + notarization）/ Linux AppImage / 自动更新（`updater` 插件占位） | 中，依赖环境 |
 
 ### 16.2 遗留打磨项（文档点名「留后续」）
