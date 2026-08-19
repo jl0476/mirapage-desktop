@@ -21,7 +21,7 @@ import { getSetting, setSetting } from '@/lib/tauri';
 import { useDirectorySortStore } from '@/stores/directorySort';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { validateSourceRelativePath } from '@/lib/relativePath';
-import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
+import type { ArchiveFormat, MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 export type FileBrowserError =
   | { kind: 'notFound'; message: string }
@@ -78,6 +78,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   // ReaderView 退出时调 restoreNavigationContext, FileBrowser.onMounted 优先恢复.
   // 取代之前的「每次 onMounted 都 setRoot(LAST_ROOT_KEY) 抹掉 currentPath」反模式.
   const savedNavigationContext = ref<{ rootPath: string; currentPath: string } | null>(null);
+  // module3.2.0（spec §3.3）：ZIP 条目视图的进入前上下文（exitArchive 恢复）
+  const archiveParent = ref<{ rootPath: string; path: string } | null>(null);
   const entries = ref<MediaEntry[]>([]);
   const loading = ref(false);
   const error = ref<FileBrowserError | null>(null);
@@ -227,7 +229,13 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   async function up(): Promise<void> {
-    if (currentPath.value === '') return;
+    if (currentPath.value === '') {
+      // module3.2.0（spec §3.3）：ZIP 条目视图在顶层再向上 = 退出压缩包
+      if (archiveParent.value) {
+        await exitArchive();
+      }
+      return;
+    }
     const parts = currentPath.value.split(/[\\/]/).filter(Boolean);
     parts.pop();
     const parent = parts.join('/');
@@ -236,6 +244,45 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     if (normParent === null) return;
     currentPath.value = normParent;
     await fetch(normParent);
+  }
+
+  // ─── module3.2.0（spec §3.3）: 本地 ZIP 进入/退出 ───
+
+  /** 打开本地压缩包：进入 ZIP 条目视图（archivePath 必须绝对路径，rev2 §3.3） */
+  async function openArchive(entry: MediaEntry): Promise<void> {
+    const root = rootPath.value ?? '';
+    const dir = currentPath.value;
+    // entry.path 只是相对当前目录的文件名（local.rs:97），join root+dir+name 拼绝对路径
+    const abs = [root, dir, entry.name]
+      .filter((s) => s.length > 0)
+      .join('/')
+      .replace(/\\/g, '/');
+    archiveParent.value = { rootPath: root, path: dir };
+    currentDescriptor.value = {
+      type: 'archive', archivePath: abs, entryPrefix: '',
+      format: archiveFormatOf(entry.name),
+    };
+    currentPath.value = '';
+    searchQuery.value = '';
+    await fetch('');
+  }
+
+  /** 退出压缩包：恢复进入前目录 */
+  async function exitArchive(): Promise<void> {
+    const parent = archiveParent.value;
+    archiveParent.value = null;
+    currentDescriptor.value = null; // 回 activeDescriptor 的 rootPath 兜底（Local）
+    if (parent) {
+      rootPath.value = parent.rootPath;
+      await navigate(parent.path);
+    }
+  }
+
+  function archiveFormatOf(name: string): ArchiveFormat {
+    const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : 'zip';
+    return (['cbz', 'cbr', 'zip', 'rar', '7z'] as const).includes(ext as ArchiveFormat)
+      ? ext as ArchiveFormat
+      : 'zip';
   }
 
   // ─── v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复 ───
@@ -486,6 +533,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     currentPath,
     lastFetchedPath,
     currentDescriptor,
+    archiveParent,
     entries,
     loading,
     error,
@@ -506,6 +554,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     // module3.2.0: 四类源取数/打开
     activeDescriptor,
     openDescriptorAt,
+    // module3.2.0（spec §3.3）: ZIP 进入/退出
+    openArchive,
+    exitArchive,
     // v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复
     saveNavigationContext,
     restoreNavigationContext,

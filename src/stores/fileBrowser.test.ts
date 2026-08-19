@@ -847,4 +847,44 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     expect(store.currentDescriptor).toBeNull();
     expect(mockedList).toHaveBeenLastCalledWith({ type: 'local', rootPath: 'C:/comics' }, '');
   });
+
+  // ─── module3.2.0（spec §3.3）: ZIP 进入/退出 ───
+
+  it('openArchive：构造 Archive descriptor（绝对路径）并保存返回上下文', async () => {
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    const store = useFileBrowserStore();
+    await store.setRoot('F:/comics');
+    await store.navigate('sub');
+    const entry = makeEntry('book.cbz', { isArchive: true });
+    await store.openArchive(entry);
+    expect(store.archiveParent).toEqual({ rootPath: 'F:/comics', path: 'sub' });
+    expect(store.currentDescriptor?.type).toBe('archive');
+    expect((store.currentDescriptor as { archivePath: string }).archivePath).toBe('F:/comics/sub/book.cbz'); // 绝对路径（rev2 §3.3）
+    expect(mockedList).toHaveBeenLastCalledWith(store.currentDescriptor, '');
+  });
+
+  it('exitArchive：恢复进入前目录', async () => {
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    const store = useFileBrowserStore();
+    await store.setRoot('F:/comics');
+    await store.navigate('sub');
+    await store.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    await store.exitArchive();
+    expect(store.archiveParent).toBeNull();
+    expect(store.currentDescriptor).toBeNull();
+    expect(store.rootPath).toBe('F:/comics');
+    expect(store.currentPath).toBe('sub');
+    expect(mockedList).toHaveBeenLastCalledWith({ type: 'local', rootPath: 'F:/comics' }, 'sub');
+  });
+
+  it('ZIP 内 navigate 到顶层再 up() 触发 exitArchive', async () => {
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    const store = useFileBrowserStore();
+    await store.setRoot('F:/comics');
+    await store.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    expect(store.currentPath).toBe('');
+    await store.up();
+    expect(store.archiveParent).toBeNull(); // 已退出
+    expect(mockedList).toHaveBeenLastCalledWith({ type: 'local', rootPath: 'F:/comics' }, '');
+  });
 });

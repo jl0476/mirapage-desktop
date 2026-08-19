@@ -539,7 +539,13 @@ async function onEntryOpen(entry: MediaEntry) {
     await readerActions.readFromImage(entry);
     return;
   }
-  // 非图片非目录 (e.g. .cbz archive): 双击 no-op
+  if (entry.isArchive) {
+    // module3.2.0（spec §3.3）：双击 CBZ/ZIP 进入条目视图
+    log('[FileBrowser] onEntryOpen: archive → openArchive');
+    await fb.openArchive(entry);
+    return;
+  }
+  // 非图片非目录非压缩包: 双击 no-op
   log('[FileBrowser] double-click on non-image file is no-op');
 }
 
@@ -625,15 +631,28 @@ function onRegenerateThumbnail(entries: MediaEntry[]) {
 }
 
 
-async function onBreadcrumbNavigate(path: string) {
-  await fb.navigate(path);
-}
-
 const rootLabel = computed(() => {
   if (!fb.rootPath) return t('nav.fileBrowser');
   const parts = fb.rootPath.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? fb.rootPath;
 });
+
+/** module3.2.0（spec §3.3）：ZIP 条目视图首段显示压缩包文件名，点根 = 退出压缩包 */
+const archiveRootLabel = computed(() => {
+  if (!fb.archiveParent || !fb.currentDescriptor || fb.currentDescriptor.type !== 'archive') {
+    return rootLabel.value;
+  }
+  return fb.currentDescriptor.archivePath.split(/[\\/]/).filter(Boolean).pop() ?? 'archive';
+});
+
+async function onBreadcrumbNavigate(path: string) {
+  if (path === '' && fb.archiveParent) {
+    // ZIP 面包屑点到根段 = 退出压缩包（up() 的同款语义）
+    await fb.exitArchive();
+    return;
+  }
+  await fb.navigate(path);
+}
 
 /* ─── Lucide SVG 图标路径 ─── */
 const ICON_EYE = 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z';
@@ -1046,7 +1065,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
       </div>
       <Breadcrumb
         v-else
-        :root-label="rootLabel"
+        :root-label="archiveRootLabel"
         :path="fb.currentPath"
         data-test="breadcrumb"
         @navigate="onBreadcrumbNavigate"
