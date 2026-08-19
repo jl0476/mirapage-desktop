@@ -163,12 +163,42 @@ pub fn delete_account_impl(
     Ok(DeleteAccountResult { warning })
 }
 
-/// 测试连接(Phase 7-8 stub:smb-rs / reqwest 实际握手)
+/// 测试连接：webdav 真握手（factory 分发）；smb M1 明确报错（module 3.3.0 交付）
 #[tauri::command]
-pub fn test_connection(_id: i64) -> Result<bool, String> {
-    // TODO(Phase 7): smb-rs connect
-    // TODO(Phase 8): reqwest PROPFIND
-    Ok(false)
+pub async fn test_connection(
+    id: i64,
+    db: tauri::State<'_, crate::db::Db>,
+    factory: tauri::State<'_, crate::source::MediaSourceFactory>,
+) -> Result<bool, String> {
+    test_connection_impl(&db, &factory, id).await
+}
+
+pub async fn test_connection_impl(
+    db: &crate::db::Db,
+    factory: &crate::source::MediaSourceFactory,
+    id: i64,
+) -> Result<bool, String> {
+    let (kind, host) = {
+        let conn = db.conn();
+        let (kind, host): (String, Option<String>) = conn
+            .query_row("SELECT type, host FROM account WHERE id = ?1", rusqlite::params![id], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .map_err(|e| format!("账户不存在: {e}"))?;
+        (kind, host)
+    };
+    match kind.as_str() {
+        "webdav" => {
+            let base_url = host.clone().ok_or("webdav 账户缺少 host（应为完整 base URL）")?;
+            let d = crate::source::descriptor::SourceDescriptor::WebDav {
+                account_id: id, base_url, path: String::new(),
+            };
+            factory.resolve(&d).test(&d).await
+                .map(|_| true).map_err(|e| e.to_string())
+        }
+        "smb" => Err("SMB 尚未实装（module 3.3.0 交付）".into()),
+        _ => Err(format!("未知账户类型 {kind}")),
+    }
 }
 
 #[cfg(test)]
@@ -272,5 +302,18 @@ mod tests {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap();
         assert_eq!((name.as_str(), host.as_deref(), user.as_deref()),
                    ("old-name", Some("https://old"), Some("old-user"))); // 旧值完整回滚
+    }
+
+    #[tokio::test]
+    async fn test_connection_smb_not_implemented_yet() {
+        let (db, store) = setup();
+        let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
+            id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
+            port: Some(445), share: Some("media".into()), username: None, password: None }).unwrap();
+        let factory = crate::source::MediaSourceFactory::new(
+            db.clone(),
+            std::sync::Arc::new(crate::credentials::MemoryStore::new()),
+        );
+        assert!(test_connection_impl(&db, &factory, id).await.is_err()); // M1：SMB 未实装，明确报错而非假 true
     }
 }
