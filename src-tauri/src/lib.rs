@@ -11,6 +11,7 @@ mod credentials;
 mod db;
 mod log;
 mod maintenance;
+mod media_protocol;
 mod source;
 pub mod thumbnail;
 
