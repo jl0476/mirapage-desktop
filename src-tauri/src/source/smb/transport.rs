@@ -2,6 +2,7 @@
 //! 生产实现在 real_transport.rs（包 smb crate）；测试用 mock_transport.rs。
 
 /// SMB 传输错误。is_connection_level() 决定连接管理器的重连策略（spec §3）。
+// task 3 added: MockSmbTransport::take_injected needs Clone for fail_all.clone() (持续注入语义)
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum TransportError {
     #[error("连接已断开")]

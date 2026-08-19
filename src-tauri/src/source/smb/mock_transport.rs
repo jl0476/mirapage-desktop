@@ -167,7 +167,7 @@ mod tests {
         let m = MockSmbTransport::new();
         m.set_fail_all(TransportError::Disconnected);
         assert!(m.list("x").await.is_err());
-        // connect 后 fail 被触发过 disconnect 观察计数（重连测试用）
+        // 注入 Disconnected 后 list 触发 disconnect_signals+1（重连测试观察点）
         assert_eq!(m.disconnect_signals(), 1);
     }
 }
