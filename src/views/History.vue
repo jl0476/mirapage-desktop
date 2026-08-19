@@ -54,11 +54,8 @@ onMounted(() => {
 
 async function openEntry(entry: BrowseHistoryEntry) {
   const sd = entry.sourceDescriptor;
-  if (sd.type !== 'local') return; // Phase 1 仅支持 Local
-  await fb.setRoot(sd.rootPath);
-  if (entry.relPath) {
-    await fb.navigate(entry.relPath);
-  }
+  // module3.2.0：四类源统一 descriptor 打开（Local 内部转 setRoot，远程置 currentDescriptor）
+  await fb.openDescriptorAt(sd, entry.relPath ?? '');
   await router.push({ name: 'home' });
 }
 

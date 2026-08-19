@@ -391,18 +391,15 @@ watch(
 );
 
 // v0.1.0-module3.0.10: pendingOpenLocation 消费逻辑（likes「浏览」跳转）。
-// 防御模式对齐 openShortcut：relPath 校验非法则 log + 放弃不导航；
-// setRoot 无条件调（同 openShortcut：避免同根不同 relPath 切换时 currentPath 残留）。
-async function openPendingLocation(p: { rootPath: string; relPath: string }): Promise<void> {
+// module3.2.0：descriptor 形态——Local 内部转 setRoot；远程源置 currentDescriptor
+// 后走统一取数链（openDescriptorAt 单点）。无图目录由 watch([viewMode, hasImages]) 守卫回落 details。
+async function openPendingLocation(p: { descriptor: SourceDescriptor; relPath: string }): Promise<void> {
   const relCheck = validateSourceRelativePath(p.relPath);
   if (!relCheck.ok) {
     log('[FileBrowser] pendingOpenLocation relPath 越界, 拒绝打开', { relPath: p.relPath, reason: relCheck.reason });
     return;
   }
-  await fb.setRoot(p.rootPath);
-  if (relCheck.normalized) {
-    await fb.navigate(relCheck.normalized);
-  }
+  await fb.openDescriptorAt(p.descriptor, relCheck.normalized);
   // 无图目录由 watch([viewMode, hasImages]) 守卫自动回落 details
   fb.setViewMode('masonry');
 }
@@ -428,11 +425,7 @@ async function openShortcut(id: number): Promise<void> {
     shortcuts.clearActive();
     return;
   }
-  if (desc.type !== 'local') {
-    // TODO Phase 7-8: SMB/WebDAV descriptor 打开
-    return;
-  }
-  // 校验 relPath（空串=根目录 合法；绝对/.. 非法拒绝）。
+  // module3.2.0: 四类源统一打开（3.0.5 schema 本就跨源，此处解开 Local-only 打开门）
   const relCheck = validateSourceRelativePath(sc.relPath);
   if (!relCheck.ok) {
     log('[FileBrowser] shortcut relPath 越界, 拒绝打开', { id, relPath: sc.relPath, reason: relCheck.reason });
@@ -440,12 +433,7 @@ async function openShortcut(id: number): Promise<void> {
     return;
   }
   lastOpenedShortcutId = id;
-  // 注意: setRoot 无条件调 (不做 rootPath 相等守卫) — 否则同根不同 relPath 的 shortcut
-  // 切换时 setRoot 被跳过, currentPath 残留旧路径, 列表不切到正确目录.
-  await fb.setRoot(desc.rootPath);
-  if (relCheck.normalized) {
-    await fb.navigate(relCheck.normalized);
-  }
+  await fb.openDescriptorAt(desc, relCheck.normalized);
 }
 
 watch(

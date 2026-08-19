@@ -2165,7 +2165,7 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
       .mockResolvedValueOnce(null);
     setActivePinia(createPinia());
     const fb = useFileBrowserStore();
-    fb.requestOpenLocation('C:/comics', 'VOL.11');
+    fb.requestOpenLocation({ type: 'local', rootPath: 'C:/comics' }, 'VOL.11');
     mountBrowser();
     await flushPromises();
 
@@ -2179,7 +2179,7 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
   it("relPath=''（root 级书）→ 仅 setRoot + masonry，不 navigate", async () => {
     setActivePinia(createPinia());
     const fb = useFileBrowserStore();
-    fb.requestOpenLocation('C:/comics', '');
+    fb.requestOpenLocation({ type: 'local', rootPath: 'C:/comics' }, '');
     mountBrowser();
     await flushPromises();
 
@@ -2191,7 +2191,7 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
   it('relPath 非法 → 不 setRoot 不 navigate，viewMode 保持 details', async () => {
     setActivePinia(createPinia());
     const fb = useFileBrowserStore();
-    fb.requestOpenLocation('C:/comics', '..\\evil');
+    fb.requestOpenLocation({ type: 'local', rootPath: 'C:/comics' }, '..\\evil');
     mountBrowser();
     await flushPromises();
 
@@ -2204,7 +2204,7 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
     const fb = useFileBrowserStore();
     await fb.setRoot('C:/old');
     fb.saveNavigationContext();
-    fb.requestOpenLocation('C:/comics', 'VOL.11');
+    fb.requestOpenLocation({ type: 'local', rootPath: 'C:/comics' }, 'VOL.11');
     mountBrowser();
     await flushPromises();
 
@@ -2219,7 +2219,7 @@ describe('FileBrowser — pendingOpenLocation 消费（likes 浏览跳转）', (
     const shortcuts = useShortcutsStore();
     const fb = useFileBrowserStore();
     shortcuts.setActive(3);
-    fb.requestOpenLocation('C:/comics', 'VOL.11');
+    fb.requestOpenLocation({ type: 'local', rootPath: 'C:/comics' }, 'VOL.11');
 
     const w1 = mountBrowser();
     await flushPromises();

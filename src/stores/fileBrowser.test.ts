@@ -776,10 +776,11 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     vi.clearAllMocks();
   });
 
-  it('requestOpenLocation 写入 → consume 返回并清空（一次性）', () => {
+  it('requestOpenLocation 写入 → consume 返回并清空（一次性，descriptor 形态）', () => {
     const store = useFileBrowserStore();
-    store.requestOpenLocation('C:/comics', 'VOL.11');
-    expect(store.consumePendingOpenLocation()).toEqual({ rootPath: 'C:/comics', relPath: 'VOL.11' });
+    const desc = { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' } as const;
+    store.requestOpenLocation(desc, 'VOL.11');
+    expect(store.consumePendingOpenLocation()).toEqual({ descriptor: desc, relPath: 'VOL.11' });
     expect(store.consumePendingOpenLocation()).toBeNull();
   });
 
@@ -793,7 +794,7 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     const store = useFileBrowserStore();
     await store.setRoot('C:/old');
     store.saveNavigationContext();
-    store.requestOpenLocation('C:/comics', '');
+    store.requestOpenLocation({ type: 'local', rootPath: 'C:/comics' }, '');
     expect(await store.restoreNavigationContext()).toBe(false);
   });
 
@@ -801,7 +802,49 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     const store = useFileBrowserStore();
     const shortcuts = useShortcutsStore();
     shortcuts.setActive(3);
-    store.requestOpenLocation('C:/comics', '');
+    store.requestOpenLocation({ type: 'local', rootPath: 'C:/comics' }, '');
     expect(shortcuts.activeId).toBeNull();
+  });
+
+  // ─── module3.2.0: openDescriptorAt（四类源打开指定目录）───
+
+  it('openDescriptorAt(Local)：转 setRoot + navigate（rootPath 语义不变）', async () => {
+    mockedList.mockResolvedValue(makeEntries('a.jpg'));
+    const store = useFileBrowserStore();
+    await store.openDescriptorAt({ type: 'local', rootPath: 'C:/comics' }, 'VOL.11');
+    expect(mockedList).toHaveBeenLastCalledWith(
+      { type: 'local', rootPath: 'C:/comics' }, 'VOL.11');
+    expect(store.rootPath).toBe('C:/comics');
+    expect(store.currentPath).toBe('VOL.11');
+  });
+
+  it('openDescriptorAt(webdav)：currentDescriptor 置入 + 该源取数', async () => {
+    mockedList.mockResolvedValue(makeEntries('a.jpg'));
+    const store = useFileBrowserStore();
+    const desc = { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' } as const;
+    await store.openDescriptorAt(desc, 'comics/v1');
+    expect(mockedList).toHaveBeenLastCalledWith(desc, 'comics/v1');
+    expect(store.currentPath).toBe('comics/v1');
+    expect(store.currentDescriptor).toEqual(desc);
+  });
+
+  it('openDescriptorAt 后 navigate 仍走 currentDescriptor（非 Local 持续生效）', async () => {
+    mockedList.mockClear();
+    mockedList.mockResolvedValue(makeEntries('b.jpg'));
+    const store = useFileBrowserStore();
+    const desc = { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' } as const;
+    await store.openDescriptorAt(desc, '');
+    mockedList.mockClear();
+    await store.navigate('sub');
+    expect(mockedList).toHaveBeenLastCalledWith(desc, 'sub');
+  });
+
+  it('setRoot 重置 currentDescriptor（回 Local 语义）', async () => {
+    mockedList.mockResolvedValue(makeEntries('a.jpg'));
+    const store = useFileBrowserStore();
+    await store.openDescriptorAt({ type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' }, '');
+    await store.setRoot('C:/comics');
+    expect(store.currentDescriptor).toBeNull();
+    expect(mockedList).toHaveBeenLastCalledWith({ type: 'local', rootPath: 'C:/comics' }, '');
   });
 });

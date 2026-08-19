@@ -49,10 +49,9 @@ watch(page, () => mainRef.value?.scrollTo({ top: 0 }));
 // v0.1.0-module3.0.10: 「浏览」— 跳文件浏览器该书所在目录 + 瀑布流视图。
 // 只写一次性意图（requestOpenLocation 内部清 savedNavigationContext + shortcut
 // activeId），实际 setRoot/navigate/setViewMode 由 FileBrowser.onMounted 单点执行。
+// module3.2.0：descriptor 形态（远程源浏览跳瀑布流，spec rev5 §3.2）。
 function openInBrowser(book: BookItem): void {
-  const sd = book.sourceDescriptor;
-  if (sd.type !== 'local') return; // 防御：非 Local 无跳转（Phase 1，当前库中不可达）
-  fb.requestOpenLocation(sd.rootPath, book.absolutePath);
+  fb.requestOpenLocation(book.sourceDescriptor, book.absolutePath);
   void router.push('/');
 }
 
@@ -129,7 +128,7 @@ const ICON_GRID = 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z';
           @click="toggleFav(book.id)"
         >{{ t('likes.toggleOff') }}</button>
         <button
-          v-if="book.sourceDescriptor.type === 'local'"
+          v-if="!!book.sourceDescriptor"
           data-test="btn-browse"
           :title="t('likes.browseTitle')"
           class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent

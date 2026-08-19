@@ -1,11 +1,14 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@tauri-apps/api/core', () => ({
-  convertFileSrc: (path: string, protocol: string) => `http://${protocol}.localhost/${path}`,
-}));
+// 锁定 Windows WebView2 形态（http://media.localhost/...）；happy-dom 默认 UA 不含 Windows
+vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' });
 
 import { joinRel, mediaUrl } from './mediaUrl';
 import type { SourceDescriptor } from './sourceDescriptor';
+
+afterEach(() => {
+  vi.clearAllMocks();
+});
 
 const local: SourceDescriptor = { type: 'local', rootPath: 'F:/comics' } as SourceDescriptor;
 const webdav: SourceDescriptor = { type: 'webdav', accountId: 7, baseUrl: 'https://d.example/dav', path: '' } as SourceDescriptor;

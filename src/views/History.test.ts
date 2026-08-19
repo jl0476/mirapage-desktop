@@ -97,14 +97,12 @@ describe('History.vue', () => {
     const wrapper = mount(History, { global: { plugins: [i18n, router] } });
     await flushPromises();
     const fb = useFileBrowserStore();
-    const setRootSpy = vi.spyOn(fb, 'setRoot').mockResolvedValue();
-    const navigateSpy = vi.spyOn(fb, 'navigate').mockResolvedValue();
+    const openSpy = vi.spyOn(fb, 'openDescriptorAt').mockResolvedValue();
     const pushSpy = vi.spyOn(router, 'push');
 
     await wrapper.findAll('button.name')[0]!.trigger('click');
     await flushPromises();
-    expect(setRootSpy).toHaveBeenCalledWith('C:/comics');
-    expect(navigateSpy).toHaveBeenCalledWith('Vol.01');
+    expect(openSpy).toHaveBeenCalledWith({ type: 'local', rootPath: 'C:/comics' }, 'Vol.01');
     expect(pushSpy).toHaveBeenCalledWith({ name: 'home' });
   });
 
@@ -112,14 +110,34 @@ describe('History.vue', () => {
     const wrapper = mount(History, { global: { plugins: [i18n, router] } });
     await flushPromises();
     const fb = useFileBrowserStore();
-    const setRootSpy = vi.spyOn(fb, 'setRoot').mockResolvedValue();
-    const navigateSpy = vi.spyOn(fb, 'navigate').mockResolvedValue();
+    const openSpy = vi.spyOn(fb, 'openDescriptorAt').mockResolvedValue();
 
     // root 是 lastVisitedAt 较小的，排序后是 rows[1]
     await wrapper.findAll('button.name')[1]!.trigger('click');
     await flushPromises();
-    expect(setRootSpy).toHaveBeenCalledWith('C:/comics');
-    expect(navigateSpy).not.toHaveBeenCalled();
+    expect(openSpy).toHaveBeenCalledWith({ type: 'local', rootPath: 'C:/comics' }, '');
+  });
+
+  it('module3.2.0: webdav 记录可打开（不再因类型防御 return）', async () => {
+    const remote = {
+      sourceDescriptor: { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' },
+      relPath: 'comics/v1',
+      displayName: 'v1',
+      lastVisitedAt: 1700000001,
+      bookId: null,
+    };
+    const { listHistory } = await import('@/lib/tauri');
+    (listHistory as any).mockResolvedValueOnce([remote]);
+    const wrapper = mount(History, { global: { plugins: [i18n, router] } });
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    const openSpy = vi.spyOn(fb, 'openDescriptorAt').mockResolvedValue();
+    const pushSpy = vi.spyOn(router, 'push');
+
+    await wrapper.findAll('button.name')[0]!.trigger('click');
+    await flushPromises();
+    expect(openSpy).toHaveBeenCalledWith(remote.sourceDescriptor, 'comics/v1');
+    expect(pushSpy).toHaveBeenCalledWith({ name: 'home' });
   });
 
   it('删除按钮 → deleteEntry', async () => {

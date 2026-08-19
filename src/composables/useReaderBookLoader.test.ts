@@ -63,8 +63,8 @@ describe('useReaderBookLoader', () => {
     expect(snapshot.imageNames).toEqual(['page2.jpg', 'page10.jpg']);
     // media:// 统一 URL（spec §2 决策：Local 同走 media://，单段 encode 绝对路径）
     expect(snapshot.pageUrls).toEqual([
-      `asset://local/${encodeURIComponent('C:\\comics\\vol1\\page2.jpg')}`,
-      `asset://local/${encodeURIComponent('C:\\comics\\vol1\\page10.jpg')}`,
+      `media://localhost/local/${encodeURIComponent('C:\\comics\\vol1\\page2.jpg')}`,
+      `media://localhost/local/${encodeURIComponent('C:\\comics\\vol1\\page10.jpg')}`,
     ]);
     expect(snapshot.spreads.length).toBeGreaterThan(0);
   });
@@ -87,7 +87,7 @@ describe('useReaderBookLoader', () => {
     });
     const snapshot = await useReaderBookLoader().loadBookById(7);
     expect(mocks.listDirectory).toHaveBeenCalledWith(webdavDesc, 'comics/v1');
-    expect(snapshot.pageUrls[0]).toBe(`asset://webdav/7/${encodeURIComponent('comics/v1/page2.jpg')}`);
+    expect(snapshot.pageUrls[0]).toBe(`media://localhost/webdav/7/${encodeURIComponent('comics/v1/page2.jpg')}`);
   });
 
   it('archive(local) descriptor：pageUrls 走 archive/local 形态', async () => {
@@ -99,7 +99,7 @@ describe('useReaderBookLoader', () => {
     });
     const snapshot = await useReaderBookLoader().loadBookById(7);
     expect(mocks.listDirectory).toHaveBeenCalledWith(archiveDesc, '');
-    expect(snapshot.pageUrls[0]).toBe(`asset://archive/local/${encodeURIComponent('D:/a.cbz')}/${encodeURIComponent('page2.jpg')}`);
+    expect(snapshot.pageUrls[0]).toBe(`media://localhost/archive/local/${encodeURIComponent('D:/a.cbz')}/${encodeURIComponent('page2.jpg')}`);
   });
 
   it('路径身份修复: absolute_path 为污染的绝对路径 → 抛错, 不走兼容分支', async () => {

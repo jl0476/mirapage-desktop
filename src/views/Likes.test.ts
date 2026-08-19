@@ -129,21 +129,26 @@ describe('Likes.vue', () => {
     await flushPromises();
 
     const fb = useFileBrowserStore();
-    expect(fb.pendingOpenLocation).toEqual({ rootPath: '/x', relPath: 'VOL.11' });
+    expect(fb.pendingOpenLocation).toEqual({ descriptor: { type: 'local', rootPath: '/x' }, relPath: 'VOL.11' });
     expect(router.currentRoute.value.path).toBe('/');
   });
 
-  it('非 Local 书不渲染「浏览」按钮（防御分支）', async () => {
+  it('module3.2.0: webdav 书也渲染「浏览」按钮且意图写 descriptor 形态', async () => {
     const tauri = await import('@/lib/tauri');
+    const remoteDesc = { type: 'webdav', accountId: 1, baseUrl: 'http://x', path: '/' };
     const remote = {
       ...FAV_BOOK,
       id: 8,
-      sourceDescriptor: { type: 'webdav', accountId: 1, baseUrl: 'http://x', path: '/' },
+      sourceDescriptor: remoteDesc,
     };
     (tauri.listLibrary as any).mockResolvedValueOnce([remote]);
     const { wrapper } = await mountLikes();
 
     expect(wrapper.find('[data-test="row"]').exists()).toBe(true);
-    expect(wrapper.find('[data-test="btn-browse"]').exists()).toBe(false);
+    await wrapper.find('[data-test="btn-browse"]').trigger('click');
+    await flushPromises();
+
+    const fb = useFileBrowserStore();
+    expect(fb.pendingOpenLocation).toEqual({ descriptor: remoteDesc, relPath: remote.absolutePath });
   });
 });

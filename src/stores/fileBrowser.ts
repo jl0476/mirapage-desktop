@@ -21,7 +21,7 @@ import { getSetting, setSetting } from '@/lib/tauri';
 import { useDirectorySortStore } from '@/stores/directorySort';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { validateSourceRelativePath } from '@/lib/relativePath';
-import type { MediaEntry, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
 
 export type FileBrowserError =
   | { kind: 'notFound'; message: string }
@@ -37,8 +37,10 @@ export type ViewMode = 'details' | 'masonry';
 // Likes.vue 点「浏览」→ requestOpenLocation + push('/')；FileBrowser.onMounted
 // 在 loadLayout 之后 consume（spec §4.3：消费点后置让 setViewMode('masonry')
 // 不被 loadLayout 读到的旧持久化值覆盖）。
+// module3.2.0：rootPath 形态 → descriptor 形态（远程源浏览跳瀑布流，spec rev5 §3.2；
+// Likes 是唯一 caller，直接换签名不留兼容）。
 export interface PendingOpenLocation {
-  rootPath: string;
+  descriptor: SourceDescriptor;
   relPath: string;
 }
 
@@ -68,6 +70,10 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
   const currentPath = ref<string>('');
   const lastFetchedPath = ref<string>('');
+  // module3.2.0: 当前数据源 descriptor。null = Local 语义（rootPath 兜底构造 Local
+  // descriptor），非 null = 跨源打开（WebDAV 浏览跳转 / ZIP 条目视图）置入。
+  // fetch 一律经 activeDescriptor() 取源，普通 Local 流程零迁移成本。
+  const currentDescriptor = ref<SourceDescriptor | null>(null);
   // v0.1.0-module3.0.3-hotfix (Bug 2): 保存「进入 reader 前」的导航上下文.
   // ReaderView 退出时调 restoreNavigationContext, FileBrowser.onMounted 优先恢复.
   // 取代之前的「每次 onMounted 都 setRoot(LAST_ROOT_KEY) 抹掉 currentPath」反模式.
@@ -92,6 +98,39 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     return { type: 'local', rootPath: root };
   }
 
+  /** fetch 实际使用的数据源：currentDescriptor 优先，Local 兜底（rootPath）。 */
+  function activeDescriptor(): SourceDescriptor | null {
+    if (currentDescriptor.value) return currentDescriptor.value;
+    return rootPath.value !== null ? toDescriptor(rootPath.value) : null;
+  }
+
+  /** module3.2.0: 四类源打开指定目录（跨源浏览跳转/ZIP 进入共用）。
+   *  Local → setRoot（rootPath 语义复用）；非 Local → currentDescriptor 置入后走同一取数链。 */
+  async function openDescriptorAt(descriptor: SourceDescriptor, relPath: string): Promise<void> {
+    const relCheck = validateSourceRelativePath(relPath);
+    if (!relCheck.ok) {
+      log('[fileBrowser] openDescriptorAt relPath 越界, 拒绝打开', { relPath, reason: relCheck.reason });
+      error.value = { kind: 'io', message: '路径越出数据源根' };
+      return;
+    }
+    if (descriptor.type === 'local') {
+      await setRoot(descriptor.rootPath);
+      if (relCheck.normalized) {
+        await navigate(relCheck.normalized);
+      }
+      return;
+    }
+    // 非 Local：置入 descriptor（navigate → fetch → activeDescriptor 取该源）
+    currentDescriptor.value = descriptor;
+    if (relCheck.normalized) {
+      await navigate(relCheck.normalized);
+    } else {
+      currentPath.value = '';
+      searchQuery.value = '';
+      await fetch('');
+    }
+  }
+
   /**
    * 校验 source-relative path（路径身份修复 2026-08-12）。
    * 合法返回 normalized 串；非法返回 null 并记 log + 设 error。
@@ -109,7 +148,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   async function fetch(path: string): Promise<void> {
-    if (rootPath.value === null) return;
+    const descriptor = activeDescriptor();
+    if (descriptor === null) return;
     // 路径身份修复: IPC 前最后一道校验。非法路径不发 listDirectory。
     const normPath = assertRelPath(path);
     if (normPath === null) return;
@@ -119,7 +159,6 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     error.value = null;
     log('[fileBrowser] fetch', { rootPath: rootPath.value, path: normPath });
     try {
-      const descriptor = toDescriptor(rootPath.value);
       const result = await listDirectory(descriptor, normPath);
       // 过期请求（setRoot/navigate 触发了更新的请求）→ 丢弃回写，不动 entries/state。
       if (myId !== fetchRequestId) {
@@ -166,6 +205,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     lastFetchedPath.value = '';
     entries.value = [];
     error.value = null;
+    currentDescriptor.value = null; // 回 Local 语义（rootPath 兜底）
     clearSelection();
     searchQuery.value = ''; // v0.1.0-module3.0.3: 换目录清空搜索 (对齐 PV)
     if (root !== null) {
@@ -233,8 +273,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   // 类型 PendingOpenLocation 定义在模块顶层（函数体内不允许 export 声明）。
   const pendingOpenLocation = ref<PendingOpenLocation | null>(null);
 
-  function requestOpenLocation(rootPath: string, relPath: string): void {
-    pendingOpenLocation.value = { rootPath, relPath };
+  function requestOpenLocation(descriptor: SourceDescriptor, relPath: string): void {
+    pendingOpenLocation.value = { descriptor, relPath };
     // 显式新意图取代两类陈旧导航意图（spec 审查必须修复项）：
     // 1. reader 残留的 savedNavigationContext —— 否则本跳转 early-return 跳过
     //    restoreNavigationContext 后旧上下文滞留 store，下次挂载 '/' 会把用户拽回旧目录
@@ -445,6 +485,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     rootPath,
     currentPath,
     lastFetchedPath,
+    currentDescriptor,
     entries,
     loading,
     error,
@@ -462,6 +503,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     navigate,
     refresh,
     up,
+    // module3.2.0: 四类源取数/打开
+    activeDescriptor,
+    openDescriptorAt,
     // v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复
     saveNavigationContext,
     restoreNavigationContext,
