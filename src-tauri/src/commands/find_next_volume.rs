@@ -680,7 +680,7 @@ mod tests {
         // —— 已升级到 SMB 真实列举阶段。
         if let Err(ref e) = result {
             assert!(
-                !e.contains("Local") || !e.contains("WebDAV") || !e.contains("SMB") || e.contains("跨卷当前仅支持"),
+                !e.starts_with("跨卷当前仅支持"),
                 "M2 后 SMB 不应再被源分派拦截：{e}"
             );
             // 实际：真实网络失败信息应含 connection/connect/timeout/no address 等
