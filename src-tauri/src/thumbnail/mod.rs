@@ -28,6 +28,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+pub mod fetch;
 pub mod generator;
 pub mod index;
 pub mod key;

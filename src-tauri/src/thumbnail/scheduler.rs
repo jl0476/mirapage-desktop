@@ -153,6 +153,7 @@ struct InFlight {
 }
 
 /// 调度器句柄。drop 时发送 Shutdown。
+#[derive(Clone)]
 pub struct SchedulerHandle {
     tx: mpsc::UnboundedSender<Command>,
 }

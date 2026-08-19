@@ -239,6 +239,53 @@ pub fn classify_item(
     Ok(ItemClass::Generate { task, cache_abs })
 }
 
+/// 远程分类结果（spec rev3 §3.5）。
+pub enum RemoteClass {
+    UseOriginal,
+    Cached {
+        cache_key: String,
+        cache_abs: PathBuf,
+        width: u32,
+        height: u32,
+    },
+    Fetch(super::fetch::PreparedRemoteTask),
+}
+
+/// 远程源分类：索引命中直返；未命中产出**分类时刻完整快照**（rev5）入取源 actor。
+/// 复用 classify_item（缓存命中/一致性校验/UseOriginal 决策同款），abs 参数无意义
+///（远程源不经本地文件系统读原图，bytes 到手后在快照上下文构造 bytes-based 任务）。
+pub fn classify_remote(
+    conn: &Connection,
+    cache_root: &Path,
+    descriptor_json: &str,
+    descriptor: &SourceDescriptor,
+    item: &ThumbnailRequestItem,
+    epoch: u64,
+    quality: Quality,
+) -> rusqlite::Result<RemoteClass> {
+    match classify_item(conn, cache_root, descriptor_json, PathBuf::new(), item, epoch, quality)? {
+        ItemClass::UseOriginal => Ok(RemoteClass::UseOriginal),
+        ItemClass::Cached { cache_key, cache_abs, width, height } => Ok(RemoteClass::Cached {
+            cache_key, cache_abs, width, height,
+        }),
+        ItemClass::Generate { task, .. } => {
+            let prepared = super::fetch::PreparedRemoteTask {
+                cache_key: task.cache_key.clone(),
+                descriptor: descriptor.clone(),
+                descriptor_json: descriptor_json.to_string(),
+                source_rel_path: item.source_rel_path.clone(),
+                file_size: item.file_size,
+                epoch,
+                quality: quality_str(quality).to_string(),
+                item: item.clone(),
+                task_template: task,
+            };
+            Ok(RemoteClass::Fetch(prepared))
+        }
+        ItemClass::Unsupported => Ok(RemoteClass::UseOriginal),
+    }
+}
+
 /// LRU 驱逐：把总量降到 `limit_bytes` 的 80% 水位，跳过 protected_keys。
 /// 返回释放字节数。
 ///
@@ -404,6 +451,8 @@ pub struct ProgressEvent {
 pub struct ThumbnailService {
     app: AppHandle,
     scheduler: SchedulerHandle,
+    /// 远程取源 actor（spec rev3 §3.5）：慢 SMB/WebDAV 不占解码 worker
+    remote_fetch: super::fetch::RemoteFetchActor,
     /// 当前缓存根（可切换：迁移提交后更新）。读写锁，迁移切根时短暂持写锁。
     cache_root: Arc<RwLock<PathBuf>>,
     quality: Arc<RwLock<Quality>>,
@@ -433,13 +482,125 @@ impl ThumbnailService {
         // build + tauri::async_runtime::spawn（setup() 同步上下文里 tokio::spawn 会 panic）
         let (scheduler, actor) = SchedulerHandle::build(config, production_generate_fn());
         tauri::async_runtime::spawn(actor.run());
+
+        let protected_keys: Arc<std::sync::Mutex<HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(HashSet::new()));
+        let cache_limit_arc = Arc::new(RwLock::new(cache_limit_mb));
+        let quality_arc = Arc::new(RwLock::new(quality));
+        let cache_root_arc = Arc::new(RwLock::new(cache_root));
+
+        // 远程取源 actor：fetch 走 factory.resolve；on_fetched 在快照上下文构造
+        // bytes-based GenerationJob 提交 scheduler（复用 Local 完成事件路径）
+        let remote_fetch = {
+            let factory = app
+                .state::<crate::source::MediaSourceFactory>()
+                .inner()
+                .clone();
+            let fetch: super::fetch::FetchFn = Arc::new(move |descriptor, rel| {
+                let factory = factory.clone();
+                Box::pin(async move {
+                    factory
+                        .resolve(&descriptor)
+                        .read_file(&descriptor, &rel, None)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            });
+            let on_fetched: super::fetch::OnFetched = {
+                let app = app.clone();
+                let scheduler = scheduler.clone();
+                let protected = protected_keys.clone();
+                let cache_limit_ref = cache_limit_arc.clone();
+                let cache_root_ref = cache_root_arc.clone();
+                Arc::new(move |prepared: super::fetch::PreparedRemoteTask, bytes: Vec<u8>| {
+                    let mut task = prepared.task_template;
+                    // bytes-based：源已在手，不走本地路径
+                    task.job.source_bytes = bytes;
+                    task.job.source_path = None;
+                    task.job.on_progress = progress_closure_for(
+                        app.clone(),
+                        prepared.epoch,
+                        prepared.cache_key.clone(),
+                        prepared.item.path.clone(),
+                    );
+                    let cache_key = task.cache_key.clone();
+                    let target_bucket = task.job.target_width;
+                    let cache_abs = task.job.cache_path.clone();
+                    let item = prepared.item.clone();
+                    let descriptor_json = prepared.descriptor_json.clone();
+                    let quality = prepared.quality.clone();
+                    let cache_limit = *cache_limit_ref.read().unwrap() * 1_000_000;
+                    let cache_root_now = cache_root_ref.read().unwrap().clone();
+                    let rx = scheduler.submit(task);
+                    spawn_completion(app.clone(), rx, CompletionMeta {
+                        epoch: prepared.epoch,
+                        cache_key,
+                        ui_path: item.path.clone(),
+                        source_rel_path: item.source_rel_path.clone(),
+                        cache_abs,
+                        cache_root: cache_root_now,
+                        cache_limit,
+                        protected_keys: protected.clone(),
+                        source_key: key::source_key(&descriptor_json, &item.source_rel_path),
+                        source_size: item.file_size,
+                        source_modified_at: item.modified_at,
+                        source_width: item.source_width,
+                        source_height: item.source_height,
+                        quality,
+                        target_bucket,
+                    });
+                })
+            };
+            let on_failed: super::fetch::OnFailed = {
+                let app = app.clone();
+                let protected = protected_keys.clone();
+                Arc::new(move |prepared: &super::fetch::PreparedRemoteTask, msg: &str| {
+                    // 取源失败：从保护集合移除 + emit failed（前端按 item.path 关联）
+                    {
+                        let mut pk = protected.lock().unwrap();
+                        pk.remove(&prepared.cache_key);
+                    }
+                    log::write_log(
+                        "WARN",
+                        "thumbnail",
+                        &format!(
+                            "remote fetch FAILED path={} cacheKey={} err={}",
+                            prepared.item.path, prepared.cache_key, msg
+                        ),
+                    );
+                    let _ = app.emit(
+                        EVENT_STATE,
+                        StateEvent {
+                            epoch: prepared.epoch,
+                            cache_key: prepared.cache_key.clone(),
+                            path: prepared.item.path.clone(),
+                            state: "failed".into(),
+                            cache_path: None,
+                            output_width: None,
+                            output_height: None,
+                            message: Some(msg.to_string()),
+                        },
+                    );
+                })
+            };
+            let actor = super::fetch::RemoteFetchActor::spawn(super::fetch::FetchActorConfig {
+                concurrency: 4,
+                byte_budget: 64 * 1024 * 1024, // 在途 bytes 上限（代码常量起步）
+                fetch,
+                on_fetched,
+                on_failed,
+            });
+            actor
+        };
+
         Self {
             app,
             scheduler,
-            cache_root: Arc::new(RwLock::new(cache_root)),
-            quality: Arc::new(RwLock::new(quality)),
-            cache_limit_mb: Arc::new(RwLock::new(cache_limit_mb)),
-            protected_keys: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            remote_fetch,
+            cache_root: cache_root_arc,
+            quality: quality_arc,
+            cache_limit_mb: cache_limit_arc,
+            protected_keys,
             migration_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             migration_state: Arc::new(RwLock::new(None)),
         }
@@ -467,6 +628,7 @@ impl ThumbnailService {
 
     pub fn new_epoch(&self, epoch: u64) {
         self.scheduler.new_epoch(epoch);
+        self.remote_fetch.new_epoch(epoch);
     }
 
     pub fn set_fast_scrolling(&self, fast: bool) {
@@ -520,11 +682,52 @@ impl ThumbnailService {
             }
             for item in items {
                 if !local {
-                    results.push(RequestResult {
-                        path: item.path.clone(),
-                        status: "unsupported".into(),
-                        ..unset(&item.path)
-                    });
+                    // 远程源（spec rev3 §3.5）：索引命中直返；未命中 classify_remote 产出
+                    // 完整快照入取源 actor（bytes 到手才进解码队列，慢 IO 不占解码 worker）
+                    match classify_remote(
+                        &conn,
+                        &cache_root,
+                        &descriptor_json,
+                        descriptor,
+                        item,
+                        epoch,
+                        quality,
+                    ) {
+                        Ok(RemoteClass::Cached { cache_key, cache_abs, width, height }) => {
+                            results.push(RequestResult {
+                                path: item.path.clone(),
+                                status: "cached".into(),
+                                cache_path: Some(cache_abs.to_string_lossy().into()),
+                                cache_key: Some(cache_key),
+                                width: Some(width),
+                                height: Some(height),
+                                error_kind: None,
+                            });
+                        }
+                        Ok(RemoteClass::UseOriginal) => results.push(RequestResult {
+                            path: item.path.clone(),
+                            status: "original".into(),
+                            ..unset(&item.path)
+                        }),
+                        Ok(RemoteClass::Fetch(prepared)) => {
+                            let ck = prepared.cache_key.clone();
+                            // in-flight key 加入保护集合，避免取源+生成期间被 LRU 清理
+                            {
+                                let mut pk = self.protected_keys.lock().unwrap();
+                                pk.insert(ck.clone());
+                            }
+                            self.remote_fetch.try_submit(
+                                super::fetch::RemoteFetchRequest { prepared },
+                            );
+                            results.push(RequestResult {
+                                path: item.path.clone(),
+                                status: "queued".into(),
+                                cache_key: Some(ck),
+                                ..unset(&item.path)
+                            });
+                        }
+                        Err(e) => results.push(err_result(&item.path, &e.to_string())),
+                    }
                     continue;
                 }
                 // P1-1: 用 source_rel_path（含 currentPath 前缀）定位文件，而非 UI path
