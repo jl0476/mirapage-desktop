@@ -230,6 +230,10 @@ export default {
     webdav: 'WebDAV',
     testedOk: '连接成功',
     testedFail: '连接失败',
+    passwordPlaceholder: '输入密码',
+    passwordKeep: '留空保持不变',
+    credentialWarning: '凭据可能残留在系统凭据管理器，请手动清理',
+    typeLocked: '类型不可修改（删除后重新添加可换类型）',
   },
   shortcuts: {
     title: '快捷方式',

@@ -228,6 +228,10 @@ export default {
     webdav: 'WebDAV',
     testedOk: 'Connection successful',
     testedFail: 'Connection failed',
+    passwordPlaceholder: 'Enter password',
+    passwordKeep: 'Leave blank to keep',
+    credentialWarning: 'Credential may remain in OS credential manager, please clean up manually',
+    typeLocked: 'Type is immutable (delete and re-add to change)',
   },
   shortcuts: {
     title: 'Shortcuts',

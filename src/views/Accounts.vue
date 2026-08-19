@@ -33,6 +33,15 @@ const draft = ref({
   password: '',
 });
 const testResult = ref<Record<number, boolean | null>>({});
+/** module3.2.0：删除账户的凭据残留警告（keyring 删除失败时后端返回） */
+const warning = ref<string | null>(null);
+let warningTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showWarning(msg: string): void {
+  warning.value = msg;
+  if (warningTimer) clearTimeout(warningTimer);
+  warningTimer = setTimeout(() => { warning.value = null; }, 5000);
+}
 
 async function refresh() {
   accounts.value = await listAccounts();
@@ -84,7 +93,8 @@ async function save() {
 }
 
 async function remove(id: number) {
-  await deleteAccount(id);
+  const res = await deleteAccount(id);
+  if (res.warning) showWarning(res.warning); // 凭据残留提示（spec §3.4）
   await refresh();
 }
 
@@ -109,6 +119,11 @@ async function test(id: number) {
 
     <p v-if="accounts.length === 0" class="hint">
       {{ t('accounts.empty') }}
+    </p>
+
+    <!-- module3.2.0：凭据残留警告（keyring 删除失败，DB 已删） -->
+    <p v-if="warning" data-test="credential-warning" class="hint warning">
+      {{ warning }}
     </p>
 
     <ul v-else data-test="list" class="accounts-list">
@@ -138,7 +153,8 @@ async function test(id: number) {
         </label>
         <label>
           {{ t('accounts.type') }}
-          <select v-model="draft.kind">
+          <!-- module3.2.0：type 不可变（spec §3.4——杜绝改类型后旧 keyring 条目遗留） -->
+          <select v-model="draft.kind" :disabled="!!editing" data-test="kind-select">
             <option value="smb">{{ t('accounts.smb') }}</option>
             <option value="webdav">{{ t('accounts.webdav') }}</option>
           </select>
@@ -161,7 +177,12 @@ async function test(id: number) {
         </label>
         <label>
           {{ t('accounts.password') }}
-          <input v-model="draft.password" type="password" />
+          <input
+            v-model="draft.password"
+            type="password"
+            data-test="password"
+            :placeholder="editing ? t('accounts.passwordKeep') : t('accounts.passwordPlaceholder')"
+          />
         </label>
         <div class="modal-actions">
           <button @click="showAdd = false">{{ t('common.cancel') }}</button>
@@ -252,4 +273,5 @@ button {
 }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .hint { color: #888; text-align: center; margin-top: 24px; }
+.hint.warning { color: #ff6b6b; }
 </style>

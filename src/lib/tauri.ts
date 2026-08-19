@@ -573,10 +573,12 @@ export async function listAccounts(): Promise<AccountItem[]> {
 export async function upsertAccount(
   acct: Partial<AccountItem> & { name: string; type: 'smb' | 'webdav'; password?: string | null },
 ): Promise<number> {
-  return invoke<number>('upsert_account', { acct });
+  // Rust command 参数名 args（Tauri 2 按名匹配，此前误传 acct 导致 IPC 报缺参）
+  return invoke<number>('upsert_account', { args: acct });
 }
-export async function deleteAccount(id: number): Promise<void> {
-  await invoke<void>('delete_account', { id });
+export interface DeleteAccountResult { warning: string | null }
+export async function deleteAccount(id: number): Promise<DeleteAccountResult> {
+  return invoke<DeleteAccountResult>('delete_account', { id });
 }
 export async function testConnection(id: number): Promise<boolean> {
   return invoke<boolean>('test_connection', { id });
