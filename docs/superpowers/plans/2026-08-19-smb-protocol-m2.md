@@ -107,12 +107,14 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("[2] list ok, {n} entries");
 
-    // ③④ stat + Range 读（含越界行为）
+    // ③④ stat + Range 读（含越界行为）。
+    // 顺序（rev4 修正）：unwrap_file 消耗 Resource——必须先 query_info（size）+
+    // handle().modified()（mtime，FileStandardInformation 无 mtime 字段），最后再 unwrap_file。
     let fres = tree.open_existing(big_file, smb::AccessMask::new().with_generic_read(true)).await?;
-    let file = fres.unwrap_file();
     let std_info: smb_fscc::FileStandardInformation = fres.query_info().await?;
-    println!("[3] stat size={} mtime={:?}", std_info.end_of_file,
-        std_info.last_write_time.date_time());
+    let mtime = fres.handle().modified().assume_utc().unix_timestamp();
+    let file = fres.unwrap_file();
+    println!("[3] stat size={} mtime(unix)={}", std_info.end_of_file, mtime);
     let mut buf = vec![0u8; 16];
     let got = file.read_block(&mut buf, 0, None, false).await?;
     println!("[3] read_block(0,16) -> {got} bytes"); // 验证恰好 16 或短读
@@ -1361,13 +1363,13 @@ fn map_status_code(code: u32, ctx: String) -> TransportError {
 /// FileIdBothDirectoryInformation 公共字段（file_name/attributes/end_of_file/last_write_time）
 /// 的中立抽取——避开 source.rs 直接依赖 smb-fscc 类型。
 fn to_raw(info: &smb_fscc::FileIdBothDirectoryInformation) -> RawDirEntry {
+    // FileTime 无 unix_100ns 访问器（rev3 修正）——用 since_epoch()（相对 1601 的 Duration）
+    let since1601_100ns = info.last_write_time.since_epoch().as_nanos() as u64 / 100;
     RawDirEntry {
         name: info.file_name.clone(),
         is_directory: info.attributes.directory(),
         size: info.end_of_file,
-        // FileTime 无 unix_100ns 访问器（rev3 修正）——用 since_epoch()（相对 1601 的 Duration）
-        let since1601 = info.last_write_time.since_epoch().as_nanos() as u64 / 100; // 100ns
-        modified_unix_secs: super::transport::file_time_to_unix_secs(since1601).unwrap_or(0),
+        modified_unix_secs: super::transport::file_time_to_unix_secs(since1601_100ns).unwrap_or(0),
     }
 }
 
@@ -1448,7 +1450,7 @@ impl SmbTransport for SmbClientTransport {
     async fn stat(&self, rel: &str) -> Result<RawStat, TransportError> {
         let tree = self.tree().await?;
         let resource = tree
-            .open_existing(&rel.replace('/', "\"), Self::access())
+            .open_existing(&rel.replace('/', "\\"), Self::access())
             .await
             .map_err(map_smb_error)?;
         // P1-1（rev3）：FileStandardInformation 属 FileInformation 家族——只有
@@ -1706,6 +1708,16 @@ git push origin main --tags
 
 1. **P1 stat 方案编译必败**：复核确认 `FileStandardInformation` 属 FileInformation 家族（allocation_size/end_of_file/链接数/布尔标记），**无 mtime 字段**（last_write_time 在 DirectoryInformation 家族的宏基座）；`date_time_unix_100ns()` 系计划内虚构 API。修正：size 走 `query_info::<FileStandardInformation>()`，mtime 走 `resource.handle().modified().assume_utc().unix_timestamp()`（ResourceHandle::modified 已核对存在；smb 依赖 time 0.3.45，两方法为 0.3 标准）；`to_raw` 的 list 路径同步改 `FileTime::since_epoch()` 纯整数换算；本项目 Cargo.toml 补 `time = "0.3"`；不确定点第 3 条定案（备选 FileBasicInformation 双字段查询）；编译级锁定写进任务 6 验证（误用 std_info.last_write_time 直接编译失败，handle().modified() 链编译通过即真实路径证明）+ spike 实机 mtime 复核。
 2. **P1 并发测试预期不稳**：采纳时序分析（即时 mock + join! 顺序 poll → 首 future 完成后第二个命中 slot，实例数实为 1）。重写为 Barrier(2) 确定性测试：工厂闭包内 await barrier——两请求都越过阶段 1（slot miss）后一起放行（否则超时失败）；断言改为「建连 2 实例（策略=各自建连）+ slot 收敛 1（阶段 3 写回去重）」；connection.rs 补 `slot_count()` 测试观察器。
+
+## 附：计划审查修订记录（rev4，2026-08-19）
+
+第三轮复审：rev3 方向确认正确，但修订引入 3 个编译级阻断（2 P0 + 1 P1），全采纳：
+
+1. **P0 to_raw 语法错误**：`let since1601` 误写进 `RawDirEntry { ... }` 初始化器内（Rust 不允许）——移到初始化器之前（更名 `since1601_100ns`）。
+2. **P0 stat 字符串转义损坏**：`rel.replace('/', "\\")` 在计划编辑时被转义吃掉一层变成非法字面量 `"\"` 单反斜杠——恢复为合法 `"\\"`（markdown 源码双反斜杠）。同款三处 `rel.replace` / `unc_rel` 已逐一核对：list(1403)/read(1428)/stat(1451) 均为合法形态。
+3. **P1 spike stat 示例未随 rev3 同步**：`unwrap_file()` 消耗 `fres` 后又 `fres.query_info()`（move 后使用，编译必败）+ 仍访问不存在的 `FileStandardInformation.last_write_time`。重写为正确顺序：`query_info`（size）→ `fres.handle().modified().assume_utc().unix_timestamp()`（mtime）→ 最后 `unwrap_file()`。
+
+教训入档：多轮 python 脚本编辑 markdown 内嵌代码块时，反斜杠转义层级是系统性风险——rev4 后计划内 Rust 代码块建议执行者在抄录时以编译器为最终裁决（本计划的「执行期不确定点」机制已覆盖此风险）。
 
 ## 附：执行顺序依赖
 
