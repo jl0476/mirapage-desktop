@@ -138,6 +138,11 @@ impl SmbTransport for SmbClientTransport {
             .open_existing(&unc_rel, Self::access())
             .await
             .map_err(map_smb_error)?;
+        // P1 修复（终审）：URL 指向文件等类型不符时 unwrap_dir 会 panic（网络输入不可信）——
+        // is_dir 先判类型（判定后 unwrap 不再 panic），不符返回受控 FileNotFound
+        if !resource.is_dir() {
+            return Err(TransportError::FileNotFound(format!("不是目录: {rel}")));
+        }
         let dir = Arc::new(resource.unwrap_dir());
         // rev1 修正：Directory::query 是 `pub fn query(this: &Arc<Self>, pattern)` 返回 impl Future
         let mut stream = smb::Directory::query::<smb::FileIdBothDirectoryInformation>(&dir, "*")
@@ -166,6 +171,10 @@ impl SmbTransport for SmbClientTransport {
             .open_existing(&rel.replace('/', "\\"), Self::access())
             .await
             .map_err(map_smb_error)?;
+        // P1 修复（终审）：同 list——类型不符返回受控错误而非 panic
+        if !resource.is_file() {
+            return Err(TransportError::FileNotFound(format!("不是文件: {rel}")));
+        }
         let file = resource.unwrap_file();
         // read_block 短读语义（返回实读数，EOF=0）→ 循环填满；EOF 早到=文件变小 → Disconnected
         // 触发外层重连一次兜底（spec §3.1 强契约：请求区间必须恰好）
@@ -174,7 +183,11 @@ impl SmbTransport for SmbClientTransport {
             let got = file
                 .read_block(&mut buf[filled..], offset + filled as u64, None, false)
                 .await
-                .map_err(|e| TransportError::Io(e.to_string()))?;
+                // P1 修复（终审）：读块期间的 io 错误按 kind 分派——
+                // NotFound→404 / PermissionDenied→403（map_smb_error 内 IoError 分支同款），
+                // 其余才落 Io 连接级触发重连；此前一刀切 Io 把权限/不存在错误
+                // 误升级成「断线重连 + 最终 502」。
+                .map_err(|e| map_smb_error(SmbError::IoError(e)))?;
             if got == 0 {
                 return Err(TransportError::Disconnected);
             }
@@ -197,6 +210,10 @@ impl SmbTransport for SmbClientTransport {
         //
         // rev6 实装路径修正：`File` 自身 Deref 到 `ResourceHandle`（resource/file.rs line ~30），
         // 所以 `query_info/handle/modified` 三方法在 File 上直接可用（Deref 自动解引用）。
+        // P1 修复（终审）：同 list/read——类型不符返回受控错误而非 panic
+        if !resource.is_file() {
+            return Err(TransportError::FileNotFound(format!("不是文件: {rel}")));
+        }
         // `unwrap_file` 消耗 Resource 产出 File——先 query_info 拿 size，再 modified 拿时间。
         let file = resource.unwrap_file();
         let std_info: smb::FileStandardInformation = file
@@ -246,6 +263,29 @@ mod tests {
         ));
         let io_nf = SmbError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, "nf"));
         assert!(matches!(map_smb_error(io_nf), TransportError::FileNotFound(_)));
+    }
+
+    /// 终审 P1-2 回归：读块期间的 io 错误按 kind 分派（非一刀切连接级）。
+    /// read_block_exact 的 map_err 走 map_smb_error(SmbError::IoError(e))——
+    /// PermissionDenied → 文件级 403（不触发重连）；Other kind 才落 Io 连接级。
+    #[test]
+    fn read_block_io_error_kind_dispatch_not_all_connection_level() {
+        let pd = SmbError::IoError(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied mid-read",
+        ));
+        let mapped = map_smb_error(pd);
+        assert!(matches!(mapped, TransportError::PermissionDenied(_)));
+        assert!(
+            !mapped.is_connection_level(),
+            "权限错误不得触发断线重连（此前一刀切 Io 致 502）"
+        );
+
+        let other = SmbError::IoError(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "conn reset mid-read",
+        ));
+        assert!(matches!(map_smb_error(other), TransportError::Io(_)));
     }
 
     #[test]
