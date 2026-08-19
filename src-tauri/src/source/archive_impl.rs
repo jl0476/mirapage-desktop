@@ -215,6 +215,58 @@ impl MediaSource for ArchiveMediaSource {
         Ok(entries.len() as u64)
     }
 
+    /// entry stat（spec rev3 §3.1）：返回 ZIP 内条目**解压后** size——语义是
+    /// 「压缩包内这张图」，不是 ZIP 容器（容器 stat 由 M3 materializer 对 origin 调）。
+    async fn stat(
+        &self,
+        descriptor: &SourceDescriptor,
+        path: &str,
+    ) -> Result<crate::source::trait_def::FileStat> {
+        let (archive_path, entry_prefix, format) = match descriptor {
+            SourceDescriptor::Archive { archive_path, entry_prefix, format, .. } => (
+                PathBuf::from(archive_path),
+                entry_prefix.clone(),
+                *format,
+            ),
+            _ => {
+                return Err(MediaSourceError::NotImplemented(
+                    "ArchiveMediaSource::stat 仅处理 Archive descriptor".into(),
+                ));
+            }
+        };
+        let bytes = tokio::fs::read(&archive_path).await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(archive_path.display().to_string()),
+            std::io::ErrorKind::PermissionDenied => {
+                MediaSourceError::PermissionDenied(archive_path.display().to_string())
+            }
+            _ => MediaSourceError::Io(e.into()),
+        })?;
+        let entry_name = if entry_prefix.is_empty() {
+            path.to_string()
+        } else {
+            format!("{}/{}", entry_prefix.trim_end_matches('/'), path)
+        };
+        match format {
+            ArchiveFormat::Cbz | ArchiveFormat::Zip => {
+                use zip::ZipArchive;
+                let cursor = Cursor::new(&bytes[..]);
+                let mut archive = ZipArchive::new(cursor)
+                    .map_err(|e| MediaSourceError::Other(format!("zip open: {e}")))?;
+                let entry = archive
+                    .by_name(&entry_name)
+                    .map_err(|_| MediaSourceError::NotFound(entry_name.clone()))?;
+                Ok(crate::source::trait_def::FileStat {
+                    size: entry.size(),
+                    modified_at: None, // DOS 时间精度低且无消费方（spec rev3）
+                })
+            }
+            _ => Err(MediaSourceError::NotImplemented(format!(
+                "{:?} stat 未实装",
+                format
+            ))),
+        }
+    }
+
     async fn test(&self, descriptor: &SourceDescriptor) -> Result<()> {
         match descriptor {
             SourceDescriptor::Archive { archive_path, format, .. } => {
@@ -374,5 +426,24 @@ mod tests {
         let res = rt.block_on(src.test(&descriptor));
         assert!(res.is_err());
         std::mem::forget(dir);
+    }
+
+    #[tokio::test]
+    async fn stat_returns_entry_uncompressed_size() {
+        let path = create_test_cbz(&["p1.png", "p2.png"]);
+        let descriptor = SourceDescriptor::Archive {
+            archive_path: path.to_string_lossy().to_string(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Cbz,
+            origin: None,
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        let src = ArchiveMediaSource::new();
+        let st = src.stat(&descriptor, "p1.png").await.unwrap();
+        // PNG magic 8 字节（spec rev3 §3.1：entry 解压后 size，非 ZIP 容器 size）
+        assert_eq!(st.size, 8);
+        assert_eq!(st.modified_at, None);
+        assert!(src.stat(&descriptor, "missing.png").await.is_err());
     }
 }
