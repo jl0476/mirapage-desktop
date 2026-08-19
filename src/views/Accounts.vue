@@ -7,6 +7,12 @@
  * - 添加/编辑 SMB / WebDAV 账户(name + host + port + cred)
  * - 测试连接(backend returns boolean)
  * - 删除账户
+ *
+ * M2 task 7 修订:
+ * - test() catch 存错误信息，testResult 值由 boolean 扩展为 { ok: boolean; message?: string }
+ * - 按错误字符串关键字路由三态：含「权限/认证/Auth/credential」→ testFailAuth、
+ *   含「share/契约/配置」→ testFailConfig、其余 → testFailNetwork
+ * - 删除按钮的 res.warning 走顶部 5s toast（保留已有 warning 行为）
  */
 import { onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -32,7 +38,45 @@ const draft = ref({
   username: '',
   password: '',
 });
-const testResult = ref<Record<number, boolean | null>>({});
+
+/** M2 task 7：testResult 由 boolean 扩为 { ok, message } 对象，支持三态失败分类。 */
+interface TestResult {
+  ok: boolean;
+  message?: string;
+}
+const testResult = ref<Record<number, TestResult>>({});
+
+/** M2 task 7：测试连接失败原因 5s 顶部 toast（与删除凭据残留 warning 共享同一 banner）。 */
+const testFailMessage = ref<string | null>(null);
+let testFailTimer: ReturnType<typeof setTimeout> | null = null;
+
+function showTestFail(msg: string): void {
+  testFailMessage.value = msg;
+  if (testFailTimer) clearTimeout(testFailTimer);
+  testFailTimer = setTimeout(() => { testFailMessage.value = null; }, 5000);
+}
+
+/** M2 task 7：按后端错误消息关键字路由三态。前端兜底，后端文案已人话；后端没有强制错误码。 */
+function classifyTestFail(msg: string): 'auth' | 'config' | 'network' {
+  const m = msg.toLowerCase();
+  if (m.includes('权限') || m.includes('认证') || m.includes('auth')
+      || m.includes('credential') || m.includes('password')) {
+    return 'auth';
+  }
+  if (m.includes('share') || m.includes('契约') || m.includes('配置')
+      || m.includes('share_root') || m.includes('initial_path')
+      || m.includes('路径')) {
+    return 'config';
+  }
+  return 'network';
+}
+
+function testFailI18nKey(kind: 'auth' | 'config' | 'network'): string {
+  return kind === 'auth' ? 'accounts.testFailAuth'
+       : kind === 'config' ? 'accounts.testFailConfig'
+       : 'accounts.testFailNetwork';
+}
+
 /** module3.2.0：删除账户的凭据残留警告（keyring 删除失败时后端返回） */
 const warning = ref<string | null>(null);
 let warningTimer: ReturnType<typeof setTimeout> | null = null;
@@ -100,9 +144,18 @@ async function remove(id: number) {
 
 async function test(id: number) {
   try {
-    testResult.value = { ...testResult.value, [id]: await testConnection(id) };
-  } catch {
-    testResult.value = { ...testResult.value, [id]: false };
+    const ok = await testConnection(id);
+    testResult.value = { ...testResult.value, [id]: { ok } };
+    if (!ok) {
+      // 后端返回 Ok(false) 但不带 message（极少见——工厂层仅在 true/Err 二态）——
+      // 给个兜底网络文案，避免 toast 空串。
+      showTestFail(t('accounts.testFailNetwork'));
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    testResult.value = { ...testResult.value, [id]: { ok: false, message } };
+    const kind = classifyTestFail(message);
+    showTestFail(t(testFailI18nKey(kind)));
   }
 }
 </script>
@@ -126,7 +179,12 @@ async function test(id: number) {
       {{ warning }}
     </p>
 
-    <ul v-else data-test="list" class="accounts-list">
+    <!-- M2 task 7：测试连接失败三态原因 toast（顶部 5s 提示） -->
+    <p v-else-if="testFailMessage" data-test="test-fail" class="hint warning">
+      {{ testFailMessage }}
+    </p>
+
+    <ul v-if="accounts.length > 0" data-test="list" class="accounts-list">
       <li v-for="acct in accounts" :key="acct.id" data-test="row">
         <span class="name">{{ acct.name }}</span>
         <span class="kind" :class="acct.type">{{ t(`accounts.${acct.type}`) }}</span>
@@ -135,9 +193,11 @@ async function test(id: number) {
         <span
           v-if="testResult[acct.id] !== undefined"
           class="test-result"
-          :class="{ ok: testResult[acct.id], fail: testResult[acct.id] === false }"
+          :class="{ ok: testResult[acct.id].ok, fail: !testResult[acct.id].ok }"
+          :data-test-fail-kind="testResult[acct.id].message
+            ? classifyTestFail(testResult[acct.id].message!) : null"
         >
-          {{ testResult[acct.id] ? t('accounts.testedOk') : t('accounts.testedFail') }}
+          {{ testResult[acct.id].ok ? t('accounts.testedOk') : t('accounts.testedFail') }}
         </span>
         <button data-test="edit-btn" @click="startEdit(acct)">{{ t('accounts.edit') }}</button>
         <button data-test="delete-btn" @click="remove(acct.id)">{{ t('accounts.delete') }}</button>
