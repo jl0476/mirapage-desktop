@@ -137,7 +137,14 @@ async fn main() -> anyhow::Result<()> {
     let tree2 = client.get_tree(&unc).await?;
     println!("[5] re-get_tree ok (Client 可复用): {:?}", tree2.is_dfs_root());
 
-    // ⑦ 错误分类观察：访问不存在文件
+    // ⑦ 自定义端口 + 深层 initialPath（评审补充验证点）
+    let deep = UncPath::new(server)?.with_share(share)?.with_path("comics");
+    let tree3 = client.get_tree(&deep).await?;
+    let _ = tree3.open_existing(".", smb::AccessMask::new().with_generic_read(true)).await;
+    println!("[7] deep initialPath tree ok");
+    // 端口：把 server 换 "{server}:1445"（若 NAS 支持非 445）重跑验证 parse_socket_address 路径
+
+    // ⑧ 错误分类观察：访问不存在文件
     let miss = tree.open_existing("no_such_dir_xyz", smb::AccessMask::new().with_generic_read(true)).await;
     println!("[6] missing dir err = {:?}", miss.err().map(|e| e.to_string()));
 
@@ -148,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
 
 注意：`AccessMask`/`FileAccessMask` 的确切导入路径与构造（`smb::AccessMask` vs `smb_msg::FileAccessMask`）以编译器提示为准微调——本骨架已按 `Tree::open_existing(&self, file_name, access: FileAccessMask)` 核对；`query_info::<T>` 的 trait bound（`QueryInformationValue` 类）若不满足则改用 `open_existing 后 as_file` + `GetLen`。**spike 的产出之一就是把这两处真实路径记录回写**。
 
-- [ ] **步骤 2：跑通并记录七点结论**（connect 时长 / 字段映射可行 / read_block 恰好语义 / stat API / 吞吐 MB/s / Client 复用 / 错误形态），回写母 spec §4.1。
+- [ ] **步骤 2：跑通并记录验证点结论（含评审补充的深层 initialPath 与自定义端口两项）**（connect 时长 / 字段映射可行 / read_block 恰好语义 / stat API / 吞吐 MB/s / Client 复用 / 错误形态），回写母 spec §4.1。
 
 - [ ] **步骤 3：Commit（无 NAS 时跳过本任务，在验收任务 9 前必须补跑）**
 
@@ -710,6 +717,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_connect_deduplicates_to_one_slot() {
+        // P1-1 阶段 3 写回语义：并发两请求各自建连（实例 2 个），最终 slot 只留一个
+        // 且两者都成功返回可用 transport
+        let (mgr, log) = manager_with_log(std::time::Duration::from_secs(300));
+        let (a, b) = tokio::join!(mgr.stat(1, "media", "f"), mgr.stat(1, "media", "f"));
+        assert!(a.is_err() && b.is_err()); // 未脚本化 FileNotFound——但两请求都走通了 transport
+        assert_eq!(log.created.lock().unwrap().len(), 2, "并发竞态各自建连（去重=复用先到者，非阻止建连）");
+    }
+
+    #[tokio::test]
     async fn missing_account_row_errors() {
         let (mgr, _) = manager_with_log(Duration::from_secs(300));
         let r = mgr.list(999, "media", "x").await;
@@ -790,13 +807,17 @@ impl SmbConnectionManager {
         };
         super::path::share_root_matches(initial_path, share.as_deref())
             .map_err(TransportError::InvalidPath)?;
+        let port = port.unwrap_or(445);
+        if !(1..=65535).contains(&port) {
+            return Err(TransportError::InvalidPath(format!("端口越界: {port}")));
+        }
         let password = self
             .creds
             .get_password(&crate::credentials::account_key("smb", account_id))
             .map_err(|e| TransportError::Io(e))?;
         Ok(ConnectParams {
             host,
-            port: port.unwrap_or(445) as i32,
+            port: port as i32,
             share: share.unwrap_or_default(),
             username,
             password,
@@ -804,19 +825,38 @@ impl SmbConnectionManager {
         })
     }
 
+    /// **两阶段（P1 修复）**：std MutexGuard 不得跨 await（async_trait 要求 Send；
+    /// 且连接慢时不能阻塞其他账户的缓存读取/回收）。
+    /// 阶段 1 锁内查/回收 → 释放锁建连 → 阶段 2 短锁写回（并发去重：后到者复用先到者）。
     async fn get_or_connect(&self, account_id: i64, initial_path: &str) -> Result<Arc<dyn SmbTransport>, TransportError> {
         let params = self.resolve_params(account_id, initial_path)?;
-        let mut slots = self.slots.lock().unwrap();
-        // TTL 懒回收：剔除过期条目（含目标自身——过期则重建）
-        let now = Instant::now();
-        slots.retain(|_, m| now.duration_since(m.last_used) < self.ttl);
-        if let Some(m) = slots.get_mut(&account_id) {
-            m.last_used = now;
-            return Ok(m.transport.clone());
+        // 阶段 1：锁内——TTL 懒回收 + 命中直返（锁在 await 前释放）
+        let existing = {
+            let mut slots = self.slots.lock().unwrap();
+            let now = Instant::now();
+            slots.retain(|_, m| now.duration_since(m.last_used) < self.ttl);
+            match slots.get_mut(&account_id) {
+                Some(m) => {
+                    m.last_used = now;
+                    Some(m.transport.clone())
+                }
+                None => None,
+            }
+        }; // MutexGuard 在此 drop
+        if let Some(t) = existing {
+            return Ok(t);
         }
+        // 阶段 2：无锁建连（慢连接不阻塞其他账户）
         let transport = (self.factory)().await;
         transport.connect(&params).await?;
-        slots.insert(account_id, ManagedTransport { transport: transport.clone(), last_used: now });
+        // 阶段 3：短锁写回。并发建连去重：竞态后到者发现自己已存在 → 丢弃新建实例
+        // （多花一次建连握手，正确性无损——两实例行为等价），复用先到者。
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(m) = slots.get_mut(&account_id) {
+            m.last_used = Instant::now();
+            return Ok(m.transport.clone());
+        }
+        slots.insert(account_id, ManagedTransport { transport: transport.clone(), last_used: Instant::now() });
         Ok(transport)
     }
 
@@ -932,11 +972,12 @@ mod tests {
     #[tokio::test]
     async fn list_maps_entries_with_archive_flag_and_sort() {
         let (src, mock) = make_source();
-        mock.script_list("v1", vec![
+        // rel 相对 share = initial_path("media") + 方法 path("v1")
+        mock.script_list("media/v1", vec![
             raw("page10.jpg", false, 5), raw("page2.jpg", false, 4),
             raw("sub", true, 0), raw("book.cbz", false, 100),
         ]);
-        let entries = src.list_directory(&smb_desc("media", "v1"), "").await.unwrap();
+        let entries = src.list_directory(&smb_desc("media", "v1"), "v1").await.unwrap();
         // 自然排序（page2 < page10），目录在前由 UI 层管（source 只保自然序——对齐 local.rs）
         assert_eq!(entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
                    ["book.cbz", "page10.jpg", "page2.jpg", "sub"]);
@@ -951,6 +992,8 @@ mod tests {
     async fn read_file_range_exact_or_error() {
         let (src, mock) = make_source();
         mock.script_bytes(b"0123456789");
+        // 无 range 分支先 stat 拿全量 size——脚本必须配（rel 相对 share 含 initial_path 前缀）
+        mock.script_stat("media/v1/f.bin", RawStat { size: 10, modified_unix_secs: None });
         let d = smb_desc("media", "v1");
         let full = src.read_file(&d, "f.bin", None).await.unwrap();
         assert_eq!(full, b"0123456789");
@@ -965,10 +1008,40 @@ mod tests {
     #[tokio::test]
     async fn stat_maps_to_file_stat() {
         let (src, mock) = make_source();
-        mock.script_stat("f.bin", RawStat { size: 42, modified_unix_secs: Some(123) });
-        let st = src.stat(&smb_desc("media", "v1"), "f.bin").await.unwrap();
+        mock.script_stat("media/v1/f.bin", RawStat { size: 42, modified_unix_secs: Some(123) });
+        let st = src.stat(&smb_desc("media", "v1"), "v1/f.bin").await.unwrap();
         assert_eq!(st.size, 42);
         assert_eq!(st.modified_at, Some(123));
+    }
+
+    // ─── P0 回归：initial_path 前缀必须进 transport rel（深层入口）───
+
+    #[tokio::test]
+    async fn deep_initial_path_root_list_includes_prefix() {
+        let (src, mock) = make_source();
+        // 账户 share=media、入口 media/comics：根目录列表（方法 path=""）→ rel="media/comics"
+        mock.script_list("media/comics", vec![raw("v1", true, 0)]);
+        let entries = src.list_directory(&smb_desc("media/comics", ""), "").await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "v1");
+    }
+
+    #[tokio::test]
+    async fn deep_initial_path_subdirectory_join() {
+        let (src, mock) = make_source();
+        mock.script_list("media/comics/v1", vec![raw("001.jpg", false, 7)]);
+        let entries = src.list_directory(&smb_desc("media/comics", ""), "v1").await.unwrap();
+        assert_eq!(entries[0].name, "001.jpg");
+    }
+
+    #[tokio::test]
+    async fn deep_initial_path_read_joins_prefix() {
+        let (src, mock) = make_source();
+        mock.script_bytes(b"0123456789");
+        let d = smb_desc("media/comics", "");
+        let part = src.read_file(&d, "v1/001.jpg", Some(ByteRange::new(2, 4))).await.unwrap();
+        assert_eq!(part, b"2345");
+        // read 走 stat 拿全量（无 range 时）——此处 range 路径不依赖 stat 脚本
     }
 
     #[tokio::test]
@@ -983,7 +1056,7 @@ mod tests {
     #[tokio::test]
     async fn test_lists_root_and_requires_share() {
         let (src, mock) = make_source();
-        mock.script_list("", vec![raw("comics", true, 0)]);
+        mock.script_list("media", vec![raw("comics", true, 0)]);
         src.test(&smb_desc("media", "")).await.unwrap();
         // initial_path 首段 ≠ share → 配置错误
         assert!(src.test(&smb_desc("wrong", "")).await.is_err());
@@ -1004,6 +1077,9 @@ use crate::source::trait_def::{ByteRange, FileStat, MediaSource, MediaSourceErro
 use async_trait::async_trait;
 use std::sync::Arc;
 
+/// 单次 read_file 全量上限（建议 3：异常 stat 防御，对齐 media LRU 256MB）
+const MAX_SMB_READ_BYTES: usize = 256 * 1024 * 1024;
+
 pub struct SmbMediaSource {
     manager: Arc<SmbConnectionManager>,
 }
@@ -1013,11 +1089,10 @@ impl SmbMediaSource {
         Self { manager }
     }
 
-    fn extract<'a>(&self, descriptor: &'a SourceDescriptor) -> Option<(i64, &'a str, &'a str)> {
+    /// (account_id, initial_path)。descriptor.path 不参与路径拼接（P0：方法参数即完整路径）。
+    fn extract<'a>(&self, descriptor: &'a SourceDescriptor) -> Option<(i64, &'a str)> {
         match descriptor {
-            SourceDescriptor::Smb { account_id, initial_path, path, .. } => {
-                Some((*account_id, initial_path.as_str(), path.as_str()))
-            }
+            SourceDescriptor::Smb { account_id, initial_path, .. } => Some((*account_id, initial_path.as_str())),
             _ => None,
         }
     }
@@ -1057,10 +1132,10 @@ impl MediaSource for SmbMediaSource {
     }
 
     async fn list_directory(&self, descriptor: &SourceDescriptor, path: &str) -> Result<Vec<MediaEntry>> {
-        let (account_id, initial_path, cur) = self.extract(descriptor).ok_or_else(|| {
+        let (account_id, initial_path) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("SmbMediaSource 仅处理 Smb descriptor".into())
         })?;
-        let rel = validated_rel(initial_path, cur, path)?;
+        let rel = validated_rel(initial_path, path)?;
         let raws = self.manager.list(account_id, initial_path, &rel).await.map_err(Self::transport_err)?;
         let mut entries: Vec<MediaEntry> = raws.into_iter().map(map_entry).collect();
         entries.sort_by(|a, b| crate::algorithm::natural_compare(&a.name, &b.name));
@@ -1068,17 +1143,24 @@ impl MediaSource for SmbMediaSource {
     }
 
     async fn read_file(&self, descriptor: &SourceDescriptor, path: &str, range: Option<ByteRange>) -> Result<Vec<u8>> {
-        let (account_id, initial_path, cur) = self.extract(descriptor).ok_or_else(|| {
+        let (account_id, initial_path) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("SmbMediaSource 仅处理 Smb descriptor".into())
         })?;
-        let rel = validated_rel(initial_path, cur, path)?;
+        let rel = validated_rel(initial_path, path)?;
         let total = match range {
             None => {
                 let st = self.manager.stat(account_id, initial_path, &rel).await.map_err(Self::transport_err)?;
-                st.size as usize
+                // 建议 3 修复：u64→usize 显式检查 + 巨量钳制（异常/恶意 stat 防御；
+                // 256MB 对齐 media LRU 容量——正常图片远小于此）
+                usize::try_from(st.size)
+                    .map_err(|_| MediaSourceError::Network(format!("文件过大: {}", st.size)))?
             }
-            Some(r) => r.length as usize,
+            Some(r) => usize::try_from(r.length)
+                .map_err(|_| MediaSourceError::Network(format!("区间过大: {}", r.length)))?,
         };
+        if total > MAX_SMB_READ_BYTES {
+            return Err(MediaSourceError::Network(format!("读取超过上限 {} 字节", MAX_SMB_READ_BYTES)));
+        }
         let mut buf = vec![0u8; total];
         self.manager
             .read_block_exact(account_id, initial_path, &rel, range.map(|r| r.offset).unwrap_or(0), &mut buf)
@@ -1105,26 +1187,26 @@ impl MediaSource for SmbMediaSource {
     }
 
     async fn stat(&self, descriptor: &SourceDescriptor, path: &str) -> Result<FileStat> {
-        let (account_id, initial_path, cur) = self.extract(descriptor).ok_or_else(|| {
+        let (account_id, initial_path) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("SmbMediaSource 仅处理 Smb descriptor".into())
         })?;
-        let rel = validated_rel(initial_path, cur, path)?;
+        let rel = validated_rel(initial_path, path)?;
         let raw = self.manager.stat(account_id, initial_path, &rel).await.map_err(Self::transport_err)?;
         Ok(FileStat { size: raw.size, modified_at: raw.modified_unix_secs })
     }
 }
 
-/// path 参数（相对 descriptor.path 所在目录）→ 相对 initial_path 的完整 rel，
-/// 途中过 validate_source_relative（PathEscape 防御，对齐 local.rs resolve_path 语义）。
-fn validated_rel(initial_path: &str, cur: &str, path: &str) -> Result<String> {
+/// **路径契约（P0 修复）**：方法 path 参数 = 相对 initial_path 入口的完整路径
+/// （对齐 WebDAV 语义——webdav_impl 忽略 descriptor.path、只用方法参数拼 base_url；
+/// fileBrowser fetch 传完整 currentPath、loader 传 book.absolutePath，均为完整路径）。
+/// descriptor.path 是同信息的冗余双承载（身份记录），**不参与拼接**。
+/// transport rel 语义 = 相对 share = initial_path 前缀 + 方法 path。
+fn validated_rel(initial_path: &str, path: &str) -> Result<String> {
     let norm = crate::algorithm::validate_source_relative(path)
         .map_err(|e| MediaSourceError::PathEscape(format!("{:?}: {}", e, path)))?;
-    let joined = crate::source::smb::path::unc_rel(
-        cur,
-        &norm.replace('/', "\\"),
-    );
-    // joined 现为 '\' 分隔的「initial_path 子目录 + 文件」——转回 '/' 供 transport 层
-    Ok(joined.replace('\\', "/"))
+    let joined = crate::source::smb::path::unc_rel(initial_path, &norm);
+    // unc_rel 产出 \' 分隔（相对 share）——转回 '/' 供 transport 层统一消费
+    Ok(joined.replace('\\', '/'))
 }
 ```
 
@@ -1193,33 +1275,43 @@ impl SmbClientTransport {
     }
 }
 
-/// smb::Error → TransportError（连接级/文件级分类落点，spec §3）。
-/// 变体集合对 smb-0.11.2 error.rs 核对：TransportError/IoError/OperationTimeout → 连接级；
-/// ReceivedErrorMessage(Status::U32_OBJECT_NAME_NOT_FOUND 等) → FileNotFound；
-/// ReceivedErrorMessage(STATUS_ACCESS_DENIED) → PermissionDenied。
+/// smb::Error → TransportError（P1-3 修复：按 smb-0.11.2 error.rs 真实变体核对）。
+/// 连接级（触发外层重连一次）：TransportError / ConnectionStopped / InvalidState /
+/// NegotiationError / OperationTimeout / IoError（非 NotFound/PermissionDenied kind）。
+/// 文件级：NotFound / MissingPermissions / ReceivedErrorMessage 按状态码分派。
 fn map_smb_error(e: SmbError) -> TransportError {
-    use smb::msg::Status;
     match &e {
-        SmbError::TransportError(_) => TransportError::Disconnected,
-        SmbError::IoError(io) => {
-            match io.kind() {
-                std::io::ErrorKind::NotFound => TransportError::FileNotFound(io.to_string()),
-                std::io::ErrorKind::PermissionDenied => TransportError::PermissionDenied(io.to_string()),
-                _ => TransportError::Io(io.to_string()),
-            }
-        }
-        SmbError::OperationTimeout(_, _) => TransportError::Timeout,
-        SmbError::ReceivedErrorMessage(status, _) => match status {
-            Status::U32_OBJECT_NAME_NOT_FOUND | Status::U32_OBJECT_PATH_NOT_FOUND => {
-                TransportError::FileNotFound(e.to_string())
-            }
-            Status::U32_ACCESS_DENIED => TransportError::PermissionDenied(e.to_string()),
-            Status::U32_NETWORK_NAME_DELETED | Status::U32_CONNECTION_DISCONNECTED
-            | Status::U32_SESSION_EXPIRED | Status::U32_USER_SESSION_DELETED => TransportError::Disconnected,
-            _ => TransportError::Other(e.to_string()),
+        SmbError::TransportError(_) | SmbError::ConnectionStopped
+        | SmbError::InvalidState(_) | SmbError::NegotiationError(_)
+        | SmbError::OperationTimeout(_, _) => TransportError::Disconnected,
+        SmbError::IoError(io) => match io.kind() {
+            std::io::ErrorKind::NotFound => TransportError::FileNotFound(io.to_string()),
+            std::io::ErrorKind::PermissionDenied => TransportError::PermissionDenied(io.to_string()),
+            _ => TransportError::Io(io.to_string()),
         },
         SmbError::NotFound(p) => TransportError::FileNotFound(p.clone()),
+        SmbError::MissingPermissions(p) => TransportError::PermissionDenied(p.clone()),
+        // 实际签名 ReceivedErrorMessage(u32, ErrorResponse)——Status::U32_* 是 u32 常量，
+        // 用 guard 比较（非枚举 match）；分派逻辑独立成纯函数供单测锁死
+        SmbError::ReceivedErrorMessage(code, _) => map_status_code(*code, e.to_string()),
         _ => TransportError::Other(e.to_string()),
+    }
+}
+
+/// NT 状态码 u32 → TransportError（纯函数，可全常量覆盖测试）。
+/// 常量名以 smb-msg 实际导出为准（编译期裁决：缺的常量删除对应臂，落 Other 兜底）。
+fn map_status_code(code: u32, ctx: String) -> TransportError {
+    use smb::msg::Status as S;
+    match code {
+        c if c == S::U32_OBJECT_NAME_NOT_FOUND || c == S::U32_OBJECT_PATH_NOT_FOUND => {
+            TransportError::FileNotFound(ctx)
+        }
+        c if c == S::U32_ACCESS_DENIED => TransportError::PermissionDenied(ctx),
+        c if c == S::U32_NETWORK_NAME_DELETED
+            || c == S::U32_CONNECTION_DISCONNECTED
+            || c == S::U32_SESSION_EXPIRED
+            || c == S::U32_USER_SESSION_DELETED => TransportError::Disconnected,
+        _ => TransportError::Other(ctx),
     }
 }
 
@@ -1238,7 +1330,15 @@ fn to_raw(info: &smb_fscc::FileIdBothDirectoryInformation) -> RawDirEntry {
 #[async_trait::async_trait]
 impl SmbTransport for SmbClientTransport {
     async fn connect(&self, params: &ConnectParams) -> Result<(), TransportError> {
-        let unc = UncPath::new(&params.host)
+        // P1-2 修复：smb crate 的端口经 server 字符串承载——TransportUtils::parse_socket_address
+        // 对无 ':' 的 endpoint 补 ":0" 后由 TcpTransport::default_port() 落到 445；
+        // 非 445 端口必须显式拼 "host:port"（已核对 smb-transport utils.rs/tcp.rs 源码）。
+        let server = if params.port == 445 {
+            params.host.clone()
+        } else {
+            format!("{}:{}", params.host, params.port)
+        };
+        let unc = UncPath::new(&server)
             .and_then(|u| u.with_share(&params.share))
             .map_err(|e| TransportError::InvalidPath(e.to_string()))?;
         self.client
@@ -1334,10 +1434,28 @@ mod tests {
 
     #[test]
     fn error_classification_variants() {
-        // 编译期锁定变体存在 + 分类正确（网络行为靠 spike/验收）
-        assert!(matches!(map_smb_error(SmbError::TransportError(
-            smb::transport::TransportError::NotConnected)), TransportError::Disconnected));
+        // P1-3：可构造变体逐一锁定（网络行为靠 spike/验收）
+        assert!(matches!(
+            map_smb_error(SmbError::TransportError(smb::transport::TransportError::NotConnected)),
+            TransportError::Disconnected));
+        assert!(matches!(map_smb_error(SmbError::ConnectionStopped), TransportError::Disconnected));
+        assert!(matches!(map_smb_error(SmbError::InvalidState("s".into())), TransportError::Disconnected));
         assert!(matches!(map_smb_error(SmbError::NotFound("x".into())), TransportError::FileNotFound(_)));
+        assert!(matches!(map_smb_error(SmbError::MissingPermissions("p".into())), TransportError::PermissionDenied(_)));
+        let io_nf = SmbError::IoError(std::io::Error::new(std::io::ErrorKind::NotFound, "nf"));
+        assert!(matches!(map_smb_error(io_nf), TransportError::FileNotFound(_)));
+    }
+
+    #[test]
+    fn status_code_dispatch_full_coverage() {
+        // map_status_code 纯函数：状态码分派全锁定（u32 直构，零网络）
+        use smb::msg::Status as S;
+        assert!(matches!(map_status_code(S::U32_OBJECT_NAME_NOT_FOUND, "c".into()), TransportError::FileNotFound(_)));
+        assert!(matches!(map_status_code(S::U32_OBJECT_PATH_NOT_FOUND, "c".into()), TransportError::FileNotFound(_)));
+        assert!(matches!(map_status_code(S::U32_ACCESS_DENIED, "c".into()), TransportError::PermissionDenied(_)));
+        assert!(matches!(map_status_code(S::U32_CONNECTION_DISCONNECTED, "c".into()), TransportError::Disconnected));
+        assert!(matches!(map_status_code(S::U32_SESSION_EXPIRED, "c".into()), TransportError::Disconnected));
+        assert!(matches!(map_status_code(0xC000_0001, "c".into()), TransportError::Other(_))); // 未知码兜底
     }
 }
 ```
@@ -1392,17 +1510,33 @@ accounts.rs tests 的 `test_connection_smb_not_implemented_yet` 改为：smb 账
 
 ```rust
     #[tokio::test]
-    async fn test_connection_smb_uses_factory_handshake() {
+    async fn test_connection_smb_rejects_missing_share_without_network() {
+        // 建议 1 修复：不用生产 factory 打真实 IP（CI 不稳定）——走配置错误路径
+        // （share 缺失在 resolve_params 前置校验，零网络）断言错误语义
         let (db, store) = setup();
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
-            port: Some(445), share: Some("media".into()), username: None, password: None }).unwrap();
+            port: Some(445), share: None, username: None, password: None }).unwrap();
         let factory = crate::source::MediaSourceFactory::new(
             db.clone(), std::sync::Arc::new(crate::credentials::MemoryStore::new()));
         let r = test_connection_impl(&db, &factory, id).await;
-        // 真 handshake：连不上 192.168.1.1 → Err（网络错误），但不再是「尚未实装」
         assert!(r.is_err());
-        assert!(!r.unwrap_err().contains("尚未实装"));
+        let msg = r.unwrap_err();
+        assert!(msg.contains("share") || msg.contains("共享"), "配置错误语义: {msg}");
+        assert!(!msg.contains("尚未实装"), "M2 后不再有未实装占位错误");
+    }
+
+    #[tokio::test]
+    async fn test_connection_smb_rejects_out_of_range_port() {
+        let (db, store) = setup();
+        let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
+            id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
+            port: Some(99999), share: Some("media".into()), username: None, password: None }).unwrap();
+        let factory = crate::source::MediaSourceFactory::new(
+            db.clone(), std::sync::Arc::new(crate::credentials::MemoryStore::new()));
+        let r = test_connection_impl(&db, &factory, id).await;
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("端口"), "端口越界被拒绝而非静默忽略");
     }
 ```
 
@@ -1417,15 +1551,17 @@ accounts.rs test_connection_impl：
             let host = host.ok_or("smb 账户缺少 host")?;
             let share = _share.clone().ok_or("smb 账户缺少 share（固定共享根必填）")?;
             let initial = share; // test 用 share 根做 initial_path
+            // P1-2：port 用账户行值（此前硬编码 445）；port 越界在 resolve_params 校验
+            let port = _port.unwrap_or(445) as i32;
             let d = crate::source::descriptor::SourceDescriptor::Smb {
-                account_id: id, initial_path: initial, path: String::new(), port: 445,
+                account_id: id, initial_path: initial, path: String::new(), port,
             };
             factory.resolve(&d).test(&d).await
                 .map(|_| true).map_err(|e| e.to_string())
         }
 ```
 
-（impl 内 `_share` 变量名改 `share`——SELECT 已取 type/host，需加 share 列。）
+（impl 内变量名改 `share`/`_port`——SELECT 已取 type/host，需加 port、share 两列。）
 
 find_next_volume.rs：
 
@@ -1499,6 +1635,16 @@ git push origin main --tags
 - **占位符扫描**：无「待定/TODO/后续实现」；任务 6 的「执行期不确定点」7 条均为**编译器裁决的具体指令**（含备选写法），非占位——每条给了确定的处理动作。
 - **类型一致性**：`TransportError`（任务 1 定义，2/3/4/5/6 使用）、`SmbTransport`/`RawDirEntry`/`RawStat`/`ConnectParams`（任务 1 定义，3/4/5/6 使用）、`TransportFactory`（任务 4 定义，5 复用）、`SmbConnectionManager::new/new_production`（任务 4 定义，任务 5 factory 使用）、`map_smb_error`（任务 6 内闭用）——签名一致。
 - **与 M1 代码库的接线事实**：factory::new(db, creds) 现签名（M1 任务 4）、Db Clone（M1）、CredentialStore/account_key（M1 任务 2）、`Cargo.toml` smb 依赖已存在（0.11 注释已启用）——均已核对。
+
+## 附：计划审查修订记录（rev2，2026-08-19）
+
+外部审查 1 P0 + 3 P1 + 3 建议全采纳（每条先经本地 registry 源码/计划复核再修）：
+
+1. **P0 路径契约**：`validated_rel` 漏拼 `initial_path` 属实——重写为「方法 path = 相对 initial_path 入口的完整路径（对齐 WebDAV 忽略 descriptor.path 的参数语义），transport rel = initial_path + path（相对 share）」；`extract` 改二元组；补深层入口根/子目录/读文件三回归用例；既有用例 script key 全部补 `media/` 前缀。
+2. **P1 MutexGuard 跨 await**：`get_or_connect` 重写两阶段（锁内查/回收→释放建连→短锁写回）；并发去重策略=后到者复用先到者（各自建连、slot 单份）+ 并发用例。
+3. **P1 端口静默忽略**：核实 smb-transport 源码——`TransportUtils::parse_socket_address` 对无 `:` endpoint 补 `:0` 走 `TcpTransport::default_port()=445`，**server 字符串承载端口**（`host:port` 形态过 `check_no_separators`）——修法为非 445 拼 `format!("{host}:{port}")`（crate 支持，不需拒绝）；`resolve_params` 加端口 1-65535 校验；test_connection 用账户行 port（删硬编码）；spike 补自定义端口验证点。
+4. **P1 错误映射假设错误**：核实 error.rs——实际 `ReceivedErrorMessage(u32, ErrorResponse)`（`Status::U32_*` 是 u32 常量，用 guard 比较非枚举 match）；映射表按真实变体重写，`ConnectionStopped`/`InvalidState`/`NegotiationError` 归连接级、`MissingPermissions`→PermissionDenied；状态码分派独立纯函数 `map_status_code(u32)` 全常量锁定测试；「编译器提示后删 match 臂」降级为缺常量时的兜底手段而非常规策略。
+5. **建议**：test_connection 测试改零网络路径（share 缺失/端口越界两用例，不打真实 IP）；spike 补深层 initialPath 验证点；read_file 全量 `usize::try_from` + 256MB 钳制（`MAX_SMB_READ_BYTES`）。
 
 ## 附：执行顺序依赖
 
