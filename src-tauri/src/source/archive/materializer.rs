@@ -429,11 +429,13 @@ impl Materializer {
 impl crate::source::archive_impl::Materialize for Materializer {
     async fn ensure_cached(
         &self, origin: &SourceDescriptor, archive_rel_path: &str,
-    ) -> std::result::Result<PathBuf, String> {
-        // 显式 inherent 方法调用——trait 方法同名，避免无限递归
+    ) -> std::result::Result<PathBuf, MediaSourceError> {
+        // 显式 inherent 方法调用——trait 方法同名，避免无限递归。
+        // `From<MaterializeError> for MediaSourceError` 保类型：NotFound→NotFound /
+        // Network→Network / Io→Io / Other→Other（审查修复：错误语义不扁平化成 String）
         Materializer::ensure_cached(self, origin, archive_rel_path)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.into())
     }
 }
 
