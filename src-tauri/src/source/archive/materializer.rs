@@ -82,7 +82,8 @@ impl From<MaterializeError> for MediaSourceError {
     }
 }
 
-const CHUNK: u64 = 4 * 1024 * 1024;
+/// chunk 大小（pub(crate)：prefetch 测试构造跨 chunk 源用）
+pub(crate) const CHUNK: u64 = 4 * 1024 * 1024;
 
 pub struct Materializer {
     webdav: Arc<dyn MediaSource>,
@@ -221,6 +222,14 @@ impl Materializer {
         self.inflight.lock().await.clearing = false;
     }
     pub fn cache_root(&self) -> PathBuf { self.cache_root.read().unwrap().clone() }
+    /// 元数据预载（M3 任务 8 / spec §7）：仅 stat origin 远端——结果弃用，
+    /// 预热 SMB/WebDAV 连接缓存，不落任何状态（YAGNI）
+    pub async fn stat_origin(
+        &self, origin: &SourceDescriptor, rel: &str,
+    ) -> Result<FileStat, MaterializeError> {
+        let src = self.origin_source(origin)?;
+        src.stat(origin, rel).await.map_err(|e| e.into())
+    }
     pub async fn inflight_empty(&self) -> bool { self.inflight.lock().await.map.is_empty() }
     /// clear 用：等待在途任务退出（chunk/检查点粒度快速退出）；超时返回 false
     pub async fn wait_inflight_drained(&self, timeout: std::time::Duration) -> bool {
@@ -498,7 +507,7 @@ fn emit_progress(cache_key: &str, rel: &str, downloaded: u64, total: u64, phase:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::source::descriptor::SourceDescriptor;
     use crate::source::trait_def::FileStat;
@@ -507,7 +516,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc as StdArc;
 
-    fn webdav(path: &str) -> SourceDescriptor {
+    pub(crate) fn webdav(path: &str) -> SourceDescriptor {
         SourceDescriptor::WebDav { account_id: 7, base_url: "https://d/x".into(), path: path.into() }
     }
 
@@ -532,15 +541,16 @@ mod tests {
     }
 
     /// 内存 mock 源：stat/read 可编程 + 调用计数 + 错误注入
-    struct MockOrigin {
-        stat_size: std::sync::Mutex<u64>,
-        stat_mtime: std::sync::Mutex<Option<i64>>,
-        bytes: std::sync::Mutex<Vec<u8>>,
-        read_calls: AtomicUsize,
-        stat_calls: AtomicUsize,
+    /// （pub(crate)：prefetch 测试复用——MockOrigin + temp_materializer + wait_reads）
+    pub(crate) struct MockOrigin {
+        pub(crate) stat_size: std::sync::Mutex<u64>,
+        pub(crate) stat_mtime: std::sync::Mutex<Option<i64>>,
+        pub(crate) bytes: std::sync::Mutex<Vec<u8>>,
+        pub(crate) read_calls: AtomicUsize,
+        pub(crate) stat_calls: AtomicUsize,
         fail_next_read: std::sync::atomic::AtomicBool,
         /// 每次 read 前延迟（慢源：取消 / in-flight 去重用例）
-        read_delay_ms: std::sync::Mutex<u64>,
+        pub(crate) read_delay_ms: std::sync::Mutex<u64>,
         /// 记录每次 read 的 (offset, length)（续传 / 全量重下断言）
         last_ranges: std::sync::Mutex<Vec<(u64, u64)>>,
         /// 第 N 次 stat（1-based）把远端切到新版本字节（rename 前二次 stat 发现远端变更）
@@ -551,7 +561,7 @@ mod tests {
     }
 
     impl MockOrigin {
-        fn new(size: u64) -> Self {
+        pub(crate) fn new(size: u64) -> Self {
             Self {
                 stat_size: std::sync::Mutex::new(size),
                 stat_mtime: std::sync::Mutex::new(Some(1000)),
@@ -625,7 +635,7 @@ mod tests {
 
     /// tempdir 建 cache_root + part/；内存库跑 migrations；webdav 槽位注入 mock。
     /// tempdir 本身就是 RAII guard（Drop 清理目录），直接放进返回元组。
-    fn temp_materializer(origin: StdArc<MockOrigin>)
+    pub(crate) fn temp_materializer(origin: StdArc<MockOrigin>)
         -> (Materializer, tempfile::TempDir, crate::db::Db) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("part")).unwrap();
@@ -636,7 +646,7 @@ mod tests {
     }
 
     /// 等到 mock 源至少被读了 n 次（测试前置：确认下载真的在途，代际/epoch 已捕获）
-    async fn wait_reads(mock: &MockOrigin, at_least: usize) {
+    pub(crate) async fn wait_reads(mock: &MockOrigin, at_least: usize) {
         for _ in 0..400 {
             if mock.read_calls.load(Ordering::SeqCst) >= at_least { return; }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;

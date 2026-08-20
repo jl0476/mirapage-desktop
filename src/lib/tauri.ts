@@ -652,3 +652,18 @@ export async function deleteShortcut(id: number): Promise<void> {
 export async function keepScreenOn(enable: boolean): Promise<void> {
   await invoke<void>('keep_screen_on', { enable });
 }
+
+// ─── M3 任务 8: 远程 archive 三级预载 ─────────────────────────────────
+/**
+ * masonry 像素窗口 / details 选中推送 archive 预载目标。
+ * epoch 取 Date.now()（单调、remount 安全；切目录天然由新窗口 watch 产生新调用，
+ * 后端 epoch 推进即取消在途预载）。mode: 'metadata'（仅 stat 预热）/
+ * 'content'（低优物化，可被后续 epoch 取消）。
+ */
+export async function notifyArchiveWindow(
+  descriptor: SourceDescriptor,
+  rels: string[],
+  mode: 'metadata' | 'content',
+): Promise<void> {
+  await invoke<void>('notify_archive_window', { epoch: Date.now(), descriptor, rels, mode });
+}

@@ -16,6 +16,7 @@ import {
   type MasonryViewportAnchor,
 } from '@/composables/useMasonryLayout';
 import { useMasonryThumbnails } from '@/composables/useMasonryThumbnails';
+import { useArchiveWindowPrefetch } from '@/composables/useArchiveWindowPrefetch';
 import type { ThumbnailState } from '@/lib/thumbnail';
 import { useMasonryBrowsePosition } from '@/composables/useMasonryBrowsePosition';
 import { listImageDimensions } from '@/lib/tauri';
@@ -131,6 +132,7 @@ onMounted(async () => {
 onUnmounted(() => {
   ro?.disconnect();
   if (resizeEndTimer) { clearTimeout(resizeEndTimer); resizeEndTimer = null; }
+  archivePrefetch.dispose(); // M3 任务 8：停窗口 watch + 取消 pending 预载防抖
   window.removeEventListener('keydown', onKeydown);
   document.removeEventListener('mousedown', onDocMouseDown);
 });
@@ -168,6 +170,16 @@ const { layout, visibleRange, colWidth, thumbnailWindows, dimensionPrefetchPaths
 // 缩略图队列（替代原脱离 DOM 的原图预读）。dpr 用设备像素比；quality 来自设置 store。
 const dpr = ref(typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1);
 const thumbQuality = computed(() => settingsStore.thumbnailQuality);
+
+// M3 任务 8：masonry 像素窗口 → 远程 archive 内容预载（100ms 防抖；仅 webdav/smb
+// 源 + is_archive 条目；切目录天然由新调用的新 epoch 承担取消）。dispose 见 onUnmounted。
+const archivePrefetch = useArchiveWindowPrefetch({
+  descriptor: toRef(props, 'descriptor'),
+  currentPath: toRef(props, 'currentPath'),
+  entries: entriesRef,
+  windows: thumbnailWindows,
+});
+
 const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, regenerate: regenerateThumbnail, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
   currentPath: toRef(props, 'currentPath'),

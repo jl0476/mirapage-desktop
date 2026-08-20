@@ -99,6 +99,19 @@ pub fn run() {
             // cache 管理命令直接触达物化器（factory 与 manage 共享同一 Arc）
             app.manage(factory.archive_materializer());
 
+            // M3 任务 8：三级预载调度器（spec §7）——持 factory 同一物化器 Arc；
+            // 开关读 settings（默认 true，仅 "false" 关闭，脏值 fail-open）
+            let prefetch_enabled = {
+                let db_state = app.state::<db::Db>();
+                let conn = db_state.conn();
+                setting_str(&conn, "remote_archive_prefetch_enabled", "true") != "false"
+            };
+            let prefetcher = std::sync::Arc::new(
+                source::archive::prefetch::ArchivePrefetcher::new(factory.archive_materializer()),
+            );
+            prefetcher.set_enabled(prefetch_enabled);
+            app.manage(prefetcher);
+
             // archive cache 启动清理（M3 spec §8 rev2）：孤儿 part / 孤儿缓存文件 /
             // 超容量淘汰（零网络请求；一致性验证推迟到下次 ensure_cached 的 stat）
             //
@@ -204,6 +217,9 @@ pub fn run() {
             // module3.2.0: 远程图片预读预载（warm 会话协议，spec rev5 §3.6）
             commands::warm::advance_warm_session,
             commands::warm::warm_media_urls,
+            // M3 任务 8: 三级预载（metadata stat 预热 / 内容低优物化 + epoch 取消）
+            commands::archive_prefetch::notify_archive_window,
+            commands::archive_prefetch::set_archive_prefetch_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

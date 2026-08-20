@@ -4,3 +4,4 @@
 
 pub mod dao;
 pub mod materializer;
+pub mod prefetch;

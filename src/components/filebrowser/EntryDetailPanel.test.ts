@@ -1,13 +1,20 @@
 /**
  * EntryDetailPanel.test.ts — 详情面板派生
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { setActivePinia, createPinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import zhCN from '@/locales/zh-CN';
 import EntryDetailPanel from './EntryDetailPanel.vue';
-import type { MediaEntry } from '@/lib/sourceDescriptor';
+import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
+
+// M3 任务 8：选中远程 archive 条目 → metadata stat 预热（mock IPC）
+const notifySpy = vi.fn(async (..._args: unknown[]) => undefined);
+vi.mock('@/lib/tauri', () => ({
+  notifyArchiveWindow: vi.fn((...args: unknown[]) => notifySpy(...args)),
+}));
 
 const i18n = createI18n({
   legacy: false,
@@ -31,6 +38,7 @@ function entry(name: string, opts: Partial<MediaEntry> = {}): MediaEntry {
 describe('EntryDetailPanel.vue', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    notifySpy.mockClear();
   });
   it('entry=null 显示 noFileSelected', () => {
     const w = mount(EntryDetailPanel, {
@@ -99,6 +107,48 @@ describe('EntryDetailPanel.vue', () => {
       global: { plugins: [i18n] },
     });
     const html = w.html();
-    expect(html).toContain('—');
+    expect(html).toContain('—'); // extension + mime 都是 —
+  });
+
+  // ─── M3 任务 8：选中 archive 条目 → metadata stat 预热 ───────────────
+  const webdav: SourceDescriptor = { type: 'webdav', accountId: 1, baseUrl: 'https://d/x', path: '' };
+
+  it('远程源选中 archive 条目触发 metadata 预热（rel = lastFetchedPath/name）', async () => {
+    const fb = useFileBrowserStore();
+    fb.currentDescriptor = webdav;
+    fb.lastFetchedPath = 'sub';
+    const w = mount(EntryDetailPanel, {
+      props: { entry: entry('x.jpg'), rootPath: 'C:/x' },
+      global: { plugins: [i18n] },
+    });
+    // watch 非 immediate——挂载时不触发；选中变化（jpg → cbz）触发
+    expect(notifySpy).not.toHaveBeenCalled();
+    await w.setProps({ entry: entry('comic.cbz', { isArchive: true }) });
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy).toHaveBeenCalledWith(webdav, ['sub/comic.cbz'], 'metadata');
+  });
+
+  it('Local 源选中 archive 条目不触发（物化器仅支持 webdav/smb origin）', async () => {
+    const fb = useFileBrowserStore();
+    fb.currentDescriptor = null;
+    fb.rootPath = 'D:/x';
+    const w = mount(EntryDetailPanel, {
+      props: { entry: entry('x.jpg'), rootPath: 'D:/x' },
+      global: { plugins: [i18n] },
+    });
+    await w.setProps({ entry: entry('comic.cbz', { isArchive: true }) });
+    expect(notifySpy).not.toHaveBeenCalled();
+  });
+
+  it('选中非 archive 条目不触发 metadata 预热', async () => {
+    const fb = useFileBrowserStore();
+    fb.currentDescriptor = webdav;
+    fb.lastFetchedPath = '';
+    const w = mount(EntryDetailPanel, {
+      props: { entry: entry('x.jpg'), rootPath: 'C:/x' },
+      global: { plugins: [i18n] },
+    });
+    await w.setProps({ entry: entry('y.png') });
+    expect(notifySpy).not.toHaveBeenCalled();
   });
 });

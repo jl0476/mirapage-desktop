@@ -10,13 +10,14 @@
  *  - 加入书库 (次按钮, 仅目录 enable)
  *  - 下载全部 (stub, 永远 disabled, 显示 tooltip)
  */
-import { computed } from 'vue';
+import { computed, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { formatBytes, formatDateTime } from '@/locales/helpers';
 import { useSettingsStore } from '@/stores/settings';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import { PathUtils } from '@/lib/path';
 import { extensionOf, mimeFromName, getMimeCategory } from '@/lib/mime';
+import { notifyArchiveWindow } from '@/lib/tauri';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 
 interface Props {
@@ -83,6 +84,20 @@ const display = computed(() => {
 });
 
 const isDirectory = computed(() => props.entry?.isDirectory === true);
+
+// M3 任务 8：选中远程 archive 条目 → metadata 级 stat 预热（不下载内容；details
+// 视图不内容预载——spec §7「非 masonry 视图不内容预载」）。rel 构造与
+// fileBrowser.openArchive 的 relInside 一致（lastFetchedPath + name）。
+watch(() => props.entry, (e) => {
+  if (!e?.isArchive) return;
+  const d = fb.activeDescriptor();
+  if (!d || (d.type !== 'webdav' && d.type !== 'smb')) return;
+  const dir = fb.lastFetchedPath;
+  const rel = dir ? `${dir}/${e.name}` : e.name;
+  void notifyArchiveWindow(d, [rel], 'metadata').catch(() => {
+    // 预热失败静默（后台优化，非关键路径）
+  });
+});
 </script>
 
 <template>
