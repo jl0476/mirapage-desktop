@@ -220,6 +220,18 @@ describe('Settings.vue remote section (M3 任务 9)', () => {
     expect(wrapper.find('[data-test="archive-cache-clear-btn"]').exists()).toBe(true);
   });
 
+  // 终审二批 P1-2：partBytes > 0 时展示「含未完成」文案（总量 = bytes + partBytes）
+  it('用量展示含 .part 未完成字节（老载荷无 part 字段走原文案）', async () => {
+    const { getArchiveCacheInfo } = await import('@/lib/tauri');
+    vi.mocked(getArchiveCacheInfo).mockResolvedValueOnce(
+      { count: 1, bytes: 5, partCount: 2, partBytes: 3 });
+    const wrapper = mountSettings();
+    await flushPromises();
+    const usage = wrapper.find('[data-test="archive-cache-usage"]');
+    expect(usage.text()).toBe(i18n.global.t('settings.remote.archiveCacheUsagePending',
+      { count: 1, size: '8 B', pending: '3 B' }));
+  });
+
   it('点击预载开关 → setArchivePrefetchEnabled(false)（任务 8 命令，写设置+运行时推送）', async () => {
     const wrapper = mountSettings();
     await flushPromises();

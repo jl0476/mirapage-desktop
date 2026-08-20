@@ -1,7 +1,8 @@
 //! `commands::archive_cache` —— archive cache 管理 IPC（M3 spec §8；模式同 thumbnails
 //! clear/info，但清空多「闸门 + 排空」两段——物化在途时不能删文件）。
 //!
-//! - `get_archive_cache_info`：{count, bytes}（dao::usage）。
+//! - `get_archive_cache_info`：{count, bytes, partCount, partBytes}（dao::usage +
+//!   materializer::parts_usage；终审二批 P1-2）。
 //! - `clear_archive_cache`：四段式（简报 rev5）——
 //!   ① `begin_clearing()`：持 inflight 锁置 clearing=true 后 cancel_all（与
 //!      ensure_cached 的「查闸门 + 注册」临界区互斥，TOCTOU 封死）；
@@ -21,10 +22,15 @@ use tauri::State;
 use crate::db::Db;
 use crate::source::archive::materializer::Materializer;
 
-/// (条数, 字节总量)——`get_archive_cache_info` 的可测核心。
-pub(crate) fn get_archive_cache_info_impl(db: &Db) -> rusqlite::Result<(i64, i64)> {
+/// (ready 条数, ready 字节, .part 条数, .part 字节)——`get_archive_cache_info` 的
+/// 可测核心（终审二批 P1-2：.part 计入用量统计，spec §12；ready 字段名不变前端兼容）。
+pub(crate) fn get_archive_cache_info_impl(
+    db: &Db, cache_root: &std::path::Path,
+) -> rusqlite::Result<(i64, i64, usize, u64)> {
     let conn = db.conn();
-    crate::source::archive::dao::usage(&conn)
+    let (count, bytes) = crate::source::archive::dao::usage(&conn)?;
+    let (part_count, part_bytes) = crate::source::archive::materializer::parts_usage(cache_root);
+    Ok((count, bytes, part_count, part_bytes))
 }
 
 /// 清空缓存四段式的可测核心（语义见模块注释 ①-④）。
@@ -56,13 +62,18 @@ pub(crate) async fn clear_archive_cache_impl(db: &Db, mat: &Materializer) -> Res
     result
 }
 
-/// 缓存统计：{ count, bytes }。
+/// 缓存统计：{ count, bytes, partCount, partBytes }（parts = 有效 .part 半截下载）。
 #[tauri::command]
 pub async fn get_archive_cache_info(
     db: State<'_, Db>,
+    mat: State<'_, Arc<Materializer>>,
 ) -> Result<serde_json::Value, String> {
-    let (count, bytes) = get_archive_cache_info_impl(&db).map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({ "count": count, "bytes": bytes }))
+    let (count, bytes, part_count, part_bytes) =
+        get_archive_cache_info_impl(&db, &mat.cache_root()).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "count": count, "bytes": bytes,
+        "partCount": part_count, "partBytes": part_bytes,
+    }))
 }
 
 /// 清空缓存（闸门 + 排空 + 实删 + 复位；在途未排空返回忙碌错误且不动文件）。
@@ -105,8 +116,29 @@ mod tests {
         let _ = m;
         seed_ready(&db, dir.path(), "k1", b"aaa");
         seed_ready(&db, dir.path(), "k2", b"bb");
-        let (count, bytes) = get_archive_cache_info_impl(&db).unwrap();
+        let (count, bytes, part_count, part_bytes) =
+            get_archive_cache_info_impl(&db, dir.path()).unwrap();
         assert_eq!((count, bytes), (2, 5), "两条 ready 行，字节求和");
+        assert_eq!((part_count, part_bytes), (0, 0), "无 .part");
+    }
+
+    /// 终审二批 P1-2：info 载荷加 partCount/partBytes——有效 .part 计入用量统计
+    /// （spec §12「.part 目录计入用量统计」）；ready 的 count/bytes 字段名不变。
+    #[test]
+    fn info_reports_part_usage() {
+        let mock = StdArc::new(MockOrigin::new(0));
+        let (m, dir, db) = temp_materializer(mock);
+        let _ = m;
+        seed_ready(&db, dir.path(), "k1", b"aaa");
+        let part = dir.path().join("part");
+        std::fs::write(part.join("k2.part"), b"xy").unwrap();
+        std::fs::write(part.join("k2.part.meta"), b"{}").unwrap();
+        std::fs::write(part.join("k3.part.meta.tmp"), b"{}").unwrap();
+        let (count, bytes, part_count, part_bytes) =
+            get_archive_cache_info_impl(&db, dir.path()).unwrap();
+        assert_eq!((count, bytes), (1, 3), "ready 字段语义不变");
+        assert_eq!((part_count, part_bytes), (1, 2),
+                   "只计 .part 数据文件（sidecar/.tmp 不计）");
     }
 
     #[tokio::test]
@@ -124,7 +156,9 @@ mod tests {
 
         clear_archive_cache_impl(&db, &m).await.unwrap();
 
-        assert_eq!(get_archive_cache_info_impl(&db).unwrap(), (0, 0), "表已清空");
+        let (count, bytes, part_count, part_bytes) =
+            get_archive_cache_info_impl(&db, root).unwrap();
+        assert_eq!((count, bytes, part_count, part_bytes), (0, 0, 0, 0), "表已清空");
         assert!(!f1.exists() && !f2.exists(), "ready 文件实删（clear_all 路径）");
         // part/ 整体重建后为空目录（.part / .meta / .meta.tmp 一并清除）
         let entries: Vec<_> = std::fs::read_dir(&part).unwrap().collect();

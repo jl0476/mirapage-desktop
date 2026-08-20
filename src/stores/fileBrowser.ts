@@ -330,14 +330,27 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
 
   /** 挂 archive://progress 事件监听（幂等，app 生命周期一次）。
    *  happy-dom / 普通浏览器环境无 __TAURI_INTERNALS__，listen() reject — 静默
-   *  （3.0.8 useMasonryThumbnails 同款防御）。 */
+   *  （3.0.8 useMasonryThumbnails 同款防御）。
+   *  终审二批 P2-2：事件按当前 archive 过滤——payload.relPath 必须等于当前
+   *  currentDescriptor.archiveRelPath 才写入（后台预载其他 CBZ 时准备页不串台；
+   *  本地 ZIP 无 archiveRelPath → 不消费远程进度事件，走 indeterminate 兜底）。
+   *  phase === 'ready' 且匹配当前 → 清 archiveProgress（fetch 完成后 loading
+   *  自然结束，防陈旧数字残留）。 */
   function startArchiveProgressListener(): void {
     if (archiveProgressAttached) return;
     archiveProgressAttached = true;
     void listen<ArchiveProgressPayload>('archive://progress', (event) => {
+      const d = currentDescriptor.value;
+      const rel = d && d.type === 'archive' ? d.archiveRelPath : undefined;
+      const p = event.payload;
+      if (!rel || p.relPath !== rel) return;
+      if (p.phase === 'ready') {
+        archiveProgress.value = null;
+        return;
+      }
       archiveProgress.value = {
-        downloaded: event.payload.downloaded,
-        total: event.payload.totalBytes,
+        downloaded: p.downloaded,
+        total: p.totalBytes,
       };
     }).catch(() => {
       // 非 Tauri 环境预期失败；重置标志允许消费组件下次挂载重试（Tauri 下零成本）

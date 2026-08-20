@@ -4,7 +4,7 @@
  * 7 section + 左侧 anchor nav.
  * 视觉基线: Tailwind utility class (CLAUDE.md §1.1), 无 scoped hex 色.
  */
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSettingsStore } from '@/stores/settings';
 import { useMaintenanceStore } from '@/stores/maintenance';
@@ -13,6 +13,7 @@ import {
 } from '@/lib/readerSettings';
 import {
   getSetting, setArchivePrefetchEnabled, getArchiveCacheInfo, clearArchiveCache,
+  type ArchiveCacheInfo,
 } from '@/lib/tauri';
 import { formatBytes } from '@/locales/helpers';
 import { log } from '@/lib/logger';
@@ -57,7 +58,7 @@ async function doRun() {
 // 上限只写 DB：运行时限值不热生效（下次启动 startup_cleanup 生效），UI 不提示。
 const remotePrefetchEnabled = ref(true);
 const archiveCacheMaxMb = ref(2048);
-const archiveCacheUsage = ref<{ count: number; bytes: number } | null>(null);
+const archiveCacheUsage = ref<ArchiveCacheInfo | null>(null);
 const clearingArchiveCache = ref(false);
 
 async function loadRemoteSection() {
@@ -80,6 +81,20 @@ async function refreshArchiveCacheUsage() {
     log('[settings] getArchiveCacheInfo failed', e);
   }
 }
+
+/** 用量文案（终审二批 P1-2）：总量 = ready + .part 半截下载；有 .part 时单列
+ *  「含未完成」，无 .part 沿用原文案（老载荷无 partBytes 字段也走原文案）。 */
+const archiveCacheUsageText = computed(() => {
+  const u = archiveCacheUsage.value;
+  if (!u) return '';
+  const pending = u.partBytes ?? 0;
+  const size = formatBytes(u.bytes + pending);
+  return pending > 0
+    ? t('settings.remote.archiveCacheUsagePending', {
+        count: u.count, size, pending: formatBytes(pending),
+      })
+    : t('settings.remote.archiveCacheUsage', { count: u.count, size });
+});
 
 /** 预载开关：走任务 8 命令（写 settings + 运行时推送 Prefetcher），不重复造。 */
 async function setRemotePrefetch(v: boolean) {
@@ -461,7 +476,7 @@ async function setThumbnailDetailPopover(v: boolean) {
             />
             <div class="flex items-center justify-between gap-4">
               <p v-if="archiveCacheUsage" class="text-xs text-text-muted" data-test="archive-cache-usage">
-                {{ t('settings.remote.archiveCacheUsage', { count: archiveCacheUsage.count, size: formatBytes(archiveCacheUsage.bytes) }) }}
+                {{ archiveCacheUsageText }}
               </p>
               <button
                 class="tb-btn text-accent shrink-0 whitespace-nowrap"

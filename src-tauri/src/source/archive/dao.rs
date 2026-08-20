@@ -117,19 +117,8 @@ pub fn clear_all(conn: &Connection) -> Result<Vec<String>> {
     Ok(paths)
 }
 
-/// 超限才回收，回收到 80% 水位（终审 P2-1 / spec §8/§10）：SUM ≤ limit 不动；
-/// 超限以 limit*8/10 为目标调 evict_to_limit——直接以 limit 为目标会把总量压在
-/// 100% 边缘，下次物化立刻又超限再回收（抖动）；80% 水位留出缓冲带。
-/// startup_cleanup 与 download upsert 后回收钩子共用（避免两处重复判限）。
-pub fn evict_ready_to_watermark(conn: &Connection, limit_bytes: i64, protected: &[String]) -> Result<usize> {
-    let total: i64 = conn.query_row(
-        "SELECT COALESCE(SUM(byte_size),0) FROM archive_cache", [], |r| r.get(0))?;
-    if total <= limit_bytes { return Ok(0); }
-    let target = limit_bytes.saturating_mul(8) / 10; // 80% 水位
-    evict_to_limit(conn, target, protected)
-}
-
-/// (条数, 字节总量)
+/// (条数, 字节总量)——ready 行口径（.part 用量另走 materializer::parts_usage；
+/// 容量预算 total = 两者之和，见 materializer::enforce_budget）
 pub fn usage(conn: &Connection) -> Result<(i64, i64)> {
     conn.query_row("SELECT COUNT(*), COALESCE(SUM(byte_size),0) FROM archive_cache", [], |r| Ok((r.get(0)?, r.get(1)?)))
 }
@@ -203,21 +192,23 @@ mod tests {
         assert!(bytes <= 150, "删除后 SUM(byte_size) <= limit，实际 {bytes}");
     }
 
-    /// 终审 P2-1：未超限不回收（水位钩子先判 SUM > limit 才动手）
+    /// 终审 P2-1（水位语义现由 materializer::enforce_budget 承载，经 upsert 钩子
+    /// 用例覆盖）：超限回收到 80% 水位而非 limit 边缘的底层行为由 evict_to_limit
+    /// 的目标值参数化实现——本用例直调 evict_to_limit 验证「未超限不动」。
     #[test]
-    fn evict_ready_to_watermark_below_limit_noop() {
+    fn evict_to_limit_below_limit_noop() {
         let conn = db();
         upsert(&conn, &row("k")).unwrap(); // 100 字节
-        let n = evict_ready_to_watermark(&conn, 200, &[]).unwrap();
+        let n = evict_to_limit(&conn, 200, &[]).unwrap();
         assert_eq!(n, 0, "total 100 ≤ limit 200 → 不回收");
         assert!(get(&conn, "k").unwrap().is_some());
     }
 
-    /// 终审 P2-1：超限回收到 80% 水位而非 limit 边缘——3 行各 100、limit 210：
-    /// 旧语义（目标=limit 210）need 90 → 淘汰 old 即停（剩 200）；新语义目标
-    /// 210*8/10=168 → need 132 → old+mid 两行（freed 200 ≥ 132）才停（剩 100）。
+    /// 80% 水位目标（limit*8/10 而非 limit 边缘）——3 行各 100、目标 168：
+    /// need 132 → old+mid 两行（freed 200 ≥ 132）才停（剩 100）；目标若取 limit
+    /// 边缘 210 → need 90 → 只淘汰 old（剩 200）。水位语义钉死在 dao 原语层。
     #[test]
-    fn evict_ready_to_watermark_targets_80pct() {
+    fn evict_to_limit_targets_watermark_param() {
         let conn = db();
         upsert(&conn, &row("old")).unwrap();
         upsert(&conn, &row("mid")).unwrap();
@@ -225,8 +216,8 @@ mod tests {
         conn.execute("UPDATE archive_cache SET last_accessed_at = 100 WHERE cache_key = 'old'", []).unwrap();
         conn.execute("UPDATE archive_cache SET last_accessed_at = 200 WHERE cache_key = 'mid'", []).unwrap();
         conn.execute("UPDATE archive_cache SET last_accessed_at = 300 WHERE cache_key = 'new'", []).unwrap();
-        let n = evict_ready_to_watermark(&conn, 210, &[]).unwrap();
-        assert_eq!(n, 2, "回收到 80% 水位（168B）需淘汰 2 行，limit 边缘只淘汰 1 行");
+        let n = evict_to_limit(&conn, 210 * 8 / 10, &[]).unwrap();
+        assert_eq!(n, 2, "目标 80% 水位（168B）需淘汰 2 行，limit 边缘只淘汰 1 行");
         assert!(get(&conn, "old").unwrap().is_none());
         assert!(get(&conn, "mid").unwrap().is_none());
         assert!(get(&conn, "new").unwrap().is_some());

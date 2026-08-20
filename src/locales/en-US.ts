@@ -377,6 +377,7 @@ export default {
       prefetchEnabledDesc: 'Automatically download nearby archives in the background while browsing remote directories.',
       archiveCacheLimit: 'Cache limit (MB, 512–32768)',
       archiveCacheUsage: 'Used {size}, {count} files',
+      archiveCacheUsagePending: 'Used {size} (incl. {pending} pending), {count} files',
       clearArchiveCache: 'Clear cache',
       clearConfirm: 'Clear remote archive cache? {count} downloaded files ({size}) will be deleted; in-progress downloads will be cancelled.',
     },

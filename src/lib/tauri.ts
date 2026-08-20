@@ -687,9 +687,17 @@ export async function setArchivePrefetchEnabled(value: boolean): Promise<void> {
   await invoke<void>('set_archive_prefetch_enabled', { value });
 }
 
-/** M3 任务 9：archive cache 用量统计 {count, bytes}。 */
-export async function getArchiveCacheInfo(): Promise<{ count: number; bytes: number }> {
-  return invoke<{ count: number; bytes: number }>('get_archive_cache_info');
+/** M3 任务 9：archive cache 用量统计。终审二批 P1-2 起 .part 计入统计——
+ *  partCount/partBytes = 有效 .part 半截下载（可选字段：老 mock / 旧后端兼容）。 */
+export interface ArchiveCacheInfo {
+  count: number;
+  bytes: number;
+  partCount?: number;
+  partBytes?: number;
+}
+
+export async function getArchiveCacheInfo(): Promise<ArchiveCacheInfo> {
+  return invoke<ArchiveCacheInfo>('get_archive_cache_info');
 }
 
 /**

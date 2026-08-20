@@ -132,6 +132,77 @@ pub fn sidecar_path(part_path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(s)
 }
 
+/// `.part` 用量统计（终审二批 P1-2 / spec §12「.part 目录计入用量统计」）：
+/// 遍历 `part/` 下扩展名恰为 `.part` 的数据文件（排除 `.part.meta` sidecar 与
+/// `.meta.tmp` 原子写残留），返回（条数, 总字节）。纯 fs 读，无 DB / 无副作用。
+pub fn parts_usage(cache_root: &std::path::Path) -> (usize, u64) {
+    let mut count = 0usize;
+    let mut bytes = 0u64;
+    let Ok(rd) = std::fs::read_dir(cache_root.join("part")) else { return (0, 0); };
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("part") { continue; }
+        count += 1;
+        if let Ok(md) = std::fs::metadata(&p) { bytes += md.len(); }
+    }
+    (count, bytes)
+}
+
+/// 容量预算执行（终审二批 P1-2；download upsert 钩子与 startup_cleanup 共用）：
+/// total = ready SUM + `.part` 字节。total ≤ limit → no-op；超限**先淘汰 `.part`**
+/// （mtime 最旧序——连续取消预载/网络失败留下的半截下载最先让位；跳过 protected
+/// key 对应的 `{key}.part`——in-flight 写入中，删了破断点续传；删 `.part` 连带
+/// `.meta`）到 80% 水位或无候选；仍超 → ready 行 LRU（`evict_to_limit`，目标 =
+/// 水位 - 剩余 `.part` 字节，total 口径一致）。返回淘汰条数（parts + ready）。
+pub fn enforce_budget(
+    cache_root: &std::path::Path,
+    conn: &rusqlite::Connection,
+    limit_bytes: i64,
+    protected: &[String],
+) -> usize {
+    let ready_bytes: i64 = super::dao::usage(conn).map(|(_, b)| b).unwrap_or(0);
+    let (_, part_bytes) = parts_usage(cache_root);
+    let mut current = ready_bytes + part_bytes as i64;
+    if current <= limit_bytes { return 0; }
+    let target = limit_bytes.saturating_mul(8) / 10; // 80% 水位
+    let mut evicted = 0usize;
+    // phase 1：.part 最旧优先（protected key 的 {key}.part 跳过）
+    if part_bytes > 0 {
+        let mut cands: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(cache_root.join("part")) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("part") { continue; }
+                // 文件名 {key}.part——file_stem 即 cache key（sha256 hex 无点，无歧义）
+                let key = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if protected.iter().any(|pk| pk == key) { continue; }
+                if let Ok(md) = std::fs::metadata(&p) {
+                    let mtime = md.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    cands.push((mtime, md.len(), p));
+                }
+            }
+        }
+        cands.sort_by_key(|(m, _, _)| *m);
+        for (_, size, p) in cands {
+            if current <= target { break; }
+            if std::fs::remove_file(&p).is_ok() {
+                let _ = std::fs::remove_file(sidecar_path(&p)); // sidecar 连带
+                current -= size as i64;
+                evicted += 1;
+            }
+        }
+    }
+    // phase 2：仍超 → ready 行 LRU；目标 = 水位 - 剩余 .part（total 口径压到水位）
+    if current > target {
+        let (_, remain_parts) = parts_usage(cache_root);
+        let ready_target = (target - remain_parts as i64).max(0);
+        if let Ok(n) = super::dao::evict_to_limit(conn, ready_target, protected) {
+            evicted += n;
+        }
+    }
+    evicted
+}
+
 /// sidecar 原子写（tmp + rename）——半截 JSON 会被续传校验拒绝，但原子写让这几乎不发生
 fn atomic_write_sidecar(part_path: &std::path::Path, sc: &PartSidecar) -> Result<(), MaterializeError> {
     let target = sidecar_path(part_path);
@@ -145,7 +216,7 @@ fn atomic_write_sidecar(part_path: &std::path::Path, sc: &PartSidecar) -> Result
 /// 重启续传依据，原「全删 part/」与断点续传冲突已废弃**；一致性验证推迟到下次
 /// ensure_cached 的 sidecar 快照 vs 远端 stat，启动时零网络请求）②孤儿缓存文件（表无行）
 /// ③反向扫表——表行文件缺失/长度不符 byte_size 的悬空行删除（正向孤儿扫的补集修复）
-/// ④超容量淘汰（80% 水位，终审 P2-1）
+/// ④超容量淘汰（80% 水位，终审 P2-1；P1-2 起 total 含 .part，见 enforce_budget）
 pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) {
     if let Ok(rd) = std::fs::read_dir(cache_root.join("part")) {
         for entry in rd.flatten() {
@@ -210,8 +281,9 @@ pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) 
             }
         }
     }
-    // 超容量淘汰（终审 P2-1：回收到 80% 水位，非 limit 边缘）
-    let _ = super::dao::evict_ready_to_watermark(&conn, limit_bytes, &[]);
+    // 超容量淘汰（终审 P2-1 + 终审二批 P1-2）：total = ready SUM + .part 字节，
+    // 回收到 80% 水位；.part 最旧优先（启动时无 in-flight，protected 为空）
+    let _ = enforce_budget(cache_root, &conn, limit_bytes, &[]);
 }
 
 impl Materializer {
@@ -594,12 +666,15 @@ impl Materializer {
                     byte_size: byte_size as i64,
                 }).map_err(|e| MaterializeError::Other(e.to_string()))?;
             }
-            // 回收钩子（最终审查 I2 + 终审 P2-1）：upsert 成功后立即回收到 80% 水位
-            // ——此前容量上限只在 startup_cleanup 执行，一次会话滚过几十个大 CBZ（预载
-            // 放大）可无限超限直到重启（spec §12 风险对策三件套「容量上限 + LRU + 启动
-            // 清理」至此全量生效）。错误吞掉：回收失败不影响本次物化返回。conn 短作用域且
-            // 不跨 await（任务 6 死锁教训——inflight 锁的 await 在取 conn 之前完成）；
-            // 在途 key 全量 protected（含本任务自身：不自删，也不删并发任务的 final）。
+            // 回收钩子（最终审查 I2 + 终审 P2-1 + 终审二批 P1-2）：upsert 成功后立即
+            // 执行容量预算（total = ready + .part，80% 水位）——此前容量上限只在
+            // startup_cleanup 执行，一次会话滚过几十个大 CBZ（预载放大）可无限超限
+            // 直到重启（spec §12 风险对策三件套「容量上限 + LRU + 启动清理」全量生效）；
+            // P1-2 起 .part 同受预算约束（连续取消预载/网络失败的半截下载不再无上限
+            // 占盘）。错误吞掉：回收失败不影响本次物化返回。conn 短作用域且不跨
+            // await（任务 6 死锁教训——inflight 锁的 await 在取 conn 之前完成）；
+            // 在途 key 全量 protected（含本任务自身：不自删，也不删并发任务的
+            // final 与 .part）。
             {
                 let limit_bytes = {
                     let conn = self.db.conn();
@@ -612,7 +687,7 @@ impl Materializer {
                     st.map.keys().cloned().collect()
                 };
                 let conn = self.db.conn();
-                let _ = super::dao::evict_ready_to_watermark(&conn, limit_bytes, &protected);
+                let _ = enforce_budget(&self.cache_root(), &conn, limit_bytes, &protected);
             }
             emit_progress(key, archive_rel_path, snap.size, snap.size, "ready");
             return Ok(final_path);
@@ -1465,5 +1540,180 @@ pub(crate) mod tests {
         assert!(crate::source::archive::dao::get(&conn, "k9").unwrap().is_some(),
                 "完好行保留");
         assert!(good.exists(), "完好文件保留");
+    }
+
+    // ─── 终审二批 P1-2：.part 计入容量预算（parts_usage / enforce_budget）───
+
+    /// 设置文件 mtime（确定性排序用；File::set_times 稳定于 Rust 1.75）
+    fn set_mtime(path: &std::path::Path, t: std::time::SystemTime) {
+        let f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(t)).unwrap();
+    }
+
+    /// parts_usage 只统计扩展名恰为 .part 的数据文件——.part.meta（sidecar）与
+    /// .meta.tmp（原子写残留）不是 part，不计条数也不计字节。
+    #[test]
+    fn parts_usage_only_counts_part_files() {
+        let (dir, db) = cleanup_fixture();
+        let _ = db;
+        let part = dir.path().join("part");
+        std::fs::write(part.join("a.part"), [0u8; 10]).unwrap();
+        std::fs::write(part.join("a.part.meta"), [0u8; 50]).unwrap();
+        std::fs::write(part.join("b.part.meta.tmp"), [0u8; 30]).unwrap();
+        std::fs::write(part.join("c.txt"), [0u8; 7]).unwrap();
+        let (count, bytes) = parts_usage(dir.path());
+        assert_eq!((count, bytes), (1, 10),
+                   "只计 a.part；sidecar/.tmp/.txt 均不计");
+        // part/ 目录不存在 → (0, 0) 而非报错
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(parts_usage(empty.path()), (0, 0));
+    }
+
+    /// in-flight 注册的 key 对应 .part 不被预算淘汰（写入中，删了会破断点续传）；
+    /// 未保护的更旧 .part 优先被删。
+    #[test]
+    fn inflight_part_protected_from_budget_eviction() {
+        let (dir, db) = cleanup_fixture();
+        let root = dir.path();
+        let part = root.join("part");
+        let kprot = part.join("kprot.part");
+        let kfree = part.join("kfree.part");
+        std::fs::write(&kprot, [0u8; 300]).unwrap();
+        std::fs::write(kprot.with_extension("part.meta"), b"{}").unwrap();
+        std::fs::write(&kfree, [0u8; 200]).unwrap();
+        std::fs::write(kfree.with_extension("part.meta"), b"{}").unwrap();
+        let now = std::time::SystemTime::now();
+        set_mtime(&kprot, now - std::time::Duration::from_secs(3600)); // 更旧但 protected
+        set_mtime(&kfree, now);
+        let conn = db.conn();
+        let n = enforce_budget(root, &conn, 100, &["kprot".to_string()]);
+        assert_eq!(n, 1, "只淘汰 1 个 .part（kfree）");
+        assert!(kprot.exists(), "protected 的 .part 保留（in-flight 写入中）");
+        assert!(kprot.with_extension("part.meta").exists(), "protected 的 sidecar 保留");
+        assert!(!kfree.exists(), "未保护的 .part 被删");
+        assert!(!kfree.with_extension("part.meta").exists(), "连带删 sidecar");
+        assert_eq!(parts_usage(root), (1, 300));
+    }
+
+    /// 主场景：2 个 ready 包（真物化）+ 2 个手工 .part+sidecar（一旧一新）+ 限值压小
+    /// → 物化第 3 包的 upsert 钩子触发 enforce_budget → 最旧 .part 连带 .meta 被删、
+    /// 新 .part 与全部 ready 保留、total ≤ 80% 水位。
+    /// 数字：包各 1MB；part_old 2.5MB（mtime -1h）/ part_new 100KB（now）；
+    /// limit 5MB → 水位 4MB。c 钩子时 total = 3 + 2.6 = 5.6MB > 5MB → 删 part_old
+    /// → 3.1MB ≤ 4MB 停（phase 2 不触发，ready 全保留）。
+    #[tokio::test]
+    async fn parts_counted_in_budget_and_evicted() {
+        let mock = StdArc::new(MockOrigin::new(1_000_000));
+        let (m, dir, db) = temp_materializer(mock.clone());
+        let root = dir.path().to_path_buf();
+        {
+            let conn = db.conn();
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('archive_cache_max_mb', '5')",
+                []).unwrap();
+        }
+        let origin = webdav("");
+        // a/b 先物化（各 1MB；钩子 total 2MB ≤ 5MB no-op）
+        m.ensure_cached(&origin, "a.cbz").await.unwrap();
+        m.ensure_cached(&origin, "b.cbz").await.unwrap();
+        // 手工 .part + 有效 sidecar（预算执行不校验 sidecar，真实态构造）
+        let sidecar_for = |rel: &str| {
+            let key = cache_key(&origin, rel);
+            PartSidecar {
+                cache_key: key,
+                canonical_origin: serde_json::to_string(&origin).unwrap(),
+                archive_rel_path: rel.into(),
+                snapshot_size: 10,
+                snapshot_mtime: Some(1000),
+                downloaded: 1,
+            }
+        };
+        let part_old = write_part(&m, &origin, "old.cbz", &vec![0u8; 2_500_000],
+                                  Some(&sidecar_for("old.cbz")));
+        let part_new = write_part(&m, &origin, "new.cbz", &vec![0u8; 100_000],
+                                  Some(&sidecar_for("new.cbz")));
+        let now = std::time::SystemTime::now();
+        set_mtime(&part_old, now - std::time::Duration::from_secs(3600));
+        set_mtime(&part_new, now);
+        // c 物化 → upsert 钩子：total 5.6MB > 5MB → 淘汰 part_old → 3.1MB ≤ 4MB 水位
+        let pc = m.ensure_cached(&origin, "c.cbz").await.unwrap();
+        assert!(pc.exists(), "c 物化成功");
+        assert!(!part_old.exists(), "最旧 .part 被删");
+        assert!(!sidecar_path(&part_old).exists(), "最旧 .part 的 sidecar 连带删除");
+        assert!(part_new.exists() && sidecar_path(&part_new).exists(),
+                "新 .part + sidecar 保留");
+        let finals: Vec<_> = ["a.cbz", "b.cbz", "c.cbz"].iter()
+            .map(|rel| m.cache_paths(&cache_key(&origin, rel)).0).collect();
+        for f in &finals { assert!(f.exists(), "ready 全保留（未到 phase 2）: {}", f.display()); }
+        let conn = db.conn();
+        let (_, ready_bytes) = crate::source::archive::dao::usage(&conn).unwrap();
+        assert_eq!(ready_bytes, 3_000_000);
+        let (_, part_bytes) = parts_usage(&root);
+        assert_eq!(part_bytes, 100_000, "仅剩 part_new");
+        assert!(ready_bytes + part_bytes as i64 <= 5 * 1024 * 1024 * 8 / 10,
+                "total ≤ 80% 水位");
+    }
+
+    // ─── 终审二批 P2-3：物化 → 解压 → 读 entry 端到端（真 ZIP 字节）───
+
+    const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+    /// 内存构造真 ZIP（条目乱序写入——断言 list 的自然排序，非容器序）
+    fn build_zip_bytes(names: &[&str]) -> Vec<u8> {
+        use std::io::Write;
+        let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+        for name in names {
+            w.start_file::<_, ()>(name, opts.clone()).unwrap();
+            w.write_all(&PNG_MAGIC).unwrap();
+        }
+        w.finish().unwrap().into_inner()
+    }
+
+    /// 端到端：MockOrigin 源字节 = 真 ZIP → ArchiveMediaSource（物化器真实现）
+    /// list_directory（自然排序）/ read_file（PNG magic）/ stat（解压后 size）全链。
+    async fn e2e_list_read_stat(format: crate::source::descriptor::ArchiveFormat, rel: &str) {
+        let zip_bytes = build_zip_bytes(&["p10.png", "p1.png", "p2.png"]);
+        let mock = StdArc::new(MockOrigin::new(zip_bytes.len() as u64));
+        *mock.bytes.lock().unwrap() = zip_bytes;
+        let (m, _dir, _db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        let descriptor = SourceDescriptor::Archive {
+            archive_path: format!("https://d/x/{rel}"),
+            entry_prefix: String::new(),
+            format,
+            origin: Some(Box::new(origin)),
+            origin_entry_path: Some(rel.into()),
+            archive_rel_path: Some(rel.into()),
+        };
+        let src = crate::source::archive_impl::ArchiveMediaSource::new(
+            StdArc::new(m) as StdArc<dyn crate::source::archive_impl::Materialize>);
+        // list：物化（真下载 mock 字节 → final）+ 解压列条目 + 自然排序
+        let entries = src.list_directory(&descriptor, "").await.unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["p1.png", "p2.png", "p10.png"],
+                   "自然排序（p2 < p10），非容器写入序");
+        // read：entry 解压字节 == 写入的 PNG magic
+        let bytes = src.read_file(&descriptor, "p2.png", None).await.unwrap();
+        assert_eq!(&bytes[..8], &PNG_MAGIC, "entry 字节解压无损");
+        // stat：entry 解压后 size（8），非 ZIP 容器 size
+        let st = src.stat(&descriptor, "p2.png").await.unwrap();
+        assert_eq!(st.size, 8);
+        // 二次调用走命中路径（零 read）——物化产物被复用
+        let reads_before = mock.read_calls.load(Ordering::SeqCst);
+        let again = src.read_file(&descriptor, "p1.png", None).await.unwrap();
+        assert_eq!(&again[..8], &PNG_MAGIC);
+        assert_eq!(mock.read_calls.load(Ordering::SeqCst), reads_before,
+                   "命中路径零网络 read");
+    }
+
+    #[tokio::test]
+    async fn e2e_materialize_then_list_read_stat_cbz() {
+        e2e_list_read_stat(crate::source::descriptor::ArchiveFormat::Cbz, "book.cbz").await;
+    }
+
+    #[tokio::test]
+    async fn e2e_materialize_then_list_read_stat_zip_variant() {
+        e2e_list_read_stat(crate::source::descriptor::ArchiveFormat::Zip, "book.zip").await;
     }
 }

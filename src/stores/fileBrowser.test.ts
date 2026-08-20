@@ -9,6 +9,18 @@ import { listDirectory, getSetting, setSetting } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
+// 终审二批 P2-2：捕获 archive://progress 回调（startArchiveProgressListener 区域用）
+type ArchiveProgressCb = (event: { payload: {
+  cacheKey: string; relPath: string; downloaded: number; totalBytes: number; phase: string;
+} }) => void;
+let capturedArchiveProgressCb: ArchiveProgressCb | null = null;
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (_ev: string, cb: ArchiveProgressCb) => {
+    capturedArchiveProgressCb = cb;
+    return () => { capturedArchiveProgressCb = null; };
+  }),
+}));
+
 vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
   return {
@@ -975,5 +987,60 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     expect(d.archiveRelPath).toBeUndefined();
     expect(d.format).toBe('cbz');
     expect(mockedList).toHaveBeenLastCalledWith(d, '');
+  });
+});
+
+// ─── 终审二批 P2-2: archive://progress 按当前 archive relPath 过滤 ───
+describe('fileBrowser store — archive://progress 过滤', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    capturedArchiveProgressCb = null;
+  });
+
+  /** 进入远程压缩包（webdav comics/book.cbz）并挂监听 */
+  async function setupRemoteArchive() {
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(
+      { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' }, 'comics');
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    fb.startArchiveProgressListener();
+    expect(capturedArchiveProgressCb).toBeTruthy();
+    return fb;
+  }
+
+  const emit = (relPath: string, downloaded: number, totalBytes: number, phase = 'downloading') =>
+    capturedArchiveProgressCb!({ payload: { cacheKey: 'k', relPath, downloaded, totalBytes, phase } });
+
+  it('另一 relPath 的事件（后台预载其他 CBZ）不写入 archiveProgress', async () => {
+    const fb = await setupRemoteArchive();
+    emit('other/book.cbz', 50, 100);
+    expect(fb.archiveProgress).toBeNull();
+    // 匹配的 relPath 正常写入
+    emit('comics/book.cbz', 30, 100);
+    expect(fb.archiveProgress).toEqual({ downloaded: 30, total: 100 });
+    // 再来一个不匹配的也不覆盖已有进度
+    emit('other/book.cbz', 99, 100);
+    expect(fb.archiveProgress).toEqual({ downloaded: 30, total: 100 });
+  });
+
+  it('匹配当前的 ready 事件清空 archiveProgress（防陈旧数字残留）', async () => {
+    const fb = await setupRemoteArchive();
+    emit('comics/book.cbz', 30, 100);
+    expect(fb.archiveProgress).toEqual({ downloaded: 30, total: 100 });
+    emit('comics/book.cbz', 100, 100, 'ready');
+    expect(fb.archiveProgress).toBeNull();
+  });
+
+  it('非当前 archive（本地 ZIP 无 archiveRelPath / 非 archive descriptor）不消费事件', async () => {
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    fb.startArchiveProgressListener();
+    expect(fb.currentDescriptor?.type).toBe('archive');
+    emit('book.cbz', 50, 100); // 本地 ZIP：archiveRelPath undefined → 过滤
+    expect(fb.archiveProgress).toBeNull();
   });
 });
