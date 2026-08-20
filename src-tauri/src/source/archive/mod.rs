@@ -3,3 +3,4 @@
 //! 本模块按任务逐个启用子模块；任务 1 仅包含 DAO。
 
 pub mod dao;
+pub mod materializer;
