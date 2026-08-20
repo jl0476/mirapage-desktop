@@ -31,6 +31,14 @@ pub fn is_stale(row_origin_size: i64, row_origin_mtime: Option<i64>, current: &F
     }
 }
 
+/// 命中路径磁盘一致性校验（终审 P1-3）：缓存文件存在且长度 == 表行 byte_size。
+/// OS 清缓存 / 用户删文件 / 截断损坏 → false（悬空行，调用方条件删行后重物化）。
+fn cache_file_matches(row: &super::dao::CacheRow) -> bool {
+    std::fs::metadata(&row.cache_abs_path)
+        .map(|m| m.len() == row.byte_size as u64)
+        .unwrap_or(false)
+}
+
 // ===================== ensure_cached 状态机（M3 spec §4；rev2-rev6 语义 baked in） =====================
 // - 取消双通道：窗口 epoch 只取消 cancellable=true（预载）任务；cancel_gen 单调自增对所有
 //   任务生效，四检查点（每 chunk 前 / 二次 stat 前 / 二次 stat 后 rename 前 / 紧贴 upsert 前）
@@ -133,10 +141,11 @@ fn atomic_write_sidecar(part_path: &std::path::Path, sc: &PartSidecar) -> Result
     std::fs::rename(&tmp, &target).map_err(MaterializeError::Io)
 }
 
-/// 启动清理（spec §8 rev2）：①part/ 只删 sidecar 缺失/损坏的 .part（**有效 sidecar 保留——
+/// 启动清理（spec §8 rev2 + 终审 P1-3）：①part/ 只删 sidecar 缺失/损坏的 .part（**有效 sidecar 保留——
 /// 重启续传依据，原「全删 part/」与断点续传冲突已废弃**；一致性验证推迟到下次
 /// ensure_cached 的 sidecar 快照 vs 远端 stat，启动时零网络请求）②孤儿缓存文件（表无行）
-/// ③超容量淘汰
+/// ③反向扫表——表行文件缺失/长度不符 byte_size 的悬空行删除（正向孤儿扫的补集修复）
+/// ④超容量淘汰（80% 水位，终审 P2-1）
 pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) {
     if let Ok(rd) = std::fs::read_dir(cache_root.join("part")) {
         for entry in rd.flatten() {
@@ -163,6 +172,31 @@ pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) 
     }
     let _ = std::fs::create_dir_all(cache_root.join("part"));
     let conn = db.conn();
+    // 反向扫表（终审 P1-3）：表行对应文件缺失或长度不符 byte_size = 悬空行 → 删行
+    // （+尽力删错长度文件）。此前只有正向扫文件（表无行的文件删），悬空行每次
+    // 命中都返回不存在路径、永不自愈——启动时反向修复一次。
+    {
+        let dangling: Vec<(String, String)> = {
+            let mut stmt = match conn.prepare(
+                "SELECT cache_key, cache_abs_path, byte_size FROM archive_cache") {
+                Ok(s) => s, Err(_) => return,
+            };
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?))
+            }).map(|it| it.filter_map(|v| v.ok())
+                .filter(|(_, abs, size)| std::fs::metadata(abs)
+                    .map(|m| m.len() != *size as u64)
+                    .unwrap_or(true)) // 文件缺失 → 悬空
+                .map(|(k, abs, _)| (k, abs))
+                .collect::<Vec<_>>());
+            match rows { Ok(v) => v, Err(_) => return }
+        };
+        for (k, abs) in dangling {
+            let _ = conn.execute("DELETE FROM archive_cache WHERE cache_key = ?1",
+                                 rusqlite::params![k]);
+            let _ = std::fs::remove_file(abs); // 错长度文件尽力删（缺失时落空无害）
+        }
+    }
     let known: std::collections::HashSet<String> = {
         let mut stmt = match conn.prepare("SELECT cache_abs_path FROM archive_cache") { Ok(s) => s, Err(_) => return };
         let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map(|it| it.filter_map(|v| v.ok()).collect::<Vec<_>>());
@@ -176,7 +210,8 @@ pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) 
             }
         }
     }
-    let _ = super::dao::evict_to_limit(&conn, limit_bytes, &[]);
+    // 超容量淘汰（终审 P2-1：回收到 80% 水位，非 limit 边缘）
+    let _ = super::dao::evict_ready_to_watermark(&conn, limit_bytes, &[]);
 }
 
 impl Materializer {
@@ -202,9 +237,14 @@ impl Materializer {
         (root.join(format!("{key}.zip")), root.join("part").join(format!("{key}.part")))
     }
 
-    pub fn new_epoch(&self, e: u64) { self.epoch.store(e, std::sync::atomic::Ordering::SeqCst); }
-    /// pub：prefetch 批次循环逐 rel 启动前比对（任务 8 审查修复——「待开始任务丢弃」
-    /// 不能只靠 download 内的 epoch_at_start：同批后续 rel 会以新 epoch 完整下载）
+    /// 单调推进（终审 P1-4）：仅 e > current 时生效——IPC 乱序迟到的旧窗口 epoch
+    /// 不得回退当前值（旧 new_epoch 无条件 store，旧窗口可覆盖新窗口取消语义）。
+    pub fn advance_epoch(&self, e: u64) {
+        self.epoch.fetch_max(e, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// pub：prefetch 批次循环逐 rel 启动前比对（任务 8 审查修复——「待开始任务丢弃」；
+    /// 终审 P1-4 后批内任务身份由 ensure_cached_cancellable 的 expected_epoch 显式携带，
+    /// 此查保留为快速短路）
     pub fn current_epoch(&self) -> u64 { self.epoch.load(std::sync::atomic::Ordering::SeqCst) }
 
     /// rev2 双通道②：单调自增，新任务取新代际——预载在 clear 后自然恢复
@@ -247,18 +287,21 @@ impl Materializer {
     pub async fn ensure_cached(
         &self, origin: &SourceDescriptor, archive_rel_path: &str,
     ) -> Result<PathBuf, MaterializeError> {
-        self.ensure_cached_inner(origin, archive_rel_path, false).await
+        self.ensure_cached_inner(origin, archive_rel_path, None).await
     }
 
-    /// 预载路径——窗口 epoch 与 generation 双通道均可取消
+    /// 预载路径——窗口 epoch 与 generation 双通道均可取消。expected_epoch 是任务
+    /// **诞生时刻**（notify_window 的批次 epoch）的身份，全程显式携带（终审 P1-4：
+    /// 身份不从环境读——旧实现 download 内捕获 current_epoch，批次循环检查与调用
+    /// 间隙推进的 epoch 被新任务当自己的身份完整下载，竞态结构性消除）。
     pub async fn ensure_cached_cancellable(
-        &self, origin: &SourceDescriptor, archive_rel_path: &str,
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, expected_epoch: u64,
     ) -> Result<PathBuf, MaterializeError> {
-        self.ensure_cached_inner(origin, archive_rel_path, true).await
+        self.ensure_cached_inner(origin, archive_rel_path, Some(expected_epoch)).await
     }
 
     async fn ensure_cached_inner(
-        &self, origin: &SourceDescriptor, archive_rel_path: &str, cancellable: bool,
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, expected_epoch: Option<u64>,
     ) -> Result<PathBuf, MaterializeError> {
         let key = cache_key(origin, archive_rel_path);
         // 0. 格式闸门（最终审查 I1；spec §1 非目标：RAR/7z 远程物化不做）——cbz/zip
@@ -271,95 +314,161 @@ impl Materializer {
             | Some(crate::source::descriptor::ArchiveFormat::Zip) => {}
             _ => return Err(MaterializeError::Other(format!("远程物化仅支持 cbz/zip：{archive_rel_path}"))),
         }
-        // 1. 表命中 → stat 失效判定
-        //    rev4：Db 是 Mutex 包裹的连接——先读行后立刻 drop conn，再 await 远端 stat
-        //    （持连接跨网络 await 会锁住整个数据库）；touch/删除时重新获取连接
-        {
-            let row = {
-                let conn = self.db.conn();
-                super::dao::get(&conn, &key).map_err(|e| MaterializeError::Other(e.to_string()))?
-            };
-            if let Some(row) = row {
-                let src = self.origin_source(origin)?;
-                let cur = src.stat(origin, archive_rel_path).await?;
-                if !is_stale(row.origin_size, row.origin_mtime, &cur) {
+        // waiter 接管循环（终审 P1-1）：「查表 → 注册/等待」包进 loop——waiter 醒来
+        // 表无行时不再直接报「未产出结果」：强制调用方（用户双击打开）无条件重走
+        // 查表 + 抢 owner（接管续传，cancellable=false 不受 epoch 影响）；cancellable
+        // 调用方 epoch 已变 → Err("cancelled")，epoch 未变（owner 网络错误等）→ 接管
+        // 一次。上限 5 轮防病态 ping-pong（正常路径 1-2 轮）。
+        for _round in 0..5 {
+            // 1. 表命中 → stat 失效判定 + 磁盘一致性校验（终审 P1-3）
+            //    rev4：Db 是 Mutex 包裹的连接——先读行后立刻 drop conn，再 await 远端 stat
+            //    （持连接跨网络 await 会锁住整个数据库）；touch/删除时重新获取连接
+            {
+                let row = {
                     let conn = self.db.conn();
-                    let _ = super::dao::touch(&conn, &key);
-                    return Ok(PathBuf::from(&row.cache_abs_path));
-                }
-                // 失效：条件删除（审查修复）——仅当表行仍是本调用者读到的 stale 版本时
-                // 才拥有失效权（删行 + 删文件）。竞态：B 读 v1 行 → await stat 窗口内
-                // A 完成整套 v2 下载（upsert 刷新行；final 同 key 同路径）；旧的无条件
-                // DELETE + remove_file 会误删 A 的 v2 文件并留下指向已删文件的 v2 表行
-                // （命中路径 stat 判新鲜直接返回不存在路径，永不自愈）。条件 DELETE 落空
-                // （0 行）= 行已被刷新：重读行，对 B 手头 stat 新鲜 → touch + 直接返回
-                // （免重下）；仍 stale（远端又变）或行不存在 → 继续走下载（rename 在
-                // Windows 用 MOVEFILE_REPLACE_EXISTING，残留 final 可被原子替换）
-                let won = {
-                    let conn = self.db.conn();
-                    super::dao::delete_if_version_match(&conn, &key, row.origin_size, row.origin_mtime)
-                        .map_err(|e| MaterializeError::Other(e.to_string()))?
+                    super::dao::get(&conn, &key).map_err(|e| MaterializeError::Other(e.to_string()))?
                 };
-                if won {
-                    let _ = std::fs::remove_file(&row.cache_abs_path);
-                } else {
-                    let rerow = {
-                        let conn = self.db.conn();
-                        super::dao::get(&conn, &key).map_err(|e| MaterializeError::Other(e.to_string()))?
-                    };
-                    if let Some(rerow) = rerow {
-                        if !is_stale(rerow.origin_size, rerow.origin_mtime, &cur) {
+                if let Some(row) = row {
+                    let src = self.origin_source(origin)?;
+                    let cur = src.stat(origin, archive_rel_path).await?;
+                    if !is_stale(row.origin_size, row.origin_mtime, &cur) {
+                        // P1-3：命中不止看表——文件必须存在且长度 == byte_size（OS 清
+                        // 缓存 / 用户删文件 / 截断损坏 → 悬空行自愈，不再每次命中都
+                        // 返回不存在路径）。不符 → 条件删行（指纹匹配防误删并发新行）
+                        // + 尽力删文件 → continue 重物化。
+                        if cache_file_matches(&row) {
                             let conn = self.db.conn();
                             let _ = super::dao::touch(&conn, &key);
-                            return Ok(PathBuf::from(&rerow.cache_abs_path));
+                            return Ok(PathBuf::from(&row.cache_abs_path));
+                        }
+                        let won = {
+                            let conn = self.db.conn();
+                            super::dao::delete_if_version_match(&conn, &key, row.origin_size, row.origin_mtime)
+                                .map_err(|e| MaterializeError::Other(e.to_string()))?
+                        };
+                        if won {
+                            let _ = std::fs::remove_file(&row.cache_abs_path);
+                        }
+                        continue; // 重物化（行已删，下轮查表落空直达注册）
+                    }
+                    // 失效：条件删除（审查修复）——仅当表行仍是本调用者读到的 stale 版本时
+                    // 才拥有失效权（删行 + 删文件）。竞态：B 读 v1 行 → await stat 窗口内
+                    // A 完成整套 v2 下载（upsert 刷新行；final 同 key 同路径）；旧的无条件
+                    // DELETE + remove_file 会误删 A 的 v2 文件并留下指向已删文件的 v2 表行
+                    // （命中路径 stat 判新鲜直接返回不存在路径，永不自愈）。条件 DELETE 落空
+                    // （0 行）= 行已被刷新：重读行，对 B 手头 stat 新鲜 → touch + 直接返回
+                    // （免重下）；仍 stale（远端又变）或行不存在 → 继续走下载（rename 在
+                    // Windows 用 MOVEFILE_REPLACE_EXISTING，残留 final 可被原子替换）
+                    let won = {
+                        let conn = self.db.conn();
+                        super::dao::delete_if_version_match(&conn, &key, row.origin_size, row.origin_mtime)
+                            .map_err(|e| MaterializeError::Other(e.to_string()))?
+                    };
+                    if won {
+                        let _ = std::fs::remove_file(&row.cache_abs_path);
+                    } else {
+                        let rerow = {
+                            let conn = self.db.conn();
+                            super::dao::get(&conn, &key).map_err(|e| MaterializeError::Other(e.to_string()))?
+                        };
+                        if let Some(rerow) = rerow {
+                            if !is_stale(rerow.origin_size, rerow.origin_mtime, &cur) {
+                                if cache_file_matches(&rerow) {
+                                    let conn = self.db.conn();
+                                    let _ = super::dao::touch(&conn, &key);
+                                    return Ok(PathBuf::from(&rerow.cache_abs_path));
+                                }
+                                // P1-3：rerow 同样做磁盘校验——不符则条件删行（不误删
+                                // 并发更新行）后走下载，由新任务的 upsert 修复表
+                                let won2 = {
+                                    let conn = self.db.conn();
+                                    super::dao::delete_if_version_match(&conn, &key, rerow.origin_size, rerow.origin_mtime)
+                                        .map_err(|e| MaterializeError::Other(e.to_string()))?
+                                };
+                                if won2 {
+                                    let _ = std::fs::remove_file(&rerow.cache_abs_path);
+                                }
+                            }
+                        }
+                        // 仍 stale（远端又变）或行不存在 → 继续走下载
+                    }
+                }
+            }
+            // 2. 准入闸门 + in-flight 去重 + 注册——**同一把锁的单一临界区**（rev5）：
+            //    rev4 的入口 AtomicBool 检查与此处注册之间有 TOCTOU 窗口（clear 在间隙
+            //    begin_clearing 并观察到空表，本任务随后带新代际注册下载穿透清空）。
+            //    现在「查 clearing + 查重 + 注册」原子完成；begin_clearing 持同锁置位，
+            //    任何并发 ensure_cached 要么先注册（map 可见，drain 会等）、要么看到
+            //    clearing=true 被拒——不存在中间态。Notified 仍持锁 enable() 预注册
+            //    （rev4 丢唤醒修复保留）。
+            //    终审 P1-4：cancellable 任务在注册前比对 expected_epoch——身份过时
+            //    （窗口已推进）直接拒，不注册不下载（旧实现会在 download 内把新
+            //    epoch 捕获成自己的身份，完整下载整包）。
+            {
+                let mut st = self.inflight.lock().await;
+                if st.clearing {
+                    return Err(MaterializeError::Other("cache clearing in progress".into()));
+                }
+                if let Some(expected) = expected_epoch {
+                    if self.current_epoch() != expected {
+                        return Err(MaterializeError::Other("cancelled".into()));
+                    }
+                }
+                if let Some(notify) = st.map.get(&key).cloned() {
+                    let mut notified = notify.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable(); // 持锁预注册——此后 notify_waiters 不可能丢失
+                    drop(st);
+                    notified.await;
+                    // 醒来：owner 已退出（成功 / 取消 / 网络错误）。查表——
+                    let woke_row = {
+                        let conn = self.db.conn();
+                        super::dao::get(&conn, &key)
+                            .map_err(|e| MaterializeError::Other(e.to_string()))?
+                    };
+                    if let Some(row) = woke_row {
+                        if cache_file_matches(&row) {
+                            return Ok(PathBuf::from(&row.cache_abs_path));
+                        }
+                        // 行在但文件悬空（P1-3 自愈）：条件删行 + 尽力删文件后走接管
+                        let won = {
+                            let conn = self.db.conn();
+                            super::dao::delete_if_version_match(&conn, &key, row.origin_size, row.origin_mtime)
+                                .map_err(|e| MaterializeError::Other(e.to_string()))?
+                        };
+                        if won {
+                            let _ = std::fs::remove_file(&row.cache_abs_path);
                         }
                     }
-                    // 仍 stale（远端又变）或行不存在 → 继续走下载
+                    // 表无行（或悬空行已清）→ P1-1 接管判定：
+                    // - 强制调用方：无条件 continue 重走「查表 → 抢 owner」（接管续传，
+                    //   cancellable=false 不受 epoch 影响）
+                    // - cancellable 调用方：epoch 已变 → Err("cancelled")（旧窗口任务
+                    //   不复活）；epoch 未变（owner 是网络错误等非取消退出）→ 接管一次
+                    if let Some(expected) = expected_epoch {
+                        if self.current_epoch() != expected {
+                            return Err(MaterializeError::Other("cancelled".into()));
+                        }
+                    }
+                    continue;
                 }
+                st.map.insert(key.clone(), Arc::new(tokio::sync::Notify::new()));
             }
-        }
-        // 2. 准入闸门 + in-flight 去重 + 注册——**同一把锁的单一临界区**（rev5）：
-        //    rev4 的入口 AtomicBool 检查与此处注册之间有 TOCTOU 窗口（clear 在间隙
-        //    begin_clearing 并观察到空表，本任务随后带新代际注册下载穿透清空）。
-        //    现在「查 clearing + 查重 + 注册」原子完成；begin_clearing 持同锁置位，
-        //    任何并发 ensure_cached 要么先注册（map 可见，drain 会等）、要么看到
-        //    clearing=true 被拒——不存在中间态。Notified 仍持锁 enable() 预注册
-        //    （rev4 丢唤醒修复保留）。
-        let mut registered = false;
-        {
-            let mut st = self.inflight.lock().await;
-            if st.clearing {
-                return Err(MaterializeError::Other("cache clearing in progress".into()));
+            // 3. 下载（退出时 notify + 移除 in-flight）——key 传借用（download 收 &str，
+            //    且此处后续还要用 key 清理 inflight，不能 move）
+            let result = self.download(origin, archive_rel_path, &key, expected_epoch).await;
+            {
+                let mut st = self.inflight.lock().await;
+                if let Some(n) = st.map.remove(&key) { n.notify_waiters(); }
             }
-            if let Some(notify) = st.map.get(&key).cloned() {
-                let mut notified = notify.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable(); // 持锁预注册——此后 notify_waiters 不可能丢失
-                drop(st);
-                notified.await;
-                let conn = self.db.conn();
-                if let Some(row) = super::dao::get(&conn, &key)
-                    .map_err(|e| MaterializeError::Other(e.to_string()))? {
-                    return Ok(PathBuf::from(&row.cache_abs_path));
-                }
-                return Err(MaterializeError::Other("等待的物化任务未产出结果".into()));
-            }
-            st.map.insert(key.clone(), Arc::new(tokio::sync::Notify::new()));
-            registered = true;
+            return result;
         }
-        let _ = registered; // 调试期可断言；注册成功才走到下载
-        // 3. 下载（退出时 notify + 移除 in-flight）——key 传借用（download 收 &str，
-        //    且此处后续还要用 key 清理 inflight，不能 move）
-        let result = self.download(origin, archive_rel_path, &key, cancellable).await;
-        {
-            let mut st = self.inflight.lock().await;
-            if let Some(n) = st.map.remove(&key) { n.notify_waiters(); }
-        }
-        result
+        Err(MaterializeError::Other("物化循环未收敛".into()))
     }
 
     async fn download(
-        &self, origin: &SourceDescriptor, archive_rel_path: &str, key: &str, cancellable: bool,
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, key: &str,
+        expected_epoch: Option<u64>,
     ) -> Result<PathBuf, MaterializeError> {
         let src = self.origin_source(origin)?;
         let (final_path, part_path) = self.cache_paths(key);
@@ -408,14 +517,16 @@ impl Materializer {
                 snapshot_mtime: snap.modified_at,
                 downloaded: offset,
             })?;
-            let epoch_at_start = self.current_epoch();
+            // 终审 P1-4：身份不再从环境读——cancellable 任务的 epoch 全程比
+            // expected_epoch（任务诞生时刻由调用方显式传入），旧 epoch_at_start
+            // 捕获已删（间隙推进的 epoch 会被新任务当自己的身份，竞态结构性消除）
             let gen_at_start = self.cancel_generation();
             while offset < snap.size {
                 // 检查点 ①（双通道取消 rev2）：generation 对强制路径也生效（清空缓存必须能停）；
                 // epoch 检查仅 cancellable（预载）任务。注意此处不删 .part——预载取消保留
                 // 断点（同 key 后续强制物化可续传），清空路径的取消（②③④）才删 part+sidecar
                 if self.cancel_generation() != gen_at_start
-                    || (cancellable && self.current_epoch() != epoch_at_start) {
+                    || expected_epoch.is_some_and(|e| self.current_epoch() != e) {
                     return Err(MaterializeError::Other("cancelled".into()));
                 }
                 let len = CHUNK.min(snap.size - offset);
@@ -483,10 +594,10 @@ impl Materializer {
                     byte_size: byte_size as i64,
                 }).map_err(|e| MaterializeError::Other(e.to_string()))?;
             }
-            // 回收钩子（最终审查 I2）：upsert 成功后立即 evict_to_limit——此前容量
-            // 上限只在 startup_cleanup 执行，一次会话滚过几十个大 CBZ（预载放大）可
-            // 无限超限直到重启（spec §12 风险对策三件套「容量上限 + LRU + 启动清理」
-            // 至此全量生效）。错误吞掉：回收失败不影响本次物化返回。conn 短作用域且
+            // 回收钩子（最终审查 I2 + 终审 P2-1）：upsert 成功后立即回收到 80% 水位
+            // ——此前容量上限只在 startup_cleanup 执行，一次会话滚过几十个大 CBZ（预载
+            // 放大）可无限超限直到重启（spec §12 风险对策三件套「容量上限 + LRU + 启动
+            // 清理」至此全量生效）。错误吞掉：回收失败不影响本次物化返回。conn 短作用域且
             // 不跨 await（任务 6 死锁教训——inflight 锁的 await 在取 conn 之前完成）；
             // 在途 key 全量 protected（含本任务自身：不自删，也不删并发任务的 final）。
             {
@@ -501,7 +612,7 @@ impl Materializer {
                     st.map.keys().cloned().collect()
                 };
                 let conn = self.db.conn();
-                let _ = super::dao::evict_to_limit(&conn, limit_bytes, &protected);
+                let _ = super::dao::evict_ready_to_watermark(&conn, limit_bytes, &protected);
             }
             emit_progress(key, archive_rel_path, snap.size, snap.size, "ready");
             return Ok(final_path);
@@ -984,10 +1095,12 @@ pub(crate) mod tests {
         let _ = dir.path();
     }
 
-    /// 最终审查 I2：upsert 后回收钩子——download 成功上表后立即 evict_to_limit，
-    /// 容量上限不再只靠 startup_cleanup（一次会话滚过几十个大 CBZ 可无限超限到重启）。
+    /// 最终审查 I2：upsert 后回收钩子——download 成功上表后立即回收（终审 P2-1 起
+    /// 经 evict_ready_to_watermark 回收到 80% 水位），容量上限不再只靠 startup_cleanup
+    /// （一次会话滚过几十个大 CBZ 可无限超限到重启）。
     /// 限值 1MB；mock 包各 1.5MB：A 物化时自身在途 protected 不自删；B 物化后
-    /// total 3MB > 1MB → A（更旧）被淘汰、B（在途 protected）保留。
+    /// total 3MB > 1MB → 水位目标 0.8MB → 淘汰 A（freed 1.5MB < need 2.2MB）后
+    /// 仅剩 B 且 B 在途 protected 无可淘汰 → A 删 B 留，与 limit 边缘旧语义期望一致。
     #[tokio::test]
     async fn upsert_triggers_evict_over_limit() {
         let mock = StdArc::new(MockOrigin::new(1_500_000));
@@ -1049,7 +1162,7 @@ pub(crate) mod tests {
         let root = dir.path();
         std::fs::write(root.join("k2.zip"), b"orphan").unwrap();
         let k3 = root.join("k3.zip");
-        std::fs::write(&k3, b"known").unwrap();
+        std::fs::write(&k3, b"known!").unwrap(); // 6 字节——与行 byte_size=6 一致（终审 P1-3 反向扫表长度校验）
         std::fs::write(root.join("part").join("k4.part"), b"partial").unwrap();
         {
             let conn = db.conn();
@@ -1154,10 +1267,10 @@ pub(crate) mod tests {
         let h = tokio::spawn({
             let m = m.clone();
             let o = origin.clone();
-            async move { m.ensure_cached_cancellable(&o, "a.cbz").await }
+            async move { m.ensure_cached_cancellable(&o, "a.cbz", 0).await }
         });
         wait_reads(&mock, 1).await;
-        m.new_epoch(1);
+        m.advance_epoch(1);
         assert!(h.await.unwrap().is_err(), "预载任务被窗口 epoch 取消");
         assert_eq!(mock.read_calls.load(Ordering::SeqCst), 1, "第一 chunk 后即中止");
 
@@ -1168,9 +1281,189 @@ pub(crate) mod tests {
             async move { m.ensure_cached(&o, "a.cbz").await }
         });
         wait_reads(&mock, 2).await;
-        m.new_epoch(2);
+        m.advance_epoch(2);
         let p = h2.await.unwrap().unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().len(), super::CHUNK + 5);
         assert_eq!(mock.read_calls.load(Ordering::SeqCst), 2, "续传只补读剩余字节，未全量重下");
+    }
+
+    /// 终审 P1-4：advance_epoch 单调推进——IPC 乱序迟到的旧 epoch 不得回退当前值
+    /// （旧 new_epoch 无条件 store，前端乱序可让旧窗口覆盖新窗口）。
+    #[tokio::test]
+    async fn advance_epoch_ignores_stale_lower_value() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _g, _db) = temp_materializer(mock.clone());
+        m.advance_epoch(5);
+        m.advance_epoch(3); // 迟到的旧窗口（乱序 IPC）
+        assert_eq!(m.current_epoch(), 5, "epoch 单调推进——旧值不回退");
+    }
+
+    /// 终审 P1-4：注册前身份检查——任务诞生时刻的 expected_epoch 已过时（窗口已推进）
+    /// 则立即 Err("cancelled") 且零网络读。旧实现（download 内捕获 epoch_at_start）
+    /// 会把新 epoch 当自己的身份完整下载：prefetch 批次循环检查与调用间隙推进的
+    /// epoch 全部落空，旧批次任务永不被取消。
+    #[tokio::test]
+    async fn expected_epoch_stale_rejected_at_registration() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _g, _db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        m.advance_epoch(2);
+        let err = m.ensure_cached_cancellable(&origin, "a.cbz", 1).await.unwrap_err();
+        assert!(matches!(err, MaterializeError::Other(ref s) if s == "cancelled"),
+                "注册前身份拒绝（非进入下载后再取消），实际 {err:?}");
+        assert_eq!(mock.read_calls.load(Ordering::SeqCst), 0, "零 read（旧实现捕获新 epoch 完整下载）");
+        assert_eq!(mock.stat_calls.load(Ordering::SeqCst), 0, "零 stat（无表行走查表路径，直接拒）");
+        assert!(m.inflight_empty().await, "未注册 inflight");
+    }
+
+    /// 终审 P1-1：强制 waiter 接管被 epoch 取消的预载 owner——预载取消后同 key 的
+    /// 强制调用方（用户双击打开）醒来发现表无行，不得继承「未产出结果」错误，
+    /// 应重走查表 + 抢 owner 续传（.part 复用，只补剩余 chunk）。
+    #[tokio::test]
+    async fn forced_waiter_takes_over_cancelled_preload_owner() {
+        let mock = StdArc::new(MockOrigin::new(super::CHUNK + 5)); // 两 chunk
+        *mock.read_delay_ms.lock().unwrap() = 150;
+        let (m, _g, _db) = temp_materializer(mock.clone());
+        let m = StdArc::new(m);
+        let origin = webdav("");
+
+        // 任务 1：预载 owner（expected=1）——先推进 epoch 到 1（生产路径 notify_window
+        // 先 advance_epoch 再 spawn，任务诞生时 current == expected），chunk 1 在途后
+        // 确认已注册并进入下载
+        m.advance_epoch(1);
+        let h1 = tokio::spawn({
+            let m = m.clone();
+            let o = origin.clone();
+            async move { m.ensure_cached_cancellable(&o, "a.cbz", 1).await }
+        });
+        wait_reads(&mock, 1).await;
+        // 任务 2：强制调用方——注册时 owner 在途 → 成为 waiter（短暂 sleep 确保注册顺序）
+        let h2 = tokio::spawn({
+            let m = m.clone();
+            let o = origin.clone();
+            async move { m.ensure_cached(&o, "a.cbz").await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // 窗口推进 → 预载 owner 在第二 chunk 前的检查点被取消（.part 保留）
+        m.advance_epoch(2);
+        assert!(h1.await.unwrap().is_err(), "预载 owner 被 epoch 取消");
+        // 旧实现：waiter 醒来表无行直接 Err——强制打开继承预载取消结果
+        let p = h2.await.unwrap().unwrap();
+        assert!(p.exists(), "waiter 接管成为新 owner，物化成功");
+        assert_eq!(std::fs::metadata(&p).unwrap().len(), super::CHUNK + 5);
+        assert_eq!(take_ranges(&mock), &[(0, super::CHUNK), (super::CHUNK, 5)],
+                   "接管从 .part 续传——只补读剩余 5 字节，未全量重下");
+    }
+
+    /// 终审 P1-3：命中路径磁盘一致性校验——表行 stat 新鲜但缓存文件被 OS 清掉 /
+    /// 用户删除 → 悬空行不得每次命中都返回不存在路径，应条件删行后重物化自愈。
+    #[tokio::test]
+    async fn hit_path_missing_file_rematerializes() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _g, _db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        let p1 = m.ensure_cached(&origin, "a.cbz").await.unwrap();
+        std::fs::remove_file(&p1).unwrap(); // 模拟外部删除
+        let reads_before = mock.read_calls.load(Ordering::SeqCst);
+        let p2 = m.ensure_cached(&origin, "a.cbz").await.unwrap();
+        assert_eq!(p2, p1, "同一 cache 路径重物化");
+        assert!(p2.exists() && p2.is_file(), "返回的路径真实存在");
+        assert!(mock.read_calls.load(Ordering::SeqCst) > reads_before, "触发重新下载");
+        assert_eq!(std::fs::metadata(&p2).unwrap().len(), 10);
+    }
+
+    /// 终审 P1-3：命中路径长度校验——文件存在但被截断 / 损坏（len != byte_size）
+    /// 同样视为悬空：条件删行 + 尽力删文件 → 重物化。
+    #[tokio::test]
+    async fn hit_path_truncated_file_rematerializes() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _g, _db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        let p1 = m.ensure_cached(&origin, "a.cbz").await.unwrap();
+        std::fs::write(&p1, b"12345").unwrap(); // 截断到 5 字节（长度不符）
+        let reads_before = mock.read_calls.load(Ordering::SeqCst);
+        let p2 = m.ensure_cached(&origin, "a.cbz").await.unwrap();
+        assert_eq!(p2, p1);
+        assert_eq!(std::fs::metadata(&p2).unwrap().len(), 10, "重物化产出完整文件");
+        assert!(mock.read_calls.load(Ordering::SeqCst) > reads_before, "触发重新下载");
+    }
+
+    /// 终审 P2-1：upsert 后回收钩子回收到 80% 水位——4 包各 1.2MB + limit 4MB：
+    /// 第 4 包 upsert 后 total 4.8MB > 4MB → 目标 3.2MB → 淘汰 a+b（各 1.2MB，
+    /// 2.4MB ≤ 3.2MB 停）。旧语义（目标=limit）只淘汰 a（3.6MB ≤ 4MB 即停）——
+    /// 本用例以「b 也被淘汰」钉死水位语义。秒级 last_accessed_at 手工排序保 LRU 确定性。
+    #[tokio::test]
+    async fn upsert_hook_evicts_to_80pct_watermark() {
+        let mock = StdArc::new(MockOrigin::new(1_200_000));
+        let (m, _dir, db) = temp_materializer(mock.clone());
+        {
+            let conn = db.conn();
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('archive_cache_max_mb', '4')",
+                []).unwrap();
+        }
+        let origin = webdav("");
+        let keys: Vec<String> = ["a", "b", "c", "d"].iter()
+            .map(|n| cache_key(&origin, &format!("{n}.cbz"))).collect();
+        let finals: Vec<PathBuf> = keys.iter()
+            .map(|k| m.cache_paths(k).0).collect();
+        // a/b/c 先物化（total 3.6MB ≤ 4MB 不触发回收），手工排访问时间
+        for (i, name) in ["a.cbz", "b.cbz", "c.cbz"].iter().enumerate() {
+            m.ensure_cached(&origin, name).await.unwrap();
+            let conn = db.conn();
+            conn.execute("UPDATE archive_cache SET last_accessed_at = ?1 WHERE cache_key = ?2",
+                rusqlite::params![((i + 1) * 100) as i64, keys[i]]).unwrap();
+        }
+        // d：upsert 后 total 4.8MB > 4MB → 目标 3.2MB → 淘汰 a(100)+b(200)，剩 c+d=2.4MB
+        let pd = m.ensure_cached(&origin, "d.cbz").await.unwrap();
+        assert!(pd.exists(), "d 物化成功");
+        assert!(!finals[0].exists(), "a（最旧）被淘汰");
+        assert!(!finals[1].exists(), "b 也被淘汰——回收到 80% 水位而非 limit 边缘");
+        assert!(finals[2].exists() && finals[3].exists(), "c/d 保留");
+        let conn = db.conn();
+        assert!(crate::source::archive::dao::get(&conn, &keys[0]).unwrap().is_none(), "a 行删");
+        assert!(crate::source::archive::dao::get(&conn, &keys[1]).unwrap().is_none(), "b 行删");
+        let (_, bytes) = crate::source::archive::dao::usage(&conn).unwrap();
+        assert_eq!(bytes, 2_400_000, "剩余总量 = 80% 水位（2 × 1.2MB）");
+    }
+
+    /// 终审 P1-3：startup_cleanup 反向扫表——表行对应文件缺失（悬空行）→ 删行；
+    /// 文件存在但长度不符 byte_size → 删行 + 删文件；完好行不受影响。
+    #[test]
+    fn startup_cleanup_removes_dangling_rows() {
+        let (dir, db) = cleanup_fixture();
+        let root = dir.path();
+        let good = root.join("k9.zip");
+        std::fs::write(&good, b"0123456789").unwrap();
+        let badlen = root.join("k8.zip");
+        std::fs::write(&badlen, b"short").unwrap(); // 5 字节，行宣称 10
+        {
+            let conn = db.conn();
+            for (k, abs, size) in [
+                ("k7", root.join("k7.zip").display().to_string(), 10), // 文件缺失
+                ("k8", badlen.display().to_string(), 10),               // 长度不符
+                ("k9", good.display().to_string(), 10),                 // 完好
+            ] {
+                crate::source::archive::dao::upsert(&conn, &crate::source::archive::dao::NewCacheRow {
+                    cache_key: k.into(),
+                    origin_kind: "webdav".into(),
+                    archive_rel_path: "books/a.cbz".into(),
+                    origin_size: 10,
+                    origin_mtime: Some(1000),
+                    cache_abs_path: abs,
+                    byte_size: size,
+                }).unwrap();
+            }
+        }
+        startup_cleanup(root, &db, i64::MAX);
+        let conn = db.conn();
+        assert!(crate::source::archive::dao::get(&conn, "k7").unwrap().is_none(),
+                "悬空行（文件缺失）删除");
+        assert!(crate::source::archive::dao::get(&conn, "k8").unwrap().is_none(),
+                "错长度行删除");
+        assert!(!badlen.exists(), "错长度文件一并删除");
+        assert!(crate::source::archive::dao::get(&conn, "k9").unwrap().is_some(),
+                "完好行保留");
+        assert!(good.exists(), "完好文件保留");
     }
 }

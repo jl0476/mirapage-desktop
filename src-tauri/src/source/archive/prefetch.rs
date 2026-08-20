@@ -43,24 +43,24 @@ impl ArchivePrefetcher {
         if !self.enabled.load(Ordering::SeqCst) {
             return;
         }
-        let batch_epoch = epoch; // 本批次身份：new_epoch 之前捕获（值相同，语义在此）
-        self.mat.new_epoch(epoch);
+        let batch_epoch = epoch; // 本批次身份：任务诞生时刻固定（终审 P1-4 身份显式传入）
+        self.mat.advance_epoch(epoch);
         let mat = self.mat.clone();
         let enabled = self.enabled.clone();
         let origin = origin.clone();
         let rels = rels.to_vec();
         tokio::spawn(async move {
             for rel in &rels {
-                // 批次级取消（任务 8 审查修复 / spec §7「待开始任务丢弃」）：epoch 在
-                // download 内的 epoch_at_start 只能取消**正在下载**的 rel——同批后续
-                // rel 启动时会捕获新 epoch 完整下载（快速滚动数百 MB CBX 白下）。
-                // 故每个 rel 启动前比对批次 epoch 与实时开关，变了/关了即不再启动。
+                // 批次级取消（任务 8 审查修复 / spec §7「待开始任务丢弃」）+ 终审
+                // P1-4：ensure_cached_cancellable(expected=batch_epoch) 在注册前再查
+                // 一次身份（间隙推进的 epoch 由它兜底拒绝）；此处比对是快速短路，
+                // 避免明知过时还入临界区。
                 if mat.current_epoch() != batch_epoch
                     || !enabled.load(Ordering::SeqCst)
                 {
                     break;
                 }
-                let _ = mat.ensure_cached_cancellable(&origin, rel).await;
+                let _ = mat.ensure_cached_cancellable(&origin, rel, batch_epoch).await;
             }
         });
     }

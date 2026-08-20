@@ -655,17 +655,28 @@ export async function keepScreenOn(enable: boolean): Promise<void> {
 
 // ─── M3 任务 8: 远程 archive 三级预载 ─────────────────────────────────
 /**
+ * 窗口 epoch：模块级递增计数器（终审 P1-4）——Date.now() 同毫秒重复 + IPC 乱序
+ * 可让旧窗口覆盖新窗口；单调递增序号保证每次调用身份严格递增，后端 advance_epoch
+ * 亦单调（旧值不回退），双端叠加消除乱序回退。
+ */
+let archiveEpochSeq = 0;
+
+/**
  * masonry 像素窗口 / details 选中推送 archive 预载目标。
- * epoch 取 Date.now()（单调、remount 安全；切目录天然由新窗口 watch 产生新调用，
- * 后端 epoch 推进即取消在途预载）。mode: 'metadata'（仅 stat 预热）/
- * 'content'（低优物化，可被后续 epoch 取消）。
+ * epoch 每次调用严格递增（切目录/滚动/换窗口都产生新身份，后端推进即取消在途
+ * 预载）。mode: 'metadata'（仅 stat 预热）/ 'content'（低优物化，可被后续 epoch 取消）。
  */
 export async function notifyArchiveWindow(
   descriptor: SourceDescriptor,
   rels: string[],
   mode: 'metadata' | 'content',
 ): Promise<void> {
-  await invoke<void>('notify_archive_window', { epoch: Date.now(), descriptor, rels, mode });
+  await invoke<void>('notify_archive_window', {
+    epoch: ++archiveEpochSeq,
+    descriptor,
+    rels,
+    mode,
+  });
 }
 
 /**
