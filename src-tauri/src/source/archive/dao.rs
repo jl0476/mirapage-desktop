@@ -62,26 +62,32 @@ pub fn touch(conn: &Connection, cache_key: &str) -> Result<()> {
 }
 
 /// 按 last_accessed_at 升序淘汰至 byte_total <= limit_bytes；protected 跳过。
-/// 返回淘汰条数。逐批 256（模式同 thumbnail evict_to_limit）。
+/// 返回淘汰条数。逐批 256 + freed 累计到 need_to_free 即停（模式同 thumbnail
+/// index.rs oldest_until_bytes——archive_cache 每行是完整物化的远程 zip，
+/// 超限 1 字节也不得多删）。cache_key ASC tiebreaker 保证同秒多行顺序确定。
 pub fn evict_to_limit(conn: &Connection, limit_bytes: i64, protected: &[String]) -> Result<usize> {
     let mut evicted = 0usize;
     loop {
         let total: i64 = conn.query_row("SELECT COALESCE(SUM(byte_size),0) FROM archive_cache", [], |r| r.get(0))?;
         if total <= limit_bytes { return Ok(evicted); }
+        let need_to_free = total - limit_bytes;
         let mut stmt = conn.prepare(
-            "SELECT cache_key, cache_abs_path FROM archive_cache
+            "SELECT cache_key, cache_abs_path, byte_size FROM archive_cache
              WHERE cache_key NOT IN (SELECT value FROM json_each(?1))
-             ORDER BY last_accessed_at ASC LIMIT 256")?;
-        let victims: Vec<(String, String)> = stmt.query_map(
+             ORDER BY last_accessed_at ASC, cache_key ASC LIMIT 256")?;
+        let victims: Vec<(String, String, i64)> = stmt.query_map(
             params![serde_json::to_string(protected).unwrap_or_else(|_| "[]".to_string())],
-            |r| Ok((r.get(0)?, r.get(1)?)))?
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<Result<_>>()?;
         drop(stmt);
         if victims.is_empty() { return Ok(evicted); } // 全被保护
-        for (key, abs) in &victims {
+        let mut freed: i64 = 0;
+        for (key, abs, size) in &victims {
             conn.execute("DELETE FROM archive_cache WHERE cache_key = ?1", params![key])?;
             let _ = std::fs::remove_file(abs);
             evicted += 1;
+            freed += size;
+            if freed >= need_to_free { break; } // 精确停止：该批剩余行保留
         }
     }
 }
@@ -148,6 +154,26 @@ mod tests {
         assert_eq!(n, 1);
         assert!(get(&conn, "old").unwrap().is_some(), "protected 不被淘汰");
         assert!(get(&conn, "new").unwrap().is_none());
+    }
+
+    #[test]
+    fn evict_to_limit_partial_eviction_stops_precisely() {
+        let conn = db();
+        upsert(&conn, &row("old")).unwrap();
+        upsert(&conn, &row("mid")).unwrap();
+        upsert(&conn, &row("new")).unwrap();
+        // 秒级时间戳直接 SQL 设不同值（确定性，不 sleep）
+        conn.execute("UPDATE archive_cache SET last_accessed_at = 100 WHERE cache_key = 'old'", []).unwrap();
+        conn.execute("UPDATE archive_cache SET last_accessed_at = 200 WHERE cache_key = 'mid'", []).unwrap();
+        conn.execute("UPDATE archive_cache SET last_accessed_at = 300 WHERE cache_key = 'new'", []).unwrap();
+        // total=300，limit=150 → need_to_free=150 → 恰删 old+mid（100+100 ≥ 150 即停），new 保留
+        let n = evict_to_limit(&conn, 150, &[]).unwrap();
+        assert_eq!(n, 2, "freed 累计到 need_to_free 即停，不整批清空");
+        assert!(get(&conn, "old").unwrap().is_none());
+        assert!(get(&conn, "mid").unwrap().is_none());
+        assert!(get(&conn, "new").unwrap().is_some(), "该批剩余行保留");
+        let (_, bytes) = usage(&conn).unwrap();
+        assert!(bytes <= 150, "删除后 SUM(byte_size) <= limit，实际 {bytes}");
     }
 
     #[test]
