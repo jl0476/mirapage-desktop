@@ -203,7 +203,9 @@ impl Materializer {
     }
 
     pub fn new_epoch(&self, e: u64) { self.epoch.store(e, std::sync::atomic::Ordering::SeqCst); }
-    fn current_epoch(&self) -> u64 { self.epoch.load(std::sync::atomic::Ordering::SeqCst) }
+    /// pub：prefetch 批次循环逐 rel 启动前比对（任务 8 审查修复——「待开始任务丢弃」
+    /// 不能只靠 download 内的 epoch_at_start：同批后续 rel 会以新 epoch 完整下载）
+    pub fn current_epoch(&self) -> u64 { self.epoch.load(std::sync::atomic::Ordering::SeqCst) }
 
     /// rev2 双通道②：单调自增，新任务取新代际——预载在 clear 后自然恢复
     pub fn cancel_all(&self) { self.cancel_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }

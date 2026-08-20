@@ -8,12 +8,14 @@ use std::sync::Arc;
 
 pub struct ArchivePrefetcher {
     mat: Arc<Materializer>,
-    enabled: AtomicBool,
+    /// Arc：notify_window 的 spawn 闭包持有克隆，循环内逐 rel 读**实时**开关——
+    /// 批次进行中 set_enabled(false) 也要丢弃待开始任务（spec §7）
+    enabled: Arc<AtomicBool>,
 }
 
 impl ArchivePrefetcher {
     pub fn new(mat: Arc<Materializer>) -> Self {
-        Self { mat, enabled: AtomicBool::new(true) }
+        Self { mat, enabled: Arc::new(AtomicBool::new(true)) }
     }
 
     pub fn set_enabled(&self, v: bool) {
@@ -41,13 +43,23 @@ impl ArchivePrefetcher {
         if !self.enabled.load(Ordering::SeqCst) {
             return;
         }
+        let batch_epoch = epoch; // 本批次身份：new_epoch 之前捕获（值相同，语义在此）
         self.mat.new_epoch(epoch);
         let mat = self.mat.clone();
+        let enabled = self.enabled.clone();
         let origin = origin.clone();
         let rels = rels.to_vec();
         tokio::spawn(async move {
             for rel in &rels {
-                // epoch 变更即停（ensure_cached_cancellable 检查点取消，任务 3 语义）
+                // 批次级取消（任务 8 审查修复 / spec §7「待开始任务丢弃」）：epoch 在
+                // download 内的 epoch_at_start 只能取消**正在下载**的 rel——同批后续
+                // rel 启动时会捕获新 epoch 完整下载（快速滚动数百 MB CBX 白下）。
+                // 故每个 rel 启动前比对批次 epoch 与实时开关，变了/关了即不再启动。
+                if mat.current_epoch() != batch_epoch
+                    || !enabled.load(Ordering::SeqCst)
+                {
+                    break;
+                }
                 let _ = mat.ensure_cached_cancellable(&origin, rel).await;
             }
         });
@@ -125,6 +137,45 @@ mod tests {
             .join("part")
             .join(format!("{}.part", cache_key(&origin, "slow.cbz")));
         assert!(part.exists(), ".part 保留（预载取消不删断点，供后续续传）");
+    }
+
+    /// 批次级取消（任务 8 审查修复 / spec §7「待开始任务丢弃」）：同批 [rel1, rel2]，
+    /// rel1 首 chunk 在途时推进窗口 epoch → rel1 在检查点被取消后，rel2 **不得启动**。
+    /// 旧实现 epoch_at_start 在 download 内捕获：rel2 启动时拿到新 epoch 完整下载
+    /// （快速滚动场景数百 MB CBX 白下）。断言 read_calls 停在 rel1 的 1 次首 chunk
+    /// 且 rel2 无任何缓存产出——mock 计数先于延迟自增，300ms 余量内若 rel2 被启动必被观测。
+    #[tokio::test]
+    async fn batch_epoch_bump_drops_not_yet_started_rels() {
+        let mock = StdArc::new(MockOrigin::new(crate::source::archive::materializer::CHUNK + 5));
+        *mock.read_delay_ms.lock().unwrap() = 150;
+        let (m, dir, _db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        let m = StdArc::new(m);
+        let p = ArchivePrefetcher::new(m.clone());
+        p.notify_window(1, &origin, &["rel1.cbz".into(), "rel2.cbz".into()])
+            .await;
+        // rel1 首 chunk 已在途（epoch_at_start=1 已捕获、inflight 已注册）
+        wait_reads(&mock, 1).await;
+        // 窗口 B（epoch=2）：rel1 在第二 chunk 前被取消；rel2 属「待开始」应被丢弃
+        p.notify_window(2, &origin, &[]).await;
+        for _ in 0..400 {
+            if m.inflight_empty().await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(m.inflight_empty().await, "rel1 已退出（epoch 取消）");
+        // 旧实现：循环随即启动 rel2（read_calls → 2，计数先于 150ms 延迟自增）
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            mock.read_calls.load(Ordering::SeqCst),
+            1,
+            "rel2 从未启动（待开始任务丢弃——spec §7）"
+        );
+        assert!(
+            !dir.path().join(format!("{}.zip", cache_key(&origin, "rel2.cbz"))).exists(),
+            "rel2 无缓存产出"
+        );
     }
 
     #[tokio::test]

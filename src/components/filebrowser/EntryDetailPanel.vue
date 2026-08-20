@@ -3,7 +3,9 @@
  * EntryDetailPanel.vue — 文件/文件夹详情面板
  *
  * v0.1.0-module1.22: 选中 1 项时显示在 FileList 右侧.
- * 全部前端派生 (不调 Rust IPC), 字段缺失显示 '—'.
+ * 字段展示全部前端派生, 字段缺失显示 '—'.
+ * M3 任务 8 例外: 选中远程 archive 条目时 watch 调 notifyArchiveWindow
+ * 做一次 metadata 级 stat 预热 (不下载内容, 失败静默).
  *
  * v0.1.0-module2.0: 选中目录时显示 3 CTA (参考 Android 底部 「下载全部/立即阅读/加入书库」):
  *  - 立即阅读 (主按钮, 仅目录 enable)
