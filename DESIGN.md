@@ -1585,12 +1585,14 @@ export function useReaderInput() {
 
 > 2026-08-16 盘点（来源：AGENTS.md 当前状态表 + 各模块「留后续」标记 + 3.0.13 会话发现）。完成一项划一项；量级 / 顺序供排期参考。
 > 2026-08-16 晚 3.0.14 小件打包已收走 8 项（见 §16.4 注记 + AGENTS 状态表）。
+> 2026-08-20 M3 远程 Archive 物化已交付（`v0.1.0-module3.4.0-remote-archive`，见下表注记；远程 8 项手测待实机）。
 
 ### 16.1 主线待完成（Phase 级）
 
 | 项 | 现状 | 说明 | 量级 |
 |---|---|---|---|
-| RAR / 7z 压缩包（Phase 3 收尾） | 🟡 ZIP 已通 | `unrar` / `sevenz-rust` 依赖已加未启，`ArchiveMediaSource` 实装两种格式；7z 末尾索引需整包读（先落 cacheDir 再读，见 §3 预研）；CBR 依赖 RAR | 中 |
+| RAR / 7z 压缩包（Phase 3 收尾） | 🟡 ZIP 已通 | `unrar` / `sevenz-rust` 依赖已加未启，`ArchiveMediaSource` 实装两种格式；7z 末尾索引需整包读（先落 cacheDir 再读，见 §3 预研）——**该 cacheDir 物化管线已由 M3（module3.4.0 `source/archive/` Materializer）交付为通用基础设施，RAR/7z 实装时直接复用**；CBR 依赖 RAR | 中 |
+| 远程 Archive 物化（M3，远程 ZIP/CBZ） | ✅ `v0.1.0-module3.4.0-remote-archive` | SMB/WebDAV 上的 CBZ/ZIP 整包下载至本地 `app_cache_dir()/archive-cache` 后按本地 ZIP 读取；migration 016 `archive_cache` 索引表 + `source/archive/`（dao / materializer：sidecar 断点续传四关校验 + cancellation generation 四检查点 + clearing 闸门防复活 / prefetch 三级预载）+ `archive_impl.rs` 三方法接 Materialize trait（origin None 本地直开零回归）+ webdav `is_archive` 扩展名判定 + 前端 `openArchive` 泛化（虚拟路径/descriptor parent/进度文案）+ Settings remote section。**待实机手测**（本环境无 GUI/NAS，M1/M2 同款标注）：WebDAV/SMB 8 项（首开准备态/二次秒开/失效重下/断网+重启续传/LRU 淘汰+清空/远程 masonry 缩略图/SMB 复跑/预载开关）+ 本地 GUI（Local ZIP 零回归/Settings 用量上限清空）；自动化 Rust lib 439 + 12 integration + 前端 1144 全绿 0 回归 + type-check 0 err |
 | SMB 协议层（Phase 7） | ✅ `v0.1.0-module3.3.0-smb` 真实现 | `source/smb/` 模块化交付（`source` 5 方法实装 / `connection` TTL 懒回收 / `real_transport` share_connect+query+read_block / `transport` 错误分类 / `path` UNC 拼接 / `mock_transport` 测试桩）；旧 `smb_impl.rs` 已删；M1（module3.2.0）交付的 accounts CRUD + keyring 凭据 + `test_connection` 真握手沿用。**待实机手测**：本机无 NAS/凭据管理器访问，spec §8 六项 + spike 未实机跑（自动化 404 lib + 12 integration + 1126 前端 + 0 回归 + 编译/契约锁覆盖语义等价）；详见 `docs/superpowers/reports/2026-08-19-smb-m2-spike.md`（如未生成 = spike 未跑） |
 | Phase 9 分发 | 🟡 Windows CI 已通 | 代码签名 / macOS `.dmg`（需 mac 环境 + notarization）/ Linux AppImage / 自动更新（`updater` 插件占位） | 中，依赖环境 |
 
