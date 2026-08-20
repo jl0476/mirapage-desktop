@@ -19,6 +19,15 @@ pub mod thumbnail;
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
+/// 全局 AppHandle（archive://progress 等无 AppHandle 注入路径的后台模块 emit 事件用）。
+/// 单测无 app → None 静默跳过（materializer emit_progress 分支已写）
+static PROGRESS_EMITTER: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+/// 供物化器等后台模块非阻塞 emit 进度事件（setup 时 set，之前为 None）
+pub fn progress_emitter() -> Option<&'static tauri::AppHandle> {
+    PROGRESS_EMITTER.get()
+}
+
 pub fn run() {
     // 初始化 tracing — RUST_LOG=debug 看全部, RUST_LOG=mirapage_desktop_lib=debug
     // 看本 crate, 默认 info. release 模式下 dev 默认关日志.
@@ -55,6 +64,9 @@ pub fn run() {
             let app_handle = app.handle();
             let db = db::init(app_handle).expect("failed to init database");
             app.manage(db.clone());
+
+            // 全局 AppHandle：archive 物化进度等后台事件 emit（materializer 用）
+            let _ = PROGRESS_EMITTER.set(app_handle.clone());
 
             // 凭据存储（spec §3.4：keyring 生产实现，密码不落 DB）
             let creds = std::sync::Arc::new(credentials::KeyringStore)
