@@ -476,7 +476,7 @@ impl Materializer {
             //    终审 P1-4：cancellable 任务在注册前比对 expected_epoch——身份过时
             //    （窗口已推进）直接拒，不注册不下载（旧实现会在 download 内把新
             //    epoch 捕获成自己的身份，完整下载整包）。
-            {
+            let gen_at_start = {
                 let mut st = self.inflight.lock().await;
                 if st.clearing {
                     return Err(MaterializeError::Other("cache clearing in progress".into()));
@@ -525,14 +525,35 @@ impl Materializer {
                     continue;
                 }
                 st.map.insert(key.clone(), Arc::new(tokio::sync::Notify::new()));
-            }
+                // 与 in-flight 注册在同一临界区捕获：clear 若先抢到锁，
+                // clearing 会拒绝本任务；若本任务先注册，clear 后续推进
+                // generation 必然能被 download 观测，不留注册后、stat 前窗口。
+                self.cancel_generation()
+            };
             // 3. 下载（退出时 notify + 移除 in-flight）——key 传借用（download 收 &str，
             //    且此处后续还要用 key 清理 inflight，不能 move）
-            let result = self.download(origin, archive_rel_path, &key, expected_epoch).await;
-            {
+            let result = self.download(origin, archive_rel_path, &key, expected_epoch, gen_at_start).await;
+            let notify = {
                 let mut st = self.inflight.lock().await;
-                if let Some(n) = st.map.remove(&key) { n.notify_waiters(); }
-            }
+                let notify = st.map.remove(&key);
+                // 取消/网络错误会保留可续传的 .part；错误退出也必须立即
+                // 执行容量预算，否则反复失败会在本次会话内无上限占盘。当前 key
+                // 已从 map 移除，其残片可被回收；持锁到回收完成，防止同 key
+                // waiter 被唤醒或新 owner 注册后，残片又在写入时被删。
+                if result.is_err() {
+                    let limit_bytes = {
+                        let conn = self.db.conn();
+                        (crate::setting_u64(&conn, "archive_cache_max_mb", 2048)
+                            .saturating_mul(1024 * 1024))
+                            .min(i64::MAX as u64) as i64
+                    };
+                    let protected: Vec<String> = st.map.keys().cloned().collect();
+                    let conn = self.db.conn();
+                    let _ = enforce_budget(&self.cache_root(), &conn, limit_bytes, &protected);
+                }
+                notify
+            };
+            if let Some(n) = notify { n.notify_waiters(); }
             return result;
         }
         Err(MaterializeError::Other("物化循环未收敛".into()))
@@ -540,7 +561,7 @@ impl Materializer {
 
     async fn download(
         &self, origin: &SourceDescriptor, archive_rel_path: &str, key: &str,
-        expected_epoch: Option<u64>,
+        expected_epoch: Option<u64>, gen_at_start: u64,
     ) -> Result<PathBuf, MaterializeError> {
         let src = self.origin_source(origin)?;
         let (final_path, part_path) = self.cache_paths(key);
@@ -592,7 +613,6 @@ impl Materializer {
             // 终审 P1-4：身份不再从环境读——cancellable 任务的 epoch 全程比
             // expected_epoch（任务诞生时刻由调用方显式传入），旧 epoch_at_start
             // 捕获已删（间隙推进的 epoch 会被新任务当自己的身份，竞态结构性消除）
-            let gen_at_start = self.cancel_generation();
             while offset < snap.size {
                 // 检查点 ①（双通道取消 rev2）：generation 对强制路径也生效（清空缓存必须能停）；
                 // epoch 检查仅 cancellable（预载）任务。注意此处不删 .part——预载取消保留
@@ -1567,6 +1587,55 @@ pub(crate) mod tests {
         // part/ 目录不存在 → (0, 0) 而非报错
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(parts_usage(empty.path()), (0, 0));
+    }
+
+    /// 取消/失败路径不会走 ready upsert，但刚写入的 `.part` 同样必须立即受容量预算
+    /// 约束；否则快速滚动反复取消预载时，只能等下次成功物化或重启才会回收。
+    #[tokio::test]
+    async fn cancelled_download_enforces_part_budget_immediately() {
+        let mock = StdArc::new(MockOrigin::new(CHUNK + 5));
+        *mock.read_delay_ms.lock().unwrap() = 100;
+        let (m, dir, db) = temp_materializer(mock.clone());
+        {
+            let conn = db.conn();
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('archive_cache_max_mb', '1')",
+                [],
+            ).unwrap();
+        }
+        let origin = webdav("");
+        let m = StdArc::new(m);
+        m.advance_epoch(1);
+        let task = tokio::spawn({
+            let m = m.clone();
+            let origin = origin.clone();
+            async move { m.ensure_cached_cancellable(&origin, "cancelled.cbz", 1).await }
+        });
+
+        wait_reads(&mock, 1).await;
+        m.advance_epoch(2);
+        assert!(task.await.unwrap().is_err(), "旧窗口预载被取消");
+        assert_eq!(parts_usage(dir.path()), (0, 0),
+                   "4MB 取消残片超过 1MB 上限，应在错误退出时立即回收");
+    }
+
+    /// 取消代际必须在 in-flight 注册的同一临界区捕获。若推迟到
+    /// `download` 内首次 stat 之后才捕获，clear 在该窗口推进的新代际
+    /// 会被误当成任务起点，已登记任务将漏取消并继续整包下载。
+    #[tokio::test]
+    async fn cancellation_between_registration_and_first_stat_is_observed() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _dir, _db) = temp_materializer(mock.clone());
+        let m = StdArc::new(m);
+        let weak = StdArc::downgrade(&m);
+        *mock.interject_on_stat.lock().unwrap() = Some((1, Box::new(move || {
+            weak.upgrade().unwrap().cancel_all();
+        })));
+
+        assert!(m.ensure_cached(&webdav(""), "cancel-before-read.cbz").await.is_err(),
+                "注册后、首次 stat 期间推进的代际必须取消旧任务");
+        assert_eq!(mock.read_calls.load(Ordering::SeqCst), 0,
+                   "应在首个 chunk 前取消，不得继续下载");
     }
 
     /// in-flight 注册的 key 对应 .part 不被预算淘汰（写入中，删了会破断点续传）；

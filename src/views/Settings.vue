@@ -55,7 +55,7 @@ async function doRun() {
 
 // ─── 远程压缩包（M3 任务 9，spec §8 三项 UI）─────────────────────────
 // 开关/上限初值从 settings 表读（Rust 侧默认 true / 2048，"仅 'false' 关闭"语义对齐）。
-// 上限只写 DB：运行时限值不热生效（下次启动 startup_cleanup 生效），UI 不提示。
+// 上限写 DB：下次物化成功/失败退出或下次启动清理时生效。
 const remotePrefetchEnabled = ref(true);
 const archiveCacheMaxMb = ref(2048);
 const archiveCacheUsage = ref<ArchiveCacheInfo | null>(null);
@@ -111,8 +111,11 @@ async function setArchiveCacheLimit(v: number) {
 
 async function clearArchiveCacheClicked() {
   if (!archiveCacheUsage.value || clearingArchiveCache.value) return;
-  const { count, bytes } = archiveCacheUsage.value;
-  if (!window.confirm(t('settings.remote.clearConfirm', { count, size: formatBytes(bytes) }))) return;
+  const { count, bytes, partBytes = 0 } = archiveCacheUsage.value;
+  if (!window.confirm(t('settings.remote.clearConfirm', {
+    count,
+    size: formatBytes(bytes + partBytes),
+  }))) return;
   clearingArchiveCache.value = true;
   try {
     await clearArchiveCache();

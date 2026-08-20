@@ -254,6 +254,9 @@ describe('Settings.vue remote section (M3 任务 9)', () => {
   });
 
   it('confirm 取消 → 不调 clearArchiveCache；确认 → 清空 + 刷新用量', async () => {
+    const { getArchiveCacheInfo } = await import('@/lib/tauri');
+    vi.mocked(getArchiveCacheInfo).mockResolvedValueOnce(
+      { count: 2, bytes: 5, partCount: 1, partBytes: 3 });
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
     const wrapper = mountSettings();
     await flushPromises();
@@ -267,8 +270,9 @@ describe('Settings.vue remote section (M3 任务 9)', () => {
     await btn.trigger('click');
     await flushPromises();
     expect(clearArchiveCache).toHaveBeenCalledTimes(1);
-    // confirm 文案带用量参数（count/size）
+    // confirm 文案带 ready + .part 总用量（5 B + 3 B）
     expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('2'));
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('8 B'));
     confirmSpy.mockRestore();
   });
 });
