@@ -28,6 +28,17 @@ pub fn progress_emitter() -> Option<&'static tauri::AppHandle> {
     PROGRESS_EMITTER.get()
 }
 
+/// archive 物化缓存根（M3）：setup 内 set 真实 app_cache_dir()/archive-cache
+/// （任务 6 接线 create_dir_all）；未初始化（单测）回落 temp 目录
+static ARCHIVE_CACHE_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn archive_cache_root() -> std::path::PathBuf {
+    ARCHIVE_CACHE_ROOT
+        .get()
+        .cloned()
+        .unwrap_or_else(|| std::env::temp_dir().join("mirapage-archive-cache"))
+}
+
 pub fn run() {
     // 初始化 tracing — RUST_LOG=debug 看全部, RUST_LOG=mirapage_desktop_lib=debug
     // 看本 crate, 默认 info. release 模式下 dev 默认关日志.

@@ -4,7 +4,7 @@
 //! 而是通过 `factory.resolve(&descriptor)` 拿到 `Arc<dyn MediaSource>`。
 //! 新增远程源（Phase 7-8）只需替换 stub，UI 完全不动。
 
-use crate::source::archive_impl::ArchiveMediaSource;
+use crate::source::archive_impl::{ArchiveMediaSource, Materialize};
 use crate::source::descriptor::SourceDescriptor;
 use crate::source::local::LocalMediaSource;
 use crate::source::smb::connection::SmbConnectionManager;
@@ -27,13 +27,27 @@ impl MediaSourceFactory {
         db: crate::db::Db,
         creds: std::sync::Arc<dyn crate::credentials::CredentialStore>,
     ) -> Self {
+        let local = Arc::new(LocalMediaSource::new());
+        let smb = Arc::new(SmbMediaSource::new(Arc::new(
+            SmbConnectionManager::new_production(db.clone(), creds.clone()),
+        )));
+        let webdav = Arc::new(WebDavMediaSource::new(db.clone(), creds));
+        // M3 spec §2 断环：Materializer 持具体源 Arc（不经 factory），
+        // ArchiveMediaSource 注入 Materializer——未来加源：此处追加 + materializer 源列表
+        let cache_root = crate::archive_cache_root();
+        let materializer = Arc::new(crate::source::archive::materializer::Materializer::new(
+            webdav.clone() as Arc<dyn MediaSource>,
+            smb.clone() as Arc<dyn MediaSource>,
+            db.clone(),
+            cache_root,
+        ));
         Self {
-            local: Arc::new(LocalMediaSource::new()),
-            archive: Arc::new(ArchiveMediaSource::new()),
-            smb: Arc::new(SmbMediaSource::new(Arc::new(
-                SmbConnectionManager::new_production(db.clone(), creds.clone()),
-            ))),
-            webdav: Arc::new(WebDavMediaSource::new(db, creds)),
+            local,
+            archive: Arc::new(ArchiveMediaSource::new(
+                materializer as Arc<dyn Materialize>,
+            )),
+            smb,
+            webdav,
         }
     }
 

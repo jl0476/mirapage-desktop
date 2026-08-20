@@ -20,13 +20,21 @@ use async_trait::async_trait;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
+/// 物化抽象（生产 = source::archive::materializer::Materializer；测试 = mock）
+#[async_trait]
+pub trait Materialize: Send + Sync {
+    async fn ensure_cached(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str,
+    ) -> std::result::Result<PathBuf, String>;
+}
+
 pub struct ArchiveMediaSource {
-    _private: (),
+    materializer: std::sync::Arc<dyn Materialize>,
 }
 
 impl ArchiveMediaSource {
-    pub fn new() -> Self {
-        Self { _private: () }
+    pub fn new(materializer: std::sync::Arc<dyn Materialize>) -> Self {
+        Self { materializer }
     }
 
     fn archive_path<'a>(&self, descriptor: &'a SourceDescriptor) -> Option<&'a Path> {
@@ -35,11 +43,26 @@ impl ArchiveMediaSource {
             _ => None,
         }
     }
-}
 
-impl Default for ArchiveMediaSource {
-    fn default() -> Self {
-        Self::new()
+    /// 三方法统一前置（spec §5）：origin None 本地直开 / Some 物化
+    async fn resolve_archive_path(
+        &self,
+        archive_path: &str,
+        origin: &Option<Box<SourceDescriptor>>,
+        archive_rel_path: &Option<String>,
+    ) -> Result<PathBuf> {
+        match origin {
+            None => Ok(PathBuf::from(archive_path)),
+            Some(origin_desc) => {
+                let rel = archive_rel_path.as_deref().ok_or_else(|| {
+                    MediaSourceError::Other("远程 archive 缺少 archiveRelPath".into())
+                })?;
+                self.materializer
+                    .ensure_cached(origin_desc, rel)
+                    .await
+                    .map_err(MediaSourceError::Other)
+            }
+        }
     }
 }
 
@@ -143,11 +166,13 @@ impl MediaSource for ArchiveMediaSource {
         descriptor: &SourceDescriptor,
         _path: &str,
     ) -> Result<Vec<MediaEntry>> {
-        let (archive_path, entry_prefix, format) = match descriptor {
-            SourceDescriptor::Archive { archive_path, entry_prefix, format, .. } => (
-                PathBuf::from(archive_path),
+        let (archive_path, entry_prefix, format, origin, archive_rel_path) = match descriptor {
+            SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } => (
+                archive_path.clone(),
                 entry_prefix.clone(),
                 *format,
+                origin.clone(),
+                archive_rel_path.clone(),
             ),
             _ => {
                 return Err(MediaSourceError::NotImplemented(
@@ -155,10 +180,13 @@ impl MediaSource for ArchiveMediaSource {
                 ));
             }
         };
-        let bytes = tokio::fs::read(&archive_path).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(archive_path.display().to_string()),
+        let resolved = self
+            .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
+            .await?;
+        let bytes = tokio::fs::read(&resolved).await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(resolved.display().to_string()),
             std::io::ErrorKind::PermissionDenied => {
-                MediaSourceError::PermissionDenied(archive_path.display().to_string())
+                MediaSourceError::PermissionDenied(resolved.display().to_string())
             }
             _ => MediaSourceError::Io(e.into()),
         })?;
@@ -171,11 +199,13 @@ impl MediaSource for ArchiveMediaSource {
         path: &str,
         range: Option<ByteRange>,
     ) -> Result<Vec<u8>> {
-        let (archive_path, entry_prefix, format) = match descriptor {
-            SourceDescriptor::Archive { archive_path, entry_prefix, format, .. } => (
-                PathBuf::from(archive_path),
+        let (archive_path, entry_prefix, format, origin, archive_rel_path) = match descriptor {
+            SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } => (
+                archive_path.clone(),
                 entry_prefix.clone(),
                 *format,
+                origin.clone(),
+                archive_rel_path.clone(),
             ),
             _ => {
                 return Err(MediaSourceError::NotImplemented(
@@ -183,10 +213,13 @@ impl MediaSource for ArchiveMediaSource {
                 ));
             }
         };
-        let bytes = tokio::fs::read(&archive_path).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(archive_path.display().to_string()),
+        let resolved = self
+            .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
+            .await?;
+        let bytes = tokio::fs::read(&resolved).await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(resolved.display().to_string()),
             std::io::ErrorKind::PermissionDenied => {
-                MediaSourceError::PermissionDenied(archive_path.display().to_string())
+                MediaSourceError::PermissionDenied(resolved.display().to_string())
             }
             _ => MediaSourceError::Io(e.into()),
         })?;
@@ -228,11 +261,13 @@ impl MediaSource for ArchiveMediaSource {
         descriptor: &SourceDescriptor,
         path: &str,
     ) -> Result<crate::source::trait_def::FileStat> {
-        let (archive_path, entry_prefix, format) = match descriptor {
-            SourceDescriptor::Archive { archive_path, entry_prefix, format, .. } => (
-                PathBuf::from(archive_path),
+        let (archive_path, entry_prefix, format, origin, archive_rel_path) = match descriptor {
+            SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } => (
+                archive_path.clone(),
                 entry_prefix.clone(),
                 *format,
+                origin.clone(),
+                archive_rel_path.clone(),
             ),
             _ => {
                 return Err(MediaSourceError::NotImplemented(
@@ -240,10 +275,13 @@ impl MediaSource for ArchiveMediaSource {
                 ));
             }
         };
-        let bytes = tokio::fs::read(&archive_path).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(archive_path.display().to_string()),
+        let resolved = self
+            .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
+            .await?;
+        let bytes = tokio::fs::read(&resolved).await.map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(resolved.display().to_string()),
             std::io::ErrorKind::PermissionDenied => {
-                MediaSourceError::PermissionDenied(archive_path.display().to_string())
+                MediaSourceError::PermissionDenied(resolved.display().to_string())
             }
             _ => MediaSourceError::Io(e.into()),
         })?;
@@ -323,6 +361,43 @@ mod tests {
         path
     }
 
+    /// 恒失败物化 mock——origin None 用例不应触达物化路径
+    struct NeverMaterialize;
+
+    #[async_trait]
+    impl Materialize for NeverMaterialize {
+        async fn ensure_cached(
+            &self,
+            _origin: &SourceDescriptor,
+            _archive_rel_path: &str,
+        ) -> std::result::Result<PathBuf, String> {
+            Err("mock 无物化".into())
+        }
+    }
+
+    fn never_source() -> ArchiveMediaSource {
+        ArchiveMediaSource::new(std::sync::Arc::new(NeverMaterialize))
+    }
+
+    /// 固定路径物化 mock——ensure_cached 返回预置 ZIP 路径并记录调用次数
+    struct FixedMaterialize {
+        path: PathBuf,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Materialize for FixedMaterialize {
+        async fn ensure_cached(
+            &self,
+            _origin: &SourceDescriptor,
+            _archive_rel_path: &str,
+        ) -> std::result::Result<PathBuf, String> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.path.clone())
+        }
+    }
+
     #[test]
     fn list_cbz_returns_image_entries_only_sorted() {
         let path = create_test_cbz(&["page1.jpg", "page10.jpg", "page2.jpg", "README.txt"]);
@@ -334,7 +409,7 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let entries = rt.block_on(src.list_directory(&descriptor, "")).unwrap();
         // 应过滤掉 README.txt,保留 3 张图
@@ -356,7 +431,7 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let bytes = rt.block_on(src.read_file(&descriptor, "page1.png", None)).unwrap();
         assert_eq!(&bytes[..8], &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
@@ -373,7 +448,7 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let bytes = rt.block_on(src.read_file(&descriptor, "page1.png", Some(ByteRange::new(0, 4)))).unwrap();
         assert_eq!(bytes.len(), 4);
@@ -391,7 +466,7 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(src.read_file(&descriptor, "page1.png", Some(ByteRange::new(4, 8))));
         assert!(result.is_err(), "Range 强契约不允许静默返回短数据");
@@ -408,7 +483,7 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let res = rt.block_on(src.read_file(&descriptor, "missing.png", None));
         assert!(matches!(res, Err(MediaSourceError::NotFound(_))));
@@ -425,7 +500,7 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let count = rt.block_on(src.file_count(&descriptor, "")).unwrap();
         assert_eq!(count, 3);
@@ -444,7 +519,7 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let res = rt.block_on(src.test(&descriptor));
         assert!(res.is_err());
@@ -462,11 +537,63 @@ mod tests {
             origin_entry_path: None,
             archive_rel_path: None,
         };
-        let src = ArchiveMediaSource::new();
+        let src = never_source();
         let st = src.stat(&descriptor, "p1.png").await.unwrap();
         // PNG magic 8 字节（spec rev3 §3.1：entry 解压后 size，非 ZIP 容器 size）
         assert_eq!(st.size, 8);
         assert_eq!(st.modified_at, None);
         assert!(src.stat(&descriptor, "missing.png").await.is_err());
+    }
+
+    /// M3 spec §5：origin Some → 物化路径被使用，虚拟 archive_path 不触 fs
+    #[tokio::test]
+    async fn remote_origin_goes_through_materializer() {
+        let path = create_test_cbz(&["page1.jpg", "page2.jpg", "README.txt"]);
+        let mock = std::sync::Arc::new(FixedMaterialize {
+            path,
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        // archive_path 是虚拟 URL——fs 上不存在，成功只能来自物化返回的路径
+        let descriptor = SourceDescriptor::Archive {
+            archive_path: "https://d/x/a.cbz".into(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Cbz,
+            origin: Some(Box::new(SourceDescriptor::WebDav {
+                account_id: 1,
+                base_url: "https://d/x".into(),
+                path: String::new(),
+            })),
+            origin_entry_path: Some("a.cbz".into()),
+            archive_rel_path: Some("a.cbz".into()),
+        };
+        let src = ArchiveMediaSource::new(mock.clone());
+        let entries = src.list_directory(&descriptor, "").await.unwrap();
+        // 物化路径被使用：ZIP 内 3 条目过滤 README.txt 后剩 2 图
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "page1.jpg");
+        assert_eq!(entries[1].name, "page2.jpg");
+        assert_eq!(
+            mock.calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ensure_cached 恰被调一次"
+        );
+    }
+
+    /// M3 spec §5：origin None 现状路径零回归——本地直开不触物化
+    /// （恒失败 mock 下若误走物化路径会立即报错）
+    #[tokio::test]
+    async fn local_origin_unchanged() {
+        let path = create_test_cbz(&["p1.png", "p2.png"]);
+        let descriptor = SourceDescriptor::Archive {
+            archive_path: path.to_string_lossy().to_string(),
+            entry_prefix: String::new(),
+            format: ArchiveFormat::Cbz,
+            origin: None,
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        let src = never_source();
+        let entries = src.list_directory(&descriptor, "").await.unwrap();
+        assert_eq!(entries.len(), 2);
     }
 }

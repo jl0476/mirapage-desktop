@@ -423,6 +423,20 @@ impl Materializer {
     }
 }
 
+/// M3 spec §5：ArchiveMediaSource 三方法经 `Materialize` trait 注入物化能力
+/// （生产装配在 factory；trait 定义在 `crate::source::archive_impl`）
+#[async_trait::async_trait]
+impl crate::source::archive_impl::Materialize for Materializer {
+    async fn ensure_cached(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str,
+    ) -> std::result::Result<PathBuf, String> {
+        // 显式 inherent 方法调用——trait 方法同名，避免无限递归
+        Materializer::ensure_cached(self, origin, archive_rel_path)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// 进度事件（非阻塞；模式同 thumbnail://progress）
 fn emit_progress(cache_key: &str, rel: &str, downloaded: u64, total: u64, phase: &str) {
     // lib.rs 全局 AppHandle 的 OnceLock；未初始化（单测）静默跳过
