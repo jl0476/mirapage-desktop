@@ -142,6 +142,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 16 {
+        apply_016_archive_cache(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (16, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -633,6 +641,25 @@ fn apply_015_bookmark_position_kind(conn: &Connection) -> anyhow::Result<()> {
     conn.execute(
         "ALTER TABLE bookmark ADD COLUMN position_kind TEXT NOT NULL DEFAULT 'spread'",
         [],
+    )?;
+    Ok(())
+}
+
+/// Migration 016 —— module3.4.0 远程 Archive 物化缓存索引（M3 spec §3）。
+/// 只存 ready 态；.part 不入表（断点续传靠文件系统存在性）。
+fn apply_016_archive_cache(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE archive_cache (
+          cache_key TEXT PRIMARY KEY,
+          origin_kind TEXT NOT NULL,
+          archive_rel_path TEXT NOT NULL,
+          origin_size INTEGER NOT NULL,
+          origin_mtime INTEGER,
+          cache_abs_path TEXT NOT NULL,
+          byte_size INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          last_accessed_at INTEGER NOT NULL
+        );",
     )?;
     Ok(())
 }
@@ -1316,14 +1343,14 @@ mod tests {
 
     #[test]
     fn migration_010_run_bumps_version_to_10() {
-        // 走完整 run()，验证版本号到最新且幂等（migration 015 后,完整 run 到 15）
+        // 走完整 run()，验证版本号到最新且幂等（migration 016 后,完整 run 到 16）
         let conn = Connection::open_in_memory().unwrap();
         super::run(&conn).unwrap();
 
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 15, "完整 run 后版本号应为 15");
+        assert_eq!(v, 16, "完整 run 后版本号应为 16");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -1672,7 +1699,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 15, "完整 run 后版本号应为 15");
+        assert_eq!(v, 16, "完整 run 后版本号应为 16");
 
         // 幂等：run() 的 current<12 守卫使重复调用不再执行 012
         super::run(&conn).expect("重复 run 应幂等无错");
@@ -1681,7 +1708,7 @@ mod tests {
         let v2: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 15, "重复 run 不应再升版本号");
+        assert_eq!(v2, 16, "重复 run 不应再升版本号");
     }
 
     /// 任务 7：EXPLAIN QUERY PLAN 手动验证（`--ignored --nocapture` 跑，输出写入报告）。

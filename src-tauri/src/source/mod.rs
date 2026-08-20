@@ -9,6 +9,7 @@
 //! - `DESIGN.md` §5 Phase 1（含 MediaSource 抽象定义）
 //! - MiraPage Android: `data/source/MediaSource.kt`（参考语义，不复用代码）
 
+pub mod archive;
 pub mod archive_impl;
 pub mod descriptor;
 pub mod factory;
