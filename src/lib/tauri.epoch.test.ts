@@ -47,9 +47,10 @@ describe('notifyArchiveWindow epoch 递增计数器', () => {
     }
   });
 
-  it('epoch 从 1 起（与后端 advance_epoch 单调推进配合，0 保留给初始态）', async () => {
+  it('epoch 播种 Date.now()（webview 重载不回退到 0，防预载被拒 stale）', async () => {
     await notifyArchiveWindow(webdav, [], 'content');
     const epochs = invokedEpochs();
-    expect(epochs[0]).toBeGreaterThanOrEqual(1);
+    // 相对断言：首值在 Date.now() 时间基座量级（播种 + 一次 ++），不钉绝对值防时钟 flake
+    expect(epochs[0]).toBeGreaterThan(Date.now() - 60_000);
   });
 });

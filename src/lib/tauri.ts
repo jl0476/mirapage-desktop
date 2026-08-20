@@ -658,8 +658,11 @@ export async function keepScreenOn(enable: boolean): Promise<void> {
  * 窗口 epoch：模块级递增计数器（终审 P1-4）——Date.now() 同毫秒重复 + IPC 乱序
  * 可让旧窗口覆盖新窗口；单调递增序号保证每次调用身份严格递增，后端 advance_epoch
  * 亦单调（旧值不回退），双端叠加消除乱序回退。
+ * 播种 Date.now()（复审 minor 1）：webview 重载会重置模块状态归零，而后端
+ * fetch_max 会话内保持高值——从 0 重起会让重载后所有预载被拒 stale 直到计数器
+ * 追上；播种时间基座跨重载不回退，会话内仍 ++ 严格递增。
  */
-let archiveEpochSeq = 0;
+let archiveEpochSeq = Date.now();
 
 /**
  * masonry 像素窗口 / details 选中推送 archive 预载目标。

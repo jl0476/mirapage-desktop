@@ -1171,7 +1171,7 @@ pub(crate) mod tests {
     }
 
     /// 最终审查 I2：upsert 后回收钩子——download 成功上表后立即回收（终审 P2-1 起
-    /// 经 evict_ready_to_watermark 回收到 80% 水位），容量上限不再只靠 startup_cleanup
+    /// 经 enforce_budget 回收到 80% 水位），容量上限不再只靠 startup_cleanup
     /// （一次会话滚过几十个大 CBZ 可无限超限到重启）。
     /// 限值 1MB；mock 包各 1.5MB：A 物化时自身在途 protected 不自删；B 物化后
     /// total 3MB > 1MB → 水位目标 0.8MB → 淘汰 A（freed 1.5MB < need 2.2MB）后
