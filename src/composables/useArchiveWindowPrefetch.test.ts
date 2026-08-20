@@ -1,10 +1,12 @@
 /**
- * useArchiveWindowPrefetch.test.ts — M3 任务 8 步骤 5a（TDD 红）
+ * useArchiveWindowPrefetch.test.ts — M3 任务 8 步骤 5a + 复审修复（epoch 触发面）
  *
  * masonry 像素窗口 → 远程 archive 内容预载（100ms 防抖）：
  *  - 窗口变化触发 notifyArchiveWindow(descriptor, rels, 'content')
  *  - rel 构造与 fileBrowser.openArchive 的 relInside 一致（currentPath + name）
- *  - 仅 webdav/smb 源；Local/Archive 源不发
+ *  - 远程源空 rels 也调用（空窗口 = 推新 epoch 取消旧批次，后端取消惯用法）
+ *  - Local/Archive 源也调用但 rels 恒空（epoch 取消通道保活，不下载）
+ *  - dispose 立即发一次 rels=[] 取消（不走防抖）+ 取消 pending 防抖
  *  - 快速连续窗口变化防抖合并（一次调用，携带最新窗口）
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -67,21 +69,36 @@ describe('useArchiveWindowPrefetch', () => {
     h.dispose();
   });
 
-  it('Local 源不预载（物化器仅支持 webdav/smb origin）', async () => {
+  it('Local 源仍调用但 rels 恒空（epoch 取消通道保活，不下载）', async () => {
     const { handle: h, windows } = setup(local, [entry('a.cbz', { isArchive: true })]);
     windows.value = win(['a.cbz']);
     await nextTick();
     vi.advanceTimersByTime(100);
-    expect(notifySpy).not.toHaveBeenCalled();
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy).toHaveBeenLastCalledWith(local, [], 'content');
     h.dispose();
+    // dispose 追加一次即时取消，同样 rels 恒空；此后不再有调用
+    expect(notifySpy).toHaveBeenCalledTimes(2);
+    expect(notifySpy).toHaveBeenLastCalledWith(local, [], 'content');
+    vi.advanceTimersByTime(200);
+    expect(notifySpy).toHaveBeenCalledTimes(2);
   });
 
-  it('窗口内无 archive 条目不调用（visible/ahead/behind/idle 四组合并判定）', async () => {
+  it('切到无 archive 的远程目录（窗口 rels 空）仍触发 rels=[]（推 epoch 取消旧批次）', async () => {
     const { handle: h, windows } = setup(webdav, [entry('a.cbz', { isArchive: true }), entry('b.jpg')]);
-    windows.value = { visible: [], ahead: ['b.jpg'], behind: [], idle: [] };
+    // 先触发一次有 archive 的预载
+    windows.value = win(['a.cbz']);
     await nextTick();
     vi.advanceTimersByTime(100);
-    expect(notifySpy).not.toHaveBeenCalled();
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy).toHaveBeenCalledWith(webdav, ['a.cbz'], 'content');
+    // 窗口滚到无 archive 区域（visible/ahead/behind/idle 四组均无 archive）
+    notifySpy.mockClear();
+    windows.value = { visible: ['b.jpg'], ahead: [], behind: [], idle: [] };
+    await nextTick();
+    vi.advanceTimersByTime(100);
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy).toHaveBeenCalledWith(webdav, [], 'content');
     h.dispose();
   });
 
@@ -103,13 +120,25 @@ describe('useArchiveWindowPrefetch', () => {
     h.dispose();
   });
 
-  it('dispose 后取消 pending 防抖（卸载不触发预载）', async () => {
+  it('dispose 取消 pending 防抖并立即发一次 rels=[] 取消（不走防抖等待）', async () => {
     const { handle: h, windows } = setup(webdav, [entry('a.cbz', { isArchive: true })]);
     windows.value = win(['a.cbz']);
     await nextTick();
     h.dispose();
+    // 不 advance 计时器：取消调用即时发出（无防抖延迟）
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy).toHaveBeenCalledWith(webdav, [], 'content');
+    // pending 的预载防抖已被清掉，不再发出第二次调用
     vi.advanceTimersByTime(200);
-    expect(notifySpy).not.toHaveBeenCalled();
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispose 多次调用只发一次取消（幂等）', async () => {
+    const { handle: h } = setup(webdav, []);
+    h.dispose();
+    h.dispose();
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+    expect(notifySpy).toHaveBeenCalledWith(webdav, [], 'content');
   });
 
   it('根目录（currentPath 空）rel 即条目名', async () => {

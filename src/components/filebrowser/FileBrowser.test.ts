@@ -35,6 +35,8 @@ vi.mock('@/lib/tauri', () => ({
   getDirectoryMasonry: vi.fn(async () => null),
   setFavorite: vi.fn(async () => undefined),
   getBookStatus: vi.fn(async () => null),
+  // M3 任务 8 复审修复: useArchiveWindowPrefetch dispose 现在恒发一次空窗口取消
+  notifyArchiveWindow: vi.fn(async () => undefined),
 }));
 
 // Cluster A: spy on router.push
