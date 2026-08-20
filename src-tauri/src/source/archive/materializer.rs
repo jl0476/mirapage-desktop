@@ -261,6 +261,16 @@ impl Materializer {
         &self, origin: &SourceDescriptor, archive_rel_path: &str, cancellable: bool,
     ) -> Result<PathBuf, MaterializeError> {
         let key = cache_key(origin, archive_rel_path);
+        // 0. 格式闸门（最终审查 I1；spec §1 非目标：RAR/7z 远程物化不做）——cbz/zip
+        //    之外直接拒绝：旧行为「整包下载完后 list_archive_entries 才 NotImplemented」
+        //    既浪费整包下载，masonry 预载按 is_archive 过滤更会后台静默白下永远读不出
+        //    的文件。RAR/7z 实装模块放开此处。
+        match crate::source::descriptor::ArchiveFormat::from_extension(
+            std::path::Path::new(archive_rel_path).extension().and_then(|e| e.to_str()).unwrap_or("")) {
+            Some(crate::source::descriptor::ArchiveFormat::Cbz)
+            | Some(crate::source::descriptor::ArchiveFormat::Zip) => {}
+            _ => return Err(MaterializeError::Other(format!("远程物化仅支持 cbz/zip：{archive_rel_path}"))),
+        }
         // 1. 表命中 → stat 失效判定
         //    rev4：Db 是 Mutex 包裹的连接——先读行后立刻 drop conn，再 await 远端 stat
         //    （持连接跨网络 await 会锁住整个数据库）；touch/删除时重新获取连接
@@ -472,6 +482,26 @@ impl Materializer {
                     cache_abs_path: final_path.display().to_string(),
                     byte_size: byte_size as i64,
                 }).map_err(|e| MaterializeError::Other(e.to_string()))?;
+            }
+            // 回收钩子（最终审查 I2）：upsert 成功后立即 evict_to_limit——此前容量
+            // 上限只在 startup_cleanup 执行，一次会话滚过几十个大 CBZ（预载放大）可
+            // 无限超限直到重启（spec §12 风险对策三件套「容量上限 + LRU + 启动清理」
+            // 至此全量生效）。错误吞掉：回收失败不影响本次物化返回。conn 短作用域且
+            // 不跨 await（任务 6 死锁教训——inflight 锁的 await 在取 conn 之前完成）；
+            // 在途 key 全量 protected（含本任务自身：不自删，也不删并发任务的 final）。
+            {
+                let limit_bytes = {
+                    let conn = self.db.conn();
+                    (crate::setting_u64(&conn, "archive_cache_max_mb", 2048)
+                        .saturating_mul(1024 * 1024))
+                        .min(i64::MAX as u64) as i64
+                };
+                let protected: Vec<String> = {
+                    let st = self.inflight.lock().await;
+                    st.map.keys().cloned().collect()
+                };
+                let conn = self.db.conn();
+                let _ = super::dao::evict_to_limit(&conn, limit_bytes, &protected);
             }
             emit_progress(key, archive_rel_path, snap.size, snap.size, "ready");
             return Ok(final_path);
@@ -923,6 +953,74 @@ pub(crate) mod tests {
         assert!(sidecar_path(&part_path).exists(), "sidecar 保留");
         let conn = db.conn();
         assert!(crate::source::archive::dao::get(&conn, &key).unwrap().is_none(), "表无行");
+    }
+
+    /// 最终审查 I1：格式闸门——cbz/zip 之外的远程物化请求（cbr/rar/7z/无扩展名）
+    /// 在下载前直接拒绝（零 stat / 零 read / 零缓存产出）。旧行为：整包下载完成后
+    /// `list_archive_entries` 才对 Rar/SevenZ 报 NotImplemented；masonry 预载按
+    /// is_archive 过滤更会后台静默白下永远读不出来的文件（spec §1 非目标）。
+    #[tokio::test]
+    async fn remote_unsupported_format_rejected_before_download() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, dir, db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        for rel in ["book.cbr", "book.rar", "book.7z", "noext"] {
+            let err = m.ensure_cached(&origin, rel).await.unwrap_err();
+            assert!(matches!(err, MaterializeError::Other(_)), "{rel} 应被 Other 拒绝");
+        }
+        assert_eq!(mock.read_calls.load(Ordering::SeqCst), 0, "零 read（下载前拒绝）");
+        assert_eq!(mock.stat_calls.load(Ordering::SeqCst), 0, "零 stat（查表前拒绝）");
+        for rel in ["book.cbr", "book.rar", "book.7z", "noext"] {
+            let key = cache_key(&origin, rel);
+            {
+                let conn = db.conn();
+                assert!(crate::source::archive::dao::get(&conn, &key).unwrap().is_none(),
+                        "{rel} 表无行");
+            }
+            let (final_path, part_path) = m.cache_paths(&key);
+            assert!(!final_path.exists() && !part_path.exists(), "{rel} 无缓存文件");
+        }
+        // dir 仅用于持有 tempdir 生命周期（下划线消费避免未用警告）
+        let _ = dir.path();
+    }
+
+    /// 最终审查 I2：upsert 后回收钩子——download 成功上表后立即 evict_to_limit，
+    /// 容量上限不再只靠 startup_cleanup（一次会话滚过几十个大 CBZ 可无限超限到重启）。
+    /// 限值 1MB；mock 包各 1.5MB：A 物化时自身在途 protected 不自删；B 物化后
+    /// total 3MB > 1MB → A（更旧）被淘汰、B（在途 protected）保留。
+    #[tokio::test]
+    async fn upsert_triggers_evict_over_limit() {
+        let mock = StdArc::new(MockOrigin::new(1_500_000));
+        let (m, _dir, db) = temp_materializer(mock.clone());
+        {
+            let conn = db.conn();
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('archive_cache_max_mb', '1')",
+                []).unwrap();
+        }
+        let origin = webdav("");
+        let key_a = cache_key(&origin, "a.cbz");
+        let key_b = cache_key(&origin, "b.cbz");
+        let (final_a, _) = m.cache_paths(&key_a);
+        let (final_b, _) = m.cache_paths(&key_b);
+
+        // A：total 1.5MB 已超 1MB 限值，但 A 自身在途 protected → 保留
+        let pa = m.ensure_cached(&origin, "a.cbz").await.unwrap();
+        assert!(pa.exists(), "A 物化成功");
+        {
+            let conn = db.conn();
+            assert!(crate::source::archive::dao::get(&conn, &key_a).unwrap().is_some(), "A 行在");
+        }
+        // B：upsert 后 total 3MB → 回收钩子淘汰 A（B 在途 protected 保留）
+        let pb = m.ensure_cached(&origin, "b.cbz").await.unwrap();
+        assert!(pb.exists(), "B 物化成功");
+        assert!(!final_a.exists(), "A 缓存文件被 upsert 后回收钩子删除");
+        assert!(final_b.exists(), "B 缓存文件保留");
+        let conn = db.conn();
+        assert!(crate::source::archive::dao::get(&conn, &key_a).unwrap().is_none(),
+                "表无 A 行");
+        assert!(crate::source::archive::dao::get(&conn, &key_b).unwrap().is_some(),
+                "B 行保留");
     }
 
     /// 六字段合法 sidecar 工厂（cleanup 只做结构化校验，字段值无需语义真实）
