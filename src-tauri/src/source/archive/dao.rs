@@ -61,6 +61,21 @@ pub fn touch(conn: &Connection, cache_key: &str) -> Result<()> {
     Ok(())
 }
 
+/// 条件删除（失效竞态修复）：仅当行的 (origin_size, origin_mtime) 与调用者读到的
+/// stale 快照一致时才删行——返回是否赢得失效权（rows_affected == 1）。并发场景下若
+/// 行已被其他任务的 upsert 刷新成新版本，指纹不匹配 → 0 → 调用方不得删文件（防误删
+/// 新 final 留下指向已删文件的悬空表行），需重读行走复用/重下分支。`IS ?3` 为
+/// SQLite NULL 安全相等（NULL IS NULL 真；非 NULL 双侧等价 =）。
+pub fn delete_if_version_match(
+    conn: &Connection, cache_key: &str, origin_size: i64, origin_mtime: Option<i64>,
+) -> Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM archive_cache WHERE cache_key = ?1 AND origin_size = ?2 AND origin_mtime IS ?3",
+        params![cache_key, origin_size, origin_mtime],
+    )?;
+    Ok(n == 1)
+}
+
 /// 按 last_accessed_at 升序淘汰至 byte_total <= limit_bytes；protected 跳过。
 /// 返回淘汰条数。逐批 256 + freed 累计到 need_to_free 即停（模式同 thumbnail
 /// index.rs oldest_until_bytes——archive_cache 每行是完整物化的远程 zip，
@@ -187,6 +202,37 @@ mod tests {
         assert_eq!(paths, vec!["C:/cache/k.zip".to_string()]);
         assert_eq!(usage(&conn).unwrap(), (0, 0));
         assert!(get(&conn, "k").unwrap().is_none());
+    }
+
+    #[test]
+    fn delete_if_version_match_fingerprint_gate() {
+        let conn = db();
+        // 表是 v1 行、以 v1 的 (size,mtime) 条件删 → rows_affected 1 → 赢得失效权
+        let mut v1 = row("k"); v1.origin_size = 10; v1.origin_mtime = Some(1000);
+        upsert(&conn, &v1).unwrap();
+        assert!(delete_if_version_match(&conn, "k", 10, Some(1000)).unwrap(),
+                "指纹一致 → 删除成功");
+        assert!(get(&conn, "k").unwrap().is_none(), "行已删");
+
+        // 表已被刷成 v2 行、以 v1 的 (size,mtime) 条件删 → rows_affected 0 → 不删行
+        // （并发失效竞态的核心防线：旧指纹删不动新行，调用方不得删新 final 文件）
+        let mut v2 = row("k"); v2.origin_size = 20; v2.origin_mtime = Some(2000);
+        upsert(&conn, &v2).unwrap();
+        assert!(!delete_if_version_match(&conn, "k", 10, Some(1000)).unwrap(),
+                "旧指纹 (10,1000) 删不动 v2 行");
+        assert_eq!(get(&conn, "k").unwrap().unwrap().origin_size, 20, "v2 行保留");
+
+        // mtime NULL 场景：行 mtime NULL + 条件 mtime NULL → IS NULL 匹配删除成功
+        let mut nul = row("kn"); nul.origin_mtime = None;
+        upsert(&conn, &nul).unwrap();
+        assert!(delete_if_version_match(&conn, "kn", 100, None).unwrap(),
+                "NULL IS NULL 匹配（SMB mtime 缺失源）");
+        // IS 的 NULL 安全性是双向的：行 NULL + 条件 Some → 不匹配
+        let mut nul2 = row("kn2"); nul2.origin_mtime = None;
+        upsert(&conn, &nul2).unwrap();
+        assert!(!delete_if_version_match(&conn, "kn2", 100, Some(1000)).unwrap(),
+                "行 NULL vs 指纹 Some → 不匹配");
+        assert!(get(&conn, "kn2").unwrap().is_some(), "行保留");
     }
 
     #[test]

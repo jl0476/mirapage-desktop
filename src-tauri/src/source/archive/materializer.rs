@@ -5,7 +5,6 @@
 use crate::db::Db;
 use crate::source::descriptor::SourceDescriptor;
 use crate::source::trait_def::{ByteRange, FileStat, MediaSource, MediaSourceError};
-use rusqlite::params;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,6 +40,9 @@ pub fn is_stale(row_origin_size: i64, row_origin_mtime: Option<i64>, current: &F
 // - rev5 闸门：InflightState { clearing, map } 同一把 tokio async Mutex；「查 clearing + 查重 +
 //   注册」单一临界区原子完成；等待者持锁 notified().enable() 预注册再 drop 锁 await（防丢唤醒）
 // - DB 连接不跨网络 await：先读行 drop conn → await stat → 重新取连接 touch/删行
+// - 失效条件删除（审查修复）：stale 分支 DELETE 按 (cache_key, origin_size, origin_mtime)
+//   指纹匹配——落空（0 行）= 行已被并发任务刷新 → 重读行，对手版本对本次 stat 新鲜则
+//   touch + 复用返回（免重下），不误删并发刚物化好的新 final 文件
 
 #[derive(Debug, thiserror::Error)]
 pub enum MaterializeError {
@@ -218,12 +220,35 @@ impl Materializer {
                     let _ = super::dao::touch(&conn, &key);
                     return Ok(PathBuf::from(&row.cache_abs_path));
                 }
-                // 失效：删行 + 删文件
-                {
+                // 失效：条件删除（审查修复）——仅当表行仍是本调用者读到的 stale 版本时
+                // 才拥有失效权（删行 + 删文件）。竞态：B 读 v1 行 → await stat 窗口内
+                // A 完成整套 v2 下载（upsert 刷新行；final 同 key 同路径）；旧的无条件
+                // DELETE + remove_file 会误删 A 的 v2 文件并留下指向已删文件的 v2 表行
+                // （命中路径 stat 判新鲜直接返回不存在路径，永不自愈）。条件 DELETE 落空
+                // （0 行）= 行已被刷新：重读行，对 B 手头 stat 新鲜 → touch + 直接返回
+                // （免重下）；仍 stale（远端又变）或行不存在 → 继续走下载（rename 在
+                // Windows 用 MOVEFILE_REPLACE_EXISTING，残留 final 可被原子替换）
+                let won = {
                     let conn = self.db.conn();
-                    let _ = conn.execute("DELETE FROM archive_cache WHERE cache_key = ?1", params![key]);
+                    super::dao::delete_if_version_match(&conn, &key, row.origin_size, row.origin_mtime)
+                        .map_err(|e| MaterializeError::Other(e.to_string()))?
+                };
+                if won {
+                    let _ = std::fs::remove_file(&row.cache_abs_path);
+                } else {
+                    let rerow = {
+                        let conn = self.db.conn();
+                        super::dao::get(&conn, &key).map_err(|e| MaterializeError::Other(e.to_string()))?
+                    };
+                    if let Some(rerow) = rerow {
+                        if !is_stale(rerow.origin_size, rerow.origin_mtime, &cur) {
+                            let conn = self.db.conn();
+                            let _ = super::dao::touch(&conn, &key);
+                            return Ok(PathBuf::from(&rerow.cache_abs_path));
+                        }
+                    }
+                    // 仍 stale（远端又变）或行不存在 → 继续走下载
                 }
-                let _ = std::fs::remove_file(&row.cache_abs_path);
             }
         }
         // 2. 准入闸门 + in-flight 去重 + 注册——**同一把锁的单一临界区**（rev5）：
@@ -458,6 +483,9 @@ mod tests {
         last_ranges: std::sync::Mutex<Vec<(u64, u64)>>,
         /// 第 N 次 stat（1-based）把远端切到新版本字节（rename 前二次 stat 发现远端变更）
         flip_on_stat: std::sync::Mutex<Option<(usize, Vec<u8>, Option<i64>)>>,
+        /// 第 N 次 stat（1-based）触发旁路副作用后消费（测试模拟：stat 网络窗口内并发
+        /// 任务完成物化——刷新表行 + 写 final 文件；失效竞态修复用例的确定性注入点）
+        interject_on_stat: std::sync::Mutex<Option<(usize, Box<dyn Fn() + Send + Sync>)>>,
     }
 
     impl MockOrigin {
@@ -472,6 +500,7 @@ mod tests {
                 read_delay_ms: std::sync::Mutex::new(0),
                 last_ranges: std::sync::Mutex::new(Vec::new()),
                 flip_on_stat: std::sync::Mutex::new(None),
+                interject_on_stat: std::sync::Mutex::new(None),
             }
         }
     }
@@ -519,6 +548,11 @@ mod tests {
                 *self.bytes.lock().unwrap() = new_bytes.clone();
                 *self.stat_size.lock().unwrap() = new_bytes.len() as u64;
                 *self.stat_mtime.lock().unwrap() = new_mtime;
+            }
+            let inject = { self.interject_on_stat.lock().unwrap().as_ref().map(|(at, _)| n == *at) };
+            if inject == Some(true) {
+                let (_, f) = self.interject_on_stat.lock().unwrap().take().unwrap();
+                f();
             }
             Ok(FileStat { size: *self.stat_size.lock().unwrap(),
                           modified_at: *self.stat_mtime.lock().unwrap() })
@@ -592,6 +626,52 @@ mod tests {
         let conn = db.conn();
         let row = crate::source::archive::dao::get(&conn, &key).unwrap().unwrap();
         assert_eq!(row.origin_size, 20, "表行 origin_size == 20");
+    }
+
+    /// 审查修复主场景（确定性注入，不靠竞态时序）：B 读 v1 行 → stat 网络窗口内「A」
+    /// 完成 v2 物化（upsert v2 行 + final 替换 v2 字节）→ B 的条件 DELETE 以 v1 指纹
+    /// 落空（0 行）→ 重读 v2 行对 B 手头 stat 新鲜 → touch + 直接返回——不重下、不误删
+    #[tokio::test]
+    async fn stale_lose_delete_race_reuses_fresh_row() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _g, db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        let rel = "race.cbz";
+        let key = cache_key(&origin, rel);
+        // v1 物化完成（表 v1 行 size=10/mtime=1000 + final 10 字节）
+        m.ensure_cached(&origin, rel).await.unwrap();
+        let reads_after_v1 = mock.read_calls.load(Ordering::SeqCst);
+        // 远端切 v2（size 20 / mtime 2000 / 字节 [7;20]）
+        *mock.stat_size.lock().unwrap() = 20;
+        *mock.stat_mtime.lock().unwrap() = Some(2000);
+        *mock.bytes.lock().unwrap() = vec![7u8; 20];
+        let (final_path, _) = m.cache_paths(&key);
+        // 注入：B 的步骤 1 stat（下一次 stat）窗口内模拟 A 完成 v2——final 写 v2 字节 + upsert v2 行
+        let db2 = db.clone();
+        let fp = final_path.clone();
+        let key2 = key.clone();
+        let next_stat = mock.stat_calls.load(Ordering::SeqCst) + 1;
+        *mock.interject_on_stat.lock().unwrap() = Some((next_stat, Box::new(move || {
+            std::fs::write(&fp, vec![7u8; 20]).unwrap();
+            let conn = db2.conn();
+            crate::source::archive::dao::upsert(&conn, &crate::source::archive::dao::NewCacheRow {
+                cache_key: key2.clone(),
+                origin_kind: "webdav".into(),
+                archive_rel_path: rel.into(),
+                origin_size: 20,
+                origin_mtime: Some(2000),
+                cache_abs_path: fp.display().to_string(),
+                byte_size: 20,
+            }).unwrap();
+        })));
+        let p = m.ensure_cached(&origin, rel).await.unwrap();
+        assert_eq!(p, final_path, "返回 v2 行的 cache_abs_path");
+        assert_eq!(std::fs::read(&p).unwrap(), vec![7u8; 20], "v2 final 未被误删");
+        assert_eq!(mock.read_calls.load(Ordering::SeqCst), reads_after_v1,
+                   "免重下（零 read——条件删除落空后复用新鲜行）");
+        let conn = db.conn();
+        let row = crate::source::archive::dao::get(&conn, &key).unwrap().unwrap();
+        assert_eq!(row.origin_size, 20, "v2 表行保留（未被旧指纹清掉）");
     }
 
     #[tokio::test]
@@ -685,6 +765,17 @@ mod tests {
         assert_eq!(std::fs::read(&p).unwrap(), vec![7u8; 5], "按截断后的远端 size 全量重下");
         assert_eq!(take_ranges(&mock), &[(0, 5)],
                    "④ 远端截断 → 弃 .part 从 0 重下");
+
+        // ⑤ sidecar 快照与远端一致（size/mtime 双匹配）但 downloaded == have > 远端 size
+        //    （size=5、downloaded=7、.part 实长 7）——前几关全过，`have <= snap.size`
+        //    作为唯一拒绝条件生效 → 弃重下（审查 minor #3：防 append 模式 offset 越界写）
+        let key8 = cache_key(&origin, "r8.cbz");
+        write_part(&m, &origin, "r8.cbz", &[7u8; 7],
+                   Some(&valid_sidecar(&key8, "r8.cbz", 7, 5, Some(1000))));
+        let p = m.ensure_cached(&origin, "r8.cbz").await.unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), vec![7u8; 5], "按远端 size 全量重下");
+        assert_eq!(take_ranges(&mock), &[(0, 5)],
+                   "⑤ downloaded > 远端 size（快照字段全匹配）→ 弃 .part 全量重下");
     }
 
     #[tokio::test]
