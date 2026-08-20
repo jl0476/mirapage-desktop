@@ -298,6 +298,7 @@ export default {
       behavior: '行为',
       slideshow: '幻灯片',
       masonry: '瀑布流',
+      remote: '远程压缩包',
       maintenance: '存储与数据维护',
     },
     fileBrowser: {
@@ -371,6 +372,15 @@ export default {
         continueMigration: '继续迁移',
         rollbackMigration: '回滚到原位置',
       },
+    },
+    // M3 任务 9: 远程压缩包（archive cache 管理，spec §8 砍到 3 项 UI）
+    remote: {
+      prefetchEnabled: '预载远程压缩包',
+      prefetchEnabledDesc: '浏览远程目录时自动在后台下载附近的压缩包，打开时无需等待。',
+      archiveCacheLimit: '缓存上限（MB，512–32768）',
+      archiveCacheUsage: '当前占用 {size}，共 {count} 个文件',
+      clearArchiveCache: '清空缓存',
+      clearConfirm: '确认清空远程压缩包缓存？将删除 {count} 个已下载文件（{size}），进行中的下载会被取消。',
     },
     maintenance: {
       autoEnabled: '自动清理',

@@ -11,6 +11,11 @@ import { useMaintenanceStore } from '@/stores/maintenance';
 import {
   type ScaleMode, type ReadDirection,
 } from '@/lib/readerSettings';
+import {
+  getSetting, setArchivePrefetchEnabled, getArchiveCacheInfo, clearArchiveCache,
+} from '@/lib/tauri';
+import { formatBytes } from '@/locales/helpers';
+import { log } from '@/lib/logger';
 import { useSectionAnchors } from '@/composables/useSectionAnchors';
 import { useHistoryExport } from '@/composables/useHistoryExport';
 import EnumRow from '@/components/settings/EnumRow.vue';
@@ -22,12 +27,13 @@ const { t } = useI18n();
 const settings = useSettingsStore();
 const maintenance = useMaintenanceStore();
 
-const sections = ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'masonry', 'maintenance'] as const;
+const sections = ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'masonry', 'remote', 'maintenance'] as const;
 const { activeId, scrollTo } = useSectionAnchors([...sections]);
 
 // ─── 维护（spec §8）──────────────────────────────────────────────────
 onMounted(() => {
   maintenance.loadSummary();
+  loadRemoteSection();
 });
 const mb = (bytes: number) => Math.round((bytes || 0) / 1_000_000);
 
@@ -44,6 +50,64 @@ async function doRun() {
   if (!window.confirm(t('settings.maintenance.runConfirm'))) return;
   showPreview.value = false;
   await maintenance.runConfirmed();
+}
+
+// ─── 远程压缩包（M3 任务 9，spec §8 三项 UI）─────────────────────────
+// 开关/上限初值从 settings 表读（Rust 侧默认 true / 2048，"仅 'false' 关闭"语义对齐）。
+// 上限只写 DB：运行时限值不热生效（下次启动 startup_cleanup 生效），UI 不提示。
+const remotePrefetchEnabled = ref(true);
+const archiveCacheMaxMb = ref(2048);
+const archiveCacheUsage = ref<{ count: number; bytes: number } | null>(null);
+const clearingArchiveCache = ref(false);
+
+async function loadRemoteSection() {
+  const [prefetch, maxMb] = await Promise.all([
+    getSetting('remote_archive_prefetch_enabled'),
+    getSetting('archive_cache_max_mb'),
+  ]);
+  if (prefetch !== null) remotePrefetchEnabled.value = prefetch !== 'false';
+  if (maxMb !== null) {
+    const n = Number(maxMb);
+    if (Number.isFinite(n)) archiveCacheMaxMb.value = n;
+  }
+  await refreshArchiveCacheUsage();
+}
+
+async function refreshArchiveCacheUsage() {
+  try {
+    archiveCacheUsage.value = await getArchiveCacheInfo();
+  } catch (e) {
+    log('[settings] getArchiveCacheInfo failed', e);
+  }
+}
+
+/** 预载开关：走任务 8 命令（写 settings + 运行时推送 Prefetcher），不重复造。 */
+async function setRemotePrefetch(v: boolean) {
+  remotePrefetchEnabled.value = v;
+  await setArchivePrefetchEnabled(v);
+}
+
+/** 缓存上限：前端钳 512–32768 后持久化。 */
+async function setArchiveCacheLimit(v: number) {
+  const n = Math.min(32768, Math.max(512, Math.round(Number(v) || 2048)));
+  archiveCacheMaxMb.value = n;
+  await settings.update('archive_cache_max_mb', n);
+}
+
+async function clearArchiveCacheClicked() {
+  if (!archiveCacheUsage.value || clearingArchiveCache.value) return;
+  const { count, bytes } = archiveCacheUsage.value;
+  if (!window.confirm(t('settings.remote.clearConfirm', { count, size: formatBytes(bytes) }))) return;
+  clearingArchiveCache.value = true;
+  try {
+    await clearArchiveCache();
+    await refreshArchiveCacheUsage();
+  } catch (e) {
+    // 后端忙碌（在途下载 2s 未排空）等用户可见错误直呈
+    window.alert(String(e));
+  } finally {
+    clearingArchiveCache.value = false;
+  }
 }
 
 // ─── 枚举选项源 ───────────────────────────────────────────────────────
@@ -371,6 +435,44 @@ async function setThumbnailDetailPopover(v: boolean) {
           <!-- 缩略图缓存资源 / 清晰度 / 容量（v0.1.0-module3.0.7） -->
           <hr class="my-4 border-[color:var(--color-border-default)]" />
           <ThumbnailCacheSettings />
+        </section>
+
+        <!-- 远程压缩包（M3 任务 9：预载开关 / 缓存上限 / 清空 + 用量） -->
+        <section id="remote" data-test="section-remote" class="scroll-mt-4 bg-surface-1 xp-bd rounded-lg p-6">
+          <h3 class="text-sm font-semibold text-accent uppercase tracking-wider mb-4">
+            {{ t('settings.section.remote') }}
+          </h3>
+          <div class="flex flex-col gap-3">
+            <BooleanRow
+              :label="t('settings.remote.prefetchEnabled')"
+              :description="t('settings.remote.prefetchEnabledDesc')"
+              :value="remotePrefetchEnabled"
+              data-test="remote-archive-prefetch"
+              @change="setRemotePrefetch"
+            />
+            <NumberRow
+              :label="t('settings.remote.archiveCacheLimit')"
+              :value="archiveCacheMaxMb"
+              :min="512"
+              :max="32768"
+              suffix="MB"
+              data-test="archive-cache-limit"
+              @change="setArchiveCacheLimit"
+            />
+            <div class="flex items-center justify-between gap-4">
+              <p v-if="archiveCacheUsage" class="text-xs text-text-muted" data-test="archive-cache-usage">
+                {{ t('settings.remote.archiveCacheUsage', { count: archiveCacheUsage.count, size: formatBytes(archiveCacheUsage.bytes) }) }}
+              </p>
+              <button
+                class="tb-btn text-accent shrink-0 whitespace-nowrap"
+                data-test="archive-cache-clear-btn"
+                :disabled="clearingArchiveCache"
+                @click="clearArchiveCacheClicked"
+              >
+                {{ clearingArchiveCache ? t('common.loading') : t('settings.remote.clearArchiveCache') }}
+              </button>
+            </div>
+          </div>
         </section>
 
         <!-- 存储与数据维护（spec §8）-->

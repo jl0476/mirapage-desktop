@@ -1,0 +1,151 @@
+//! `commands::archive_cache` —— archive cache 管理 IPC（M3 spec §8；模式同 thumbnails
+//! clear/info，但清空多「闸门 + 排空」两段——物化在途时不能删文件）。
+//!
+//! - `get_archive_cache_info`：{count, bytes}（dao::usage）。
+//! - `clear_archive_cache`：四段式（简报 rev5）——
+//!   ① `begin_clearing()`：持 inflight 锁置 clearing=true 后 cancel_all（与
+//!      ensure_cached 的「查闸门 + 注册」临界区互斥，TOCTOU 封死）；
+//!   ② `wait_inflight_drained(2s)` 排空在途（tokio sleep 轮询，不阻塞 runtime）；
+//!      超时 → 复位闸门 + 返回忙碌错误，**不删任何东西**；
+//!   ③ 实删：clear_all 返回的 cache_abs_path 逐个删 + part/ 整体重建
+//!      （.part + sidecar + .meta.tmp 一并清除）+ 清表；
+//!   ④ `end_clearing()` 复位闸门——新任务（新代际）自然恢复。
+//!
+//! 命令薄壳 + `_impl` 可测核心（State 拆掉，直测 `(&Db, &Materializer)`）。
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use tauri::State;
+
+use crate::db::Db;
+use crate::source::archive::materializer::Materializer;
+
+/// (条数, 字节总量)——`get_archive_cache_info` 的可测核心。
+pub(crate) fn get_archive_cache_info_impl(db: &Db) -> rusqlite::Result<(i64, i64)> {
+    let conn = db.conn();
+    crate::source::archive::dao::usage(&conn)
+}
+
+/// 清空缓存四段式的可测核心（语义见模块注释 ①-④）。
+pub(crate) async fn clear_archive_cache_impl(db: &Db, mat: &Materializer) -> Result<(), String> {
+    // ① 闸门：持 inflight 锁置 clearing=true 后 cancel_all——与 ensure_cached 的
+    //    「查闸门 + 注册」临界区互斥；已注册任务都在 map 里可见，drain 会等它们
+    mat.begin_clearing().await;
+    // ② 排空在途（检查点粒度快速退出）；超时 → 复位闸门 + 忙碌错误，不删任何东西
+    let drained = mat.wait_inflight_drained(Duration::from_secs(2)).await;
+    if !drained {
+        mat.end_clearing().await;
+        return Err("缓存正忙（有下载在途），请稍后重试".into());
+    }
+    // ③ 实删：ready 文件（clear_all 返回的路径逐个删）+ part/ 整体重建 + 清表
+    //    （conn guard 不跨 await——此处闭包内无 await）
+    let result = (|| -> Result<(), String> {
+        let conn = db.conn();
+        let roots = crate::source::archive::dao::clear_all(&conn).map_err(|e| e.to_string())?;
+        for abs in &roots {
+            let _ = std::fs::remove_file(abs);
+        }
+        let root = mat.cache_root();
+        let _ = std::fs::remove_dir_all(root.join("part"));
+        let _ = std::fs::create_dir_all(root.join("part"));
+        Ok(())
+    })();
+    // ④ 复位闸门——begin_clearing 内 cancel_all 已推进代际，新任务取新代际自然恢复
+    mat.end_clearing().await;
+    result
+}
+
+/// 缓存统计：{ count, bytes }。
+#[tauri::command]
+pub async fn get_archive_cache_info(
+    db: State<'_, Db>,
+) -> Result<serde_json::Value, String> {
+    let (count, bytes) = get_archive_cache_info_impl(&db).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({ "count": count, "bytes": bytes }))
+}
+
+/// 清空缓存（闸门 + 排空 + 实删 + 复位；在途未排空返回忙碌错误且不动文件）。
+#[tauri::command]
+pub async fn clear_archive_cache(
+    db: State<'_, Db>,
+    mat: State<'_, Arc<Materializer>>,
+) -> Result<(), String> {
+    clear_archive_cache_impl(&db, &mat).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::archive::dao::{self, NewCacheRow};
+    use crate::source::archive::materializer::tests::{temp_materializer, webdav, MockOrigin};
+    use std::sync::Arc as StdArc;
+
+    /// 手工铺一行 ready 缓存（文件 + 表行）——不走网络，确定性
+    fn seed_ready(db: &Db, root: &std::path::Path, key: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let abs = root.join(format!("{key}.zip"));
+        std::fs::write(&abs, bytes).unwrap();
+        let conn = db.conn();
+        dao::upsert(&conn, &NewCacheRow {
+            cache_key: key.into(),
+            origin_kind: "webdav".into(),
+            archive_rel_path: "books/a.cbz".into(),
+            origin_size: bytes.len() as i64,
+            origin_mtime: Some(1000),
+            cache_abs_path: abs.display().to_string(),
+            byte_size: bytes.len() as i64,
+        }).unwrap();
+        abs
+    }
+
+    #[test]
+    fn info_reports_usage() {
+        let mock = StdArc::new(MockOrigin::new(0));
+        let (m, dir, db) = temp_materializer(mock);
+        let _ = m;
+        seed_ready(&db, dir.path(), "k1", b"aaa");
+        seed_ready(&db, dir.path(), "k2", b"bb");
+        let (count, bytes) = get_archive_cache_info_impl(&db).unwrap();
+        assert_eq!((count, bytes), (2, 5), "两条 ready 行，字节求和");
+    }
+
+    #[tokio::test]
+    async fn clear_removes_files_and_rows() {
+        let mock = StdArc::new(MockOrigin::new(0));
+        let (m, dir, db) = temp_materializer(mock);
+        let root = dir.path();
+        let f1 = seed_ready(&db, root, "k1", b"aaa");
+        let f2 = seed_ready(&db, root, "k2", b"bb");
+        // part/ 残留：半截 .part + sidecar + 原子写残留 .meta.tmp
+        let part = root.join("part");
+        std::fs::write(part.join("k3.part"), b"xx").unwrap();
+        std::fs::write(part.join("k3.part.meta"), b"{}").unwrap();
+        std::fs::write(part.join("k4.part.meta.tmp"), b"{}").unwrap();
+
+        clear_archive_cache_impl(&db, &m).await.unwrap();
+
+        assert_eq!(get_archive_cache_info_impl(&db).unwrap(), (0, 0), "表已清空");
+        assert!(!f1.exists() && !f2.exists(), "ready 文件实删（clear_all 路径）");
+        // part/ 整体重建后为空目录（.part / .meta / .meta.tmp 一并清除）
+        let entries: Vec<_> = std::fs::read_dir(&part).unwrap().collect();
+        assert!(entries.is_empty(), "part/ 重建为空，实际残留 {} 项", entries.len());
+    }
+
+    /// rev4 闸门：begin_clearing 后新 ensure_cached 被拒；end_clearing 后恢复
+    /// （begin 内 cancel_all 已推进代际——旧 in-flight 即便漏网也不会 upsert 复活缓存）。
+    #[tokio::test]
+    async fn clearing_gate_rejects_new_tasks_and_recovers() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _dir, db) = temp_materializer(mock);
+        m.begin_clearing().await;
+        let err = m.ensure_cached(&webdav(""), "a.cbz").await.unwrap_err();
+        assert!(err.to_string().contains("clearing in progress"),
+                "闸门开启时新任务被拒，实际 {err}");
+        // 排空立即成功（无在途）→ 清空正常完成 → 复位
+        assert!(m.wait_inflight_drained(Duration::from_secs(2)).await);
+        clear_archive_cache_impl(&db, &m).await.unwrap();
+        // end_clearing 已由 impl ④ 完成：新任务正常物化
+        let p = m.ensure_cached(&webdav(""), "a.cbz").await.unwrap();
+        assert!(p.exists(), "闸门复位后新任务正常工作");
+    }
+}

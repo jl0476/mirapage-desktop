@@ -220,6 +220,9 @@ pub fn run() {
             // M3 任务 8: 三级预载（metadata stat 预热 / 内容低优物化 + epoch 取消）
             commands::archive_prefetch::notify_archive_window,
             commands::archive_prefetch::set_archive_prefetch_enabled,
+            // M3 任务 9: cache 管理命令（clear 四段式 / info 用量统计）
+            commands::archive_cache::get_archive_cache_info,
+            commands::archive_cache::clear_archive_cache,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

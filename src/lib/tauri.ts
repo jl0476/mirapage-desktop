@@ -667,3 +667,24 @@ export async function notifyArchiveWindow(
 ): Promise<void> {
   await invoke<void>('notify_archive_window', { epoch: Date.now(), descriptor, rels, mode });
 }
+
+/**
+ * M3 任务 9：远程压缩包预载开关（任务 8 命令的封装）——写 settings 表 +
+ * 运行时推送 Prefetcher.set_enabled（Settings remote section 用）。
+ */
+export async function setArchivePrefetchEnabled(value: boolean): Promise<void> {
+  await invoke<void>('set_archive_prefetch_enabled', { value });
+}
+
+/** M3 任务 9：archive cache 用量统计 {count, bytes}。 */
+export async function getArchiveCacheInfo(): Promise<{ count: number; bytes: number }> {
+  return invoke<{ count: number; bytes: number }>('get_archive_cache_info');
+}
+
+/**
+ * M3 任务 9：清空 archive cache（后端四段式：闸门 → 排空 → 实删 → 复位）。
+ * 在途下载 2s 内未排空时 reject（"缓存正忙…"），缓存不动。
+ */
+export async function clearArchiveCache(): Promise<void> {
+  await invoke<void>('clear_archive_cache');
+}

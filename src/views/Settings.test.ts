@@ -11,6 +11,10 @@ import { setActivePinia, createPinia } from 'pinia';
 vi.mock('@/lib/tauri', () => ({
   getSetting: vi.fn(async () => null),
   setSetting: vi.fn(async () => undefined),
+  // M3 任务 9: remote section（预载开关 + cache 清空/用量）
+  setArchivePrefetchEnabled: vi.fn(async () => undefined),
+  getArchiveCacheInfo: vi.fn(async () => ({ count: 2, bytes: 5 })),
+  clearArchiveCache: vi.fn(async () => undefined),
   // 维护（v0.1.0-database-retention-and-cleanup）：Settings onMounted 调 loadSummary
   getMaintenanceSummary: vi.fn(async () => ({
     historyTotal: 0, historyMaxEntries: 2000, historyRetentionDays: 365,
@@ -39,11 +43,11 @@ beforeEach(() => {
 });
 
 describe('Settings.vue', () => {
-  it('renders all 7 sections with anchors', () => {
+  it('renders all 8 sections with anchors', () => {
     const wrapper = mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
     const anchors = wrapper.findAll('[data-test^="anchor-"]');
-    expect(anchors.length).toBe(7);
-    for (const id of ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'masonry', 'maintenance']) {
+    expect(anchors.length).toBe(8);
+    for (const id of ['fileBrowser', 'reader', 'appearance', 'behavior', 'slideshow', 'masonry', 'remote', 'maintenance']) {
       expect(wrapper.find(`#${id}`).exists()).toBe(true);
     }
   });
@@ -196,5 +200,63 @@ describe('Settings.vue fileBrowser section (任务 12)', () => {
     expect(exportBrowseHistory).toHaveBeenCalledWith(
       expect.stringMatching(/^browse_history_\d{8}_\d{6}\.json$/)
     );
+  });
+});
+
+describe('Settings.vue remote section (M3 任务 9)', () => {
+  const mountSettings = () => mount(Settings, { global: { plugins: [i18n], stubs: { ThumbnailCacheSettings: true } } });
+
+  it('渲染 remote section 三项（开关 / 上限 / 用量+清空）', async () => {
+    const wrapper = mountSettings();
+    await flushPromises();
+    const section = wrapper.find('[data-test="section-remote"]');
+    expect(section.exists()).toBe(true);
+    expect(wrapper.find('[data-test="remote-archive-prefetch"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="archive-cache-limit"]').exists()).toBe(true);
+    // 用量展示（mock getArchiveCacheInfo → {count:2, bytes:5}）
+    const usage = wrapper.find('[data-test="archive-cache-usage"]');
+    expect(usage.exists()).toBe(true);
+    expect(usage.text()).toContain('2');
+    expect(wrapper.find('[data-test="archive-cache-clear-btn"]').exists()).toBe(true);
+  });
+
+  it('点击预载开关 → setArchivePrefetchEnabled(false)（任务 8 命令，写设置+运行时推送）', async () => {
+    const wrapper = mountSettings();
+    await flushPromises();
+    const btn = wrapper.find('[data-test="remote-archive-prefetch"]').find('button');
+    expect(btn.exists()).toBe(true);
+    await btn.trigger('click');
+    await flushPromises();
+    const { setArchivePrefetchEnabled } = await import('@/lib/tauri');
+    expect(setArchivePrefetchEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it('上限输入越界值 100 → 钳 512 → settings.update 持久化 archive_cache_max_mb', async () => {
+    const wrapper = mountSettings();
+    await flushPromises();
+    const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
+    await input.setValue('100');
+    await flushPromises();
+    const { setSetting } = await import('@/lib/tauri');
+    expect(setSetting).toHaveBeenCalledWith('archive_cache_max_mb', '512');
+  });
+
+  it('confirm 取消 → 不调 clearArchiveCache；确认 → 清空 + 刷新用量', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const wrapper = mountSettings();
+    await flushPromises();
+    const btn = wrapper.find('[data-test="archive-cache-clear-btn"]');
+    await btn.trigger('click');
+    await flushPromises();
+    const { clearArchiveCache } = await import('@/lib/tauri');
+    expect(clearArchiveCache).not.toHaveBeenCalled();
+
+    confirmSpy.mockReturnValue(true);
+    await btn.trigger('click');
+    await flushPromises();
+    expect(clearArchiveCache).toHaveBeenCalledTimes(1);
+    // confirm 文案带用量参数（count/size）
+    expect(confirmSpy).toHaveBeenCalledWith(expect.stringContaining('2'));
+    confirmSpy.mockRestore();
   });
 });

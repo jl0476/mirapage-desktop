@@ -296,6 +296,7 @@ export default {
       behavior: 'Behavior',
       slideshow: 'Slideshow',
       masonry: 'Masonry',
+      remote: 'Remote archives',
       maintenance: 'Storage & maintenance',
     },
     fileBrowser: {
@@ -369,6 +370,15 @@ export default {
         continueMigration: 'Continue',
         rollbackMigration: 'Rollback',
       },
+    },
+    // M3 task 9: remote archives (archive cache management, spec §8 trimmed to 3 UI items)
+    remote: {
+      prefetchEnabled: 'Preload remote archives',
+      prefetchEnabledDesc: 'Automatically download nearby archives in the background while browsing remote directories.',
+      archiveCacheLimit: 'Cache limit (MB, 512–32768)',
+      archiveCacheUsage: 'Used {size}, {count} files',
+      clearArchiveCache: 'Clear cache',
+      clearConfirm: 'Clear remote archive cache? {count} downloaded files ({size}) will be deleted; in-progress downloads will be cancelled.',
     },
     maintenance: {
       autoEnabled: 'Auto cleanup',
