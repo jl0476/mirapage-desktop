@@ -18,7 +18,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
-import { getSetting, setSetting, setFavorite, getBookStatus, addBookmark, listBookmarks, type BookmarkItem } from '@/lib/tauri';
+import { getSetting, setSetting, setFavorite, getBookStatus, addBookmark, listBookmarks, notifyArchiveWindow, type BookmarkItem } from '@/lib/tauri';
 import BookmarkJumpDialog from '@/components/reader/BookmarkJumpDialog.vue';
 import { useFileBrowserStore, setScrollToIndexCallback } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
@@ -27,7 +27,7 @@ import { useSettingsStore } from '@/stores/settings';
 import { useReaderActions } from '@/composables/useReaderActions';
 import { useMasonrySettings } from '@/composables/useMasonrySettings';
 import { useToast } from '@/composables/useToast';
-import { isImage } from '@/lib/mime';
+import { extensionOf, isImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import { bookmarkPageForImage } from '@/lib/bookmarkPage';
 import { validateSourceRelativePath } from '@/lib/relativePath';
@@ -218,6 +218,35 @@ function onToggleLikeFromCtx(entry: MediaEntry) {
   void onToggleLike(entry);
 }
 
+// ─── M3 最终审查 I3：details 视图选中远程 CBZ/ZIP → 单条内容预载 ───
+// spec §7 表格语义「内容预载 触发 = masonry 预读窗口 / 选中」：纯 CBZ 远程目录无图
+// → masonry 自动回落 details → EntryDetailPanel 在 details 视图不渲染（v-if
+// viewMode !== 'details'，metadata 预热只在 masonry 视图生效）→ 内容预载通道为空，
+// 每次双击冷启动。此处按表格语义在 FileBrowser 层补：details 视图选中远程
+// isArchive 条目（仅 cbz/zip——对齐 Rust 物化格式闸门，不发自带被拒的预载）→
+// notifyArchiveWindow 'content'。rel 拼法与 openArchive 的 relInside 一致
+// （currentPath + name，命中同一 cache_key）。masonry 视图不走此通道（窗口预载
+// 已覆盖，防双通道竞争）。300ms 防抖（选中浏览节奏比滚动慢）；unmount 清理。
+let detailPreloadTimer: ReturnType<typeof setTimeout> | null = null;
+watch([selectedEntry, () => fb.viewMode], ([e, mode]) => {
+  if (detailPreloadTimer) {
+    clearTimeout(detailPreloadTimer);
+    detailPreloadTimer = null;
+  }
+  if (mode !== 'details' || !e?.isArchive) return;
+  const ext = extensionOf(e.name);
+  if (ext !== 'cbz' && ext !== 'zip') return;
+  const d = fb.currentDescriptor;
+  if (!d || (d.type !== 'webdav' && d.type !== 'smb')) return;
+  const rel = fb.currentPath ? `${fb.currentPath}/${e.name}` : e.name;
+  detailPreloadTimer = setTimeout(() => {
+    detailPreloadTimer = null;
+    void notifyArchiveWindow(d, [rel], 'content').catch(() => {
+      // 预载失败静默（后台优化，非关键路径）
+    });
+  }, 300);
+});
+
 const canSave = computed(() => fb.hasActiveSource);
 const canUp = computed(() => fb.currentPath !== '');
 
@@ -404,6 +433,11 @@ onUnmounted(() => {
   if (nextVolumeDebounce) {
     clearTimeout(nextVolumeDebounce);
     nextVolumeDebounce = null;
+  }
+  // M3 最终审查 I3：details 内容预载防抖 timer 同步清理（卸载后不得再发 IPC）
+  if (detailPreloadTimer) {
+    clearTimeout(detailPreloadTimer);
+    detailPreloadTimer = null;
   }
   // 失效在途 prefetch: 晚到的响应不得再写已卸载组件的 state
   ++nextVolumeRequestSeq;

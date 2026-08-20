@@ -8,7 +8,7 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import FileBrowser from './FileBrowser.vue';
-import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting, setFavorite, getBookStatus } from '@/lib/tauri';
+import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting, setFavorite, getBookStatus, notifyArchiveWindow } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -2318,6 +2318,134 @@ describe('FileBrowser — 喜欢按钮二态 toggle (module3.0.14)', () => {
     resolveStatus(null); // 旧查询此刻才返回 null
     await flushPromises();
     expect(wrapper.find('[data-test="btn-add-to-library"]').text()).toContain('已喜欢'); // epoch 守卫生效
+  });
+});
+
+// ─── M3 最终审查 I3：details 视图选中远程 CBZ/ZIP → 单条内容预载 ───
+// spec §7 表格语义「内容预载 触发 = masonry 预读窗口 / 选中」：纯 CBZ 远程目录无图
+// → masonry 自动回落 details → EntryDetailPanel 在 details 视图不渲染（v-if
+// viewMode !== 'details'）→ 内容预载通道为空，每次双击冷启动。修复：FileBrowser
+// 层 watch 选中（仅 details + 远程 webdav/smb + cbz/zip）→ notifyArchiveWindow
+// 'content'，rel 拼法与 openArchive relInside 一致（命中同一 cache_key）。
+// FileList 用 null stub（details 视图无 MasonryView 拉起未 mock 的缩略图 IPC）。
+describe('FileBrowser — details 选中远程 CBZ 内容预载 (M3 最终审查 I3)', () => {
+  const cbzEntry = { name: 'vol01.cbz', path: 'vol01.cbz', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 };
+  const cbzEntry2 = { name: 'vol03.cbz', path: 'vol03.cbz', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 };
+  const cbrEntry = { name: 'vol02.cbr', path: 'vol02.cbr', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 };
+  const webdavDesc = { type: 'webdav', accountId: 7, baseUrl: 'https://dav.example/dav', path: '' } as const;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue([cbzEntry, cbzEntry2, cbrEntry]);
+    mockedShortcuts.mockResolvedValue([]);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function mountBrowser() {
+    // 每用例独立 pinia（与共享 mountFileBrowser 同款首行——缺它时全文件跑依赖
+    // 前一 describe 遗留的 active pinia，单测过滤跑直接崩）
+    setActivePinia(createPinia());
+    const wrapper = mount(FileBrowser, {
+      global: { plugins: [i18n], stubs: { FileList: { name: 'FileList', setup: () => () => null } } },
+    });
+    _mountedWrappers.push(wrapper);
+    return wrapper;
+  }
+
+  /** webdav 根目录挂载（openDescriptorAt → details 视图） */
+  async function mountWebdavBrowser() {
+    const wrapper = mountBrowser();
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(webdavDesc, '');
+    await flushPromises();
+    return { wrapper, fb };
+  }
+
+  it('details 视图选中远程 cbz → 300ms 后 notifyArchiveWindow(desc, [rel], "content")', async () => {
+    const { fb } = await mountWebdavBrowser();
+    expect(fb.viewMode).toBe('details'); // 语义锚：无图目录默认 details
+    fb.selectSingle(cbzEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(notifyArchiveWindow)).toHaveBeenCalledWith(webdavDesc, ['vol01.cbz'], 'content');
+  });
+
+  it('子目录选中 → rel 与 openArchive relInside 一致（currentPath + name）', async () => {
+    const { fb } = await mountWebdavBrowser();
+    await fb.navigate('books');
+    await flushPromises();
+    fb.selectSingle(cbzEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).toHaveBeenCalledWith(webdavDesc, ['books/vol01.cbz'], 'content');
+  });
+
+  it('选中本地 cbz 不调（Local 源无内容预载）', async () => {
+    mountBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+    fb.selectSingle(cbzEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).not.toHaveBeenCalled();
+  });
+
+  it('masonry 视图选中不调（窗口预载通道覆盖，防双通道竞争）', async () => {
+    // 含图条目：无图目录会被 watch([viewMode, hasImages]) 守卫自动回落 details
+    mockedList.mockResolvedValue([
+      cbzEntry,
+      { name: 'p1.jpg', path: 'p1.jpg', isDirectory: false, isArchive: false, size: 1, modifiedAt: 0 },
+    ] as never);
+    const { fb } = await mountWebdavBrowser();
+    fb.setViewMode('masonry');
+    await flushPromises();
+    expect(fb.viewMode).toBe('masonry'); // 语义锚：有图目录 masonry 不回落
+    fb.selectSingle(cbzEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).not.toHaveBeenCalled();
+  });
+
+  it('选中 .cbr 不调（对齐 Rust 物化格式闸门，不发自带被拒的预载）', async () => {
+    const { fb } = await mountWebdavBrowser();
+    fb.selectSingle(cbrEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).not.toHaveBeenCalled();
+  });
+
+  it('快速切换选中 → 防抖只发最后一次', async () => {
+    const { fb } = await mountWebdavBrowser();
+    fb.selectSingle(cbzEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(150); // vol01 timer 在途未 fire
+    fb.selectSingle(cbzEntry2);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    const calls = vi.mocked(notifyArchiveWindow).mock.calls;
+    expect(calls.length).toBe(1);
+    expect(calls[0][1]).toEqual(['vol03.cbz']);
+  });
+
+  it('unmount 清理防抖 timer（卸载后不发 IPC）', async () => {
+    const { wrapper, fb } = await mountWebdavBrowser();
+    fb.selectSingle(cbzEntry);
+    await flushPromises();
+    wrapper.unmount();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).not.toHaveBeenCalled();
   });
 });
 

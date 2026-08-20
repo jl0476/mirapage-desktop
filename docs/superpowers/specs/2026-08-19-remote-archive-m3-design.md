@@ -174,7 +174,7 @@ PROPFIND 解析处按 href 末段扩展名跑 `ArchiveFormat::from_extension` �
 | 内容预载 | archive 进入 masonry 预读窗口 / 选中 | 低优先级 ensure_cached（走 in-flight 去重，与打开共享任务） |
 | 强制预存 | 双击打开 / 阅读器进入 | 同步 ensure_cached（天然由 §5/§6 路径承担，调度器只提供已存在检查） |
 
-- 预读窗口沿用 masonry 的像素窗口（3.0.7 selectPathsInPixelWindow 同源参数）；非 masonry 视图不内容预载（details 选中才预载）
+- 预读窗口沿用 masonry 的像素窗口（3.0.7 selectPathsInPixelWindow 同源参数）；非 masonry 视图的内容预载由 details 选中触发（FileBrowser 层，EntryDetailPanel 仅在 masonry 视图渲染）〔勘误 2026-08-20 最终审查 I3：原「非 masonry 视图不内容预载（details 选中才预载）」自相矛盾——纯 CBZ 远程目录 masonry 回落 details 后 EntryDetailPanel 不渲染，内容预载通道为空〕
 - 开关 `remote_archive_prefetch_enabled`（默认 true）关闭时只保留强制预存
 - 取消：切目录 / 换源 → epoch++（待开始任务丢弃；在途 chunk 完成后不续发）
 
