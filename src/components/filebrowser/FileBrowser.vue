@@ -297,6 +297,22 @@ const statusBarItemsText = computed(() => {
   return t('fileBrowser.statusBar.items', { count });
 });
 
+// M3 任务 7：loading 行文案 — archive descriptor（远程物化/本地 ZIP）显示压缩包准备
+// 文案（archive://progress 事件驱动，无进度数据时 indeterminate 兜底）；其余源通用 loading。
+const loadingText = computed(() => {
+  if (fb.currentDescriptor?.type === 'archive') {
+    const p = fb.archiveProgress;
+    if (p && p.total > 0) {
+      return t('fileBrowser.archivePreparing', {
+        downloaded: (p.downloaded / 1048576).toFixed(1),
+        total: (p.total / 1048576).toFixed(1),
+      });
+    }
+    return t('fileBrowser.archivePreparingIndeterminate');
+  }
+  return t('common.loading');
+});
+
 /**
  * module3.2.0 打磨：当前数据源的显示根（四类源派生）。
  * Local=rootPath；WebDAV=baseUrl；Smb=initialPath（host 在账户表，M2 前不可达）；
@@ -336,6 +352,8 @@ onMounted(async () => {
       fileListRef.value.scrollToIndex(i, opts);
     }
   });
+  // M3 任务 7：挂 archive://progress 监听（幂等；happy-dom 非 Tauri 环境内部静默）
+  fb.startArchiveProgressListener();
   await shortcuts.refresh();
   await readStatus.refresh();
   // v0.1.0-module1.22: 加载 sortField/sortAscending/viewMode/hideFinished 持久化
@@ -1170,7 +1188,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
       </div>
 
       <p v-if="fb.loading" class="text-text-tertiary text-xs m-0 px-3 py-2">
-        {{ t('common.loading') }}
+        {{ loadingText }}
       </p>
 
       <!-- StatusBar (v0.1.0-module1.22 新增, v0.1.0-module3.1.1 任务 6 接入预查) -->

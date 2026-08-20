@@ -869,7 +869,11 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     await store.navigate('sub');
     const entry = makeEntry('book.cbz', { isArchive: true });
     await store.openArchive(entry);
-    expect(store.archiveParent).toEqual({ rootPath: 'F:/comics', path: 'sub' });
+    // M3 任务 7：archiveParent 形态升级 { descriptor, relPath }（原 { rootPath, path }）
+    expect(store.archiveParent).toEqual({
+      descriptor: { type: 'local', rootPath: 'F:/comics' },
+      relPath: 'sub',
+    });
     expect(store.currentDescriptor?.type).toBe('archive');
     expect((store.currentDescriptor as { archivePath: string }).archivePath).toBe('F:/comics/sub/book.cbz'); // 绝对路径（rev2 §3.3）
     expect(mockedList).toHaveBeenLastCalledWith(store.currentDescriptor, '');
@@ -898,5 +902,78 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     await store.up();
     expect(store.archiveParent).toBeNull(); // 已退出
     expect(mockedList).toHaveBeenLastCalledWith({ type: 'local', rootPath: 'F:/comics' }, '');
+  });
+
+  // ─── M3 任务 7: openArchive 泛化（远程源虚拟路径 + origin descriptor）───
+
+  it('openArchive 远程源：构造 origin descriptor + 虚拟 archivePath + descriptor 形态 parent', async () => {
+    mockedList.mockResolvedValue(makeEntries('book.cbz', 'p1.jpg'));
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(
+      { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' }, 'comics');
+    const entry = makeEntry('book.cbz', { isArchive: true });
+    await fb.openArchive(entry);
+    expect(fb.archiveParent).toEqual({
+      descriptor: { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' },
+      relPath: 'comics',
+    });
+    const d = fb.currentDescriptor;
+    expect(d?.type).toBe('archive');
+    if (d?.type !== 'archive') return;
+    expect(d.origin?.type).toBe('webdav');
+    expect(d.archiveRelPath).toBe('comics/book.cbz');
+    expect(d.originEntryPath).toBe('comics/book.cbz');
+    expect(d.archivePath).toBe('https://d/x/comics/book.cbz'); // 虚拟 URL 形态
+    expect(mockedList).toHaveBeenLastCalledWith(d, '');
+  });
+
+  it('openArchive SMB 源：虚拟 archivePath 契约 smb://{accountId}/{initialPath}/{rel}', async () => {
+    mockedList.mockResolvedValue(makeEntries('book.cbz', 'p1.jpg'));
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(
+      { type: 'smb', accountId: 3, initialPath: 'share/comics', path: '', port: 445 }, '');
+    const entry = makeEntry('book.cbz', { isArchive: true });
+    await fb.openArchive(entry);
+    const d = fb.currentDescriptor;
+    expect(d?.type).toBe('archive');
+    if (d?.type !== 'archive') return;
+    expect(d.archivePath).toBe('smb://3/share/comics/book.cbz'); // rev3 契约（非 UNC，无 smbHostOf）
+    expect(d.archiveRelPath).toBe('book.cbz');
+    expect(d.origin?.type).toBe('smb');
+  });
+
+  it('exitArchive 恢复远程源目录（openDescriptorAt 复用）', async () => {
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    const fb = useFileBrowserStore();
+    const desc: SourceDescriptor = { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' };
+    await fb.openDescriptorAt(desc, 'comics');
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    await fb.exitArchive();
+    expect(fb.archiveParent).toBeNull();
+    expect(fb.currentDescriptor).toEqual(desc); // activeDescriptor 回 webdav
+    expect(fb.currentPath).toBe('comics');
+    expect(mockedList).toHaveBeenLastCalledWith(desc, 'comics');
+  });
+
+  it('本地源 openArchive 行为不变（零回归）', async () => {
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    const store = useFileBrowserStore();
+    await store.setRoot('F:/comics');
+    await store.navigate('sub');
+    await store.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    // descriptor 形态 parent（Local descriptor + relPath）
+    expect(store.archiveParent).toEqual({
+      descriptor: { type: 'local', rootPath: 'F:/comics' },
+      relPath: 'sub',
+    });
+    const d = store.currentDescriptor;
+    expect(d?.type).toBe('archive');
+    if (d?.type !== 'archive') return;
+    // archivePath 仍是绝对路径（module3.2.0 语义不变）；本地源无 origin 字段
+    expect(d.archivePath).toBe('F:/comics/sub/book.cbz');
+    expect(d.origin).toBeUndefined();
+    expect(d.archiveRelPath).toBeUndefined();
+    expect(d.format).toBe('cbz');
+    expect(mockedList).toHaveBeenLastCalledWith(d, '');
   });
 });

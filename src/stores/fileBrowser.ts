@@ -14,6 +14,7 @@
  */
 import { defineStore } from 'pinia';
 import { computed, ref, triggerRef } from 'vue';
+import { listen } from '@tauri-apps/api/event';
 import { listDirectory } from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import { sortEntries, type SortField } from '@/lib/fileSort';
@@ -42,6 +43,17 @@ export type ViewMode = 'details' | 'masonry';
 export interface PendingOpenLocation {
   descriptor: SourceDescriptor;
   relPath: string;
+}
+
+// ─── M3 任务 7: 远程 archive 物化进度（archive://progress 事件载荷）───
+// 后端 materializer.rs emit：{ cacheKey, relPath, downloaded, totalBytes, phase }
+// （phase: "downloading" / "ready"；store 只取字节数，phase 不消费）。
+export interface ArchiveProgressPayload {
+  cacheKey: string;
+  relPath: string;
+  downloaded: number;
+  totalBytes: number;
+  phase: string;
 }
 
 // ─── v0.1.0-module3.0.4-virtuallist Phase 3 ───
@@ -79,7 +91,12 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   // 取代之前的「每次 onMounted 都 setRoot(LAST_ROOT_KEY) 抹掉 currentPath」反模式.
   const savedNavigationContext = ref<{ rootPath: string; currentPath: string } | null>(null);
   // module3.2.0（spec §3.3）：ZIP 条目视图的进入前上下文（exitArchive 恢复）
-  const archiveParent = ref<{ rootPath: string; path: string } | null>(null);
+  // M3 任务 7（spec §6.2）：形态从 { rootPath, path } 升级为 { descriptor, relPath } —
+  // Local 与远程源通用；exitArchive 按 descriptor.type 分流恢复。唯一 caller 为 openArchive/exitArchive。
+  const archiveParent = ref<{ descriptor: SourceDescriptor; relPath: string } | null>(null);
+  // M3 任务 7：远程 archive 物化下载进度（null = 无进度数据，indeterminate 兜底展示）。
+  // openArchive/exitArchive 时清空；监听在消费组件 onMounted 挂（startArchiveProgressListener）。
+  const archiveProgress = ref<{ downloaded: number; total: number } | null>(null);
   const entries = ref<MediaEntry[]>([]);
   const loading = ref(false);
   const error = ref<FileBrowserError | null>(null);
@@ -249,36 +266,83 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     await fetch(normParent);
   }
 
-  // ─── module3.2.0（spec §3.3）: 本地 ZIP 进入/退出 ───
+  // ─── module3.2.0（spec §3.3）+ M3 任务 7（spec §6.2 rev2）: ZIP 进入/退出 ───
 
-  /** 打开本地压缩包：进入 ZIP 条目视图（archivePath 必须绝对路径，rev2 §3.3） */
+  /** 打开压缩包：进入条目视图。本地源 archivePath 绝对路径（rev2 §3.3）；
+   *  远程源（M3 物化链）构造 origin descriptor + 虚拟 archivePath。 */
   async function openArchive(entry: MediaEntry): Promise<void> {
-    const root = rootPath.value ?? '';
+    archiveProgress.value = null; // 新一轮 fetch 前清进度（事件迟到不串台）
     const dir = currentPath.value;
-    // entry.path 只是相对当前目录的文件名（local.rs:97），join root+dir+name 拼绝对路径
-    const abs = [root, dir, entry.name]
-      .filter((s) => s.length > 0)
-      .join('/')
-      .replace(/\\/g, '/');
-    archiveParent.value = { rootPath: root, path: dir };
-    currentDescriptor.value = {
-      type: 'archive', archivePath: abs, entryPrefix: '',
-      format: archiveFormatOf(entry.name),
-    };
+    const relInside = dir ? `${dir}/${entry.name}` : entry.name;
+    const active = activeDescriptor();
+    if (active && active.type !== 'local') {
+      // 远程源（M3 spec §6.2 rev2 统一）：虚拟 archivePath——WebDAV=URL 形态 /
+      // SMB=`smb://{accountId}/{initialPath}/{rel}` 可读虚拟形态（非真 UNC：descriptor
+      // 不含 host，host 查表太重且虚拟路径零解析消费方，仅展示与身份用）
+      const origin = active;
+      const virtualPath = origin.type === 'webdav'
+        ? `${origin.baseUrl.replace(/\/+$/, '')}/${relInside}`
+        : origin.type === 'smb'
+          ? `smb://${origin.accountId}/${origin.initialPath ? origin.initialPath + '/' : ''}${relInside}`
+          : ''; // 不可达（外层已限定非 local）；空串防御
+      archiveParent.value = { descriptor: origin, relPath: dir };
+      currentDescriptor.value = {
+        type: 'archive', archivePath: virtualPath, entryPrefix: '',
+        format: archiveFormatOf(entry.name),
+        origin, originEntryPath: relInside, archiveRelPath: relInside,
+      };
+    } else {
+      // 本地源（module3.2.0 现状，零回归）
+      const root = rootPath.value ?? '';
+      // entry.path 只是相对当前目录的文件名（local.rs:97），join root+dir+name 拼绝对路径
+      const abs = [root, dir, entry.name]
+        .filter((s) => s.length > 0)
+        .join('/')
+        .replace(/\\/g, '/');
+      archiveParent.value = { descriptor: { type: 'local', rootPath: root }, relPath: dir };
+      currentDescriptor.value = {
+        type: 'archive', archivePath: abs, entryPrefix: '',
+        format: archiveFormatOf(entry.name),
+      };
+    }
     currentPath.value = '';
     searchQuery.value = '';
     await fetch('');
   }
 
-  /** 退出压缩包：恢复进入前目录 */
+  /** 退出压缩包：恢复进入前目录（Local=rootPath+navigate；远程=openDescriptorAt 复用） */
   async function exitArchive(): Promise<void> {
     const parent = archiveParent.value;
     archiveParent.value = null;
+    archiveProgress.value = null;
     currentDescriptor.value = null; // 回 activeDescriptor 的 rootPath 兜底（Local）
-    if (parent) {
-      rootPath.value = parent.rootPath;
-      await navigate(parent.path);
+    if (!parent) return;
+    if (parent.descriptor.type === 'local') {
+      rootPath.value = parent.descriptor.rootPath;
+      await navigate(parent.relPath);
+    } else {
+      await openDescriptorAt(parent.descriptor, parent.relPath);
     }
+  }
+
+  // ─── M3 任务 7: archive://progress 监听（消费组件 onMounted 挂一次）───
+  let archiveProgressAttached = false;
+
+  /** 挂 archive://progress 事件监听（幂等，app 生命周期一次）。
+   *  happy-dom / 普通浏览器环境无 __TAURI_INTERNALS__，listen() reject — 静默
+   *  （3.0.8 useMasonryThumbnails 同款防御）。 */
+  function startArchiveProgressListener(): void {
+    if (archiveProgressAttached) return;
+    archiveProgressAttached = true;
+    void listen<ArchiveProgressPayload>('archive://progress', (event) => {
+      archiveProgress.value = {
+        downloaded: event.payload.downloaded,
+        total: event.payload.totalBytes,
+      };
+    }).catch(() => {
+      // 非 Tauri 环境预期失败；重置标志允许消费组件下次挂载重试（Tauri 下零成本）
+      archiveProgressAttached = false;
+    });
   }
 
   function archiveFormatOf(name: string): ArchiveFormat {
@@ -561,6 +625,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     // module3.2.0（spec §3.3）: ZIP 进入/退出
     openArchive,
     exitArchive,
+    // M3 任务 7: 远程 archive 物化进度
+    archiveProgress,
+    startArchiveProgressListener,
     // v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复
     saveNavigationContext,
     restoreNavigationContext,

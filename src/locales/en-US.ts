@@ -155,6 +155,9 @@ export default {
     viewDetails: 'Details',
     masonrySettings: 'Masonry settings',
     noImagesForMasonry: 'No images in this folder; masonry view unavailable',
+    // M3 task 7: remote archive materialization preparing text (loading + archive descriptor)
+    archivePreparing: 'Preparing archive ({downloaded} / {total} MB)',
+    archivePreparingIndeterminate: 'Preparing archive…',
     // v0.1.0-module3.0.8 (Task 9): toolbar next-volume button (cross-volume spec §14.1)
     nextVolume: 'Next volume',
     // v0.1.0-module3.0.8 (Task 10): masonry browse position toolbar jump
