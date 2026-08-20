@@ -101,11 +101,20 @@ pub fn run() {
 
             // archive cache 启动清理（M3 spec §8 rev2）：孤儿 part / 孤儿缓存文件 /
             // 超容量淘汰（零网络请求；一致性验证推迟到下次 ensure_cached 的 stat）
+            //
+            // 死锁修复（审查 task-6）：startup_cleanup 内部会再次 db.conn()——
+            // conn guard 不得横跨该调用存活（同线程对同一非重入 Arc<Mutex<Connection>>
+            // 二次加锁 = 启动即 hang，setup 闭包 cargo test 不覆盖）。限值读取收
+            // 内层作用域，guard 先释放；乘法饱和 + 钳 i64 上界防脏 DB 超大值回绕负数。
             {
                 let db_state = app.state::<db::Db>();
-                let conn = db_state.conn();
-                let limit = setting_u64(&conn, "archive_cache_max_mb", 2048) * 1024 * 1024;
-                source::archive::materializer::startup_cleanup(&cache_root, &db_state, limit as i64);
+                let limit = {
+                    let conn = db_state.conn();
+                    setting_u64(&conn, "archive_cache_max_mb", 2048)
+                };
+                let limit_bytes =
+                    (limit.saturating_mul(1024 * 1024)).min(i64::MAX as u64) as i64;
+                source::archive::materializer::startup_cleanup(&cache_root, &db_state, limit_bytes);
             }
 
             // 初始化缩略图缓存服务（v0.1.0-module3.0.7）

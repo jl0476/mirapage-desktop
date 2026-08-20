@@ -1006,6 +1006,31 @@ mod tests {
         assert!(!part.join("k6.part.meta.tmp").exists(), "原子写残留 .tmp 清除");
     }
 
+    /// setup 死锁回归（task-6 审查修复）：lib.rs setup 闭包原实现持 conn guard 横跨
+    /// startup_cleanup（内部再次 db.conn()）——同线程对同一非重入 Arc<Mutex<Connection>>
+    /// 二次加锁，真实 app 启动即 hang。setup 闭包 cargo test 不执行（盲区），此用例
+    /// 在可执行处锁死「先读 settings → drop guard → 再 cleanup」组合模式：guard 横跨
+    /// 调用的话本用例会死锁挂起而非静默通过，同时断言清理语义（孤儿删除）不变。
+    #[test]
+    fn startup_cleanup_after_setting_read_guard_released_no_deadlock() {
+        let (dir, db) = cleanup_fixture();
+        let root = dir.path();
+        std::fs::write(root.join("orphan.zip"), b"orphan").unwrap();
+
+        // 镜像 lib.rs setup 修复后片段：限值读取收内层作用域，guard 先释放再清理
+        let limit_bytes = {
+            let conn = db.conn();
+            crate::setting_u64(&conn, "archive_cache_max_mb", 2048)
+                .saturating_mul(1024 * 1024)
+                .min(i64::MAX as u64) as i64
+        };
+        assert_eq!(limit_bytes, 2048 * 1024 * 1024, "默认档 2 GiB（settings 表无该行）");
+
+        startup_cleanup(root, &db, limit_bytes);
+        assert!(!root.join("orphan.zip").exists(),
+            "guard 已释放，cleanup 正常拿锁执行 + 孤儿删除语义不变");
+    }
+
     /// 双通道语义补测：窗口 epoch 只取消预载（cancellable）任务，强制物化不受 epoch 影响
     #[tokio::test]
     async fn epoch_cancels_preload_only_force_unaffected() {
