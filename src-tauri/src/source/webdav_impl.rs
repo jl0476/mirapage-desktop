@@ -240,11 +240,18 @@ impl PartialEntry {
         if name.is_empty() {
             return None;
         }
+        let is_archive = !self.is_collection && crate::source::descriptor::ArchiveFormat::from_extension(
+            std::path::Path::new(&name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or(""),
+        )
+        .is_some();
         Some(MediaEntry {
             name: name.clone(),
             path: name,
             is_directory: self.is_collection,
-            is_archive: false,
+            is_archive,
             size: self.size.unwrap_or(0),
             modified_at: None,
         })
@@ -549,5 +556,19 @@ mod tests {
         assert!(!entries[0].is_directory);
         assert_eq!(entries[1].name, "sub1");
         assert!(entries[1].is_directory);
+    }
+
+    #[test]
+    fn parse_propfind_marks_archive_entries_by_extension() {
+        let body = r#"<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/dav/book.cbz</d:href>
+    <d:propstat><d:prop><d:getcontentlength>999</d:getcontentlength></d:prop></d:propstat></d:response>
+  <d:response><d:href>/dav/img.jpg</d:href>
+    <d:propstat><d:prop><d:getcontentlength>1</d:getcontentlength></d:prop></d:propstat></d:response>
+</d:multistatus>"#;
+        let entries = WebDavMediaSource::parse_propfind(body, "/dav/").unwrap();
+        assert!(entries[0].is_archive, ".cbz 按扩展名标记");
+        assert!(!entries[1].is_archive, "普通文件不标记");
     }
 }
