@@ -28,8 +28,9 @@ pub fn progress_emitter() -> Option<&'static tauri::AppHandle> {
     PROGRESS_EMITTER.get()
 }
 
-/// archive 物化缓存根（M3）：setup 内 set 真实 app_cache_dir()/archive-cache
-/// （任务 6 接线 create_dir_all）；未初始化（单测）回落 temp 目录
+/// archive 物化缓存根（M3）：setup 内 get_or_init 真实 app_cache_dir()/archive-cache
+/// （随后 create_dir_all part/ + 启动清理 startup_cleanup）；未初始化（单测 / setup
+/// 前的兜底构造，如 commands 里的独立 factory）回落 temp 目录
 static ARCHIVE_CACHE_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 pub fn archive_cache_root() -> std::path::PathBuf {
@@ -84,9 +85,28 @@ pub fn run() {
                 as std::sync::Arc<dyn credentials::CredentialStore>;
             app.manage(creds.clone());
 
+            // M3：archive cache root 先于 factory（factory 内 Materializer 经
+            // archive_cache_root() 取根）——app_cache_dir()/archive-cache，解析失败回落 temp
+            let cache_root = app.path().app_cache_dir()
+                .map(|d| d.join("archive-cache"))
+                .unwrap_or_else(|_| std::env::temp_dir().join("mirapage-archive-cache"));
+            ARCHIVE_CACHE_ROOT.get_or_init(|| cache_root.clone());
+            std::fs::create_dir_all(cache_root.join("part"))?;
+
             // 初始化 MediaSourceFactory（WebDav 源持 DB 克隆 + 凭据取 Basic Auth）
             let factory = source::MediaSourceFactory::new(db, creds);
-            app.manage(factory);
+            app.manage(factory.clone());
+            // cache 管理命令直接触达物化器（factory 与 manage 共享同一 Arc）
+            app.manage(factory.archive_materializer());
+
+            // archive cache 启动清理（M3 spec §8 rev2）：孤儿 part / 孤儿缓存文件 /
+            // 超容量淘汰（零网络请求；一致性验证推迟到下次 ensure_cached 的 stat）
+            {
+                let db_state = app.state::<db::Db>();
+                let conn = db_state.conn();
+                let limit = setting_u64(&conn, "archive_cache_max_mb", 2048) * 1024 * 1024;
+                source::archive::materializer::startup_cleanup(&cache_root, &db_state, limit as i64);
+            }
 
             // 初始化缩略图缓存服务（v0.1.0-module3.0.7）
             init_thumbnail_service(app_handle)?;

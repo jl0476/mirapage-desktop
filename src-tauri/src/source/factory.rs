@@ -18,6 +18,9 @@ use std::sync::Arc;
 pub struct MediaSourceFactory {
     local: Arc<LocalMediaSource>,
     archive: Arc<ArchiveMediaSource>,
+    /// M3 任务 6：cache 管理命令经 `State<Arc<Materializer>>` 直接触达——与
+    /// `archive` 源共享同一 Arc（cancel_all / begin_clearing 对在途任务即时生效）
+    materializer: Arc<crate::source::archive::materializer::Materializer>,
     smb: Arc<SmbMediaSource>,
     webdav: Arc<WebDavMediaSource>,
 }
@@ -44,11 +47,19 @@ impl MediaSourceFactory {
         Self {
             local,
             archive: Arc::new(ArchiveMediaSource::new(
-                materializer as Arc<dyn Materialize>,
+                materializer.clone() as Arc<dyn Materialize>,
             )),
+            materializer,
             smb,
             webdav,
         }
+    }
+
+    /// M3 任务 6：setup 里 `app.manage(factory.archive_materializer())`——cache 管理
+    /// 命令（usage/evict/clear，任务 9）以 `State<Arc<Materializer>>` 直接触达，
+    /// 与 factory 内 ArchiveMediaSource 注入的 `Arc<dyn Materialize>` 是同一实例
+    pub fn archive_materializer(&self) -> Arc<crate::source::archive::materializer::Materializer> {
+        self.materializer.clone()
     }
 
     /// 按 `SourceDescriptor` 类型返回对应的 `MediaSource` 实现

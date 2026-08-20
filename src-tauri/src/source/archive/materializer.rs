@@ -132,6 +132,52 @@ fn atomic_write_sidecar(part_path: &std::path::Path, sc: &PartSidecar) -> Result
     std::fs::rename(&tmp, &target).map_err(MaterializeError::Io)
 }
 
+/// 启动清理（spec §8 rev2）：①part/ 只删 sidecar 缺失/损坏的 .part（**有效 sidecar 保留——
+/// 重启续传依据，原「全删 part/」与断点续传冲突已废弃**；一致性验证推迟到下次
+/// ensure_cached 的 sidecar 快照 vs 远端 stat，启动时零网络请求）②孤儿缓存文件（表无行）
+/// ③超容量淘汰
+pub fn startup_cleanup(cache_root: &std::path::Path, db: &Db, limit_bytes: i64) {
+    if let Ok(rd) = std::fs::read_dir(cache_root.join("part")) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            // rev3：只把扩展名恰为 .part 的数据文件当候选——sidecar（.part.meta）与
+            // 原子写残留（.meta.tmp）不是 part，绝不当候选（原实现会把 .meta 判为
+            // 无 sidecar 的孤儿而误删，下次启动无法续传）
+            if p.extension().and_then(|e| e.to_str()) != Some("part") {
+                if p.extension().and_then(|e| e.to_str()) == Some("tmp") {
+                    let _ = std::fs::remove_file(&p); // 原子写残留可清
+                }
+                continue;
+            }
+            // 结构化校验（非仅 JSON 可解析）：六字段齐全且类型正确才保留
+            let sidecar_ok = std::fs::read(sidecar_path(&p))
+                .ok()
+                .and_then(|b| serde_json::from_slice::<PartSidecar>(&b).ok())
+                .is_some();
+            if !sidecar_ok {
+                let _ = std::fs::remove_file(&p); // 无法安全续传的孤儿
+                let _ = std::fs::remove_file(sidecar_path(&p));
+            }
+        }
+    }
+    let _ = std::fs::create_dir_all(cache_root.join("part"));
+    let conn = db.conn();
+    let known: std::collections::HashSet<String> = {
+        let mut stmt = match conn.prepare("SELECT cache_abs_path FROM archive_cache") { Ok(s) => s, Err(_) => return };
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map(|it| it.filter_map(|v| v.ok()).collect::<Vec<_>>());
+        match rows { Ok(v) => v.into_iter().collect(), Err(_) => return }
+    };
+    if let Ok(rd) = std::fs::read_dir(cache_root) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.is_file() && !known.contains(&p.display().to_string()) {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    let _ = super::dao::evict_to_limit(&conn, limit_bytes, &[]);
+}
+
 impl Materializer {
     pub fn new(webdav: Arc<dyn MediaSource>, smb: Arc<dyn MediaSource>, db: Db, cache_root: PathBuf) -> Self {
         Self { webdav, smb, db, cache_root: std::sync::RwLock::new(cache_root),
@@ -865,6 +911,99 @@ mod tests {
         assert!(sidecar_path(&part_path).exists(), "sidecar 保留");
         let conn = db.conn();
         assert!(crate::source::archive::dao::get(&conn, &key).unwrap().is_none(), "表无行");
+    }
+
+    /// 六字段合法 sidecar 工厂（cleanup 只做结构化校验，字段值无需语义真实）
+    fn cleanup_sidecar(key: &str, downloaded: u64) -> PartSidecar {
+        PartSidecar {
+            cache_key: key.into(),
+            canonical_origin: "{}".into(),
+            archive_rel_path: "books/a.cbz".into(),
+            snapshot_size: 10,
+            snapshot_mtime: Some(1000),
+            downloaded,
+        }
+    }
+
+    /// 空表内存库 + tempdir cache root（startup_cleanup 用例共用前置）
+    fn cleanup_fixture() -> (tempfile::TempDir, crate::db::Db) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("part")).unwrap();
+        (dir, crate::db::Db::open_in_memory().unwrap())
+    }
+
+    #[test]
+    fn startup_cleanup_removes_orphans_and_parts() {
+        // tempdir：无表行的 {k2}.zip（孤儿 ready）+ 有表行的 {k3}.zip + 无 sidecar 的 part/{k4}.part
+        let (dir, db) = cleanup_fixture();
+        let root = dir.path();
+        std::fs::write(root.join("k2.zip"), b"orphan").unwrap();
+        let k3 = root.join("k3.zip");
+        std::fs::write(&k3, b"known").unwrap();
+        std::fs::write(root.join("part").join("k4.part"), b"partial").unwrap();
+        {
+            let conn = db.conn();
+            crate::source::archive::dao::upsert(&conn, &crate::source::archive::dao::NewCacheRow {
+                cache_key: "k3".into(),
+                origin_kind: "webdav".into(),
+                archive_rel_path: "books/a.cbz".into(),
+                origin_size: 6,
+                origin_mtime: Some(1000),
+                cache_abs_path: k3.display().to_string(),
+                byte_size: 6,
+            }).unwrap();
+        }
+        startup_cleanup(root, &db, i64::MAX);
+        assert!(!root.join("k2.zip").exists(), "孤儿 ready（表无行）删除");
+        assert!(root.join("k3.zip").exists(), "表行对应的 k3.zip 保留");
+        assert!(!root.join("part").join("k4.part").exists(), "无 sidecar 的 .part 删除");
+    }
+
+    /// rev6 终审建议：重启续传不得被启动清理误伤（rev3 修过的方向守卫——
+    /// 旧实现枚举到 .part.meta 拼出 .part.part.meta 判失败，把有效 sidecar 删了）
+    #[test]
+    fn startup_cleanup_keeps_resumable_part_with_valid_sidecar() {
+        let (dir, db) = cleanup_fixture();
+        let part = dir.path().join("part");
+        // ① k1.part（半截 5 字节）+ 有效 k1.part.meta（六字段 PartSidecar，downloaded=5）
+        //    → 两者均保留——重启续传可用（下次 ensure_cached 四关校验通过后从 5 续传）
+        std::fs::write(part.join("k1.part"), b"12345").unwrap();
+        std::fs::write(part.join("k1.part.meta"),
+            serde_json::to_vec(&cleanup_sidecar("k1", 5)).unwrap()).unwrap();
+        // ② k2.part 无 sidecar → 删
+        std::fs::write(part.join("k2.part"), b"12345").unwrap();
+        // ③ k3.part + 损坏 sidecar（半截 JSON）→ 删两者
+        std::fs::write(part.join("k3.part"), b"12345").unwrap();
+        std::fs::write(part.join("k3.part.meta"), b"{\"cache_key\": \"k3\"").unwrap();
+        // ④ k4.part.meta 单独存在（.part 已 rename 走，sidecar 残留）→ 非候选不处理
+        //    （保留；正常路径 ready 时已顺手删，此为极端残留）
+        std::fs::write(part.join("k4.part.meta"),
+            serde_json::to_vec(&cleanup_sidecar("k4", 10)).unwrap()).unwrap();
+
+        startup_cleanup(dir.path(), &db, i64::MAX);
+        assert!(part.join("k1.part").exists() && part.join("k1.part.meta").exists(),
+            "① 有效 sidecar 的 .part+sidecar 均保留（重启续传依据）");
+        assert!(!part.join("k2.part").exists(), "② 无 sidecar 的 .part 删除");
+        assert!(!part.join("k3.part").exists() && !part.join("k3.part.meta").exists(),
+            "③ 损坏 sidecar → .part+sidecar 均删除");
+        assert!(part.join("k4.part.meta").exists(), "④ 孤儿 sidecar 非候选保留");
+    }
+
+    /// rev6 方向守卫：目录只有 .meta/.meta.tmp（无 .part）时 cleanup 不误删 sidecar
+    #[test]
+    fn startup_cleanup_ignores_meta_files_as_part_candidates() {
+        let (dir, db) = cleanup_fixture();
+        let part = dir.path().join("part");
+        // part/ 只有 k5.part.meta（无 k5.part）→ 保留
+        let sc = serde_json::to_vec(&cleanup_sidecar("k5", 5)).unwrap();
+        std::fs::write(part.join("k5.part.meta"), &sc).unwrap();
+        // k6.part.meta.tmp（原子写残留）→ 删除
+        std::fs::write(part.join("k6.part.meta.tmp"), &sc).unwrap();
+
+        startup_cleanup(dir.path(), &db, i64::MAX);
+        assert!(part.join("k5.part.meta").exists(),
+            "无 .part 对应的 sidecar 不是候选，不被误删（旧实现方向反了会删）");
+        assert!(!part.join("k6.part.meta.tmp").exists(), "原子写残留 .tmp 清除");
     }
 
     /// 双通道语义补测：窗口 epoch 只取消预载（cancellable）任务，强制物化不受 epoch 影响
