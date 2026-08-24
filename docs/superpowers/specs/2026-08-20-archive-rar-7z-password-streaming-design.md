@@ -1,7 +1,7 @@
 # RAR / CBR / 7z、全格式密码与远程 ZIP 流式读取设计
 
 > 日期：2026-08-20
-> 状态：用户已逐节确认，待书面规格审查
+> 状态：用户已逐节确认，2026-08-24 第三轮书面规格审查修订完成
 > 前置：`v0.1.0-module3.4.0-remote-archive` 已交付远程 CBZ/ZIP 物化、断点续传、预载与 LRU cache
 > 关联：`DESIGN.md` §16.1「RAR / 7z 压缩包（Phase 3 收尾）」
 
@@ -61,7 +61,7 @@
 | 格式 | 后端 | 密码范围 | 输入形态 |
 |---|---|---|---|
 | CBZ / ZIP | 现有 `zip 2.x`，显式启用 AES 能力 | ZipCrypto、WinZip AES AE-1/AE-2 | 本地文件或远程随机访问源 |
-| CBR / RAR | `unrar 0.5.x` + 内置 RARLab UnRAR | RAR4、RAR5 加密 | 本地文件路径 |
+| CBR / RAR | `unrar 0.5.8` + `unrar_sys 0.5.8` + 内置 RARLab UnRAR | RAR4、RAR5 加密 | 本地文件路径；读取经 UnRAR data callback 限流 |
 | 7z | `sevenz-rust 0.6.1`，启用 AES | 普通/solid、内容与文件名加密 | 本地文件路径 |
 
 依赖选择以 Rust 1.75 可编译为硬门槛。最新 `unrar-ng 0.7` 要求 Rust 1.85，最新 `sevenz-rust2 0.21` 要求 Rust 1.93，因此本模块不采用。实现计划的首个依赖 spike 必须在 Windows 当前工具链和 Rust 1.75 上分别验证；若间接依赖漂移破坏 MSRV，则锁定兼容补丁版本，不抬高 MSRV。
@@ -79,10 +79,12 @@ archive/
 ├─ backend.rs          统一类型、错误与 backend 分派
 ├─ zip_backend.rs      本地 ZIP + 远程随机访问 ZIP
 ├─ rar_backend.rs      RAR/CBR 路径读取
+├─ rar_callback.rs     UnRAR data callback、限长输出与 FFI 安全边界
 ├─ sevenz_backend.rs   7z 路径读取
 ├─ password.rs         会话密码库与 archive identity
 ├─ remote_zip.rs       Range Read+Seek 适配与内存块 LRU
-├─ materializer.rs     现有整包物化，泛化格式
+├─ cache_coordinator.rs runtime/磁盘 cache 的单一全局准入与清空协调器
+├─ materializer.rs     现有整包物化，泛化格式并接入全局协调器
 ├─ prefetch.rs         现有预载，扩展五格式
 └─ dao.rs              现有 cache DAO
 ```
@@ -116,11 +118,26 @@ ZIP、UnRAR、7z 的解析/解压均视为阻塞 IO/CPU 工作，统一在 `toki
 - RAR backend：最多 2 个并发任务。
 - 7z backend：最多 2 个并发任务。
 
-并发限制为进程级 semaphore。获取许可前可取消；任务已进入第三方同步库后不能强杀，只丢弃结果并禁止写入陈旧状态。单个任务 panic 必须在 join 边界转换为类型化错误，不能使后续请求永久卡住。
+并发限制为进程级 semaphore。获取许可前可取消；ZIP/7z 任务已进入第三方同步库后不能强杀，只丢弃结果并禁止写入陈旧状态。RAR 读取例外：必须直接使用 `unrar_sys` 的 UnRAR data callback，在 callback 累计输出达到硬上限时返回终止码，使解压在产生无界 `Vec` 之前停止；不得调用高层 `unrar::read()` 取得完整 `Vec` 后再检查长度。`OpenArchiveDataEx` 在 `RAROpenArchiveEx` 之前就写入 callback 与 user-data，不能等 handle 打开后才注册，否则加密 header 的密码请求会丢失。callback state 同时持有可选限长 sink、`Zeroizing` 密码和类型化错误；容量固定为 `limit + 1`。读取按 header 顺序推进，命中目标调用 `RARProcessFile(RAR_TEST)`，其余调用 `RAR_SKIP`；禁止 `RAR_EXTRACT`，不得向工作目录或 cache 写出 entry。`UCM_PROCESSDATA` 在构造 slice 前必须验证数据指针非空且长度为正，volume/password 消息也要按各自指针/长度契约验证。FFI 边界使用 `catch_unwind`，任何 panic 都写入 state 并转换为终止码，绝不跨 C ABI unwind。单个任务 panic必须在 join 边界转换为类型化错误，不能使后续请求永久卡住。
 
 ### 4.4 目录索引缓存
 
 增加进程内 catalog LRU，键为 archive identity + `size/mtime` 指纹 + `entryPrefix`，值只包含条目元数据，不包含图片字节或密码。最大 32 个 archive catalog；文件指纹变化、密码失效或 cache 清空时移除对应项。该缓存不写 DB，退出自动释放。
+
+catalog cache 只证明“这份容器元数据曾被解析”，不能证明当前仍持有已验证密码。命中包含加密条目的 catalog 时，服务必须再次检查同一 identity 的 password store；password 不存在则返回 `PasswordRequired`，不得仅凭 catalog hit 返回 `ready`。错误密码、显式 forget、文件指纹变化和 cache 清空同时移除对应 catalog。
+
+### 4.5 资源上限
+
+所有 archive 都视为不可信输入。并发 semaphore 之外增加以下硬限制，避免压缩炸弹、伪造元数据或超长目录耗尽内存：
+
+- 单条目最大解压大小：512 MiB；读取过程中实际输出超过上限立即停止，不能只信 central directory / header 声明值。
+- catalog 最大条目数：100,000；单条目规范化路径最大 4,096 UTF-8 bytes；超过任一限制返回 `ResourceLimitExceeded`。
+- `read_entry` 使用限长 writer/read loop，最多读取 `limit + 1` bytes 判断越界；不得按不可信 `unpacked_size` 直接 `Vec::with_capacity(unpacked_size as usize)`。
+- RAR 的“实际输出”限制由 `unrar_sys` data callback 在每个数据块到达时执行；callback 只复制剩余预算并立即中止，禁止用 `unrar::read()` 先完整分配。RAR listing 的声明大小限制和 callback 的实际输出限制是两条独立防线、两组独立测试。
+- 进程级并发解压工作集预算：512 MiB。任务取得格式 semaphore 后还必须按 `min(declaredSize, 512 MiB)` 取得加权内存许可；无可靠声明时按 512 MiB 申请。许可覆盖 backend 解压和结果 `Vec` 构造，函数把 bytes 交付上层时释放；现有 `MediaSource -> Vec<u8>` 契约不允许它继续覆盖 media response 生命周期，因此单条目 512 MiB 硬上限仍是最终兜底。
+- 7z 的 dictionary / coder 内存请求超过库或本模块上限时映射为 `ResourceLimitExceeded`，不映射为损坏包。
+
+上限首版固定为后端常量，不新增设置项；后续若真实漫画样本证明 512 MiB 单图不足，再独立设计可配置策略。
 
 ## 5. 密码模型
 
@@ -159,19 +176,32 @@ Rust managed state 中新增 `ArchivePasswordStore`：
 
 ### 6.1 新命令
 
-新增两个 Tauri command，并继续只由 `src/lib/tauri.ts` 封装：
+新增五个 Tauri command，并继续只由 `src/lib/tauri.ts` 封装：
 
-- `prepare_archive(descriptor) -> ArchivePrepareResult`
-- `unlock_archive(descriptor, password) -> ArchivePrepareResult`
+- `begin_archive_session(sessionId) -> ()`
+- `prepare_archive(descriptor, requestId) -> ArchivePrepareResult`
+- `unlock_archive(descriptor, password, requestId) -> ArchivePrepareResult`
+- `commit_archive_open(requestId) -> ()`
+- `cancel_archive_prepare(requestId) -> ()`
 
 返回结果为带 tag 的结构化枚举：
 
 ```text
-ready { accessMode: local | streaming | materialized }
+ready { accessMode: local | streaming | materialized, progressKey: string | null }
 passwordRequired
 ```
 
-命令在 probe、Range 准备或完整物化结束后才返回；等待期间的 `materializing` UI 状态继续由既有 archive 进度事件驱动，不把一个无人接管的中间结果返回给前端。错误使用结构化 `ArchiveAccessError`，不由前端解析字符串。`forget_archive_password` 只保留 Rust 内部方法；前端没有“永久记住/忘记”按钮。
+命令在 probe、Range 准备或完整物化结束后才返回；等待期间的 `materializing` UI 状态继续由 archive 进度事件驱动，不把一个无人接管的中间结果返回给前端。远程结果的 `progressKey` 是后端生成的 opaque cache key，前端只保存并用于匹配当前 archive 的后台事件，不自行重算。错误使用结构化 `ArchiveAccessError`，不由前端解析字符串。`forget_archive_password` 只保留 Rust 内部方法；前端没有“永久记住/忘记”按钮。
+
+`requestId` 固定为 `{ sessionId: string, sequence: u64 }`。每次 WebView 生命周期生成一个随机 UUID sessionId，并在首次 archive 请求前调用 `begin_archive_session`；sessionId 最长 64 bytes 且必须是 UUID 文本，无效值返回结构化 `InvalidRequest`。Rust 针对单主窗口只保存一个 `currentSession`。相同 session begin 幂等；新 session 表示 reload/HMR rollover，必须原子取消旧 active、删除旧 session 状态并拒绝其迟到 prepare/unlock/commit（迟到 cancel 为幂等 no-op），因此空间不随 WebView reload 数增长。
+
+当前 session 只保存单调 `cancelledThrough`、精确 `lastCommitted: u64 | null` 与至多一个 active request。每次打开递增 sequence；同一候选的 prepare、unlock、commit、取消和候选物化进度都携带同一个 id。新请求注册时原子取消/替换旧 active；前端也必须在发出新 prepare 前先取消旧 id。`cancel_archive_prepare(N)` 幂等推进取消高水位并取消 active.sequence <= N 的未提交请求，所以 cancel 即使先于 register 到达也不会丢失。commit 只接受 Prepared active，成功后保存精确 `lastCommitted=N` 并移除 active；只有同一个 N 的重试直接成功且不重复启动预载，不能把所有 `sequence <= N` 推断为已提交。cancel 已提交 id 为 no-op，旧 Prepared 的迟到 commit 必须拒绝。
+
+请求状态为 `Running -> AwaitingPassword | Prepared -> Committed`，任意未提交状态都可转 `Cancelled`。`prepare/unlock` 返回 `ready` 时只进入 `Prepared`，绝不启动非阻塞后台预载；前端先原子提交导航，再显式调用幂等 `commit_archive_open(requestId)`。只有 `Prepared -> Committed` 成功后，后端才把该请求的可选后台物化 subscriber 加入 Materializer 并启动/提升预载。前端若在本地提交前取消或丢弃迟到回包，则调用 cancel，后台任务不会逃逸。commit IPC 失败不回滚已提交导航：前端保留 requestId，以同一 id 最多重试 3 次（短退避）；最终失败时 best-effort cancel 并清除 commit-pending id，不能丢弃 id 后让 Prepared 永久泄漏。新打开和退出也会取消该 commit-pending id。
+
+取消检查覆盖：取得全局 cache 准入与格式 semaphore 前、每个 Range/下载 chunk、远端二次 stat 后、第三方同步 backend 返回后、catalog/block/DAO/rename 提交前。同步第三方库调用不能强杀时允许其完成，但结果必须丢弃且不得写入缓存或密码 store。物化 in-flight 去重时，每个交互请求作为独立 subscriber；取消只移除自身，最后一个交互 subscriber 取消且没有已 commit 的后台 subscriber 时才停止共享下载。共享任务的进度向所有活动交互 subscriber 各 fan-out 一份；后台事件使用 `requestId: null` 和 Ready 返回的同一 `progressKey`。
+
+候选 descriptor 未提交期间，前端以独立 `pendingArchiveOpen` 保存候选 identity、`archiveRelPath`、结构化 `requestId`、请求 epoch 与 `opening/materializing` 状态。进度事件使用 serde camelCase 的类型化载荷 `{ requestId, progressKey, relPath, downloaded, totalBytes, phase }`；候选 UI 只接受两个 requestId 字段都相等的事件，当前 archive 的非阻塞后台进度只按已提交 Ready 的 opaque `progressKey` 匹配；不能用 relPath、前端闭包 epoch 或自行派生 cache key 推断事件归属。后台 Materializer subscriber 必须保存 commit 传入的 progressKey，并从 subscriber state 给每一条事件赋值，不能只把参数停留在 Prefetcher API。新打开请求、取消或离开页面都会推进 epoch，原子摘走旧 pending/password/commit-pending id 并在注册新请求前调用后端取消；旧回包与迟到事件必须被丢弃。该 pending 状态只在内存中存在，不写持久化 store。
 
 ### 6.2 事务式打开
 
@@ -180,14 +210,14 @@ passwordRequired
 ```text
 idle
   → probing
-  → password-required → unlocking → ready
+  → password-required → unlocking → prepared → UI commit → backend commit → ready
                       ↘ wrong-password → password-required
                       ↘ cancel → idle
-  → materializing → ready
+  → materializing → prepared → UI commit → backend commit → ready
   → error → idle
 ```
 
-只有 `ready` 后才提交导航状态、历史、快捷方式身份和列表加载。取消、密码错误、网络失败或坏包都留在原目录，不产生半切换状态。
+只有后端返回 `ready` 且 request/epoch 仍有效时，前端才提交导航状态、历史、快捷方式身份和列表加载；提交后立即发送 `commit_archive_open`，后端收到 commit 后才启动可选后台物化。取消、密码错误、网络失败或坏包都留在原目录，不产生半切换状态。
 
 ### 6.3 密码弹窗
 
@@ -224,6 +254,8 @@ stat(size, mtime)
 
 `RemoteZipReader` 向 `zip` crate 提供同步 `Read + Seek` 外观。它只在 `spawn_blocking` 线程运行；Range miss 时通过捕获的 Tokio runtime handle 调用异步 `read_range`，禁止在 async worker 上 `block_on`。
 
+`Read` 边界必须用自定义 `RemoteZipIoError` 作为 `std::io::Error` 的 inner source 保存 `RemoteRangeUnavailable/Network/Timeout/Cancelled` 分类。限长 writer 用独立 `LimitedEntryIoError` marker 表示越界。`zip_backend::map_zip_io_error` 的映射顺序固定为：先恢复 `RemoteZipIoError`；再把 `LimitedEntryIoError` 映射为 `ResourceLimitExceeded`；再把 ZIP payload 完整性校验产生的 `ErrorKind::InvalidData` 映射为 `CorruptArchive`；最后才映射普通 `Io`。`map_zip_error(ZipError::Io)` 委托同一 helper。所有 entry payload 的 `Read::read`、`read_to_end`、`io::copy`、CRC/MAC 完整性验证和限长 writer 路径都必须经该 helper，因为这些调用直接返回 `std::io::Error`，不能假设都会再次包装为 `ZipError::Io`。自动降级测试必须分别覆盖 catalog/open 阶段和“catalog 成功、读取首个 entry payload 时网络失败”阶段，并穿过真实 `RemoteZipReader -> zip::ZipArchive -> ZipBackend -> ArchiveService`。
+
 固定参数：
 
 - Range block：1 MiB。
@@ -234,9 +266,13 @@ stat(size, mtime)
 
 块只存在 RAM，不写 SQLite。archive 指纹变化、cache 清空或应用退出时失效。
 
+catalog LRU、Range block LRU、Materializer ready-path/cache-hit 检查和完整物化共享唯一 `ArchiveCacheCoordinator`。Coordinator 用短持有的 `std::sync::Mutex<State>` 原子完成“检查 clearing + 注册 admission”，返回同步 Drop 的 `AdmissionGuard`；所有 archive runtime 与 Materializer 路径必须在任何 catalog/block/DAO/ready 磁盘 cache 查询之前先取得 admission，因此 cache hit 也不能绕过清空闸门。guard Drop 同步减少 active 计数并通知 drain waiter，不在 Drop 中启动 async 工作。
+
+`begin_clear` 在同一 mutex 内置 `clearing=true`、推进 generation 并返回 `ClearGuard`，从这一刻起 runtime 和 Materializer 新 admission 全部返回 `Cancelled`；随后 `wait_drained(timeout)` 等待已有 guard 归零，再清 runtime LRU、磁盘与 DAO。loader 在每个提交点复核 guard generation。`ClearGuard::drop` 同步复位 clearing 并通知等待者，所以错误、timeout 或 panic 路径都不会遗留闸门。禁止串联两个独立 gate，也禁止“先查 ready cache、miss 后才 admission”的顺序。
+
 ### 7.3 后台物化与切换
 
-远程 ZIP catalog 成功后：
+远程 ZIP prepare/probe 成功并返回 `Prepared` 后，必须等待前端 `commit_archive_open`；commit 成功后：
 
 - `remote_archive_prefetch_enabled=true`：启动可取消的后台完整物化。
 - 设置为 false：保持 Range 读取；只有流式失败才强制物化。
@@ -252,6 +288,7 @@ stat(size, mtime)
 - 返回 offset 或长度违反强契约。
 - ZIP reader 需要的 Seek 无法满足。
 - 流式网络请求失败且一次原位重试仍失败。
+- 流式请求超时（`Timeout`）；`Cancelled` 不降级，直接静默终止陈旧请求。
 
 UI 从“正在打开”切换为“正在下载完整压缩包…”，继续显示既有物化进度。完整物化也失败时才返回最终网络/IO 错误。
 
@@ -270,10 +307,13 @@ UnRAR 只接受路径并按顺序处理条目；7z 尤其 solid archive 的随�
 - normalizedExt 由 descriptor format 决定，并与 `archiveRelPath` 扩展名双重校验。
 - `.part` 与 `.part.meta` 命名保持 `{cacheKey}.part`，sidecar schema 不增加密码。
 - DAO 的 `cache_abs_path` 已是字符串，无需 migration；既有 `.zip` 行继续有效。
-- 启动清理、磁盘一致性、远端失效判定、条件删除、in-flight、取消、清空闸门、容量统计和 LRU 语义不变。
+- 启动清理、磁盘一致性、远端失效判定、条件删除、容量统计和 LRU 语义不变；原 Materializer 独立清空闸门并入 §7.2 的唯一 `ArchiveCacheCoordinator`，所有 cache hit/miss 都先 admission。
+- in-flight 去重扩展为明确 subscriber 模型：交互请求按结构化 requestId 独立取消和接收进度；commit 后的后台 subscriber 保存 Ready 的 opaque progressKey 且不受 UI 取消影响；没有任何 subscriber 时才取消物理下载。现有直接拼 `serde_json::json!` 的进度分支统一替换为类型化 serde payload，交互/后台路径不能漏掉 requestId 或 progressKey。
 - 前端 metadata/content 预载过滤扩展到五种格式；预载只下载原始包，不探测或弹出密码。
 
 多卷按两层识别：`.partNN.rar`、`.rNN`、`.7z.NNN` 等明确文件名模式在调用 backend 前拒绝；普通 `.rar/.cbr/.7z` 则由 backend 打开后的 volume/split 元数据识别并立即停止。任一层确认多卷都返回 `MultiVolumeUnsupported`，不得自动扫描、请求或下载相邻卷。
+
+ZIP/CBZ 在构造 catalog 前检查 EOCD 与 ZIP64 locator/EOCD 的 disk number、central-directory start disk 和 per-disk entry count；任一字段表明 multi-disk 即返回 `MultiVolumeUnsupported`。不得依赖 `zip` crate 的通用 unsupported/corrupt 文本来分类。
 
 ## 9. 错误模型
 
@@ -287,12 +327,16 @@ Archive 层新增稳定错误分类：
 | `MultiVolumeUnsupported` | 说明仅支持单卷 |
 | `CorruptArchive` | 说明索引、CRC/MAC 或内容损坏 |
 | `EmptyArchive` | 说明未找到可阅读图片 |
+| `ResourceLimitExceeded` | 说明条目或容器超过安全资源上限 |
 | `EntryNotFound` | 显示条目已变化或不存在 |
 | `RemoteRangeUnavailable` | 内部降级，最终失败前不弹出 |
 | `Cancelled` | 静默回原目录或丢弃陈旧结果 |
+| `InvalidRequest` | 拒绝非法 session/request 合同并记录非敏感诊断 |
 | `Io/Network/Timeout` | 沿用现有媒体源提示与状态码 |
 
 backend 原始错误必须在各自模块映射，不把第三方库字符串直接暴露给前端。media protocol 保留现有 HTTP 状态语义；密码错误不得降级成通用 500 并无限重试。
+
+`FileBrowser` 必须捕获 `prepare_archive` 的 rejected promise：`Cancelled` 静默清理候选，其余错误写入仅内存的 `archiveOpenError` 并由 UI 按上表映射；不得从双击/click handler 泄漏未处理 Promise。错误、密码请求和取消都不得修改原导航。至少为 `MultiVolumeUnsupported`、`ResourceLimitExceeded`、`Network` 和 `CorruptArchive` 建立 store/UI 测试。
 
 日志只记录格式、错误分类、request id 和经过现有规则截断/脱敏的路径。任何级别都禁止记录密码、密码长度、候选密码哈希或解密后的敏感非图片内容。
 
@@ -340,7 +384,7 @@ backend 原始错误必须在各自模块映射，不把第三方库字符串直
 - 7z：普通、solid、加密文件名。
 - 每类覆盖无密码、正确密码、错误密码、取消、会话复用、文件变化后缓存失效。
 
-RAR 库不能创建 archive；仓库提交最小测试 fixture，内容只使用自生成色块图片，同时提交 README，记录生成命令、工具版本、格式、密码仅测试用途及 SHA-256。ZIP/7z 优先在测试中生成；库无法生成的特定变体同样使用有来源说明的最小 fixture。
+RAR 库不能创建 archive；仓库提交最小测试 fixture，内容只使用自生成色块图片，同时提交可执行生成脚本/命令与 README。ZIP 基线固定为 7-Zip 24.09 的 ZipCrypto，以及 Python 3.12 + `pyzipper==0.4.0` 通过 `force_wz_aes_version=1/2` 显式生成的 AES AE-1/AE-2；生成脚本负责确定性输入、AE-1/AE-2、multi-disk ZIP，并显式调用/验证固定版本的 7-Zip 生成 ZipCrypto；脚本必须解析 AES extra field，断言 vendor version 分别为 1/2，并校验 AE-2 CRC 为 0。RAR 基线固定为 WinRAR CLI 7.11 的 `rar.exe`，README 记录完整参数，脚本只生成 RAR 输入并验证外部产物。每个 fixture 记录工具版本、完整命令、格式、密码仅测试用途及 SHA-256；哈希清单显式枚举且断言恰好九个 archive 文件，不包含脚本、README、输入图片或额外分卷。不得使用“任选可用工具”或 `ZipWriter` 的单一 AES vendor version 代替三类证据。7z 优先在测试中生成；库无法生成的特定变体使用同样有脚本、版本和哈希的最小 fixture。
 
 ### 12.3 单卷与安全
 
@@ -348,18 +392,28 @@ RAR 库不能创建 archive；仓库提交最小测试 fixture，内容只使用
 - descriptor JSON、DB 行、日志、事件、sidecar 和错误文本扫描不得包含测试密码。
 - 错误密码不进入 store；正确密码在 drop/clear 后内存容器执行清零逻辑。
 - 第一个加密条目完整校验，锁住 ZipCrypto 错误密码误通过防线。
+- 已解锁 catalog 命中后清除 password store，再次 prepare 必须返回 `PasswordRequired`。
+- 超大声明值、实际解压越界、catalog 条目数和路径长度越界都返回 `ResourceLimitExceeded`，且进程继续可用。RAR 不通过篡改 CRC 保护的 header 构造该测试：合法 fixture + 低 limit 测 listing 声明大小分支；另用仅限测试的 policy 绕过声明值短路，使同一合法 fixture 穿过真实 `RAROpenArchiveEx -> callback -> RARProcessFile(RAR_TEST)` 并在实际输出达到 `limit + 1` 以内中止。测试断言类型化资源上限错误、工作目录/cache 无新增 entry、abort 后下一次正常请求成功；加密 header fixture 另行证明 password callback 在 open 前已注册。纯 callback helper 单测不能替代这两个 FFI 集成合同。
 
 ### 12.4 远程 ZIP 流式
 
 WebDAV 与 SMB mock 运行同一合同：
 
-- 首个数据请求为尾部 Range，而非 `0..size` 整包。
+- 首个数据请求为包含 EOF 的最后一个 1 MiB block，而非 `0..size` 整包；断言按 block 对齐，不假设 offset 位于末尾 128 KiB。
 - catalog 后只请求首图需要的 block。
 - Range block cache 命中与并发去重。
+- prepare 返回 Streaming 时后台物化尚未启动；只有对应 `commit_archive_open` 才启动，取消或迟到回包不启动；逐字节断言 Ready 的 `progressKey` 与该后台 subscriber 后续每一条 `requestId=null` 事件一致。
 - 后台物化启动、取消、续传、完成后新请求切本地。
-- Range 被忽略、offset 错、短读、网络错误时自动降级。
+- Range 被忽略、offset 错、短读、Network 或 Timeout 时自动降级；Cancelled 不降级。
 - 远端 size/mtime 变化使 catalog、block、密码 identity 与完整 cache 失效。
 - 流式与 cache 清空并发不复活已清数据。
+- Range 错误分类必须分别穿过真实 `ZipError::Io` 和 entry payload 直接返回的 `std::io::Error` 边界后仍触发自动降级；`map_zip_io_error` 分别锁定 Remote marker、limit marker、CRC/`InvalidData` 与普通 IO 的映射顺序。
+- 取消 prepare 后后端 Range/完整物化停止或仅为其他 subscriber 继续；新 open 在注册新 request 前先取消旧 Prepared，同一路径立即重开时旧 requestId 的进度、回包和迟到 commit 都不能污染新请求。cancel-before-register 由 `cancelledThrough` 拒绝；故意跳号后只允许精确 `lastCommitted` 重试，不能把空洞内旧 id 当作已提交。
+- WebView session rollover 会取消旧 active、回收旧 session，并拒绝旧 session 的迟到命令；重复 reload 后 registry 大小保持常数。非法/超长 sessionId 被结构化拒绝。
+- commit IPC 暂时失败后以同一 requestId 重试成功只启动一次预载；连续 3 次失败后调用 cancel，导航不回滚且 registry 不残留 Prepared。
+- Materializer 同 key subscriber 合同：A/B 都先收到基线事件，记录各自计数后取消 A；随后 A 计数不再增长，B 计数增长并收到完成事件。交互 + 已 commit 后台 subscriber 中交互取消不停止物理下载；所有交互 subscriber 都取消且无后台 subscriber 时物理下载停止。
+- 清空开始后新 catalog/block/ready-cache/materialize 路径都被同一个全局 coordinator 拒绝；清理测试必须先 spawn clear、等待 clearing/drain gate 已建立，再释放受控 Range/下载，最后 await clear，避免测试自身死锁。另用注入的短 drain timeout 证明错误返回后 `ClearGuard` 已同步复位、后续 admission 不会死锁。正常清理结束时 runtime、磁盘与 DAO 均为空，闸门随后恢复。
+- RemoteZipReader 并发/线程测试使用 multi-thread `#[tokio::test]`，显式捕获并 clone `tokio::runtime::Handle::current()` 给 `spawn_blocking`/OS thread；不得在普通 `#[test]` 中假设存在 runtime。
 
 ### 12.5 全量回归门槛
 
@@ -387,6 +441,7 @@ npm run tauri -- build --no-bundle
 - 7z 普通/solid、未加密/加密文件名包均可浏览和阅读。
 - 错误密码可重试，取消留在原目录，正确密码本次运行内复用，重启后重新询问。
 - 大 ZIP 不再产生整包 `Vec<u8>` 副本。
+- 超大/恶意条目和目录命中资源上限时给出稳定错误，不造成无界内存增长。
 
 ### 13.2 远程
 
@@ -409,7 +464,7 @@ npm run tauri -- build --no-bundle
 1. 依赖/MSRV/许可 spike 与 fixture 基线。
 2. 锁定现有 ZIP 行为。
 3. ArchiveBackend 抽象与 ZIP 路径化迁移，保持零行为变化。
-4. 类型化错误、密码 store、prepare/unlock IPC 与密码弹窗。
+4. 类型化错误、密码 store、prepare/unlock/cancel IPC 与密码弹窗。
 5. ZIP 全密码支持。
 6. RAR/CBR backend。
 7. 7z backend。
@@ -423,6 +478,7 @@ npm run tauri -- build --no-bundle
 
 - UnRAR 原始许可：<https://raw.githubusercontent.com/muja/unrar.rs/master/unrar_sys/vendor/unrar/license.txt>
 - `unrar` API 与路径/顺序读取限制：<https://github.com/muja/unrar.rs>
+- `unrar_sys 0.5.8` 的 `RARSetCallback` / `UCM_PROCESSDATA` 绑定：<https://docs.rs/unrar_sys/0.5.8/unrar_sys/>
 - `zip` 加密与格式支持：<https://docs.rs/zip/latest/zip/>
 - `ZipArchive::by_*_decrypt`：<https://docs.rs/zip/latest/zip/read/struct.ZipArchive.html>
 - `sevenz-rust 0.6.1`：<https://docs.rs/crate/sevenz-rust/0.6.1>

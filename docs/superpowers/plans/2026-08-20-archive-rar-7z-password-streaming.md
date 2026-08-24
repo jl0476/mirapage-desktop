@@ -4,9 +4,9 @@
 
 **目标：** 在不改变现有 Archive descriptor 和上层阅读链路的前提下，为 CBZ/ZIP/CBR/RAR/7z 增加全源、单卷、会话密码支持，并让远程 ZIP/CBZ 可以 Range 流式首开、后台完整物化和失败自动降级。
 
-**架构：** 新增共享 `ArchiveService`，由 `ArchiveMediaSource` 与 prepare/unlock IPC 共用；服务按格式分派 ZIP、RAR、7z backend，并持有会话密码库、目录 catalog LRU、远程 ZIP block LRU 和现有 Materializer。ZIP backend 接受本地文件或 `Read+Seek` reader factory，RAR/7z 只接受本地路径；远程 ZIP 先通过 `RemoteZipReader` 读取，RAR/7z 继续完整物化。
+**架构：** 新增共享 `ArchiveService`，由 `ArchiveMediaSource` 与 session/prepare/unlock/commit/cancel IPC 共用；服务按格式分派 ZIP、RAR、7z backend，并持有会话密码库、目录 catalog LRU、远程 ZIP block LRU、结构化请求状态机和现有 Materializer。Archive runtime 与 Materializer 的 cache hit、loader 和清空统一经过单一 `ArchiveCacheCoordinator` 原子准入。ZIP backend 接受本地文件或 `Read+Seek` reader factory；RAR 通过 `unrar_sys` data callback 在解压过程中执行硬上限；7z 只接受本地路径。远程 ZIP 先通过 `RemoteZipReader` 读取，RAR/7z 继续完整物化。`prepare/unlock` 只产生 Prepared，前端原子提交导航后调用 `commit_archive_open` 才启动可选后台物化。
 
-**技术栈：** Rust 1.75、Tauri 2、Tokio、`zip 2.4.2`、`unrar 0.5.8`、`sevenz-rust 0.6.1`、`zeroize 1.x`、Vue 3、Pinia、Vitest。
+**技术栈：** Rust 1.75、Tauri 2、Tokio、`zip 2.4.2`、`unrar 0.5.8`、`unrar_sys 0.5.8`、`sevenz-rust 0.6.1`、`zeroize 1.x`、Vue 3、Pinia、Vitest。
 
 **规格：** `docs/superpowers/specs/2026-08-20-archive-rar-7z-password-streaming-design.md`
 
@@ -16,14 +16,16 @@
 
 ### 新建
 
-- `src-tauri/src/source/archive/backend.rs`：统一 catalog、输入源、backend trait、类型化 Archive 错误和格式分派。
+- `src-tauri/src/source/archive/backend.rs`：统一 catalog、输入源、backend trait、类型化 Archive 错误、资源上限和格式分派。
 - `src-tauri/src/source/archive/password.rs`：archive identity、会话密码库、清零语义。
 - `src-tauri/src/source/archive/zip_backend.rs`：本地/远程 ZIP、ZipCrypto/AES、catalog/read/stat。
 - `src-tauri/src/source/archive/rar_backend.rs`：单卷 RAR4/RAR5、密码、catalog/read/stat。
+- `src-tauri/src/source/archive/rar_callback.rs`：UnRAR data callback、限长输出、错误桥与 FFI unwind 防线。
 - `src-tauri/src/source/archive/sevenz_backend.rs`：普通/solid 7z、AES、catalog/read/stat。
-- `src-tauri/src/source/archive/remote_zip.rs`：1 MiB Range block、32 MiB LRU、singleflight、`Read+Seek`。
+- `src-tauri/src/source/archive/remote_zip.rs`：1 MiB Range block、32 MiB LRU、singleflight、cache generation、类型化 IO 桥和 `Read+Seek`。
+- `src-tauri/src/source/archive/cache_coordinator.rs`：runtime/Materializer 共用的 admission、generation、drain 与 RAII clear guard。
 - `src-tauri/src/source/archive/service.rs`：路径解析、probe/unlock、backend 调度、catalog LRU、流式降级和后台物化。
-- `src-tauri/src/commands/archive_access.rs`：`prepare_archive` / `unlock_archive` Tauri commands。
+- `src-tauri/src/commands/archive_access.rs`：`prepare_archive` / `unlock_archive` / `commit_archive_open` / `cancel_archive_prepare` Tauri commands。
 - `src/components/filebrowser/ArchivePasswordDialog.vue`：受控密码模态框。
 - `src/components/filebrowser/ArchivePasswordDialog.test.ts`：键盘、提交、错误和安全文案测试。
 - `src-tauri/tests/fixtures/archive/README.md`：fixture 来源、生成命令、密码和 SHA-256。
@@ -40,9 +42,9 @@
 - `src-tauri/src/source/factory.rs`：构造并暴露共享 Materializer、Prefetcher、ArchiveService。
 - `src-tauri/src/source/trait_def.rs`：Archive 类型化错误穿透到 media protocol。
 - `src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`：注册 commands 与 managed state。
-- `src-tauri/src/commands/archive_cache.rs`：cache 清理测试不再假设 `.zip`。
-- `src/lib/tauri.ts`：结构化 prepare/unlock 类型和 IPC 封装。
-- `src/stores/fileBrowser.ts`：候选 descriptor、prepare 后原子提交、密码请求状态。
+- `src-tauri/src/commands/archive_cache.rs`：cache 清理协调 Materializer 与 Archive runtime cache，并且测试不再假设 `.zip`。
+- `src/lib/tauri.ts`：结构化 session/prepare/unlock/commit/cancel 类型和 IPC 封装。
+- `src/stores/fileBrowser.ts`：候选 descriptor、pending 打开 epoch/进度、prepare 后原子提交、密码请求状态。
 - `src/stores/fileBrowser.test.ts`：事务式导航、五格式、取消/错误零污染。
 - `src/components/filebrowser/FileBrowser.vue`：驱动密码模态框、非阻塞后台缓存文案。
 - `src/components/filebrowser/FileBrowser.test.ts`：密码交互、流式/降级 UI。
@@ -64,6 +66,13 @@
 - 创建：`src-tauri/tests/fixtures/archive/plain-rar5.rar`
 - 创建：`src-tauri/tests/fixtures/archive/password-rar5.rar`
 - 创建：`src-tauri/tests/fixtures/archive/multipart.part1.rar`
+- 创建：`src-tauri/tests/fixtures/archive/password-zipcrypto.zip`
+- 创建：`src-tauri/tests/fixtures/archive/password-ae1.zip`
+- 创建：`src-tauri/tests/fixtures/archive/password-ae2.zip`
+- 创建：`src-tauri/tests/fixtures/archive/multidisk.zip`
+- 创建：`src-tauri/tests/fixtures/archive/generate.py`
+- 创建：`src-tauri/tests/fixtures/archive/requirements.in`
+- 创建：`src-tauri/tests/fixtures/archive/requirements.txt`
 
 - [ ] **步骤 1：记录依赖前基线**
 
@@ -84,6 +93,7 @@ cargo +1.75.0 check --manifest-path src-tauri/Cargo.toml
 # Archive readers；版本必须保持 Rust 1.75 可编译。
 zip = { version = "=2.4.2", features = ["aes-crypto"] }
 unrar = "=0.5.8"
+unrar_sys = "=0.5.8" # 直接使用 UnRAR data callback；与 unrar 0.5.8 锁为同版
 sevenz-rust = { version = "=0.6.1", features = ["aes256"] }
 zeroize = "1"
 ```
@@ -95,21 +105,38 @@ cargo update --manifest-path src-tauri/Cargo.toml -p zip --precise 2.4.2
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
-预期：依赖解析完成，`Cargo.lock` 出现 `unrar 0.5.8`、`sevenz-rust 0.6.1`，ZIP 保持 2.4.2。
+预期：依赖解析完成，`Cargo.lock` 出现 `unrar 0.5.8`、`unrar_sys 0.5.8`、`sevenz-rust 0.6.1`，ZIP 保持 2.4.2。
 
-- [ ] **步骤 3：添加最小 RAR fixtures 与说明**
+- [ ] **步骤 3：添加最小 RAR/ZIP fixtures 与说明**
 
-`src-tauri/tests/fixtures/archive/README.md` 必须说明五个 fixture 的格式、密码、内容、生成工具和生成日期。生成文件后，用下述命令取得实际 SHA-256，再把每个 64 位小写哈希连同对应文件名写入 README；README 中不得出现示例哈希、空单元格或待补文字。
+`src-tauri/tests/fixtures/archive/README.md` 必须说明九个 fixture 的格式、密码、内容、生成工具和生成日期。`requirements.txt` 是由 `pip-compile --generate-hashes` 生成的完整锁文件，直接依赖固定 `pyzipper==0.4.0`，传递依赖也必须固定版本与哈希。职责固定如下：`generate.py` 生成确定性 PNG/padding 输入、AE-1、AE-2 与 `multidisk.zip`，并解析 local/central AES extra field，断言 vendor version 分别为 1/2、AE-2 CRC 为 0；同一脚本通过显式参数调用已安装的 7-Zip 24.09 生成 ZipCrypto，并验证工具版本和产物可解密。RAR 五个产物由 README 中固定的 WinRAR 7.11 PowerShell 命令生成，脚本只负责生成其输入并在 `--verify` 时校验产物存在、内容与元数据。生成文件后，只对下列九个 archive fixture 取 SHA-256；不得把 README、脚本、输入图片或额外分卷混入清单。README 中不得出现示例哈希、空单元格或待补文字。
 
-固定元数据如下：`plain-rar4.rar`（RAR4 单卷、无密码、`page1.png/page2.png`）、`password-rar4.rar`（RAR4 单卷、密码 `test-pass-中文`、`page1.png`）、`plain-rar5.rar`（RAR5 单卷、无密码、`page1.png/page2.png`）、`password-rar5.rar`（RAR5 单卷、密码 `test-pass-中文`、`page1.png`）、`multipart.part1.rar`（RAR5 分卷、无密码、`page1.png`）。所有图片均为测试生成的 1×1 PNG，不含第三方版权内容；生成工具固定为 WinRAR 命令行，生成日期记录实际执行日期。
+固定元数据如下：`plain-rar4.rar`（RAR4 单卷、无密码、`page1.png/page2.png`）、`password-rar4.rar`（RAR4 单卷、密码 `test-pass-中文`、`page1.png`）、`plain-rar5.rar`（RAR5 单卷、无密码、`page1.png/page2.png`）、`password-rar5.rar`（RAR5 单卷、密码 `test-pass-中文`、`page1.png`）、`multipart.part1.rar`（RAR5 分卷、无密码、`page1.png`，另含非图片 `padding.bin` 只用于强制分卷）。`generate.py` 固定生成 4096 bytes 的确定性 `padding.bin`；所有输入均为脚本生成，不含第三方版权内容。RAR 生成工具固定为 WinRAR CLI 7.11，并在 README 原样记录以下命令及 `rar.exe` 的绝对版本输出：
+
+```powershell
+rar.exe a -idq -ma4 plain-rar4.rar page1.png page2.png
+rar.exe a -idq -ma4 -ptest-pass-中文 password-rar4.rar page1.png
+rar.exe a -idq -ma5 plain-rar5.rar page1.png page2.png
+rar.exe a -idq -ma5 -ptest-pass-中文 password-rar5.rar page1.png
+rar.exe a -idq -ma5 -m0 -v1k multipart.rar page1.png padding.bin
+```
+
+ZIP 固定元数据：`password-zipcrypto.zip`、`password-ae1.zip`、`password-ae2.zip` 均包含同一个 `page1.png`，密码 `test-pass-中文`。ZipCrypto 固定用 7-Zip 24.09：`7z.exe a -tzip -mem=ZipCrypto -ptest-pass-中文 password-zipcrypto.zip page1.png`。AE-1/AE-2 固定用 Python 3.12 + `pyzipper==0.4.0`，`generate.py` 分别调用 `AESZipFile(..., encryption=pyzipper.WZ_AES, encryption_kwargs={"nbits": 256, "force_wz_aes_version": 1})` 与 version 2；不得依赖库的自动选择。`multidisk.zip` 由同一脚本手写最小 EOCD/ZIP64 disk 字段非零结构且不包含相邻分盘文件。README 必须记录 `python --version`、`pip show pyzipper`、`7z i`、完整命令与脚本提交哈希。
 
 生成完成后运行：
 
 ```powershell
-Get-ChildItem src-tauri/tests/fixtures/archive/*.rar | Get-FileHash -Algorithm SHA256
+python -m pip install pip-tools==7.4.1
+python -m piptools compile --generate-hashes --resolver=backtracking --output-file src-tauri/tests/fixtures/archive/requirements.txt src-tauri/tests/fixtures/archive/requirements.in
+python -m pip install --require-hashes -r src-tauri/tests/fixtures/archive/requirements.txt
+python src-tauri/tests/fixtures/archive/generate.py --verify
+$fixtures = @('plain-rar4.rar','password-rar4.rar','plain-rar5.rar','password-rar5.rar','multipart.part1.rar','password-zipcrypto.zip','password-ae1.zip','password-ae2.zip','multidisk.zip')
+$hashes = $fixtures | ForEach-Object { Get-FileHash -LiteralPath (Join-Path 'src-tauri/tests/fixtures/archive' $_) -Algorithm SHA256 }
+if ($hashes.Count -ne 9) { throw "expected exactly 9 fixture hashes" }
+$hashes
 ```
 
-预期：五个文件均输出 64 位 SHA-256，README 与实际值一致。
+预期：九个文件均输出 64 位 SHA-256，README 与实际值一致。
 
 - [ ] **步骤 4：归档 UnRAR 许可**
 
@@ -285,7 +312,8 @@ fn password_store_only_returns_exact_identity_and_can_forget() {
 运行：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive::backend source::archive::password
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::backend
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::password
 ```
 
 预期：FAIL，模块或类型尚不存在。
@@ -316,17 +344,47 @@ pub enum ArchiveAccessError {
     CorruptArchive(String),
     #[error("压缩包中没有可阅读图片")]
     EmptyArchive,
+    #[error("压缩包超过安全资源上限: {0}")]
+    ResourceLimitExceeded(String),
     #[error("压缩包条目不存在: {0}")]
     EntryNotFound(String),
     #[error("远程 Range 不可用: {0}")]
     RemoteRangeUnavailable(String),
     #[error("操作已取消")]
     Cancelled,
+    #[error("archive 请求无效: {0}")]
+    InvalidRequest(String),
     #[error("IO 错误: {0}")]
     Io(String),
     #[error("网络错误: {0}")]
     Network(String),
+    #[error("操作超时: {0}")]
+    Timeout(String),
 }
+
+#[derive(Debug, Clone)]
+pub struct RemoteZipIoError(pub ArchiveAccessError);
+
+impl std::fmt::Display for RemoteZipIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("remote archive IO failed") // 不把路径或第三方错误重复写入 source 文本
+    }
+}
+
+impl std::error::Error for RemoteZipIoError {}
+
+#[derive(Debug, Clone)]
+pub struct LimitedEntryIoError {
+    pub limit: u64,
+}
+
+impl std::fmt::Display for LimitedEntryIoError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "archive entry exceeded {} bytes", self.limit)
+    }
+}
+
+impl std::error::Error for LimitedEntryIoError {}
 
 pub trait ArchiveReadSeek: Read + Seek + Send {}
 impl<T: Read + Seek + Send> ArchiveReadSeek for T {}
@@ -335,13 +393,17 @@ pub type ReaderFactory = Arc<
     dyn Fn() -> Result<Box<dyn ArchiveReadSeek>, ArchiveAccessError> + Send + Sync
 >;
 
+pub const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_CATALOG_ENTRIES: usize = 100_000;
+pub const MAX_ENTRY_PATH_BYTES: usize = 4_096;
+
 #[derive(Clone)]
 pub enum ArchiveInput {
     Path(PathBuf),
     Reader(ReaderFactory),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ArchiveCatalog {
     pub entries: Vec<MediaEntry>,
     pub first_encrypted_entry: Option<String>,
@@ -376,6 +438,8 @@ pub fn backend_kind(format: ArchiveFormat) -> &'static str {
     }
 }
 ```
+
+同文件增加 `LimitedEntryWriter`，内部累计实际输出字节；写入会超过 `MAX_ENTRY_BYTES` 时返回携带专用 marker 的 `std::io::Error`，backend 在边界恢复为 `ResourceLimitExceeded`。任何 backend 都不得按 archive 声明的解压大小直接无界预分配。
 
 - [ ] **步骤 4：实现密码库**
 
@@ -451,7 +515,8 @@ pub mod prefetch;
 运行：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive::backend source::archive::password
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::backend
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::password
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
@@ -475,26 +540,51 @@ git commit -m "feat(archive): 建立类型化后端与会话密码库"
 
 - [ ] **步骤 1：写 ZIP backend 失败测试**
 
-在 `zip_backend.rs` tests 中用 `zip::ZipWriter` 生成普通、ZipCrypto 和 AES fixture，核心断言：
+在 `zip_backend.rs` tests 中用 `zip::ZipWriter` 生成普通 fixture；加密变体读取任务 1 固定的 ZipCrypto、AE-1、AE-2 fixtures，分别执行同一正确/错误密码合同，不能合并成一个泛化 AES case。核心断言：
 
 ```rust
 #[test]
 fn encrypted_zip_requires_password_rejects_wrong_and_reads_correct() {
-    let path = create_encrypted_zip("secret", "page.png", PNG_BYTES);
-    let backend = ZipBackend;
-    let input = ArchiveInput::Path(path);
-    assert_eq!(
-        backend.catalog(&input, "", None).unwrap_err(),
-        ArchiveAccessError::PasswordRequired
-    );
-    assert_eq!(
-        backend.read_entry(&input, "page.png", Some(b"wrong")).unwrap_err(),
-        ArchiveAccessError::WrongPassword
-    );
-    assert_eq!(
-        backend.read_entry(&input, "page.png", Some(b"secret")).unwrap(),
-        PNG_BYTES
-    );
+    for fixture in ["password-zipcrypto.zip", "password-ae1.zip", "password-ae2.zip"] {
+        let input = fixture_input(fixture);
+        assert_eq!(ZipBackend.catalog(&input, "", None).unwrap_err(),
+                   ArchiveAccessError::PasswordRequired);
+        assert_eq!(ZipBackend.read_entry(&input, "page1.png", Some(b"wrong")).unwrap_err(),
+                   ArchiveAccessError::WrongPassword);
+        assert_eq!(ZipBackend.read_entry(
+            &input, "page1.png", Some("test-pass-中文".as_bytes())
+        ).unwrap(), PNG_BYTES);
+    }
+}
+
+#[test]
+fn multidisk_zip_maps_to_dedicated_error() {
+    assert!(matches!(
+        ZipBackend.catalog(&fixture_input("multidisk.zip"), "", None),
+        Err(ArchiveAccessError::MultiVolumeUnsupported(_))
+    ));
+}
+
+#[test]
+fn declared_oversized_entry_and_limited_writer_are_rejected() {
+    let declared = zip_with_declared_size(MAX_ENTRY_BYTES + 1);
+    assert!(matches!(ZipBackend.read_entry(&declared, "page.png", None),
+                     Err(ArchiveAccessError::ResourceLimitExceeded(_))));
+    let mut writer = LimitedEntryWriter::with_limit(8);
+    assert!(writer.write_all(&[0; 9]).is_err());
+    assert!(writer.exceeded());
+}
+
+#[test]
+fn zip_io_mapping_preserves_remote_limit_crc_and_plain_io_classes() {
+    assert!(matches!(map_zip_io_error(remote_io(ArchiveAccessError::Timeout("slow".into()))),
+                     ArchiveAccessError::Timeout(_)));
+    assert!(matches!(map_zip_io_error(limited_entry_io()),
+                     ArchiveAccessError::ResourceLimitExceeded(_)));
+    assert!(matches!(map_zip_io_error(std::io::Error::new(ErrorKind::InvalidData, "CRC mismatch")),
+                     ArchiveAccessError::CorruptArchive(_)));
+    assert!(matches!(map_zip_io_error(std::io::Error::new(ErrorKind::UnexpectedEof, "short")),
+                     ArchiveAccessError::Io(_)));
 }
 
 #[test]
@@ -544,11 +634,13 @@ fn by_name<'a, R: Read + Seek>(
 }
 ```
 
-`map_zip_error` 必须把 invalid password、unsupported compression、missing file、invalid archive 分别映射到 `WrongPassword`、`UnsupportedCodec`、`EntryNotFound`、`CorruptArchive`。
+`map_zip_error` 必须把 invalid password、unsupported compression、missing file、invalid archive 分别映射到 `WrongPassword`、`UnsupportedCodec`、`EntryNotFound`、`CorruptArchive`。使用任务 2 已定义的 `RemoteZipIoError` 与 `LimitedEntryIoError` 两个可 downcast marker，建立唯一 `map_zip_io_error(std::io::Error) -> ArchiveAccessError`；映射顺序固定为：Remote marker 恢复稳定分类 → Limited marker 映射 `ResourceLimitExceeded` → `ErrorKind::InvalidData` 映射 `CorruptArchive`（CRC/MAC）→ 普通 `Io`。`map_zip_error(ZipError::Io(io))` 委托该 helper。helper 和所有调用点必须在本任务建立，不能把 entry payload 的 IO 扁平化为字符串；任务 9 只负责让 `RemoteZipReader` 实际产生 Remote wrapper。
+
+在调用 `zip::ZipArchive::new` 前用小型 EOCD/ZIP64 parser 检查 disk number、central-directory start disk 与 per-disk entry count；任一字段表明 multi-disk 时直接返回 `MultiVolumeUnsupported`，不得解析第三方错误字符串。
 
 - [ ] **步骤 4：实现 catalog/read/stat**
 
-`catalog` 遍历 central directory，应用 `entryPrefix`、`is_image` 和自然排序；加密条目在无密码时仍返回 `PasswordRequired`，有密码时完整读取第一个加密图片并校验 CRC/MAC。`read_entry` 只解压目标条目到 `Vec<u8>`；`stat_entry` 读取 central directory 的解压后 size，不解压内容。
+`catalog` 遍历 central directory，应用 `entryPrefix`、`is_image` 和自然排序；每加入一项检查 `MAX_CATALOG_ENTRIES` 与规范化路径的 `MAX_ENTRY_PATH_BYTES`。加密条目在无密码时仍返回 `PasswordRequired`，有密码时通过 `LimitedEntryWriter` 完整读取第一个加密图片并校验 CRC/MAC。`read_entry` 同样经 `LimitedEntryWriter` 解压目标条目；`stat_entry` 读取 central directory 的解压后 size，若超过上限直接返回 `ResourceLimitExceeded`。所有 `Read::read`、`read_to_end`、`io::copy`、完整性验证及限长 writer 返回的 `std::io::Error` 都必须 `.map_err(map_zip_io_error)`，不能只处理 `ZipError::Io`。
 
 实现后在 `archive/mod.rs` 加：
 
@@ -590,6 +682,7 @@ git commit -m "refactor(archive): ZIP 改为路径读取并支持密码"
 
 **文件：**
 - 创建：`src-tauri/src/source/archive/rar_backend.rs`
+- 创建：`src-tauri/src/source/archive/rar_callback.rs`
 - 修改：`src-tauri/src/source/archive/mod.rs`
 
 - [ ] **步骤 1：写 fixture 驱动失败测试**
@@ -623,6 +716,48 @@ fn multipart_rar_is_rejected() {
         Err(ArchiveAccessError::MultiVolumeUnsupported(_))
     ));
 }
+
+#[test]
+fn rar_listing_rejects_declared_size_over_limit() {
+    let backend = RarBackend::with_limits(ArchiveLimits::for_test(8));
+    assert!(matches!(
+        backend.catalog(&fixture_input("plain-rar5.rar"), "", None),
+        Err(ArchiveAccessError::ResourceLimitExceeded(_))
+    ));
+}
+
+#[test]
+fn rar_callback_unit_checks_null_zero_length_and_budget_math() {
+    let mut sink = LimitedRarSink::new(8);
+    assert_eq!(feed_callback_for_test(&mut sink, std::ptr::null(), 0),
+               CallbackControl::Continue);
+    assert_eq!(feed_callback_for_test(&mut sink, b"123456789".as_ptr(), 9),
+               CallbackControl::Abort);
+    assert!(sink.bytes_seen() <= 9);
+}
+
+#[test]
+fn rar_data_callback_aborts_real_ffi_output_at_hard_limit_and_recovers() {
+    // 仅跳过 catalog 声明大小的测试短路，仍使用生产 read_entry -> unrar_sys callback 路径。
+    let backend = RarBackend::with_test_policy(ArchiveLimits::for_test(8),
+                                               DeclaredSizePolicy::BypassForFfiTest);
+    let targets_before = snapshot_rar_write_targets(&backend);
+    assert!(matches!(backend.read_entry(
+        &fixture_input("plain-rar5.rar"), "page1.png", None
+    ), Err(ArchiveAccessError::ResourceLimitExceeded(_))));
+    assert_eq!(snapshot_rar_write_targets(&backend), targets_before); // cwd + cache 均无 entry
+    assert_eq!(RarBackend::default().read_entry(
+        &fixture_input("plain-rar5.rar"), "page1.png", None
+    ).unwrap(), PNG_BYTES);
+}
+
+#[test]
+fn encrypted_header_password_callback_is_registered_before_open() {
+    let input = fixture_input("encrypted-headers-rar5.rar");
+    assert_eq!(RarBackend::default().read_entry(
+        &input, "page1.png", Some("test-pass-中文".as_bytes())
+    ).unwrap(), PNG_BYTES);
+}
 ```
 
 - [ ] **步骤 2：运行测试确认失败**
@@ -630,7 +765,7 @@ fn multipart_rar_is_rejected() {
 运行：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive::rar_backend
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::rar_
 ```
 
 预期：FAIL，模块不存在。
@@ -667,26 +802,30 @@ fn reject_multipart_name(path: &Path) -> Result<(), ArchiveAccessError> {
 }
 ```
 
-- [ ] **步骤 4：实现 UnRAR catalog/read/stat**
+- [ ] **步骤 4：实现 UnRAR catalog 与低层 callback read/stat**
 
-使用 `unrar::Archive::new(path)` 或 `Archive::with_password(path, password)`；listing 读取 entry filename、unpacked_size 和 split/volume flag，确认 split 后立即返回 `MultiVolumeUnsupported`。processing 按 `read_header → skip/read` 顺序前进，命中目标时 `read()` 到内存，未命中时 `skip()`；错误分类由错误 code 映射，不比较本地化错误文本。
+catalog 可使用 `unrar::Archive::new(path)` 或 `Archive::with_password(path, password)`；listing 读取 entry filename、unpacked_size 和 split/volume flag，确认 split 后立即返回 `MultiVolumeUnsupported`。读取 entry 不得调用高层 `unrar::read()`，因为它在调用方检查之前已经返回完整 `Vec`。`rar_callback.rs` 固定使用 `unrar_sys = 0.5.8`：先构造包含 callback、user-data 的 `OpenArchiveDataEx`，再调用 `RAROpenArchiveEx`；不能依赖 open 成功后才调用 `RARSetCallback`，否则加密 header 在 open 阶段请求密码时没有 callback。随后按 `read_header → 命中项 RAR_TEST / 其他项 RAR_SKIP` 顺序前进；禁止使用 `RAR_EXTRACT`，整个读取过程不得向当前工作目录或 cache 目录写出 entry。命中目标时 callback 每次只复制剩余预算，累计达到 `limit + 1` 立即返回 UnRAR abort code。
+
+callback user-data 只指向当前同步调用期间有效的 `RarCallbackState { sink: Option<LimitedRarSink>, password: Option<Zeroizing<Vec<u8>>>, error: Option<ArchiveAccessError> }`；同一 state 同时服务 open 阶段的 header 密码、处理阶段的数据输出和类型化错误桥。关闭 handle 与清理 callback state 覆盖所有错误路径。处理 `UCM_PROCESSDATA` 时先检查 `p1 != 0 && p2 > 0`，满足后才构造 slice；volume/password 分支同样检查空指针、对齐和长度，单卷策略遇到请求下一卷直接终止。`extern "C"` callback 整体包在 `catch_unwind(AssertUnwindSafe(...))` 中，panic 写入 state.error 并转 abort，绝不跨 ABI unwind。保留无 FFI 的 callback 单元测试覆盖 null/zero-length 和预算算法，但资源上限与 header 密码合同必须穿过真实 `RAROpenArchiveEx -> callback -> RARProcessFile(RAR_TEST)` 集成路径。
 
 `catalog` 返回过滤后的图片与 `first_encrypted_entry`；`read_entry`、`stat_entry` 与 ZIP 保持同一语义。所有 entry path 先把 `\` 归一为 `/`，再应用 prefix。
+
+RAR listing 同样执行 catalog 数量、路径长度和 `unpacked_size` 上限检查。`RarBackend` 接受生产默认值为 512 MiB 的 `ArchiveLimits`，测试构造函数可注入 8 bytes 上限。合法 `plain-rar5.rar` + 8-byte limit 负责声明值分支；另一个仅限测试的 `DeclaredSizePolicy::BypassForFfiTest` 绕过这一个前置短路，让同一合法 fixture 的真实输出达到 callback 并映射为 `ResourceLimitExceeded`。测试同时断言工作目录/cache 快照不变、abort 后下一次正常 RAR 请求成功；不得修改 fixture header 或只测纯 `feed_callback_for_test` 来替代 FFI 合同。
 
 - [ ] **步骤 5：运行 RAR 测试**
 
 运行：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive::rar_backend -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::rar_ -- --nocapture
 ```
 
-预期：RAR4/RAR5、正确/错误密码、多卷拒绝全部 PASS。
+预期：RAR4/RAR5、正确/错误密码、加密 header 的 pre-open password callback、多卷拒绝、listing 声明限制、真实 FFI callback 实际输出硬停止、无文件写出与 abort 后恢复全部 PASS。
 
 - [ ] **步骤 6：Commit**
 
 ```bash
-git add src-tauri/src/source/archive/rar_backend.rs src-tauri/src/source/archive/mod.rs
+git add src-tauri/src/source/archive/rar_backend.rs src-tauri/src/source/archive/rar_callback.rs src-tauri/src/source/archive/mod.rs
 git commit -m "feat(archive): 支持单卷 RAR/CBR 与会话密码"
 ```
 
@@ -762,6 +901,8 @@ fn sevenz_password(password: Option<&[u8]>) -> Result<sevenz_rust::Password, Arc
 
 将 `PasswordRequired`、错误 AES 密码、checksum、unsupported method、missing entry 分别映射到稳定错误。
 
+`archive().files` 建 catalog 时检查数量、路径长度与 entry size；`for_each_entries` 读取命中项时通过 `LimitedEntryWriter`/限长 read loop 约束实际输出。`Error::MaxMemLimited` 以及 dictionary/coder 内存超过 512 MiB 映射为 `ResourceLimitExceeded`。用 test-only 8-byte limit 驱动 writer 越界单测，避免生成 512 MiB fixture。
+
 - [ ] **步骤 4：运行 7z 测试**
 
 运行：
@@ -785,6 +926,7 @@ git commit -m "feat(archive): 支持单卷 7z 与 AES 密码"
 
 **文件：**
 - 创建：`src-tauri/src/source/archive/service.rs`
+- 创建：`src-tauri/src/source/archive/cache_coordinator.rs`
 - 修改：`src-tauri/src/source/archive/mod.rs`
 - 修改：`src-tauri/src/source/archive_impl.rs`
 - 修改：`src-tauri/src/source/factory.rs`
@@ -811,10 +953,39 @@ async fn service_dispatches_formats_and_reuses_verified_password() {
         &descriptor,
         zeroize::Zeroizing::new(b"secret".to_vec()),
     ).await.unwrap(),
-               ArchivePrepareResult::Ready { access_mode: ArchiveAccessMode::Local });
+               ArchivePrepareResult::Ready {
+                   access_mode: ArchiveAccessMode::Local,
+                   progress_key: None,
+               });
     let entries = harness.service.list(&descriptor).await.unwrap();
     assert_eq!(entries[0].name, "page.png");
     assert_eq!(harness.rar.password_seen(), Some(b"secret".to_vec()));
+}
+
+#[tokio::test]
+async fn cached_encrypted_catalog_never_replaces_password_proof() {
+    let harness = ServiceHarness::new();
+    let descriptor = harness.local_descriptor("encrypted.cbz", ArchiveFormat::Cbz);
+    harness.service.unlock(&descriptor, Zeroizing::new(b"secret".to_vec())).await.unwrap();
+    harness.service.list(&descriptor).await.unwrap(); // populate catalog LRU
+    harness.service.forget_password_for_test(&descriptor).await.unwrap();
+    assert_eq!(harness.service.prepare(&descriptor).await.unwrap(),
+               ArchivePrepareResult::PasswordRequired);
+}
+
+#[tokio::test]
+async fn weighted_memory_budget_serializes_large_decodes() {
+    let harness = ServiceHarness::with_memory_budget_mib(8);
+    harness.zip.set_declared_size_mib(8);
+    let first = harness.spawn_read(harness.zip_a.clone(), "page.png");
+    let second = harness.spawn_read(harness.zip_b.clone(), "page.png");
+    harness.zip.wait_until_first_started().await;
+    assert_eq!(harness.zip.started_count(), 1);
+    harness.zip.release_first();
+    let (a, b) = tokio::join!(first, second);
+    a.unwrap().unwrap();
+    b.unwrap().unwrap();
+    assert_eq!(harness.zip.max_concurrent(), 1);
 }
 ```
 
@@ -831,6 +1002,13 @@ cargo test --manifest-path src-tauri/Cargo.toml source::archive::service
 - [ ] **步骤 3：实现结果类型与本地解析**
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveRequestId {
+    pub session_id: String,
+    pub sequence: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ArchiveAccessMode { Local, Streaming, Materialized }
@@ -838,16 +1016,27 @@ pub enum ArchiveAccessMode { Local, Streaming, Materialized }
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum ArchivePrepareResult {
-    Ready { #[serde(rename = "accessMode")] access_mode: ArchiveAccessMode },
+    Ready {
+        #[serde(rename = "accessMode")]
+        access_mode: ArchiveAccessMode,
+        #[serde(rename = "progressKey")]
+        progress_key: Option<String>,
+    },
     PasswordRequired,
 }
 ```
 
-`ArchiveService` 持 `Arc<ZipBackend/RarBackend/SevenZBackend>`、`ArchivePasswordStore`、三个 semaphore 和 32 项 catalog LRU。Local identity 使用规范化绝对路径 + `std::fs::metadata` size/mtime。
+`ArchiveRequestId`、单窗口 session registry 和 `begin_session/prepare_with_request/unlock_with_request/commit_request/cancel_request` 的核心状态机在本任务落地，任务 11 只增加 Tauri/TS IPC 外壳；这样任务 8 的 Materializer subscriber 与任务 10 的 commit-gated prefetch 不会反向依赖后置任务。状态机初版支持本地与完整物化的 Running/AwaitingPassword/Prepared/Cancelled、cancel-before-register、精确幂等 commit 和 session rollover；任务 10 只给 Prepared 增加 streaming prefetch intent。
+
+`ArchiveService` 在本任务就必须持有工厂构造的同一个 `Arc<Materializer>`，不能等远程流式任务才补；在任务 10 接入 `RemoteZipReader` 前，远程 ZIP/CBZ 继续沿用完整物化，确保 `ArchiveMediaSource` 变为 service-only 后既有远程行为不断档。Service 同时持 `Arc<ZipBackend/RarBackend/SevenZBackend>`、`ArchivePasswordStore`、三个格式 semaphore、512 个 1-MiB permit 的加权内存 semaphore、32 项 catalog LRU 和唯一 `Arc<ArchiveCacheCoordinator>`；任务 9 创建 `remote_zip.rs` 后把 block LRU 接入同一 coordinator。Local Ready 的 `progress_key=None`，远程物化/流式 Ready 返回 Materializer 的 opaque cache key。
+
+`ArchiveCacheCoordinator` 使用 `std::sync::Mutex<State>`，state 包含 `clearing`、单调 `generation`、active admission 计数和 `tokio::sync::Notify`。`admit()` 在同一短临界区检查 clearing 并增加 active，返回同步 Drop 的 `AdmissionGuard`；Drop 同步减计数并 notify。`begin_clear()` 原子置 clearing、推进 generation 并返回同步 Drop 的 `ClearGuard`；`wait_drained(timeout)` 是独立 async 方法。所有 catalog、后续 block、Materializer ready cache hit 与下载都必须先 admission，再查 cache；禁止两个串行 gate 和 async Drop。Local identity 使用规范化绝对路径 + `std::fs::metadata` size/mtime。测试构造函数允许注入较小内存预算。
 
 - [ ] **步骤 4：实现 prepare/unlock/list/read/stat**
 
-`prepare` 用已缓存密码调用 catalog；遇到 `PasswordRequired/WrongPassword` 时清除旧密码并返回 `PasswordRequired`。`unlock` 使用 `Zeroizing<Vec<u8>>`，完整验证首个加密条目后才写 store。`list/read/stat` 按格式取得 backend 和 semaphore，在 `spawn_blocking` 中执行；join panic 映射 `CorruptArchive("backend task panicked")`。
+`prepare` 先取 catalog metadata；若 catalog 标记存在加密条目但同 identity password store 为空，必须返回 `PasswordRequired`，cache hit 不能替代密码证明。遇到 `PasswordRequired/WrongPassword` 时同时清除旧密码和对应 catalog。`unlock` 使用 `Zeroizing<Vec<u8>>`，完整验证首个加密条目后才写 store。`list/read/stat` 按格式取得 backend semaphore，再按声明大小的 MiB 向上取整取得加权内存许可（未知或超过上限按 512 permits）；随后在 `spawn_blocking` 中执行。join panic 映射 `CorruptArchive("backend task panicked")`，两类许可都由 RAII 释放。
+
+提供 `cache_coordinator()`、`clear_runtime_caches_while_gated(generation)` 与 loader 提交前 generation 复核。清 LRU 只能在 `ClearGuard` 存活且 active admission 已排空后执行；任何 return/panic 路径由同步 Drop 恢复 gate。该流程不清 password store，手动清磁盘 cache 不应强制用户重新输入密码；但会清 catalog，使下次访问重新解析并继续用同 identity 的已验证密码。
 
 - [ ] **步骤 5：ArchiveMediaSource 变为薄适配器**
 
@@ -869,7 +1058,7 @@ impl ArchiveMediaSource {
 
 - [ ] **步骤 6：Factory 构造共享实例**
 
-`MediaSourceFactory` 增加 `archive_service` 与 `prefetcher` Arc，并提供 accessor。构造顺序固定为：具体远程源 → Materializer → Prefetcher → ArchiveService → ArchiveMediaSource。`lib.rs` manage factory 暴露的同一 service/prefetcher，不再另建 Prefetcher。
+`MediaSourceFactory` 增加 `cache_coordinator`、`archive_service` 与 `prefetcher` Arc，并提供 accessor。构造顺序固定为：具体远程源 → ArchiveCacheCoordinator → Materializer(coordinator) → Prefetcher → ArchiveService(materializer, coordinator) → ArchiveMediaSource。`lib.rs` manage factory 暴露的同一 service/prefetcher，不再另建 Materializer 或 Prefetcher。
 
 - [ ] **步骤 7：运行格式全链路测试**
 
@@ -886,7 +1075,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 - [ ] **步骤 8：Commit**
 
 ```bash
-git add src-tauri/src/source/archive/service.rs src-tauri/src/source/archive/mod.rs src-tauri/src/source/archive_impl.rs src-tauri/src/source/factory.rs src-tauri/src/lib.rs
+git add src-tauri/src/source/archive/service.rs src-tauri/src/source/archive/cache_coordinator.rs src-tauri/src/source/archive/mod.rs src-tauri/src/source/archive_impl.rs src-tauri/src/source/factory.rs src-tauri/src/lib.rs
 git commit -m "refactor(archive): 统一服务接管五格式读取"
 ```
 
@@ -925,6 +1114,50 @@ async fn legacy_zip_row_keeps_its_recorded_cache_path() {
     assert_eq!(path, harness.cache_root.join("abc.zip"));
     assert_eq!(harness.origin.read_calls.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn shared_download_keeps_independent_subscriber_lifetimes_and_progress() {
+    let harness = blocking_materializer();
+    let a = ArchiveRequestId::new("session-a", 1);
+    let b = ArchiveRequestId::new("session-b", 1);
+    let load_a = harness.spawn_interactive(a.clone());
+    let load_b = harness.spawn_interactive(b.clone());
+    harness.wait_physical_download_started().await;
+    harness.emit_progress(1, 10);
+    harness.wait_until_each_received(&[&a, &b], 1).await;
+    let a_count_at_cancel = harness.progress_for(&a).len();
+    let b_count_at_cancel = harness.progress_for(&b).len();
+    harness.cancel(&a).await;
+    assert!(matches!(load_a.await.unwrap(), Err(MaterializeError::Cancelled)));
+    assert_eq!(harness.physical_download_count(), 1);
+    harness.emit_progress(5, 10);
+    harness.release_download();
+    load_b.await.unwrap().unwrap();
+    assert_eq!(harness.progress_for(&a).len(), a_count_at_cancel);
+    assert!(harness.progress_for(&b).len() > b_count_at_cancel);
+    assert_eq!(harness.progress_for(&b).last().unwrap().phase, "ready");
+}
+
+#[tokio::test]
+async fn background_subscriber_survives_interactive_cancel_but_all_interactive_cancel_stops() {
+    let with_background = blocking_materializer();
+    let request = ArchiveRequestId::new("session-a", 2);
+    let interactive = with_background.spawn_interactive(request.clone());
+    let background = with_background.attach_background();
+    with_background.cancel(&request).await;
+    assert!(matches!(interactive.await.unwrap(), Err(MaterializeError::Cancelled)));
+    assert!(!with_background.physical_cancelled());
+    with_background.release_download();
+    background.await.unwrap().unwrap();
+
+    let only_interactive = blocking_materializer();
+    let a = only_interactive.spawn_interactive(ArchiveRequestId::new("session-a", 3));
+    let b = only_interactive.spawn_interactive(ArchiveRequestId::new("session-b", 3));
+    only_interactive.cancel_all_interactive().await;
+    assert!(only_interactive.physical_cancelled());
+    assert!(a.await.unwrap().is_err() && b.await.unwrap().is_err());
+    assert!(!only_interactive.has_final_file_or_ready_row());
+}
 ```
 
 - [ ] **步骤 2：运行测试确认失败**
@@ -932,10 +1165,10 @@ async fn legacy_zip_row_keeps_its_recorded_cache_path() {
 运行：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive::materializer::tests::all_supported_extensions source::archive::materializer::tests::legacy_zip_row
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::materializer::tests -- --nocapture
 ```
 
-预期：五格式测试因现有闸门失败；旧 ZIP 命中保持 PASS。
+预期：五格式测试因现有闸门失败；subscriber 生命周期/进度 fan-out 尚未实现而失败，其中 A/B 都先收到基线事件，取消 A 后 A 的事件数不再增长而 B 继续增长并完成；旧 ZIP 命中保持 PASS。
 
 - [ ] **步骤 3：实现扩展归一与 final path**
 
@@ -961,6 +1194,8 @@ fn cache_paths(&self, key: &str, ext: &str) -> (PathBuf, PathBuf) {
 
 DAO 命中始终优先使用行内 `cache_abs_path`，因此旧 `{key}.zip` 不改名、不 migration。
 
+Materializer 的 `ensure_cached`、`ready_path_if_fresh`、subscriber attach 和物理下载都注入任务 7 的同一个 `ArchiveCacheCoordinator`，并在 DAO/磁盘 cache lookup 之前取得 admission guard。in-flight state 区分 `interactive: HashMap<ArchiveRequestId, Subscriber>` 与 `background: HashMap<BackgroundSubscriberId, BackgroundSubscriber { progress_key }>`；每个交互 subscriber 独立完成/取消 channel，进度向活动 requestId 分别 fan-out，后台事件从 subscriber 自身保存的 `progress_key` 发出。只有 interactive 与 background 都为空才取消物理下载。把现有直接构造 `serde_json::json!` 的进度 helper 改为 serde camelCase 的类型化 `ArchiveMaterializeProgress { request_id: Option<ArchiveRequestId>, progress_key: String, ... }` 后统一 emit，避免不同分支漏字段。另加一个 ready row + final file 已存在的测试：clear guard 存活时 `ready_path_if_fresh` 必须返回 Cancelled，证明 cache hit 未绕过 gate。
+
 - [ ] **步骤 4：扩展预载过滤**
 
 FileBrowser details content preload 的扩展判断改为：
@@ -977,7 +1212,9 @@ if (!REMOTE_ARCHIVE_EXTS.has(ext)) return;
 运行：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive::materializer source::archive::prefetch commands::archive_cache -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::materializer -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::prefetch -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml commands::archive_cache -- --nocapture
 npx vitest run src/components/filebrowser/FileBrowser.test.ts
 ```
 
@@ -998,15 +1235,18 @@ git commit -m "feat(archive): 物化与预载扩展到五种格式"
 - 创建：`src-tauri/src/source/archive/remote_zip.rs`
 - 修改：`src-tauri/src/source/archive/mod.rs`
 - 修改：`src-tauri/src/source/archive/materializer.rs`
+- 修改：`src-tauri/src/source/archive/zip_backend.rs`
+- 修改：`src-tauri/src/source/archive/service.rs`
 
 - [ ] **步骤 1：写 Seek、跨块、LRU 和并发去重失败测试**
 
 ```rust
-#[test]
-fn remote_reader_seek_and_cross_block_read_are_exact() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_reader_seek_and_cross_block_read_are_exact() {
+    let runtime = tokio::runtime::Handle::current();
     let origin = Arc::new(MockRangeOrigin::new(sequence_bytes(3 * BLOCK_SIZE + 17)));
     let cache = Arc::new(RangeBlockCache::new(2 * BLOCK_SIZE));
-    let mut reader = RemoteZipReader::new(test_identity(), origin.clone(), cache);
+    let mut reader = RemoteZipReader::new(test_identity(), origin.clone(), cache, runtime);
     reader.seek(SeekFrom::Start((BLOCK_SIZE - 3) as u64)).unwrap();
     let mut out = [0u8; 8];
     reader.read_exact(&mut out).unwrap();
@@ -1014,15 +1254,17 @@ fn remote_reader_seek_and_cross_block_read_are_exact() {
     assert_eq!(origin.ranges(), vec![(0, BLOCK_SIZE), (BLOCK_SIZE as u64, BLOCK_SIZE)]);
 }
 
-#[test]
-fn concurrent_same_block_loads_once() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_same_block_loads_once() {
+    let runtime = tokio::runtime::Handle::current();
     let origin = Arc::new(MockRangeOrigin::new(vec![7; BLOCK_SIZE]));
     let cache = Arc::new(RangeBlockCache::new(32 * BLOCK_SIZE));
     let threads = (0..8).map(|_| {
         let origin = origin.clone();
         let cache = cache.clone();
+        let runtime = runtime.clone();
         std::thread::spawn(move || {
-            let mut reader = RemoteZipReader::new(test_identity(), origin, cache);
+            let mut reader = RemoteZipReader::new(test_identity(), origin, cache, runtime);
             let mut byte = [0u8; 1];
             reader.read_exact(&mut byte).unwrap();
             byte[0]
@@ -1030,6 +1272,31 @@ fn concurrent_same_block_loads_once() {
     }).collect::<Vec<_>>();
     assert_eq!(threads.into_iter().map(|t| t.join().unwrap()).collect::<Vec<_>>(), vec![7; 8]);
     assert_eq!(origin.call_count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typed_range_error_survives_io_and_zip_boundaries() {
+    let runtime = tokio::runtime::Handle::current();
+    let origin = Arc::new(MockRangeOrigin::failing(ArchiveAccessError::Network("offline".into())));
+    let input = ArchiveInput::Reader(remote_reader_factory(origin, runtime));
+    assert!(matches!(ZipBackend.catalog(&input, "", None),
+                     Err(ArchiveAccessError::Network(_))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clear_generation_prevents_late_loader_reinsert() {
+    let harness = BlockingRangeHarness::new();
+    let load = harness.spawn_block_load();
+    harness.wait_loader_started();
+    let clear_guard = harness.coordinator.begin_clear().unwrap();
+    harness.release_loader();
+    assert!(matches!(load.join().unwrap(), Err(ArchiveAccessError::Cancelled)));
+    harness.coordinator.wait_drained(TEST_TIMEOUT).await.unwrap();
+    harness.runtime.clear_runtime_caches_while_gated(clear_guard.generation());
+    assert_eq!(harness.runtime.block_cache_len(), 0);
+    assert!(matches!(harness.try_start_loader(), Err(ArchiveAccessError::Cancelled)));
+    drop(clear_guard);
+    assert!(harness.try_start_loader().is_ok());
 }
 ```
 
@@ -1073,11 +1340,13 @@ pub const BLOCK_SIZE: usize = 1024 * 1024;
 pub const BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024;
 ```
 
-`RangeBlockCache` 使用 `Mutex<State> + Condvar`；`State` 包含 `HashMap<BlockKey, Arc<Vec<u8>>>`、`VecDeque<BlockKey>` 和 `HashSet<BlockKey>` loading。`get_or_load` 对相同 key 只允许一个 loader，其他线程等待 Condvar；成功或失败都移除 loading 并 `notify_all`。插入后按 LRU 淘汰到 32 个满块以内。
+`RangeBlockCache` 使用 `Mutex<State> + Condvar`；`State` 包含 `HashMap<BlockKey, Arc<Vec<u8>>>`、`VecDeque<BlockKey>` 和 `HashSet<BlockKey>` loading。`get_or_load` 对相同 key 只允许一个 loader，其他线程等待 Condvar；用 RAII loading guard 保证成功、失败或 unwind 都移除 loading 并 `notify_all`。进入 `get_or_load` 时必须先从唯一 `ArchiveCacheCoordinator` 取得 admission guard，使 cache hit 与 miss 都受 clear gate 约束；每个 loader 捕获 guard generation，插入前发现 generation 已变化则丢弃 bytes 并返回 `Cancelled`。插入后按 LRU 淘汰到 32 个满块以内，cache hit 必须更新顺序。
 
 - [ ] **步骤 5：实现 Read+Seek**
 
-`RemoteZipReader` 保存 `position/size/identity/origin/cache/runtime`。`Seek` 对 Start/Current/End 使用 `i128` 计算并拒绝负数/超过 u64；`Read` 按 block 拆分，最后一块请求 `min(BLOCK_SIZE, size-block_start)`。loader 只能在 `spawn_blocking` 线程中用 `runtime.block_on(origin.read_range(...))`。
+`RemoteZipReader` 保存 `position/size/identity/origin/cache/runtime/generation`。`Seek` 对 Start/Current/End 使用 `i128` 计算并拒绝负数/超过 u64；`Read` 按 block 拆分，最后一块请求 `min(BLOCK_SIZE, size-block_start)`。loader 只能在 `spawn_blocking` 线程中用 `runtime.block_on(origin.read_range(...))`。
+
+使用任务 2 已定义的 `RemoteZipIoError(ArchiveAccessError)` 与 `LimitedEntryIoError` marker；Range/Network/Timeout/Cancelled 通过 `std::io::Error::new(ErrorKind::Other, RemoteZipIoError(err))` 返回。`zip_backend::map_zip_io_error` 的顺序固定为：downcast Remote marker → downcast limit marker 为 `ResourceLimitExceeded` → `ErrorKind::InvalidData` 为 `CorruptArchive`（CRC/MAC）→ 普通 `Io`；`map_zip_error(ZipError::Io)` 委托该 helper。分别写四个映射单测。新增第二个真实边界测试：先成功 catalog，再让首个 entry payload block 返回 Network，断言 `read_entry` 恢复为 `ArchiveAccessError::Network` 并由 Service 自动降级物化；同路径用 Timeout 也降级、Cancelled 不降级。不得按错误文本判断，也不得只测 ZIP open/catalog 阶段。
 
 - [ ] **步骤 6：运行测试与强契约检查**
 
@@ -1085,7 +1354,8 @@ pub const BLOCK_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml source::archive::remote_zip -- --nocapture
-cargo test --manifest-path src-tauri/Cargo.toml source::webdav_impl source::smb -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::webdav_impl -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::smb -- --nocapture
 ```
 
 预期：Seek、跨块、LRU、singleflight PASS；SMB/WebDAV Range 原测试无回归。
@@ -1105,6 +1375,8 @@ git commit -m "feat(archive): 增加远程 ZIP Range reader"
 - 修改：`src-tauri/src/source/archive/service.rs`
 - 修改：`src-tauri/src/source/archive/prefetch.rs`
 - 修改：`src-tauri/src/source/archive/zip_backend.rs`
+- 修改：`src-tauri/src/commands/archive_cache.rs`
+- 修改：`src-tauri/src/lib.rs`
 
 - [ ] **步骤 1：写尾部优先、降级和本地切换失败测试**
 
@@ -1115,26 +1387,71 @@ async fn remote_zip_prepares_with_tail_range_before_full_materialization() {
     let result = harness.service.prepare(&harness.descriptor).await.unwrap();
     assert_eq!(result, ArchivePrepareResult::Ready {
         access_mode: ArchiveAccessMode::Streaming,
+        progress_key: Some(harness.expected_progress_key()),
     });
-    assert!(harness.origin.first_range().offset > harness.origin.size() - 128 * 1024);
+    let first = harness.origin.first_range();
+    let expected_offset = ((harness.origin.size() - 1) / BLOCK_SIZE as u64) * BLOCK_SIZE as u64;
+    assert_eq!(first.offset, expected_offset);
+    assert_eq!(first.length, harness.origin.size() - expected_offset);
     assert_eq!(harness.origin.full_download_count(), 0);
+    assert_eq!(harness.prefetch_start_count(), 0); // prepare 不能逃逸后台任务
 }
 
 #[tokio::test]
 async fn broken_range_falls_back_to_materialized_file() {
-    let harness = RemoteServiceHarness::zip_with_short_range();
+    // 必须使用真实 RemoteZipReader + ZipBackend，不允许 fake backend 直接返回目标错误。
+    let harness = RemoteServiceHarness::real_zip_with_short_range();
     let result = harness.service.prepare(&harness.descriptor).await.unwrap();
     assert_eq!(result, ArchivePrepareResult::Ready {
         access_mode: ArchiveAccessMode::Materialized,
+        progress_key: Some(harness.expected_progress_key()),
     });
     assert_eq!(harness.origin.full_download_count(), 1);
 }
 
 #[tokio::test]
+async fn clear_during_range_load_does_not_repopulate_runtime_or_disk_cache() {
+    let harness = RemoteServiceHarness::blocking_zip();
+    let opening = harness.spawn_prepare();
+    harness.wait_range_started().await;
+    let clearing = harness.spawn_clear_archive_cache();
+    harness.wait_until_global_clear_gate_is_closed().await;
+    assert!(matches!(harness.try_ready_cache_hit().await, Err(ArchiveAccessError::Cancelled)));
+    harness.release_range();
+    clearing.await.unwrap().unwrap();
+    assert!(matches!(opening.await.unwrap(), Err(ArchiveAccessError::Cancelled)));
+    assert_eq!(harness.service.catalog_cache_len(), 0);
+    assert_eq!(harness.service.block_cache_len(), 0);
+    assert_eq!(archive_cache_usage(&harness.db).unwrap().count, 0);
+}
+
+#[tokio::test]
+async fn clear_timeout_drops_gate_and_does_not_deadlock_followup_admission() {
+    let harness = RemoteServiceHarness::blocking_zip_with_clear_timeout(TEST_SHORT_TIMEOUT);
+    let opening = harness.spawn_prepare();
+    harness.wait_range_started().await;
+    let err = harness.clear_archive_cache().await.unwrap_err();
+    assert!(matches!(err, ArchiveCacheError::DrainTimeout));
+    assert!(harness.coordinator.try_admit().is_ok()); // ClearGuard 已同步复位
+    harness.release_range();
+    let _ = opening.await;
+}
+
+#[tokio::test]
 async fn ready_cache_is_preferred_after_background_download() {
     let harness = RemoteServiceHarness::zip();
-    harness.service.prepare(&harness.descriptor).await.unwrap();
+    let session_id = "550e8400-e29b-41d4-a716-446655440010";
+    harness.service.begin_session(session_id).unwrap();
+    let request_id = ArchiveRequestId::new(session_id, 1);
+    let ready = harness.service.prepare_with_request(
+        &harness.descriptor, request_id.clone()
+    ).await.unwrap();
+    let progress_key = ready.progress_key().unwrap().to_owned();
+    assert_eq!(harness.prefetch_start_count(), 0);
+    harness.service.commit_request(&request_id).await.unwrap();
     harness.wait_background_ready().await;
+    assert!(harness.background_events().iter()
+        .all(|event| event.progress_key.as_bytes() == progress_key.as_bytes()));
     harness.origin.clear_range_calls();
     let bytes = harness.service.read(&harness.descriptor, "page1.png").await.unwrap();
     assert_eq!(bytes, PNG_BYTES);
@@ -1155,32 +1472,39 @@ cargo test --manifest-path src-tauri/Cargo.toml source::archive::service::tests:
 - [ ] **步骤 3：Prefetcher 增加已打开 archive 后台入口**
 
 ```rust
-pub fn prefetch_opened(&self, origin: SourceDescriptor, rel: String) {
+pub fn prefetch_committed(&self, origin: SourceDescriptor, rel: String, progress_key: String) {
     if !self.is_enabled() { return; }
     let mat = self.mat.clone();
     let expected_epoch = mat.current_epoch();
     tokio::spawn(async move {
-        let _ = mat.ensure_cached_cancellable(&origin, &rel, expected_epoch).await;
+        let _ = mat.ensure_cached_background(
+            &origin, &rel, expected_epoch, progress_key,
+        ).await;
     });
 }
 ```
 
 - [ ] **步骤 4：Service 构造远程 ZIP reader factory**
 
-远程 CBZ/ZIP 先 `stat_origin` 建 identity，再创建 `ReaderFactory`；factory 每次返回共享 block cache 的新 `RemoteZipReader`。`catalog` 或首个加密条目验证成功后返回 Streaming 并调用 `prefetch_opened`。
+远程 CBZ/ZIP 先取得全局 cache admission，再 `stat_origin` 建 identity、检查 ready cache并创建 `ReaderFactory`；factory 每次返回共享 block cache 的新 `RemoteZipReader`。`catalog` 或首个加密条目验证成功后返回 `Ready { Streaming, progressKey }` 并在任务 7 的 request registry 保存 Prepared 的预载意图，绝不直接调用 prefetch。只有同一核心状态机的 `commit_request` 才调用 `prefetch_committed`；它必须把同一个 `progress_key` 传给 `ensure_cached_background`，由后台 subscriber 保存并用于每一条事件。测试逐字节比较 Ready key 与该 subscriber 的所有后台事件 key；任务 11 仅把 commit 暴露为 IPC。
 
-如果 backend 返回 `RemoteRangeUnavailable/Network`，原位重试一次；第二次仍失败则 `ensure_cached` 后用 Path input 重跑 catalog，成功返回 Materialized。密码类、坏包和 unsupported codec 不触发网络降级。
+如果 backend 返回 `RemoteRangeUnavailable/Network/Timeout`，原位重试一次；第二次仍失败则 `ensure_cached` 后用 Path input 重跑 catalog，成功返回 Materialized。`Cancelled`、密码类、坏包和 unsupported codec 不触发网络降级。
 
 - [ ] **步骤 5：实现 ready cache 优先**
 
-在 Materializer/DAO 增加无下载的 `ready_path_if_fresh` helper；Service 每次 list/read/stat 先检查 ready cache。命中则 Path input；未命中且 format 是 ZIP/CBZ 才用 RemoteZipReader。命中校验继续包含远端 stat 与磁盘长度，不绕过 M3 一致性规则。
+在 Materializer/DAO 增加无下载的 `ready_path_if_fresh` helper；Service 每次 list/read/stat 必须先从唯一 `ArchiveCacheCoordinator` 取得 admission，再检查 ready cache。命中则 Path input；未命中且 format 是 ZIP/CBZ 才用 RemoteZipReader。命中校验继续包含远端 stat 与磁盘长度，不绕过 M3 一致性规则。测试专门让 ready 磁盘文件和 DAO 已存在，再关闭 clear gate，断言命中仍返回 `Cancelled` 而不是穿透。
+
+把 `clear_archive_cache_impl` 签名扩展为同时接收 `&ArchiveService`，并从 Service/Materializer 断言取得的是同一个 coordinator Arc。清理顺序固定为：`let clear_guard = coordinator.begin_clear()` → `coordinator.wait_drained(timeout)` → `service.clear_runtime_caches_while_gated(clear_guard.generation())` → 删除磁盘与 DAO → drop clear_guard。`ClearGuard` 的 Drop 必须同步复位 gate，不实现 async Drop；超时、删除失败或 unwind 都走同一复位语义。测试不能在旧 Range 未释放时直接 await clear：先 spawn clear，等待 gate 已关闭并验证 catalog/block/ready-hit/materialize 四条新路径均被拒，再释放旧 loader，最后 await clear，断言三类 cache 均为空。Tauri command 从 managed state 取得与 factory 相同的 `Arc<ArchiveService>`，不得另建实例。
 
 - [ ] **步骤 6：运行远程流式与 M3 回归**
 
 运行：
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive::service source::archive::remote_zip source::archive::materializer source::archive::prefetch -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::service -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::remote_zip -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::materializer -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive::prefetch -- --nocapture
 ```
 
 预期：尾部 Range 优先、自动降级、后台切本地、清空/取消/断点测试全部 PASS。
@@ -1188,18 +1512,20 @@ cargo test --manifest-path src-tauri/Cargo.toml source::archive::service source:
 - [ ] **步骤 7：Commit**
 
 ```bash
-git add src-tauri/src/source/archive/service.rs src-tauri/src/source/archive/prefetch.rs src-tauri/src/source/archive/zip_backend.rs src-tauri/src/source/archive/materializer.rs src-tauri/src/source/archive/dao.rs
+git add src-tauri/src/source/archive/service.rs src-tauri/src/source/archive/prefetch.rs src-tauri/src/source/archive/zip_backend.rs src-tauri/src/source/archive/materializer.rs src-tauri/src/source/archive/dao.rs src-tauri/src/commands/archive_cache.rs src-tauri/src/lib.rs
 git commit -m "feat(archive): 远程 ZIP 流式首开并后台物化"
 ```
 
 ---
 
-### 任务 11：prepare/unlock IPC 与结构化前端契约
+### 任务 11：session/prepare/unlock/commit/cancel IPC 与结构化请求状态机
 
 **文件：**
 - 创建：`src-tauri/src/commands/archive_access.rs`
 - 修改：`src-tauri/src/commands/mod.rs`
 - 修改：`src-tauri/src/lib.rs`
+- 修改：`src-tauri/src/source/archive/service.rs`
+- 修改：`src-tauri/src/source/archive/materializer.rs`
 - 修改：`src/lib/tauri.ts`
 - 测试：`src/lib/tauri.epoch.test.ts`
 
@@ -1209,18 +1535,114 @@ git commit -m "feat(archive): 远程 ZIP 流式首开并后台物化"
 #[tokio::test]
 async fn unlock_only_caches_verified_password() {
     let harness = CommandHarness::encrypted_zip();
-    assert_eq!(prepare_archive_inner(&harness.service, harness.descriptor.clone()).await.unwrap(),
+    let session_id = "550e8400-e29b-41d4-a716-446655440020";
+    harness.service.begin_session(session_id).unwrap();
+    let request_id = ArchiveRequestId::new(session_id, 1);
+    assert_eq!(prepare_archive_inner(
+        &harness.service, harness.descriptor.clone(), request_id.clone()
+    ).await.unwrap(),
                ArchivePrepareResult::PasswordRequired);
     assert_eq!(unlock_archive_inner(
-        &harness.service, harness.descriptor.clone(), "wrong".into()
+        &harness.service, harness.descriptor.clone(), "wrong".into(), request_id.clone()
     ).await.unwrap_err(), ArchiveAccessError::WrongPassword);
     assert!(!harness.service.has_password(&harness.identity));
     assert_eq!(unlock_archive_inner(
-        &harness.service, harness.descriptor, "secret".into()
+        &harness.service, harness.descriptor, "secret".into(), request_id.clone()
     ).await.unwrap(), ArchivePrepareResult::Ready {
         access_mode: ArchiveAccessMode::Local,
+        progress_key: None,
     });
     assert!(harness.service.has_password(&harness.identity));
+    commit_archive_open_inner(&harness.service, request_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancel_request_stops_forced_materialization_without_committing() {
+    let harness = CommandHarness::blocking_remote_rar();
+    let session_id = "550e8400-e29b-41d4-a716-446655440021";
+    harness.service.begin_session(session_id).unwrap();
+    let request_id = ArchiveRequestId::new(session_id, 2);
+    let opening = harness.spawn_prepare(request_id.clone());
+    harness.wait_download_started().await;
+    cancel_archive_prepare_inner(&harness.service, request_id).await;
+    assert_eq!(opening.await.unwrap().unwrap_err(), ArchiveAccessError::Cancelled);
+    assert!(!harness.has_ready_row_or_final_file());
+}
+
+#[tokio::test]
+async fn cancel_before_register_is_observed_by_monotonic_high_water() {
+    let harness = CommandHarness::remote_rar();
+    let session_id = "550e8400-e29b-41d4-a716-446655440022";
+    harness.service.begin_session(session_id).unwrap();
+    let cancelled = ArchiveRequestId::new(session_id, 7);
+    cancel_archive_prepare_inner(&harness.service, cancelled.clone()).await;
+    assert_eq!(prepare_archive_inner(
+        &harness.service, harness.descriptor.clone(), cancelled
+    ).await.unwrap_err(), ArchiveAccessError::Cancelled);
+    assert_eq!(harness.service.cancelled_through(session_id), Some(7));
+    assert!(harness.service.prepare_with_request(
+        &harness.descriptor, ArchiveRequestId::new(session_id, 8)
+    ).await.is_ok());
+}
+
+#[tokio::test]
+async fn prepare_does_not_prefetch_until_commit() {
+    let harness = CommandHarness::streaming_remote_zip();
+    let session_id = "550e8400-e29b-41d4-a716-446655440023";
+    harness.service.begin_session(session_id).unwrap();
+    let request_id = ArchiveRequestId::new(session_id, 1);
+    let ready = prepare_archive_inner(
+        &harness.service, harness.descriptor, request_id.clone()
+    ).await.unwrap();
+    let progress_key = match ready {
+        ArchivePrepareResult::Ready { access_mode: ArchiveAccessMode::Streaming, progress_key: Some(key) } => key,
+        other => panic!("unexpected result: {other:?}"),
+    };
+    assert_eq!(harness.prefetch_start_count(), 0);
+    commit_archive_open_inner(&harness.service, request_id.clone()).await.unwrap();
+    commit_archive_open_inner(&harness.service, request_id).await.unwrap(); // idempotent
+    assert_eq!(harness.prefetch_start_count(), 1);
+    assert_eq!(harness.last_background_progress_key(), Some(progress_key));
+}
+
+#[tokio::test]
+async fn newer_request_cancels_old_prepared_and_sparse_commit_is_rejected() {
+    let harness = CommandHarness::streaming_remote_zip();
+    let session_id = "550e8400-e29b-41d4-a716-446655440024";
+    harness.begin_session(session_id).unwrap();
+    let old = ArchiveRequestId::new(session_id, 1);
+    let new = ArchiveRequestId::new(session_id, 3); // 故意留 sequence=2 空洞
+    harness.service.prepare_with_request(&harness.descriptor, old.clone()).await.unwrap();
+    harness.service.prepare_with_request(&harness.descriptor, new.clone()).await.unwrap();
+    assert_eq!(harness.service.request_state(&old), None);
+    harness.service.commit_request(&new).await.unwrap();
+    harness.service.commit_request(&new).await.unwrap(); // 只对精确 last_committed 幂等
+    assert_eq!(harness.prefetch_start_count(), 1);
+    assert_eq!(harness.service.commit_request(&old).await.unwrap_err(),
+               ArchiveAccessError::Cancelled);
+}
+
+#[tokio::test]
+async fn session_rollover_cancels_and_reclaims_previous_webview_state() {
+    let harness = CommandHarness::blocking_remote_rar();
+    harness.begin_session("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let old = ArchiveRequestId::new("550e8400-e29b-41d4-a716-446655440000", 1);
+    let opening = harness.spawn_prepare(old.clone());
+    harness.wait_download_started().await;
+    harness.begin_session("550e8400-e29b-41d4-a716-446655440001").unwrap();
+    assert_eq!(opening.await.unwrap().unwrap_err(), ArchiveAccessError::Cancelled);
+    assert!(!harness.service.has_session(old.session_id()));
+    assert_eq!(harness.service.commit_request(&old).await.unwrap_err(),
+               ArchiveAccessError::Cancelled);
+}
+
+#[test]
+fn begin_session_rejects_non_uuid_or_oversized_ids() {
+    let harness = CommandHarness::local_zip();
+    assert!(matches!(harness.service.begin_session("session-a"),
+                     Err(ArchiveAccessError::InvalidRequest(_))));
+    assert!(matches!(harness.service.begin_session(&"a".repeat(65)),
+                     Err(ArchiveAccessError::InvalidRequest(_))));
 }
 ```
 
@@ -1236,13 +1658,38 @@ cargo test --manifest-path src-tauri/Cargo.toml commands::archive_access
 
 - [ ] **步骤 3：实现 commands 并注册**
 
+复用任务 7 已定义的 `ArchiveRequestId` 与 request registry，并在这里锁定 IPC 可见合同：`RequestState::{Running, AwaitingPassword, Prepared { progress_key, prefetch }, Cancelled}`。应用是单主窗口模型，registry 只接受一个 `current_session`：`begin_archive_session(sessionId)` 校验 UUID 文本且长度不超过 64 bytes，无效值返回 `InvalidRequest`；同 id 重试幂等，不同 id 表示 WebView reload/HMR rollover，在同一 mutex 内取消旧 active、清除旧 `cancelled_through/last_committed` 后安装新 session。此后旧 session 的迟到 prepare/unlock/commit 返回 `Cancelled`，迟到 cancel 幂等 no-op，因此进程存活期间空间仍为常数，不随 reload 累积。
+
+当前 session 只保存单调 `cancelled_through`、精确 `last_committed: Option<u64>` 与 `active: Option<(sequence, RequestState)>`。cancel N 在同一 mutex 内推进取消高水位，并在 active.sequence <= N 时取消该未 commit 项；register 若 `sequence <= cancelled_through` 立即返回 `Cancelled`，若 sequence 更大则原子取消/替换旧 active，保证每个 session 恰有零或一个 active request。commit 只接受 Prepared active；成功后把它的精确 sequence 写入 `last_committed` 并移除 active。只有 `sequence == last_committed` 的重试返回成功且不重复预载，不能用 `<=` 把未实际提交的稀疏 sequence 误判成功。cancel 已提交 id 为 no-op，其他旧 id 均返回 `Cancelled`。
+
+`prepare_with_request`/`unlock_with_request` 在取得全局 cache admission、格式 semaphore、每个 Range/下载 chunk、远端二次 stat 后、同步 backend 返回后以及 catalog/block/password/DAO/rename 提交前检查 flag。Ready 只把 registry 转到 Prepared 并返回 opaque `progress_key`，不调用 `prefetch_opened`。`commit_request` 幂等执行 Prepared -> Committed，届时才注册后台 subscriber；cancel Prepared 必须丢弃预载意图。Materializer in-flight 项维护 request subscriber：取消单个 subscriber 立即让对应 command 返回 `Cancelled`，只有最后一个交互 subscriber 取消且没有 committed 后台 subscriber 时才推进物理下载取消标志。`ArchiveMaterializeProgress` 增加 `request_id: Option<ArchiveRequestId>` 与 `progress_key: String` 并继续 serde camelCase；共享下载向每个活动交互 subscriber 各 emit 一份带其 request id 的事件，后台事件 `requestId=null`。
+
+在 Materializer tests 锁定四个 subscriber 合同：A/B 同 key 取消 A 后 B 完成；interactive + background 时取消 interactive 后物理下载继续；全部 interactive 取消且无 background 时物理下载终止且无 final/DAO；共享进度分别 fan-out 到 A/B 自己的 requestId。测试还断言 cache hit 路径也先取得全局 admission。
+
 ```rust
+#[tauri::command]
+pub fn begin_archive_session(
+    service: tauri::State<'_, Arc<ArchiveService>>,
+    session_id: String,
+) -> Result<(), ArchiveAccessError> {
+    service.begin_session(&session_id)
+}
+
 #[tauri::command]
 pub async fn prepare_archive(
     service: tauri::State<'_, Arc<ArchiveService>>,
     descriptor: SourceDescriptor,
+    request_id: ArchiveRequestId,
 ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
-    service.prepare(&descriptor).await
+    prepare_archive_inner(service.inner().as_ref(), descriptor, request_id).await
+}
+
+async fn prepare_archive_inner(
+    service: &ArchiveService,
+    descriptor: SourceDescriptor,
+    request_id: ArchiveRequestId,
+) -> Result<ArchivePrepareResult, ArchiveAccessError> {
+    service.prepare_with_request(&descriptor, request_id).await
 }
 
 #[tauri::command]
@@ -1250,33 +1697,71 @@ pub async fn unlock_archive(
     service: tauri::State<'_, Arc<ArchiveService>>,
     descriptor: SourceDescriptor,
     password: String,
+    request_id: ArchiveRequestId,
 ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
-    unlock_archive_inner(service.inner().as_ref(), descriptor, password).await
+    unlock_archive_inner(service.inner().as_ref(), descriptor, password, request_id).await
 }
 
 async fn unlock_archive_inner(
     service: &ArchiveService,
     descriptor: SourceDescriptor,
     password: String,
+    request_id: ArchiveRequestId,
 ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
     let bytes = zeroize::Zeroizing::new(password.into_bytes());
-    service.unlock(&descriptor, bytes).await
+    service.unlock_with_request(&descriptor, bytes, request_id).await
 }
+
+#[tauri::command]
+pub async fn commit_archive_open(
+    service: tauri::State<'_, Arc<ArchiveService>>,
+    request_id: ArchiveRequestId,
+) -> Result<(), ArchiveAccessError> {
+    commit_archive_open_inner(service.inner().as_ref(), request_id).await
+}
+
+async fn commit_archive_open_inner(
+    service: &ArchiveService,
+    request_id: ArchiveRequestId,
+) -> Result<(), ArchiveAccessError> {
+    service.commit_request(&request_id).await
+}
+
+#[tauri::command]
+pub async fn cancel_archive_prepare(
+    service: tauri::State<'_, Arc<ArchiveService>>,
+    request_id: ArchiveRequestId,
+) {
+    cancel_archive_prepare_inner(service.inner().as_ref(), request_id).await;
+}
+
+async fn cancel_archive_prepare_inner(service: &ArchiveService, request_id: ArchiveRequestId) {
+    service.cancel_request(&request_id).await;
+}
+
 ```
 
-在 `commands/mod.rs` 导出，在 `generate_handler!` 注册；`factory.archive_service()` 以同一 Arc manage。
+在 `commands/mod.rs` 导出，在 `generate_handler!` 注册五个命令；`factory.archive_service()` 以同一 Arc manage。Running guard 只在错误/取消时清理；Ready 必须保留 Prepared 到 commit/cancel。cancel 与 commit 都幂等，且不记录 request id 之外的 descriptor/password。
 
 - [ ] **步骤 4：写前端 IPC 失败测试**
 
 在 `tauri.epoch.test.ts` 的 mock invoke harness 增加：
 
 ```ts
-it('prepare/unlock 使用稳定命令名且密码只放 IPC 参数', async () => {
+it('session/prepare/unlock/commit/cancel 使用稳定命令名且密码只放 IPC 参数', async () => {
   const descriptor = { type: 'archive', archivePath: 'C:/book.cbz', entryPrefix: '', format: 'cbz' } as const;
-  await prepareArchive(descriptor);
-  expect(invoke).toHaveBeenCalledWith('prepare_archive', { descriptor });
-  await unlockArchive(descriptor, 'secret');
-  expect(invoke).toHaveBeenCalledWith('unlock_archive', { descriptor, password: 'secret' });
+  const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+  const requestId = { sessionId, sequence: 1 };
+  await beginArchiveSession(sessionId);
+  expect(invoke).toHaveBeenCalledWith('begin_archive_session', { sessionId });
+  await prepareArchive(descriptor, requestId);
+  expect(invoke).toHaveBeenCalledWith('prepare_archive', { descriptor, requestId });
+  await unlockArchive(descriptor, 'secret', requestId);
+  expect(invoke).toHaveBeenCalledWith('unlock_archive', { descriptor, password: 'secret', requestId });
+  await commitArchiveOpen(requestId);
+  expect(invoke).toHaveBeenCalledWith('commit_archive_open', { requestId });
+  await cancelArchivePrepare(requestId);
+  expect(invoke).toHaveBeenCalledWith('cancel_archive_prepare', { requestId });
   expect(JSON.stringify(descriptor)).not.toContain('secret');
 });
 ```
@@ -1285,27 +1770,45 @@ it('prepare/unlock 使用稳定命令名且密码只放 IPC 参数', async () =>
 
 ```ts
 export type ArchiveAccessMode = 'local' | 'streaming' | 'materialized';
+export interface ArchiveRequestId { sessionId: string; sequence: number }
 export type ArchivePrepareResult =
-  | { status: 'ready'; accessMode: ArchiveAccessMode }
+  | { status: 'ready'; accessMode: ArchiveAccessMode; progressKey: string | null }
   | { status: 'passwordRequired' };
 
 export interface ArchiveAccessError {
   kind: 'passwordRequired' | 'wrongPassword' | 'unsupportedCodec'
     | 'multiVolumeUnsupported' | 'corruptArchive' | 'emptyArchive'
-    | 'entryNotFound' | 'remoteRangeUnavailable' | 'cancelled'
-    | 'io' | 'network';
+    | 'resourceLimitExceeded'
+    | 'entryNotFound' | 'remoteRangeUnavailable' | 'cancelled' | 'invalidRequest'
+    | 'io' | 'network' | 'timeout';
   message?: string;
 }
 
-export function prepareArchive(descriptor: SourceDescriptor): Promise<ArchivePrepareResult> {
-  return invoke<ArchivePrepareResult>('prepare_archive', { descriptor });
+export function beginArchiveSession(sessionId: string): Promise<void> {
+  return invoke<void>('begin_archive_session', { sessionId });
+}
+
+export function prepareArchive(
+  descriptor: SourceDescriptor,
+  requestId: ArchiveRequestId,
+): Promise<ArchivePrepareResult> {
+  return invoke<ArchivePrepareResult>('prepare_archive', { descriptor, requestId });
 }
 
 export function unlockArchive(
   descriptor: SourceDescriptor,
   password: string,
+  requestId: ArchiveRequestId,
 ): Promise<ArchivePrepareResult> {
-  return invoke<ArchivePrepareResult>('unlock_archive', { descriptor, password });
+  return invoke<ArchivePrepareResult>('unlock_archive', { descriptor, password, requestId });
+}
+
+export function commitArchiveOpen(requestId: ArchiveRequestId): Promise<void> {
+  return invoke<void>('commit_archive_open', { requestId });
+}
+
+export function cancelArchivePrepare(requestId: ArchiveRequestId): Promise<void> {
+  return invoke<void>('cancel_archive_prepare', { requestId });
 }
 ```
 
@@ -1324,8 +1827,8 @@ npm run type-check
 - [ ] **步骤 7：Commit**
 
 ```bash
-git add src-tauri/src/commands/archive_access.rs src-tauri/src/commands/mod.rs src-tauri/src/lib.rs src/lib/tauri.ts src/lib/tauri.epoch.test.ts
-git commit -m "feat(archive): 增加结构化准备与解锁 IPC"
+git add src-tauri/src/commands/archive_access.rs src-tauri/src/commands/mod.rs src-tauri/src/lib.rs src-tauri/src/source/archive/service.rs src-tauri/src/source/archive/materializer.rs src/lib/tauri.ts src/lib/tauri.epoch.test.ts
+git commit -m "feat(archive): 增加可取消的结构化准备与解锁 IPC"
 ```
 
 ---
@@ -1341,8 +1844,11 @@ git commit -m "feat(archive): 增加结构化准备与解锁 IPC"
 mock 加入：
 
 ```ts
-prepareArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const })),
-unlockArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const })),
+beginArchiveSession: vi.fn(async () => undefined),
+prepareArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null })),
+unlockArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null })),
+commitArchiveOpen: vi.fn(async () => undefined),
+cancelArchivePrepare: vi.fn(async () => undefined),
 ```
 
 新增测试：
@@ -1357,13 +1863,14 @@ it('prepare ready 后才原子提交 archive 导航', async () => {
   const opening = fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
   expect(fb.currentPath).toBe('sub');
   expect(fb.currentDescriptor).toBeNull();
-  pending.resolve({ status: 'ready', accessMode: 'local' });
+  pending.resolve({ status: 'ready', accessMode: 'local', progressKey: null });
   await opening;
   expect(fb.currentPath).toBe('');
   expect(fb.currentDescriptor).toMatchObject({ type: 'archive', format: 'cbr' });
+  expect(commitArchiveOpen).toHaveBeenCalledWith(expect.objectContaining({ sessionId: expect.any(String), sequence: 1 }));
 });
 
-it('password-required 与 prepare error 不污染原导航', async () => {
+it('password-required 不污染原导航', async () => {
   const fb = useFileBrowserStore();
   await fb.setRoot('F:/comics');
   await fb.navigate('sub');
@@ -1377,6 +1884,23 @@ it('password-required 与 prepare error 不污染原导航', async () => {
   expect(fb.currentPath).toBe('sub');
 });
 
+it.each([
+  'multiVolumeUnsupported',
+  'resourceLimitExceeded',
+  'network',
+  'corruptArchive',
+] as const)('prepare %s 进入结构化错误状态且不污染原导航', async (kind) => {
+  const fb = useFileBrowserStore();
+  await fb.setRoot('F:/comics');
+  await fb.navigate('sub');
+  vi.mocked(prepareArchive).mockRejectedValueOnce({ kind });
+  await fb.openArchive(makeEntry('book.7z', { isArchive: true }));
+  expect(fb.archiveOpenError).toMatchObject({ kind });
+  expect(fb.currentPath).toBe('sub');
+  expect(fb.currentDescriptor).toBeNull();
+  expect(fb.archiveOpening).toBe(false);
+});
+
 it('错误密码保留请求，正确密码提交候选导航', async () => {
   const fb = useFileBrowserStore();
   await fb.setRoot('F:/comics');
@@ -1385,10 +1909,95 @@ it('错误密码保留请求，正确密码提交候选导航', async () => {
   vi.mocked(unlockArchive).mockRejectedValueOnce({ kind: 'wrongPassword' });
   await expect(fb.submitArchivePassword('bad')).rejects.toMatchObject({ kind: 'wrongPassword' });
   expect(fb.pendingArchivePassword).not.toBeNull();
-  vi.mocked(unlockArchive).mockResolvedValueOnce({ status: 'ready', accessMode: 'local' });
+  vi.mocked(unlockArchive).mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
   await fb.submitArchivePassword('secret');
   expect(fb.pendingArchivePassword).toBeNull();
   expect(fb.currentDescriptor?.type).toBe('archive');
+});
+
+it('候选未提交时消费物化进度，取消后丢弃迟到回包与事件', async () => {
+  const fb = useFileBrowserStore();
+  await fb.openDescriptorAt(webdavRoot(), 'comics');
+  const pending = deferred<ArchivePrepareResult>();
+  vi.mocked(prepareArchive).mockReturnValueOnce(pending.promise);
+  const opening = fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+  expect(fb.archiveOpening).toBe(true);
+  const oldRequestId = fb.pendingArchiveOpen!.requestId;
+  emitArchiveProgress({ requestId: oldRequestId, progressKey: 'candidate-key', relPath: 'comics/book.cbr', downloaded: 4, totalBytes: 10, phase: 'downloading' });
+  expect(fb.archiveProgress).toEqual({ downloaded: 4, total: 10 });
+  fb.cancelArchiveOpen();
+  expect(cancelArchivePrepare).toHaveBeenCalledWith(oldRequestId);
+  pending.resolve({ status: 'ready', accessMode: 'materialized', progressKey: 'opaque-old-key' });
+  await opening;
+  emitArchiveProgress({ requestId: oldRequestId, progressKey: 'opaque-old-key', relPath: 'comics/book.cbr', downloaded: 10, totalBytes: 10, phase: 'ready' });
+  expect(fb.currentDescriptor).toMatchObject({ type: 'webdav' });
+  expect(fb.archiveProgress).toBeNull();
+  expect(fb.archiveOpening).toBe(false);
+  expect(commitArchiveOpen).not.toHaveBeenCalled();
+});
+
+it('取消后立即重开同一路径时只接受新 requestId 的进度', async () => {
+  const fb = useFileBrowserStore();
+  await fb.openDescriptorAt(webdavRoot(), 'comics');
+  vi.mocked(prepareArchive).mockReturnValue(new Promise(() => {}));
+  void fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+  const oldId = fb.pendingArchiveOpen!.requestId;
+  fb.cancelArchiveOpen();
+  void fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+  const newId = fb.pendingArchiveOpen!.requestId;
+  expect(newId).not.toBe(oldId);
+  emitArchiveProgress({ requestId: oldId, progressKey: 'old-key', relPath: 'comics/book.cbr', downloaded: 8, totalBytes: 10, phase: 'downloading' });
+  expect(fb.archiveProgress).toBeNull();
+  emitArchiveProgress({ requestId: newId, progressKey: 'new-key', relPath: 'comics/book.cbr', downloaded: 2, totalBytes: 10, phase: 'downloading' });
+  expect(fb.archiveProgress).toEqual({ downloaded: 2, total: 10 });
+});
+
+it('新 open 自动取消旧 Prepared，再注册唯一的新 request', async () => {
+  const fb = useFileBrowserStore();
+  const first = deferred<ArchivePrepareResult>();
+  vi.mocked(prepareArchive)
+    .mockReturnValueOnce(first.promise)
+    .mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
+  const openingOld = fb.openArchive(makeEntry('old.cbz', { isArchive: true }));
+  await vi.waitFor(() => expect(fb.pendingArchiveOpen).not.toBeNull());
+  const oldId = fb.pendingArchiveOpen!.requestId;
+  await fb.openArchive(makeEntry('new.cbz', { isArchive: true }));
+  expect(cancelArchivePrepare).toHaveBeenCalledWith(oldId);
+  expect(vi.mocked(cancelArchivePrepare).mock.invocationCallOrder[0])
+    .toBeLessThan(vi.mocked(prepareArchive).mock.invocationCallOrder[1]);
+  first.resolve({ status: 'ready', accessMode: 'local', progressKey: null });
+  await openingOld;
+  expect(fb.currentDescriptor).toMatchObject({ archivePath: expect.stringContaining('new.cbz') });
+});
+
+it('commit 暂时失败时用同一 id 重试且只启动一次预载', async () => {
+  const fb = useFileBrowserStore();
+  vi.mocked(commitArchiveOpen)
+    .mockRejectedValueOnce(new Error('ipc unavailable'))
+    .mockResolvedValueOnce(undefined);
+  await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+  expect(commitArchiveOpen).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(commitArchiveOpen).mock.calls[0][0])
+    .toEqual(vi.mocked(commitArchiveOpen).mock.calls[1][0]);
+  expect(cancelArchivePrepare).not.toHaveBeenCalled();
+});
+
+it('commit 永久失败时保留导航但取消 Prepared，后台 key 仍只认 Ready 值', async () => {
+  const fb = useFileBrowserStore();
+  vi.mocked(prepareArchive).mockResolvedValueOnce({
+    status: 'ready', accessMode: 'streaming', progressKey: 'server-key-42',
+  });
+  vi.mocked(commitArchiveOpen).mockRejectedValue(new Error('ipc unavailable'));
+  await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+  expect(fb.currentDescriptor).toMatchObject({ type: 'archive' });
+  expect(commitArchiveOpen).toHaveBeenCalledTimes(3);
+  expect(cancelArchivePrepare).toHaveBeenCalledWith(
+    vi.mocked(commitArchiveOpen).mock.calls[2][0],
+  );
+  emitArchiveProgress({ requestId: null, progressKey: 'client-derived-wrong', relPath: 'book.cbz', downloaded: 8, totalBytes: 10, phase: 'downloading' });
+  expect(fb.archiveProgress).toBeNull();
+  emitArchiveProgress({ requestId: null, progressKey: 'server-key-42', relPath: 'book.cbz', downloaded: 9, totalBytes: 10, phase: 'downloading' });
+  expect(fb.archiveProgress).toEqual({ downloaded: 9, total: 10 });
 });
 ```
 
@@ -1400,21 +2009,46 @@ it('错误密码保留请求，正确密码提交候选导航', async () => {
 npx vitest run src/stores/fileBrowser.test.ts
 ```
 
-预期：FAIL，store 尚未调用 prepare/unlock，也没有 pending 状态。
+预期：FAIL，store 尚未调用 prepare/unlock/cancel，也没有 requestId、pending 与结构化错误状态。
 
 - [ ] **步骤 3：抽出候选 descriptor 构造**
 
 ```ts
-interface PendingArchiveOpen {
+interface ArchiveCandidate {
   descriptor: SourceDescriptor;
   parent: { descriptor: SourceDescriptor; relPath: string };
   entryName: string;
 }
 
-const pendingArchivePassword = ref<PendingArchiveOpen | null>(null);
-const archiveAccessMode = ref<ArchiveAccessMode | null>(null);
+interface PendingArchiveOpen extends ArchiveCandidate {
+  epoch: number;
+  requestId: ArchiveRequestId;
+}
 
-function buildArchiveCandidate(entry: MediaEntry): PendingArchiveOpen {
+const pendingArchivePassword = ref<PendingArchiveOpen | null>(null);
+const pendingArchiveOpen = ref<PendingArchiveOpen | null>(null);
+const archiveOpening = ref(false);
+const archiveAccessMode = ref<ArchiveAccessMode | null>(null);
+const archiveProgressKey = ref<string | null>(null);
+const archiveOpenError = ref<ArchiveAccessError | null>(null);
+const archiveCommitPendingId = ref<ArchiveRequestId | null>(null);
+let archiveOpenEpoch = 0;
+const archiveSessionId = crypto.randomUUID();
+let archiveRequestSequence = 0;
+let archiveSessionReady: Promise<void> | null = null;
+
+async function ensureArchiveSession(): Promise<void> {
+  archiveSessionReady ??= beginArchiveSession(archiveSessionId).catch((cause) => {
+    archiveSessionReady = null; // 初始化 IPC 恢复后允许下一次 open 重试
+    throw cause;
+  });
+  await archiveSessionReady;
+}
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, ms));
+
+function buildArchiveCandidate(entry: MediaEntry): ArchiveCandidate {
   // 把现有 Local/WebDAV/SMB descriptor 构造原样移动到此纯函数；不得写任何 ref。
 }
 ```
@@ -1424,28 +2058,99 @@ function buildArchiveCandidate(entry: MediaEntry): PendingArchiveOpen {
 - [ ] **步骤 4：实现 prepare 后提交**
 
 ```ts
-function commitArchive(candidate: PendingArchiveOpen, mode: ArchiveAccessMode): void {
+function commitArchive(
+  candidate: PendingArchiveOpen,
+  mode: ArchiveAccessMode,
+  progressKey: string | null,
+): void {
   archiveParent.value = candidate.parent;
   currentDescriptor.value = candidate.descriptor;
   currentPath.value = '';
   searchQuery.value = '';
   archiveAccessMode.value = mode;
+  archiveProgressKey.value = progressKey;
 }
 
 async function openArchive(entry: MediaEntry): Promise<void> {
   archiveProgress.value = null;
-  const candidate = buildArchiveCandidate(entry);
-  const result = await prepareArchive(candidate.descriptor);
-  if (result.status === 'passwordRequired') {
-    pendingArchivePassword.value = candidate;
-    return;
+  archiveOpenError.value = null;
+  const epoch = ++archiveOpenEpoch;
+  // 同步摘走旧 id；先完成 best-effort cancel，才允许新 request 注册。
+  const supersededId = pendingArchiveOpen.value?.requestId
+    ?? pendingArchivePassword.value?.requestId
+    ?? archiveCommitPendingId.value;
+  pendingArchiveOpen.value = null;
+  pendingArchivePassword.value = null;
+  archiveCommitPendingId.value = null;
+  if (supersededId) {
+    await cancelArchivePrepare(supersededId).catch((cause) =>
+      recordArchiveDiagnostic('cancelSupersededArchive', cause));
   }
-  commitArchive(candidate, result.accessMode);
-  await fetch('');
+  if (epoch !== archiveOpenEpoch) return;
+  await ensureArchiveSession();
+  if (epoch !== archiveOpenEpoch) return;
+  const requestId: ArchiveRequestId = {
+    sessionId: archiveSessionId,
+    sequence: ++archiveRequestSequence,
+  };
+  const candidate = { ...buildArchiveCandidate(entry), epoch, requestId };
+  pendingArchiveOpen.value = candidate;
+  archiveOpening.value = true;
+  try {
+    const result = await prepareArchive(candidate.descriptor, requestId);
+    if (epoch !== archiveOpenEpoch) return;
+    if (result.status === 'passwordRequired') {
+      pendingArchivePassword.value = candidate;
+      return;
+    }
+    commitArchive(candidate, result.accessMode, result.progressKey);
+    // 先提交本地导航，再用同一 id 做有界幂等握手；失败不回滚导航。
+    archiveCommitPendingId.value = requestId;
+    await commitArchiveOpenWithCleanup(requestId, epoch);
+    await fetch('');
+  } catch (cause) {
+    if (epoch !== archiveOpenEpoch) return;
+    const error = normalizeArchiveAccessError(cause);
+    if (error.kind !== 'cancelled') archiveOpenError.value = error;
+  } finally {
+    if (epoch === archiveOpenEpoch) {
+      pendingArchiveOpen.value = null;
+      archiveOpening.value = false;
+    }
+  }
+}
+
+async function commitArchiveOpenWithCleanup(
+  requestId: ArchiveRequestId,
+  epoch: number,
+): Promise<void> {
+  const backoffMs = [0, 25, 75] as const;
+  for (let attempt = 0; attempt < backoffMs.length; attempt += 1) {
+    if (epoch !== archiveOpenEpoch) break;
+    if (backoffMs[attempt] > 0) await delay(backoffMs[attempt]);
+    try {
+      await commitArchiveOpen(requestId);
+      if (sameArchiveRequestId(archiveCommitPendingId.value, requestId)) {
+        archiveCommitPendingId.value = null;
+      }
+      return;
+    } catch (cause) {
+      recordArchiveDiagnostic('commitArchiveOpen', cause);
+    }
+  }
+  await cancelArchivePrepare(requestId).catch((cause) =>
+    recordArchiveDiagnostic('cancelUncommittedArchive', cause));
+  if (sameArchiveRequestId(archiveCommitPendingId.value, requestId)) {
+    archiveCommitPendingId.value = null;
+  }
 }
 ```
 
-`submitArchivePassword` 成功后 commit+fetch；失败不清 pending。`cancelArchivePassword` 清 pending 与错误，不改导航。`exitArchive` 同时清 `archiveAccessMode`。
+`normalizeArchiveAccessError` 只接受 IPC 结构化 `kind/message` 并把未知值收敛为 `{ kind: 'io' }`，不得解析错误字符串。`submitArchivePassword` 调用 `unlockArchive(candidate.descriptor, password, candidate.requestId)` 并捕获 candidate epoch；成功回包只有 epoch 仍为当前值时才 `commitArchive(..., result.progressKey)`，随后调用同一个 `commitArchiveOpenWithCleanup` 再 fetch；`wrongPassword` 继续向弹窗抛出且不清 pending，其他错误写 `archiveOpenError`。`cancelArchivePassword` 与新的 `cancelArchiveOpen` 都先保存 candidate requestId、推进 `archiveOpenEpoch`、清 pending/opening/progress，再 best-effort 调用 `cancelArchivePrepare(requestId)`；cancel IPC rejection 必须被捕获，不能产生 unhandled promise。`exitArchive` 同样取消 pending 或 `archiveCommitPendingId`，并清 `archiveAccessMode/archiveProgressKey`。commit 最多以同一 id 尝试 3 次；暂时失败后成功依赖后端精确幂等保证只启动一次预载，永久失败则 best-effort cancel Prepared，避免 request 泄漏。新增测试锁定瞬时失败、永久失败以及新 open 在注册新请求前取消旧 Prepared；导航一旦本地提交便不因 commit IPC 失败回滚。
+
+把 `ArchiveProgressPayload` 扩展为 `requestId: ArchiveRequestId | null` 和 `progressKey: string`。提供 `sameArchiveRequestId(a,b)` 比较 `sessionId + sequence`，候选监听只接受与 pending requestId 两字段相等的事件；不得用对象引用相等、relPath 或闭包 epoch替代后端关联 id。同一路径取消后立即重开的旧事件必须被拒绝。已经进入 Streaming 后的后台预载事件固定 `requestId=null`，只以 Ready 保存的 opaque `archiveProgressKey` 匹配，不由前端派生 cacheKey，也不与候选进度共用分支。
+
+Pinia setup store 的最终 `return` 对象必须显式加入 `pendingArchiveOpen`、`pendingArchivePassword`、`archiveCommitPendingId`、`archiveOpening`、`archiveAccessMode`、`archiveProgressKey`、`archiveOpenError`、`archiveProgress`、`openArchive`、`submitArchivePassword`、`cancelArchivePassword`、`cancelArchiveOpen`、`exitArchive` 和 `startArchiveProgressListener`。Task 13 组件测试通过这些公开成员访问状态；遗漏任一项应由 `npm run type-check` 失败阻止提交。
 
 - [ ] **步骤 5：五格式扩展测试 helper**
 
@@ -1550,6 +2255,10 @@ unsupportedCodec: '不支持的压缩算法：{message}',
 multiVolumeUnsupported: '暂不支持分卷压缩包',
 corruptArchive: '压缩包已损坏或内容不完整',
 emptyArchive: '压缩包中没有可阅读图片',
+resourceLimitExceeded: '压缩包条目或目录超过安全资源上限',
+network: '无法从远程位置读取压缩包',
+timeout: '读取压缩包超时，请重试',
+io: '打开压缩包时发生文件读写错误',
 backgroundCaching: '后台缓存 {percent}%',
 streamFallback: '流式读取不可用，正在下载完整压缩包…',
 ```
@@ -1578,7 +2287,7 @@ async function onArchivePasswordSubmit(password: string): Promise<void> {
 }
 ```
 
-模板挂载 `ArchivePasswordDialog`；取消调用 `fb.cancelArchivePassword()`。`loadingText` 按 `archiveAccessMode` 与 materializer progress 区分阻塞准备、stream fallback；进入 Streaming 后 status bar 显示非阻塞后台百分比。
+模板挂载 `ArchivePasswordDialog`；取消调用 `fb.cancelArchivePassword()`。加载提示的显示条件改为 `fb.loading || fb.archiveOpening`，不能只依赖 list fetch 的 `fb.loading`。`loadingText` 在 `pendingArchiveOpen` 存在时按 materializer progress 区分“正在打开”“正在下载完整压缩包”，进入 Streaming 后 status bar 显示非阻塞后台百分比。候选阶段的取消按钮调用 `fb.cancelArchiveOpen()`，不会提交 descriptor。`fb.archiveOpenError` 通过稳定 kind 映射为页面内可关闭错误提示；双击 handler 不再自行 await/rethrow store promise，因此 rejected prepare 不会成为 unhandled promise。新打开请求先清旧错误，取消不显示错误。
 
 - [ ] **步骤 6：写父组件交互测试**
 
@@ -1587,7 +2296,7 @@ it('双击加密 archive 弹密码框，错误保留，成功后进入', async (
   vi.mocked(prepareArchive).mockResolvedValueOnce({ status: 'passwordRequired' });
   vi.mocked(unlockArchive)
     .mockRejectedValueOnce({ kind: 'wrongPassword' })
-    .mockResolvedValueOnce({ status: 'ready', accessMode: 'local' });
+    .mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
   const wrapper = await mountFileBrowser();
   await wrapper.get('[data-test="file-row-book.cbr"]').trigger('dblclick');
   expect(wrapper.find('[data-test="archive-password-dialog"]').exists()).toBe(true);
@@ -1596,6 +2305,35 @@ it('双击加密 archive 弹密码框，错误保留，成功后进入', async (
   await submitDialog(wrapper, 'secret');
   expect(wrapper.find('[data-test="archive-password-dialog"]').exists()).toBe(false);
   expect(useFileBrowserStore().currentDescriptor).toMatchObject({ type: 'archive', format: 'cbr' });
+});
+
+it('远程 RAR 在候选物化阶段显示进度且取消后留在原目录', async () => {
+  const pending = deferred<ArchivePrepareResult>();
+  vi.mocked(prepareArchive).mockReturnValueOnce(pending.promise);
+  const wrapper = await mountRemoteFileBrowser('comics');
+  await wrapper.get('[data-test="file-row-book.cbr"]').trigger('dblclick');
+  const requestId = useFileBrowserStore().pendingArchiveOpen!.requestId;
+  emitArchiveProgress({ requestId, progressKey: 'opaque-rar-key', relPath: 'comics/book.cbr', downloaded: 5 * 1048576, totalBytes: 10 * 1048576, phase: 'downloading' });
+  await nextTick();
+  expect(wrapper.text()).toContain('5.0');
+  await wrapper.get('[data-test="archive-open-cancel"]').trigger('click');
+  pending.resolve({ status: 'ready', accessMode: 'materialized', progressKey: 'opaque-rar-key' });
+  await flushPromises();
+  expect(useFileBrowserStore().currentPath).toBe('comics');
+});
+
+it.each([
+  ['multiVolumeUnsupported', '暂不支持分卷压缩包'],
+  ['resourceLimitExceeded', '超过安全资源上限'],
+  ['network', '无法从远程位置读取'],
+  ['corruptArchive', '压缩包已损坏'],
+] as const)('prepare %s 显示结构化错误且不产生未处理 rejection', async (kind, text) => {
+  vi.mocked(prepareArchive).mockRejectedValueOnce({ kind });
+  const wrapper = await mountFileBrowser();
+  await wrapper.get('[data-test="file-row-book.7z"]').trigger('dblclick');
+  await flushPromises();
+  expect(wrapper.get('[data-test="archive-open-error"]').text()).toContain(text);
+  expect(useFileBrowserStore().currentDescriptor).toBeNull();
 });
 ```
 
@@ -1649,11 +2387,20 @@ async fn password_never_appears_in_descriptor_error_or_debug_output() {
 
 #[test]
 fn archive_password_error_maps_to_locked_response_without_detail() {
-    let response = map_media_error(MediaSourceError::Archive(
+    let response = error_to_status(MediaSourceError::Archive(
         ArchiveAccessError::PasswordRequired,
     ));
     assert_eq!(response.status(), StatusCode::LOCKED);
     assert_eq!(response.body(), b"archive locked");
+}
+
+#[test]
+fn archive_resource_limit_maps_to_payload_too_large() {
+    let response = error_to_status(MediaSourceError::Archive(
+        ArchiveAccessError::ResourceLimitExceeded("entry > 512 MiB".into()),
+    ));
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.body(), b"archive resource limit");
 }
 ```
 
@@ -1669,6 +2416,9 @@ MediaSourceError::Archive(ArchiveAccessError::PasswordRequired)
 MediaSourceError::Archive(ArchiveAccessError::EntryNotFound(_)) => {
     err_response(StatusCode::NOT_FOUND, "not found")
 }
+MediaSourceError::Archive(ArchiveAccessError::ResourceLimitExceeded(_)) => {
+    err_response(StatusCode::PAYLOAD_TOO_LARGE, "archive resource limit")
+}
 MediaSourceError::Archive(ArchiveAccessError::Network(_)) => {
     err_response(StatusCode::BAD_GATEWAY, "bad gateway")
 }
@@ -1681,7 +2431,7 @@ MediaSourceError::Archive(_) => {
 
 - [ ] **步骤 3：增加 CI 守卫**
 
-在 `.github/workflows/verify.yml` Rust stable 安装后增加：
+在 `.github/workflows/verify.yml` 现有 stable `cargo check` / `cargo test` 步骤全部完成之后追加 MSRV 步骤，避免安装 1.75 改变后续现有命令的默认 toolchain：
 
 ```yaml
       - name: Install Rust 1.75 for MSRV archive check
@@ -1702,7 +2452,9 @@ MediaSourceError::Archive(_) => {
 - [ ] **步骤 5：运行定向安全与格式测试**
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml source::archive commands::archive_access media_protocol -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml source::archive -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml commands::archive_access -- --nocapture
+cargo test --manifest-path src-tauri/Cargo.toml media_protocol -- --nocapture
 ```
 
 预期：所有 Archive、密码、安全、Range、Materializer 测试 PASS，0 failure。
@@ -1746,7 +2498,7 @@ git commit -m "docs(archive): 完成五格式能力与分发说明"
 
 - [ ] **步骤 10：提交前最终审查**
 
-逐项对照规格 §13：本地五格式、五格式密码、WebDAV/SMB ZIP Range 首开、后台物化、本地切换、RAR/7z 完整物化、错误分类、多卷拒绝、密码零持久化。任何缺项都回到对应任务补测试和最小实现，不能仅在验收报告中标注完成。
+逐项对照规格 §13：本地五格式、五格式密码、WebDAV/SMB ZIP Range 首开、后台物化、本地切换、RAR/7z 完整物化、错误分类、多卷拒绝、密码零持久化、资源上限、catalog/password cache 不变量、清空 cache 不复活、pending 打开进度与取消竞态。任何缺项都回到对应任务补测试和最小实现，不能仅在验收报告中标注完成。
 
 ---
 
@@ -1758,6 +2510,14 @@ git commit -m "docs(archive): 完成五格式能力与分发说明"
 - multi-disk ZIP、分卷 RAR、分卷 7z 返回专用错误。
 - WebDAV/SMB mock 证明 ZIP 首请求为尾部 Range，未先整包下载。
 - Range 失败证明自动降级完整物化；后台完成后证明新请求不再发 Range。
+- RemoteRangeUnavailable/Network/Timeout 分别穿过真实 `RemoteZipReader -> ZipBackend` 的 entry payload `std::io::Error` 与 `ZipError::Io` 边界后仍保留类型并降级；Cancelled 明确不降级。
 - `.part`、sidecar、断点续传、LRU、cache 清空和旧 `.zip` cache 行不回归。
+- cache 清空由唯一全局 coordinator 在所有 cache lookup 前原子封锁准入；旧 block/materializer loader 不重插，ready cache hit 不穿透，catalog/block/磁盘/DAO 均保持为空，失败/timeout 后 RAII gate 可恢复。
+- prepare Ready 不启动后台物化；前端提交导航后的 `commit_archive_open` 才启动，且 Ready `progressKey` 与后台事件一致。
+- Materializer 同 key 的交互/后台 subscriber 具备独立取消、物理下载寿命与 per-request 进度 fan-out 证据。
+- RAR 实际输出由 `unrar_sys` data callback 在硬上限处停止，不经高层完整 `Vec`；listing 限制与 callback 限制为独立测试。
+- 已缓存的加密 catalog 在 password store 清除后不能返回 ready，必须重新要求密码。
+- 单条目、catalog 数量、路径长度、7z dictionary 与进程级解压预算均有越界测试，且越界后服务继续可用。
+- 远程 RAR/7z 候选物化期间有进度和取消 UI，迟到 prepare/event 不提交导航。
 - 密码未进入 descriptor、DB、日志、事件、sidecar 与错误文本。
 - `npm test`、type-check、frontend build、`cargo test`、`cargo build`、Tauri portable build 全部有新鲜输出。
