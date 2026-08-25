@@ -342,13 +342,20 @@ impl LimitedEntryWriter {
                     LimitedEntryIoError { limit: self.budget.output_cap },
                 )
             })?;
-        // ② 扩容目标 = max(required, min(capacity + 1 MiB, output_cap))：至少覆盖本次
-        //    incoming（RAR callback 必须一次消费整个 p2 块），闲余按 1 MiB 步长推进；
-        //    ③ 尾块字节精确——min(...) 钳到 output_cap，最后不足 1 MiB 的部分增量按
-        //    output_cap - capacity 精确计费，不整块 MiB 对齐（7z dict 常出 511.5 MiB 一类上限）
+        // ② 扩容目标：**首次分配**（capacity == 0）按 max(required, min(1 MiB, output_cap))
+        //    起步——小条目首块也拿 1 MiB 记账步长（任务 3 合同：fresh 600 KiB → 1 MiB）；
+        //    **已有分配**时按 required 精确推进（任务 4 合同：len=512 KiB/capacity=1 MiB
+        //    再预检 768 KiB → 目标恰为 1280 KiB，不因闲余步长翻倍到 2 MiB）。两合同在
+        //    "required > capacity 时 target 必须完整覆盖本次 incoming"上一致（① 由 required
+        //    保证；RAR callback 单次整块 p2 同样被 required 一次覆盖）。backend 调用方
+        //    （zip read_entry）在解压前用声明大小做**单次**整段 ensure，分块写入全部落入
+        //    既有 capacity，不触发逐块重分配；谎报头部的增长仍受 output_cap 终态拒绝。
         let current_capacity = self.buf.capacity() as u64;
-        let step_target = (current_capacity.saturating_add(1024 * 1024)).min(self.budget.output_cap);
-        let target = required.max(step_target);
+        let target = if current_capacity == 0 {
+            required.max((1024 * 1024).min(self.budget.output_cap))
+        } else {
+            required
+        };
         // ④ 先 try_grow 计费（水位单调，≤ 已声明水位直接 true）；增长失败 → retry marker
         //    （backend 边界恢复为 BudgetRetryRequired，Service 触发增长-回退）
         if !self.budget.try_grow(target) {
@@ -366,6 +373,12 @@ impl LimitedEntryWriter {
 
     pub fn current_len(&self) -> usize {
         self.buf.len()
+    }
+
+    /// 交付缓冲区（backend `read_entry` 的返回载荷）：消费 writer，预算许可随之一并
+    /// 释放（读取已完成，输出字节转入调用方所有，不再按 permit 记账）。
+    pub fn finish(self) -> Vec<u8> {
+        self.buf
     }
 
     /// 内部先 ensure（? 传播 marker）再复制；ensure 已保证 capacity ≥ len + incoming，

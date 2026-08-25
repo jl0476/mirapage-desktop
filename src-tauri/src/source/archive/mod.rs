@@ -7,3 +7,4 @@ pub mod dao;
 pub mod materializer;
 pub mod password;
 pub mod prefetch;
+pub mod zip_backend;
