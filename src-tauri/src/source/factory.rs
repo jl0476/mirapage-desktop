@@ -44,7 +44,8 @@ impl MediaSourceFactory {
         )));
         let webdav = Arc::new(WebDavMediaSource::new(db.clone(), creds));
         // 构造顺序（任务 7 固定）：具体远程源 → ArchiveCacheCoordinator →
-        // Materializer（coordinator 注入在任务 8）→ ArchiveService → ArchiveMediaSource。
+        // Materializer（任务 8 起注入同一 coordinator——ensure/ready 查询/物理下载
+        // 共用单一 admission 闸门）→ ArchiveService → ArchiveMediaSource。
         // M3 spec §2 断环：Materializer 持具体源 Arc（不经 factory）——未来加源：
         // 此处追加 + materializer 源列表
         let cache_coordinator = ArchiveCacheCoordinator::new_shared();
@@ -54,6 +55,7 @@ impl MediaSourceFactory {
             smb.clone() as Arc<dyn MediaSource>,
             db.clone(),
             cache_root,
+            cache_coordinator.clone(),
         ));
         let archive_service = Arc::new(ArchiveService::new(
             materializer.clone() as Arc<dyn Materialize>,

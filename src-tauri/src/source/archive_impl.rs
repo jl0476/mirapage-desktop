@@ -18,14 +18,14 @@ use std::path::PathBuf;
 
 /// 物化抽象（生产 = source::archive::materializer::Materializer；测试 = mock）
 ///
-/// 错误类型化（审查修复）：保 `MediaSourceError` 而非 String——MaterializeError 的
-/// NotFound/Network 经 `From` 保类型穿透到 media:// 协议层（404/502），不被
-/// `to_string()` 扁平化成 Other → 500。
+/// 错误类型化（审查修复 + 任务 8 收紧）：直接返回 `MaterializeError` 而非
+/// MediaSourceError/String——NotFound/Network 保类型，FormatMismatch/Cancelled 由
+/// Service 边界按变体映射（InvalidRequest / Cancelled），不被 `to_string()` 扁平化。
 #[async_trait]
 pub trait Materialize: Send + Sync {
     async fn ensure_cached(
-        &self, origin: &SourceDescriptor, archive_rel_path: &str,
-    ) -> std::result::Result<PathBuf, MediaSourceError>;
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+    ) -> std::result::Result<PathBuf, crate::source::archive::materializer::MaterializeError>;
 }
 
 pub struct ArchiveMediaSource {
@@ -150,6 +150,7 @@ impl MediaSource for ArchiveMediaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::archive::materializer::MaterializeError;
     use std::io::Write;
     use tempfile::tempdir;
 
@@ -180,8 +181,9 @@ mod tests {
             &self,
             _origin: &SourceDescriptor,
             _archive_rel_path: &str,
-        ) -> std::result::Result<PathBuf, MediaSourceError> {
-            Err(MediaSourceError::Other("mock 无物化".into()))
+            _format: ArchiveFormat,
+        ) -> std::result::Result<PathBuf, MaterializeError> {
+            Err(MaterializeError::Other("mock 无物化".into()))
         }
     }
 
@@ -222,7 +224,8 @@ mod tests {
             &self,
             _origin: &SourceDescriptor,
             _archive_rel_path: &str,
-        ) -> std::result::Result<PathBuf, MediaSourceError> {
+            _format: ArchiveFormat,
+        ) -> std::result::Result<PathBuf, MaterializeError> {
             self.calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(self.path.clone())
@@ -428,9 +431,9 @@ mod tests {
         assert_eq!(entries.len(), 2);
     }
 
-    /// 错误注入物化 mock——返回预置 MediaSourceError
+    /// 错误注入物化 mock——返回预置 MaterializeError（NotFound/Network）
     struct FailingMaterialize {
-        err: MediaSourceError,
+        err: MaterializeError,
     }
 
     #[async_trait]
@@ -439,10 +442,11 @@ mod tests {
             &self,
             _origin: &SourceDescriptor,
             _archive_rel_path: &str,
-        ) -> std::result::Result<PathBuf, MediaSourceError> {
+            _format: ArchiveFormat,
+        ) -> std::result::Result<PathBuf, MaterializeError> {
             Err(match &self.err {
-                MediaSourceError::NotFound(s) => MediaSourceError::NotFound(s.clone()),
-                MediaSourceError::Network(s) => MediaSourceError::Network(s.clone()),
+                MaterializeError::NotFound(s) => MaterializeError::NotFound(s.clone()),
+                MaterializeError::Network(s) => MaterializeError::Network(s.clone()),
                 other => panic!("mock 只支持 NotFound/Network 注入, 得到 {other:?}"),
             })
         }
@@ -469,11 +473,11 @@ mod tests {
     #[tokio::test]
     async fn remote_materializer_error_type_preserved() {
         for err in [
-            MediaSourceError::NotFound("gone".into()),
-            MediaSourceError::Network("unreachable".into()),
+            MaterializeError::NotFound("gone".into()),
+            MaterializeError::Network("unreachable".into()),
         ] {
-            // 期望变体先于 move 捕获（MediaSourceError 未 derive Clone）
-            let expect_not_found = matches!(err, MediaSourceError::NotFound(_));
+            // 期望变体先于 move 捕获
+            let expect_not_found = matches!(err, MaterializeError::NotFound(_));
             let src = test_source(std::sync::Arc::new(FailingMaterialize { err }));
             let res = src.list_directory(&remote_descriptor(), "").await;
             let type_preserved = match res {

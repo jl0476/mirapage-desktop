@@ -33,15 +33,22 @@ pub(crate) fn get_archive_cache_info_impl(
     Ok((count, bytes, part_count, part_bytes))
 }
 
-/// 清空缓存四段式的可测核心（语义见模块注释 ①-④）。
+/// 清空缓存的可测核心（语义见模块注释 ①-④；任务 8 起双闸门）。
+/// coordinator ClearGuard（拒新 admission——ready 查询/物化/物理下载全走它）+
+/// materializer clearing 闸门（停在途 owner 的 chunk 检查点）+ 排空 + 实删 + 复位。
 pub(crate) async fn clear_archive_cache_impl(db: &Db, mat: &Materializer) -> Result<(), String> {
-    // ① 闸门：持 inflight 锁置 clearing=true 后 cancel_all——与 ensure_cached 的
+    // ① 双闸门：coordinator begin_clear（CloseGuard Drop 同步复位，覆盖 return/panic）
+    //    + 持 inflight 锁置 clearing=true 后 cancel_all——与 ensure_cached 的
     //    「查闸门 + 注册」临界区互斥；已注册任务都在 map 里可见，drain 会等它们
+    let clear_guard = mat.coordinator().begin_clear();
     mat.begin_clearing().await;
-    // ② 排空在途（检查点粒度快速退出）；超时 → 复位闸门 + 忙碌错误，不删任何东西
-    let drained = mat.wait_inflight_drained(Duration::from_secs(2)).await;
+    // ② 排空在途（检查点粒度快速退出 + coordinator admission 排空）；超时 →
+    //    复位双闸门 + 忙碌错误，不删任何东西
+    let drained = mat.wait_inflight_drained(Duration::from_secs(2)).await
+        && mat.coordinator().wait_drained(Duration::from_secs(2)).await;
     if !drained {
         mat.end_clearing().await;
+        drop(clear_guard);
         return Err("缓存正忙（有下载在途），请稍后重试".into());
     }
     // ③ 实删：ready 文件（clear_all 返回的路径逐个删）+ part/ 整体重建 + 清表
@@ -57,8 +64,11 @@ pub(crate) async fn clear_archive_cache_impl(db: &Db, mat: &Materializer) -> Res
         let _ = std::fs::create_dir_all(root.join("part"));
         Ok(())
     })();
-    // ④ 复位闸门——begin_clearing 内 cancel_all 已推进代际，新任务取新代际自然恢复
+    // ④ 复位闸门——begin_clearing 内 cancel_all 已推进代际，新任务取新代际自然恢复；
+    //    coordinator ClearGuard 最后 Drop（end_clearing 重开 materializer 闸门时
+    //    coordinator 闸门仍关闭，新 admission 依旧被拒，无穿透窗口）
     mat.end_clearing().await;
+    drop(clear_guard);
     result
 }
 
@@ -165,21 +175,24 @@ mod tests {
         assert!(entries.is_empty(), "part/ 重建为空，实际残留 {} 项", entries.len());
     }
 
-    /// rev4 闸门：begin_clearing 后新 ensure_cached 被拒；end_clearing 后恢复
-    /// （begin 内 cancel_all 已推进代际——旧 in-flight 即便漏网也不会 upsert 复活缓存）。
+    /// rev4 闸门（任务 8 起 Cancelled 变体）：begin_clearing 后新 ensure_cached 被拒；
+    /// end_clearing 后恢复（begin 内 cancel_all 已推进代际——旧 in-flight 即便漏网
+    /// 也不会 upsert 复活缓存）。
     #[tokio::test]
     async fn clearing_gate_rejects_new_tasks_and_recovers() {
         let mock = StdArc::new(MockOrigin::new(10));
         let (m, _dir, db) = temp_materializer(mock);
         m.begin_clearing().await;
-        let err = m.ensure_cached(&webdav(""), "a.cbz").await.unwrap_err();
-        assert!(err.to_string().contains("clearing in progress"),
-                "闸门开启时新任务被拒，实际 {err}");
+        let err = m.ensure_cached(&webdav(""), "a.cbz", crate::source::descriptor::ArchiveFormat::Cbz)
+            .await.unwrap_err();
+        assert!(matches!(err, crate::source::archive::materializer::MaterializeError::Cancelled),
+                "闸门开启时新任务被拒（Cancelled），实际 {err}");
         // 排空立即成功（无在途）→ 清空正常完成 → 复位
         assert!(m.wait_inflight_drained(Duration::from_secs(2)).await);
         clear_archive_cache_impl(&db, &m).await.unwrap();
         // end_clearing 已由 impl ④ 完成：新任务正常物化
-        let p = m.ensure_cached(&webdav(""), "a.cbz").await.unwrap();
+        let p = m.ensure_cached(&webdav(""), "a.cbz", crate::source::descriptor::ArchiveFormat::Cbz)
+            .await.unwrap();
         assert!(p.exists(), "闸门复位后新任务正常工作");
     }
 }

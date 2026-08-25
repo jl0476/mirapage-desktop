@@ -60,7 +60,13 @@ impl ArchivePrefetcher {
                 {
                     break;
                 }
-                let _ = mat.ensure_cached_cancellable(&origin, rel, batch_epoch).await;
+                // 任务 8 五格式：format 从 rel 扩展名派生（origin descriptor 无 format
+                // 字段）；不支持的扩展名跳过（materializer 闸门同样会拒，此处免空跑）
+                let ext = std::path::Path::new(rel)
+                    .extension().and_then(|e| e.to_str()).unwrap_or("");
+                let Some(format) = crate::source::descriptor::ArchiveFormat::from_extension(ext)
+                else { continue };
+                let _ = mat.ensure_cached_cancellable(&origin, rel, batch_epoch, format).await;
             }
         });
     }
@@ -96,8 +102,8 @@ mod tests {
         // notify_window(epoch=1, targets=[rel1, rel2]) → spawn 低优物化 → 两 rel ready
         p.notify_window(1, &origin, &["rel1.cbz".into(), "rel2.cbz".into()])
             .await;
-        let f1 = dir.path().join(format!("{}.zip", cache_key(&origin, "rel1.cbz")));
-        let f2 = dir.path().join(format!("{}.zip", cache_key(&origin, "rel2.cbz")));
+        let f1 = dir.path().join(format!("{}.cbz", cache_key(&origin, "rel1.cbz")));
+        let f2 = dir.path().join(format!("{}.cbz", cache_key(&origin, "rel2.cbz")));
         wait_until("两个 rel 物化 ready", || f1.exists() && f2.exists()).await;
         assert_eq!(
             mock.read_calls.load(Ordering::SeqCst),
@@ -173,7 +179,7 @@ mod tests {
             "rel2 从未启动（待开始任务丢弃——spec §7）"
         );
         assert!(
-            !dir.path().join(format!("{}.zip", cache_key(&origin, "rel2.cbz"))).exists(),
+            !dir.path().join(format!("{}.cbz", cache_key(&origin, "rel2.cbz"))).exists(),
             "rel2 无缓存产出"
         );
     }
@@ -189,8 +195,8 @@ mod tests {
         assert_eq!(mock.read_calls.load(Ordering::SeqCst), 0, "元数据级不下载内容");
         // 无任何缓存文件产出（final 不存在）
         assert!(
-            !dir.path().join(format!("{}.zip", cache_key(&origin, "a.cbz"))).exists()
-                && !dir.path().join(format!("{}.zip", cache_key(&origin, "b.cbz"))).exists(),
+            !dir.path().join(format!("{}.cbz", cache_key(&origin, "a.cbz"))).exists()
+                && !dir.path().join(format!("{}.cbz", cache_key(&origin, "b.cbz"))).exists(),
             "stat 预热不落缓存文件"
         );
     }
@@ -209,9 +215,9 @@ mod tests {
         assert_eq!(mock.read_calls.load(Ordering::SeqCst), 0, "关闭后内容预载不触发下载");
         assert_eq!(mock.stat_calls.load(Ordering::SeqCst), 0, "关闭后 stat 预热也不发");
         // 强制路径（用户打开/阅读）不受开关影响——Materializer.ensure_cached 直调
-        let forced = m.ensure_cached(&origin, "a.cbz").await.unwrap();
+        let forced = m.ensure_cached(&origin, "a.cbz", crate::source::descriptor::ArchiveFormat::Cbz).await.unwrap();
         assert!(forced.exists(), "强制物化照常工作");
         assert_eq!(mock.read_calls.load(Ordering::SeqCst), 1);
-        assert!(dir.path().join(format!("{}.zip", cache_key(&origin, "a.cbz"))).exists());
+        assert!(dir.path().join(format!("{}.cbz", cache_key(&origin, "a.cbz"))).exists());
     }
 }

@@ -32,8 +32,8 @@ use crate::source::archive::rar_backend::RarBackend;
 use crate::source::archive::sevenz_backend::SevenZBackend;
 use crate::source::archive::zip_backend::ZipBackend;
 use crate::source::archive_impl::Materialize;
+use crate::source::archive::materializer::MaterializeError;
 use crate::source::descriptor::{ArchiveFormat, MediaEntry, SourceDescriptor};
-use crate::source::trait_def::MediaSourceError;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
@@ -52,6 +52,12 @@ const MIB: u64 = 1024 * 1024;
 pub struct ArchiveRequestId {
     pub session_id: String,
     pub sequence: u64,
+}
+
+impl ArchiveRequestId {
+    pub fn new(session_id: &str, sequence: u64) -> Self {
+        Self { session_id: session_id.to_owned(), sequence }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -314,10 +320,11 @@ impl ArchiveService {
                 let rel = archive_rel_path.as_deref().ok_or_else(|| {
                     ArchiveAccessError::InvalidRequest("远程 archive 缺少 archiveRelPath".into())
                 })?;
-                // mock/生产实现均返回类型化 MediaSourceError——NotFound/Network 保真
+                // mock/生产实现均返回类型化 MaterializeError——Service 边界按变体映射
+                // （FormatMismatch→InvalidRequest / Cancelled→Cancelled / NotFound 保真）
                 let path = self
                     .materializer
-                    .ensure_cached(origin_desc, rel)
+                    .ensure_cached(origin_desc, rel, *format)
                     .await
                     .map_err(map_materialize_error)?;
                 let meta = fs_metadata(&path)?;
@@ -963,12 +970,21 @@ fn mtime_secs(meta: &std::fs::Metadata) -> Option<i64> {
 
 /// Materializer 错误 → ArchiveAccessError：NotFound 保 EntryNotFound 语义
 /// （media:// 404 合同），Network/Timeout 保类型；其余归 Io
-fn map_materialize_error(e: MediaSourceError) -> ArchiveAccessError {
+fn map_materialize_error(e: MaterializeError) -> ArchiveAccessError {
     match e {
-        MediaSourceError::NotFound(s) => ArchiveAccessError::EntryNotFound(s),
-        MediaSourceError::Network(s) => ArchiveAccessError::Network(s),
-        MediaSourceError::Timeout(s) => ArchiveAccessError::Timeout(s),
-        other => ArchiveAccessError::Io(other.to_string()),
+        MaterializeError::NotFound(s) => ArchiveAccessError::EntryNotFound(s),
+        MaterializeError::Network(s) => ArchiveAccessError::Network(s),
+        // spec §8 双重校验：descriptor 声明格式与路径扩展名不一致是调用方契约违反，
+        // 不得透传为 Other/Io 字符串
+        MaterializeError::FormatMismatch { declared, rel_path } => {
+            ArchiveAccessError::InvalidRequest(format!(
+                "descriptor 声明格式与扩展名不一致: declared={declared:?} rel={rel_path}"
+            ))
+        }
+        // 取消不触发网络降级（任务 10 白名单外；IPC 层映射取消状态）
+        MaterializeError::Cancelled => ArchiveAccessError::Cancelled,
+        MaterializeError::Io(io) => ArchiveAccessError::Io(io.to_string()),
+        MaterializeError::Other(s) => ArchiveAccessError::Io(s),
     }
 }
 
@@ -984,7 +1000,6 @@ mod tests {
     use crate::source::archive::cache_coordinator::ArchiveCacheCoordinator;
     use crate::source::archive_impl::Materialize;
     use crate::source::descriptor::{ArchiveFormat, MediaEntry, SourceDescriptor};
-    use crate::source::trait_def::MediaSourceError;
     use async_trait::async_trait;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -1414,8 +1429,9 @@ mod tests {
             &self,
             _origin: &SourceDescriptor,
             _archive_rel_path: &str,
-        ) -> std::result::Result<PathBuf, MediaSourceError> {
-            Err(MediaSourceError::Other("fake 无物化".into()))
+            _format: ArchiveFormat,
+        ) -> std::result::Result<PathBuf, MaterializeError> {
+            Err(MaterializeError::Other("fake 无物化".into()))
         }
     }
 

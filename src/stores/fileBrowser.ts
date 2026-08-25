@@ -46,10 +46,12 @@ export interface PendingOpenLocation {
 }
 
 // ─── M3 任务 7: 远程 archive 物化进度（archive://progress 事件载荷）───
-// 后端 materializer.rs emit：{ cacheKey, relPath, downloaded, totalBytes, phase }
-// （phase: "downloading" / "ready"；store 只取字节数，phase 不消费）。
+// 后端 materializer.rs 统一类型化 emit（任务 8）：{ requestId, progressKey, relPath,
+// downloaded, totalBytes, phase }（phase: "downloading" / "ready"；store 只取
+// relPath 与字节数，requestId/progressKey/phase 不消费——任务 11 接请求级进度）。
 export interface ArchiveProgressPayload {
-  cacheKey: string;
+  requestId: unknown;
+  progressKey: string;
   relPath: string;
   downloaded: number;
   totalBytes: number;

@@ -2332,11 +2332,12 @@ describe('FileBrowser — details 选中远程 CBZ 内容预载 (M3 最终审查
   const cbzEntry = { name: 'vol01.cbz', path: 'vol01.cbz', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 };
   const cbzEntry2 = { name: 'vol03.cbz', path: 'vol03.cbz', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 };
   const cbrEntry = { name: 'vol02.cbr', path: 'vol02.cbr', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 };
+  const sevenzEntry = { name: 'vol04.7z', path: 'vol04.7z', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 };
   const webdavDesc = { type: 'webdav', accountId: 7, baseUrl: 'https://dav.example/dav', path: '' } as const;
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedList.mockResolvedValue([cbzEntry, cbzEntry2, cbrEntry]);
+    mockedList.mockResolvedValue([cbzEntry, cbzEntry2, cbrEntry, sevenzEntry]);
     mockedShortcuts.mockResolvedValue([]);
     vi.useFakeTimers();
   });
@@ -2415,9 +2416,29 @@ describe('FileBrowser — details 选中远程 CBZ 内容预载 (M3 最终审查
     expect(vi.mocked(notifyArchiveWindow)).not.toHaveBeenCalled();
   });
 
-  it('选中 .cbr 不调（对齐 Rust 物化格式闸门，不发自带被拒的预载）', async () => {
+  it('选中 .cbr → 调用 notifyArchiveWindow（任务 8：五种远程物化格式）', async () => {
     const { fb } = await mountWebdavBrowser();
     fb.selectSingle(cbrEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(notifyArchiveWindow)).toHaveBeenCalledWith(webdavDesc, ['vol02.cbr'], 'content');
+  });
+
+  it('选中 .7z → 调用 notifyArchiveWindow（任务 8：五种远程物化格式）', async () => {
+    const { fb } = await mountWebdavBrowser();
+    fb.selectSingle(sevenzEntry);
+    await flushPromises();
+    vi.advanceTimersByTime(300);
+    await flushPromises();
+    expect(vi.mocked(notifyArchiveWindow)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(notifyArchiveWindow)).toHaveBeenCalledWith(webdavDesc, ['vol04.7z'], 'content');
+  });
+
+  it('选中 .exe 不调（非远程物化格式，不发自带被拒的预载）', async () => {
+    const { fb } = await mountWebdavBrowser();
+    fb.selectSingle({ name: 'setup.exe', path: 'setup.exe', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 });
     await flushPromises();
     vi.advanceTimersByTime(300);
     await flushPromises();

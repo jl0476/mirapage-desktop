@@ -223,10 +223,11 @@ function onToggleLikeFromCtx(entry: MediaEntry) {
 // → masonry 自动回落 details → EntryDetailPanel 在 details 视图不渲染（v-if
 // viewMode !== 'details'，metadata 预热只在 masonry 视图生效）→ 内容预载通道为空，
 // 每次双击冷启动。此处按表格语义在 FileBrowser 层补：details 视图选中远程
-// isArchive 条目（仅 cbz/zip——对齐 Rust 物化格式闸门，不发自带被拒的预载）→
-// notifyArchiveWindow 'content'。rel 拼法与 openArchive 的 relInside 一致
+// isArchive 条目（五种远程物化格式——对齐 Rust 物化格式闸门，不发自带被拒的预载）
+// → notifyArchiveWindow 'content'。rel 拼法与 openArchive 的 relInside 一致
 // （currentPath + name，命中同一 cache_key）。masonry 视图不走此通道（窗口预载
 // 已覆盖，防双通道竞争）。300ms 防抖（选中浏览节奏比滚动慢）；unmount 清理。
+const REMOTE_ARCHIVE_EXTS = new Set(['cbz', 'zip', 'cbr', 'rar', '7z']);
 let detailPreloadTimer: ReturnType<typeof setTimeout> | null = null;
 watch([selectedEntry, () => fb.viewMode], ([e, mode]) => {
   if (detailPreloadTimer) {
@@ -235,7 +236,7 @@ watch([selectedEntry, () => fb.viewMode], ([e, mode]) => {
   }
   if (mode !== 'details' || !e?.isArchive) return;
   const ext = extensionOf(e.name);
-  if (ext !== 'cbz' && ext !== 'zip') return;
+  if (!ext || !REMOTE_ARCHIVE_EXTS.has(ext)) return;
   const d = fb.currentDescriptor;
   if (!d || (d.type !== 'webdav' && d.type !== 'smb')) return;
   const rel = fb.currentPath ? `${fb.currentPath}/${e.name}` : e.name;
