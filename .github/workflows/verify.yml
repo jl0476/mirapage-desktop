@@ -42,3 +42,45 @@ jobs:
 
       - name: Cargo test
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # —— MSRV 1.75 守卫（archive 模块任务 14）——
+      # 全树 `cargo +1.75.0 check` 被预存在的 smb 0.11.2 → aead-0.6.0-rc.2
+      # （edition2024 manifest）阻断（任务 1 双向取证），故按简报回退条款检查
+      # 隔离 smoke crate：src-tauri/archive-msrv-smoke 实际编译调用
+      # zip/unrar/sevenz/password API，测试断言锁文件钉版。
+      # 用 `test` 而非 `check`：编译覆盖是超集，且让钉版断言真正在 CI 执行。
+      # 置于现有 cargo 步骤之后：安装 1.75 不改变上方命令的默认 toolchain。
+      - name: Install Rust 1.75 for MSRV archive check
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.75.0'
+
+      - name: Archive dependencies keep Rust 1.75 MSRV
+        run: cargo +1.75.0 test --manifest-path src-tauri/archive-msrv-smoke/Cargo.toml
+
+  # —— Linux 编译守卫（archive 模块任务 14）——
+  # Windows runner 编译不到 rar_callback 在 cfg(unix) 下 wchar_t 32 位的
+  # encode_wide/decode_wide 分支；本 job 是规格「不加入 ABI 假设」要求的最低验证。
+  # runner 自带 g++（unrar_sys 的 C++ 内核可直接编译）；apt 步骤补 tauri 系
+  # sys-crate（glib/gtk/webkit2gtk）在 build script 里 pkg-config 探测所需的头文件。
+  # macOS 编译随 Phase 9 环境补齐。
+  linux-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Cargo check (Linux)
+        run: cargo check --manifest-path src-tauri/Cargo.toml

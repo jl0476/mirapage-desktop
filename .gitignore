@@ -16,6 +16,9 @@ src-tauri/gen/
 # Independent algorithm test crate (Phase 1 algorithm/* test surface)
 src-tauri-algorithm-tests/target/
 
+# Archive MSRV 1.75 smoke crate (任务 14：隔离依赖图的 CI 编译守卫)
+src-tauri/archive-msrv-smoke/target/
+
 # IDEs and editors
 .idea/
 .vscode/*

@@ -1,0 +1,29 @@
+[package]
+name = "archive-msrv-smoke"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+publish = false
+
+# MSRV 1.75 正向证明 smoke crate（任务 14，简报回退条款）：
+# 主仓库全树 `cargo +1.75.0 check` 被预存在的 smb 0.11.2 → aead-0.6.0-rc.2
+# （edition2024 manifest，cargo 1.75 无法 parse）阻断——任务 1 已双向取证
+# （依赖改动前后同点失败，与归档依赖无关）。因此按简报回退条款在隔离
+# crate 内编译调用 zip / unrar_sys / sevenz-rust / lzma-rust / aes / cbc /
+# zeroize 的真实 API，证明「新增归档依赖子集保持 Rust 1.75 可编译」。
+#
+# 依赖声明必须与 src-tauri/Cargo.toml 的归档段逐字一致（版本 + features）；
+# 改主清单时同步改这里。Cargo.lock 承载传递依赖钉版（indexmap/time/jobserver/
+# crc/deflate64/zeroize_derive 的最新版是 edition2024 或 rust>=1.80），
+# **勿在本目录裸跑 `cargo update`**（会顶破钉版，1.75 即失败——测试会抓住）。
+
+[workspace]
+
+[dependencies]
+zip = { version = "=2.4.2", features = ["aes-crypto"] }
+unrar_sys = "=0.5.8"
+sevenz-rust = { version = "=0.6.1", default-features = false, features = ["aes256", "compress"] }
+lzma-rust = { version = "=0.1.7", default-features = false }
+aes = { version = "0.8", features = ["zeroize"] }
+cbc = "0.1"
+zeroize = "=1.8.1"
