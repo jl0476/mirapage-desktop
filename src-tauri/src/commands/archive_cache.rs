@@ -21,6 +21,26 @@ use tauri::State;
 
 use crate::db::Db;
 use crate::source::archive::materializer::Materializer;
+use crate::source::archive::service::ArchiveService;
+
+/// 清空缓存的类型化错误（任务 10）：DrainTimeout = 排空超时（闸门已同步复位、
+/// 未删任何东西——前端提示稍后重试）；Io = 磁盘/DB 删除失败。
+#[derive(Debug)]
+pub(crate) enum ArchiveCacheError {
+    DrainTimeout,
+    Io(String),
+}
+
+impl std::fmt::Display for ArchiveCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ArchiveCacheError::DrainTimeout => {
+                f.write_str("缓存正忙（有下载在途），请稍后重试")
+            }
+            ArchiveCacheError::Io(s) => f.write_str(s),
+        }
+    }
+}
 
 /// (ready 条数, ready 字节, .part 条数, .part 字节)——`get_archive_cache_info` 的
 /// 可测核心（终审二批 P1-2：.part 计入用量统计，spec §12；ready 字段名不变前端兼容）。
@@ -33,29 +53,52 @@ pub(crate) fn get_archive_cache_info_impl(
     Ok((count, bytes, part_count, part_bytes))
 }
 
-/// 清空缓存的可测核心（语义见模块注释 ①-④；任务 8 起双闸门）。
-/// coordinator ClearGuard（拒新 admission——ready 查询/物化/物理下载全走它）+
-/// materializer clearing 闸门（停在途 owner 的 chunk 检查点）+ 排空 + 实删 + 复位。
-pub(crate) async fn clear_archive_cache_impl(db: &Db, mat: &Materializer) -> Result<(), String> {
-    // ① 双闸门：coordinator begin_clear（CloseGuard Drop 同步复位，覆盖 return/panic）
+/// 清空缓存的可测核心（2s 排空超时；语义见 `_with_timeout`）。
+pub(crate) async fn clear_archive_cache_impl(
+    db: &Db, mat: &Materializer, service: &ArchiveService,
+) -> Result<(), ArchiveCacheError> {
+    clear_archive_cache_impl_with_timeout(db, mat, service, Duration::from_secs(2)).await
+}
+
+/// 清空缓存的可测核心（任务 10：超时可注入）。固定顺序：
+/// `coordinator.begin_clear()`（ClearGuard Drop 同步复位 gate，覆盖超时/删除失败/
+/// unwind）→ materializer 双闸门 + 排空（inflight + coordinator admission，超时 →
+/// `DrainTimeout` 且**不删任何东西**）→ `service.clear_runtime_caches_while_gated`
+/// （清 catalog LRU + 块 LRU）→ 删除磁盘与 DAO → drop clear_guard。
+/// 从 Service/Materializer 断言取得的是同一个 coordinator Arc（装配错误即 panic）。
+pub(crate) async fn clear_archive_cache_impl_with_timeout(
+    db: &Db,
+    mat: &Materializer,
+    service: &ArchiveService,
+    timeout: Duration,
+) -> Result<(), ArchiveCacheError> {
+    let coordinator = service.cache_coordinator();
+    assert!(
+        std::sync::Arc::ptr_eq(&coordinator, &mat.coordinator()),
+        "Service 与 Materializer 必须共用同一 ArchiveCacheCoordinator（装配错误）"
+    );
+    // ① 双闸门：coordinator begin_clear（ClearGuard Drop 同步复位，覆盖 return/panic）
     //    + 持 inflight 锁置 clearing=true 后 cancel_all——与 ensure_cached 的
     //    「查闸门 + 注册」临界区互斥；已注册任务都在 map 里可见，drain 会等它们
-    let clear_guard = mat.coordinator().begin_clear();
+    let clear_guard = coordinator.begin_clear();
     mat.begin_clearing().await;
     // ② 排空在途（检查点粒度快速退出 + coordinator admission 排空）；超时 →
-    //    复位双闸门 + 忙碌错误，不删任何东西
-    let drained = mat.wait_inflight_drained(Duration::from_secs(2)).await
-        && mat.coordinator().wait_drained(Duration::from_secs(2)).await;
+    //    复位双闸门 + DrainTimeout，不删任何东西
+    let drained = mat.wait_inflight_drained(timeout).await
+        && coordinator.wait_drained(timeout).await;
     if !drained {
         mat.end_clearing().await;
         drop(clear_guard);
-        return Err("缓存正忙（有下载在途），请稍后重试".into());
+        return Err(ArchiveCacheError::DrainTimeout);
     }
+    // ②.5 运行时缓存（catalog LRU + 远程 ZIP 块 LRU）：guard 存活且代次一致才清
+    service.clear_runtime_caches_while_gated(clear_guard.generation());
     // ③ 实删：ready 文件（clear_all 返回的路径逐个删）+ part/ 整体重建 + 清表
     //    （conn guard 不跨 await——此处闭包内无 await）
-    let result = (|| -> Result<(), String> {
+    let result = (|| -> Result<(), ArchiveCacheError> {
         let conn = db.conn();
-        let roots = crate::source::archive::dao::clear_all(&conn).map_err(|e| e.to_string())?;
+        let roots = crate::source::archive::dao::clear_all(&conn)
+            .map_err(|e| ArchiveCacheError::Io(e.to_string()))?;
         for abs in &roots {
             let _ = std::fs::remove_file(abs);
         }
@@ -87,12 +130,17 @@ pub async fn get_archive_cache_info(
 }
 
 /// 清空缓存（闸门 + 排空 + 实删 + 复位；在途未排空返回忙碌错误且不动文件）。
+/// 任务 10：从 managed state 取 factory 装配的同一 `Arc<ArchiveService>`（清
+/// catalog/块 LRU 与 Service 共用同一 coordinator），不得另建实例。
 #[tauri::command]
 pub async fn clear_archive_cache(
     db: State<'_, Db>,
     mat: State<'_, Arc<Materializer>>,
+    service: State<'_, Arc<ArchiveService>>,
 ) -> Result<(), String> {
-    clear_archive_cache_impl(&db, &mat).await
+    clear_archive_cache_impl(&db, &mat, &service)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -101,6 +149,15 @@ mod tests {
     use crate::source::archive::dao::{self, NewCacheRow};
     use crate::source::archive::materializer::tests::{temp_materializer, webdav, MockOrigin};
     use std::sync::Arc as StdArc;
+
+    /// 与 mat 共用同一 coordinator 的 Service 实例（clear impl 的任务 10 签名需要；
+    /// 断言同一 Arc 即在此验证）
+    fn service_sharing(mat: &Materializer) -> StdArc<ArchiveService> {
+        StdArc::new(ArchiveService::new(
+            StdArc::new(mat.clone()) as StdArc<dyn crate::source::archive_impl::Materialize>,
+            mat.coordinator(),
+        ))
+    }
 
     /// 手工铺一行 ready 缓存（文件 + 表行）——不走网络，确定性
     fn seed_ready(db: &Db, root: &std::path::Path, key: &str, bytes: &[u8]) -> std::path::PathBuf {
@@ -164,7 +221,8 @@ mod tests {
         std::fs::write(part.join("k3.part.meta"), b"{}").unwrap();
         std::fs::write(part.join("k4.part.meta.tmp"), b"{}").unwrap();
 
-        clear_archive_cache_impl(&db, &m).await.unwrap();
+        let service = service_sharing(&m);
+        clear_archive_cache_impl(&db, &m, &service).await.unwrap();
 
         let (count, bytes, part_count, part_bytes) =
             get_archive_cache_info_impl(&db, root).unwrap();
@@ -189,7 +247,8 @@ mod tests {
                 "闸门开启时新任务被拒（Cancelled），实际 {err}");
         // 排空立即成功（无在途）→ 清空正常完成 → 复位
         assert!(m.wait_inflight_drained(Duration::from_secs(2)).await);
-        clear_archive_cache_impl(&db, &m).await.unwrap();
+        let service = service_sharing(&m);
+        clear_archive_cache_impl(&db, &m, &service).await.unwrap();
         // end_clearing 已由 impl ④ 完成：新任务正常物化
         let p = m.ensure_cached(&webdav(""), "a.cbz", crate::source::descriptor::ArchiveFormat::Cbz)
             .await.unwrap();

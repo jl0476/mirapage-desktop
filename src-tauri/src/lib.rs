@@ -103,15 +103,14 @@ pub fn run() {
             app.manage(factory.archive_service());
 
             // M3 任务 8：三级预载调度器（spec §7）——持 factory 同一物化器 Arc；
-            // 开关读 settings（默认 true，仅 "false" 关闭，脏值 fail-open）
+            // 任务 10：从 factory 取同一实例（Service 的 committed hook 已注入它，
+            // 开关单点）；开关读 settings（默认 true，仅 "false" 关闭，脏值 fail-open）
             let prefetch_enabled = {
                 let db_state = app.state::<db::Db>();
                 let conn = db_state.conn();
                 setting_str(&conn, "remote_archive_prefetch_enabled", "true") != "false"
             };
-            let prefetcher = std::sync::Arc::new(
-                source::archive::prefetch::ArchivePrefetcher::new(factory.archive_materializer()),
-            );
+            let prefetcher = factory.archive_prefetcher();
             prefetcher.set_enabled(prefetch_enabled);
             app.manage(prefetcher);
 

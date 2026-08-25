@@ -19,8 +19,16 @@
 //!   boot 代次接受换代、拒绝更旧 boot 的迟到 begin；cancel 推进单调
 //!   `cancelled_through` 水位（cancel-before-register）；commit 只接受 Prepared
 //!   active 且精确幂等（`sequence == last_committed` 才重试成功）。
-//! - 远程 ZIP/CBZ 在任务 10 前继续完整物化（`ArchiveInput::Path`）；Ready 的
-//!   `progress_key` 本地恒 `None`，远程为 Materializer 的 opaque cache key。
+//! - **远程 ZIP/CBZ 流式首开（任务 10）**：`resolve` 先 `stat_origin` 建 identity
+//!   （origin 尺寸/mtime——物化/流式/重建同 identity，密码库与 catalog LRU 不换档），
+//!   再 `ready_path_if_fresh` 命中即 Path input（Materialized），未命中构造共享
+//!   block cache 的 `RemoteZipReader` 工厂（Streaming）。probe/catalog 在流式输入
+//!   上遇 `RemoteRangeUnavailable/Network/Timeout` **原位重试一次**，第二次仍白名单
+//!   则 `ensure_cached` 完整物化后用 Path input 重跑（Materialized）；`Cancelled`、
+//!   密码类、坏包与 unsupported codec 不触发网络降级。Ready(Streaming) 只在 Prepared
+//!   记录 streaming 预载意图，`commit_request` 消费意图时才经 `CommittedPrefetcher`
+//!   启动后台物化（同一 `progress_key` 贯穿全部后台进度事件）；cancel Prepared
+//!   直接丢弃意图。非 ZIP 远程格式（Cbr/Rar/7z）保持完整物化原语义。
 
 use crate::source::archive::backend::{
     ArchiveAccessError, ArchiveBackend, ArchiveCatalog, ArchiveInput, ArchiveLimits,
@@ -28,15 +36,18 @@ use crate::source::archive::backend::{
 };
 use crate::source::archive::cache_coordinator::ArchiveCacheCoordinator;
 use crate::source::archive::password::{ArchiveIdentity, ArchivePasswordStore};
+use crate::source::archive::prefetch::CommittedPrefetch;
 use crate::source::archive::rar_backend::RarBackend;
-use crate::source::archive::remote_zip::{RangeBlockCache, BLOCK_CACHE_BYTES};
+use crate::source::archive::remote_zip::{
+    remote_zip_reader_factory, RangeBlockCache, RangeOrigin, BLOCK_CACHE_BYTES,
+};
 use crate::source::archive::sevenz_backend::SevenZBackend;
 use crate::source::archive::zip_backend::ZipBackend;
 use crate::source::archive_impl::Materialize;
-use crate::source::archive::materializer::MaterializeError;
+use crate::source::archive::materializer::{cache_key, MaterializeError};
 use crate::source::descriptor::{ArchiveFormat, MediaEntry, SourceDescriptor};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use zeroize::Zeroizing;
 
 /// catalog LRU 容量（spec：32 项）
@@ -81,12 +92,36 @@ pub enum ArchivePrepareResult {
     PasswordRequired,
 }
 
+impl ArchivePrepareResult {
+    /// Ready 的 progress_key（PasswordRequired 恒 None；任务 10 测试/前端用）
+    pub fn progress_key(&self) -> Option<&str> {
+        match self {
+            ArchivePrepareResult::Ready { progress_key, .. } => progress_key.as_deref(),
+            ArchivePrepareResult::PasswordRequired => None,
+        }
+    }
+}
+
+/// Prepared 携带的 commit-gated streaming 预载意图（任务 10）：prepare(Ready/
+/// Streaming) 只记录（origin, rel, progress_key），`commit_request` 消费意图时才经
+/// `CommittedPrefetcher` 启动后台物化；cancel Prepared 直接丢弃（不启动）。
+#[derive(Debug, Clone)]
+struct StreamingPrefetchIntent {
+    origin: SourceDescriptor,
+    rel: String,
+    progress_key: String,
+}
+
 /// request registry 状态（任务 10 给 Prepared 增加 streaming prefetch intent）
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RequestState {
     Running,
     AwaitingPassword,
-    Prepared { progress_key: Option<String> },
+    Prepared {
+        progress_key: Option<String>,
+        /// Ready(Streaming) 的 commit-gated 预载意图（Materialized/本地为 None）
+        prefetch: Option<StreamingPrefetchIntent>,
+    },
     Cancelled,
 }
 
@@ -142,6 +177,10 @@ impl<K: Clone + Eq + std::hash::Hash, V> LruCache<K, V> {
         self.entries.remove(key)
     }
 
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
@@ -183,6 +222,9 @@ struct ResolvedArchive {
     format: ArchiveFormat,
     access_mode: ArchiveAccessMode,
     progress_key: Option<String>,
+    /// 流式远程 ZIP 的降级目标（origin, rel）：Some 时 probe/catalog 的白名单错误
+    /// 走「原位重试一次 → ensure_cached 物化 → Path input 重跑」；降级完成后置 None
+    streaming_origin: Option<(SourceDescriptor, String)>,
 }
 
 pub struct ArchiveService {
@@ -206,6 +248,9 @@ pub struct ArchiveService {
     block_cache: Arc<RangeBlockCache>,
     /// 单主窗口：仅一个 current session
     registry: Mutex<Option<SessionState>>,
+    /// commit-gated 后台物化入口（任务 10）：默认无——未接线时 commit 不产生
+    /// 后台任务；生产在 factory 装配 `ArchivePrefetcher`，测试注入观察桩
+    committed_prefetch: RwLock<Option<Arc<dyn CommittedPrefetch>>>,
 }
 
 impl ArchiveService {
@@ -258,11 +303,18 @@ impl ArchiveService {
             memory_semaphore,
             catalog_lru: Mutex::new(LruCache::new(CATALOG_LRU_CAPACITY)),
             registry: Mutex::new(None),
+            committed_prefetch: RwLock::new(None),
         }
     }
 
     pub fn cache_coordinator(&self) -> Arc<ArchiveCacheCoordinator> {
         self.coordinator.clone()
+    }
+
+    /// commit-gated 后台物化入口装配（任务 10）：factory 构造 Prefetcher 后注入；
+    /// 未装配时 commit_request 不产生后台任务
+    pub fn set_committed_prefetcher(&self, hook: Arc<dyn CommittedPrefetch>) {
+        *self.committed_prefetch.write().unwrap() = Some(hook);
     }
 
     /// 远程 ZIP 块缓存句柄（任务 10 streaming ReaderFactory 注入用）：
@@ -274,6 +326,11 @@ impl ArchiveService {
     /// 就绪块数（诊断 / 测试）
     pub fn block_cache_len(&self) -> usize {
         self.block_cache.len()
+    }
+
+    /// catalog LRU 项数（诊断 / 任务 10 清空测试）
+    pub fn catalog_cache_len(&self) -> usize {
+        self.catalog_lru.lock().unwrap().len()
     }
 
     /// 清运行时缓存（catalog LRU + 远程 ZIP 块 LRU）。只能在 `ClearGuard` 存活且
@@ -318,9 +375,14 @@ impl ArchiveService {
             .map_err(|_| ArchiveAccessError::Cancelled)
     }
 
-    /// origin None 本地直开 / Some 完整物化（任务 10 前远程 ZIP 同样物化）。
-    /// Local identity = 规范化绝对路径 + fs metadata size/mtime；远程 identity 用
-    /// origin descriptor + rel（缓存文件重建不换 identity），size/mtime 取物化产物。
+    /// origin None 本地直开 / Some 按格式分派（任务 10）：ZIP/CBZ 先 `stat_origin`
+    /// 建 identity（origin 尺寸/mtime——流式、ready 命中与物化降级共用同一 identity，
+    /// 缓存文件重建/模式切换不换档，密码库与 catalog LRU 键稳定），再
+    /// `ready_path_if_fresh`（无下载，gate 语义在实现内）命中即 Path input
+    /// （Materialized）；未命中构造共享 block cache 的 `RemoteZipReader` 工厂
+    /// （Streaming，尾部 Range 优先）。Cbr/Rar/7z 与物化降级路径保持完整物化。
+    /// Local identity = 规范化绝对路径 + fs metadata size/mtime；非 ZIP 远程
+    /// identity 用物化产物 metadata（原语义）。
     async fn resolve(&self, descriptor: &SourceDescriptor) -> Result<ResolvedArchive, ArchiveAccessError> {
         let SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } =
             descriptor
@@ -342,6 +404,67 @@ impl ArchiveService {
                 let rel = archive_rel_path.as_deref().ok_or_else(|| {
                     ArchiveAccessError::InvalidRequest("远程 archive 缺少 archiveRelPath".into())
                 })?;
+                if matches!(*format, ArchiveFormat::Zip | ArchiveFormat::Cbz) {
+                    // 任务 10：stat_origin 建 identity → ready cache 优先 → 流式工厂。
+                    // stat_origin 失败（远端不可达，或未实现 stat 的物化 mock）时回落
+                    // 完整物化——ensure_cached 自行 stat/下载，同变体错误类型保真穿透
+                    // （NotFound→404 / Network→502 合同不因回落改变）。ready 命中的
+                    // 新鲜度校验（远端 stat + 磁盘长度）在实现内，不绕过 M3 一致性
+                    // 规则。identity 一律取 origin 尺寸/mtime。
+                    if let Ok(stat) =
+                        self.materializer.stat_origin(origin_desc, rel).await
+                    {
+                        let location = format!("{}|{}", origin_desc.id(), rel);
+                        let identity =
+                            ArchiveIdentity::new(location, stat.size, stat.modified_at);
+                        let progress_key = cache_key(origin_desc, rel);
+                        return match self
+                            .materializer
+                            .ready_path_if_fresh(origin_desc, rel, *format)
+                            .await
+                            .map_err(map_materialize_error)?
+                        {
+                            Some(path) => Ok(ResolvedArchive {
+                                input: ArchiveInput::Path(path),
+                                identity,
+                                prefix: entry_prefix.clone(),
+                                format: *format,
+                                access_mode: ArchiveAccessMode::Materialized,
+                                progress_key: Some(progress_key),
+                                streaming_origin: None,
+                            }),
+                            None => {
+                                let range_origin: Arc<dyn RangeOrigin> = Arc::new(
+                                    TraitRangeOrigin {
+                                        mat: self.materializer.clone(),
+                                        origin: (**origin_desc).clone(),
+                                        rel: rel.to_string(),
+                                        size: stat.size,
+                                    },
+                                );
+                                let factory = remote_zip_reader_factory(
+                                    identity.clone(),
+                                    range_origin,
+                                    self.block_cache.clone(),
+                                    tokio::runtime::Handle::current(),
+                                );
+                                Ok(ResolvedArchive {
+                                    input: ArchiveInput::Reader(factory),
+                                    identity,
+                                    prefix: entry_prefix.clone(),
+                                    format: *format,
+                                    access_mode: ArchiveAccessMode::Streaming,
+                                    progress_key: Some(progress_key),
+                                    streaming_origin: Some((
+                                        (**origin_desc).clone(),
+                                        rel.to_string(),
+                                    )),
+                                })
+                            }
+                        };
+                    }
+                }
+                // 非 ZIP 远程格式 / stat_origin 回落：完整物化（任务 10 前原语义）
                 // mock/生产实现均返回类型化 MaterializeError——Service 边界按变体映射
                 // （FormatMismatch→InvalidRequest / Cancelled→Cancelled / NotFound 保真）
                 let path = self
@@ -354,7 +477,7 @@ impl ArchiveService {
                     path,
                     format!("{}|{}", origin_desc.id(), rel),
                     ArchiveAccessMode::Materialized,
-                    Some(crate::source::archive::materializer::cache_key(origin_desc, rel)),
+                    Some(cache_key(origin_desc, rel)),
                     meta,
                 )
             }
@@ -367,6 +490,7 @@ impl ArchiveService {
             format: *format,
             access_mode,
             progress_key,
+            streaming_origin: None,
         })
     }
 
@@ -426,6 +550,55 @@ impl ArchiveService {
     }
 
     // -----------------------------------------------------------------------
+    // 流式降级协议（任务 10 step 4）
+    // -----------------------------------------------------------------------
+
+    /// 流式远程 ZIP 输入的 backend 操作执行：白名单错误（RemoteRangeUnavailable/
+    /// Network/Timeout）**原位重试一次**；第二次仍为白名单则 `ensure_cached` 完整
+    /// 物化后用 Path input 重跑（成功后 access_mode 翻 Materialized）。`Cancelled`、
+    /// 密码类、坏包与 unsupported codec 不在白名单——直接透传，不触发网络降级；
+    /// 第二次重试出现非白名单错误同样透传（物化救不了密码错/坏包）。
+    async fn op_with_degrade<T, F, Fut>(
+        &self,
+        resolved: &mut ResolvedArchive,
+        op: F,
+    ) -> Result<T, ArchiveAccessError>
+    where
+        F: Fn(ArchiveInput) -> Fut,
+        Fut: std::future::Future<Output = Result<T, ArchiveAccessError>>,
+    {
+        let first = match op(resolved.input.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(e) => e,
+        };
+        if resolved.streaming_origin.is_none() || !is_network_degradable(&first) {
+            return Err(first);
+        }
+        // 原位重试一次（block cache 的 singleflight 已释放失败槽位）
+        let second = match op(resolved.input.clone()).await {
+            Ok(v) => return Ok(v),
+            Err(e) => e,
+        };
+        if !is_network_degradable(&second) {
+            return Err(second);
+        }
+        // 物化降级：ensure_cached 后 Path input 重跑；降级完成清除降级目标（防链式）
+        let (origin, rel) = resolved
+            .streaming_origin
+            .clone()
+            .expect("streaming_origin 已在上文确认存在");
+        let path = self
+            .materializer
+            .ensure_cached(&origin, &rel, resolved.format)
+            .await
+            .map_err(map_materialize_error)?;
+        resolved.input = ArchiveInput::Path(path);
+        resolved.access_mode = ArchiveAccessMode::Materialized;
+        resolved.streaming_origin = None;
+        op(resolved.input.clone()).await
+    }
+
+    // -----------------------------------------------------------------------
     // LRU 辅助（提交前 generation 复核：清空期间完成的加载不得复活已清数据）
     // -----------------------------------------------------------------------
 
@@ -481,12 +654,13 @@ impl ArchiveService {
             .remove(&(identity.clone(), prefix.to_string()));
     }
 
-    /// LRU 未命中时取 probe（backend 调用）；PasswordRequired/WrongPassword 由调用方
+    /// LRU 未命中时取 probe（backend 调用；流式输入经降级协议，resolved 的
+    /// access_mode/input 随降级翻新）；PasswordRequired/WrongPassword 由调用方
     /// 决定清场语义，本方法只透传
     async fn probe_or_cache(
         &self,
         backend: &Arc<dyn ArchiveBackend>,
-        input: &ArchiveInput,
+        resolved: &mut ResolvedArchive,
         key: &CatalogKey,
         generation: u64,
         password: Option<&[u8]>,
@@ -494,13 +668,19 @@ impl ArchiveService {
         if let Some(hit) = self.lru_probe(key) {
             return Ok(hit);
         }
-        let probe = Self::run_probe(
-            backend.clone(),
-            input.clone(),
-            key.1.clone(),
-            password.map(|p| p.to_vec()),
-        )
-        .await?;
+        let backend = backend.clone();
+        let prefix = key.1.clone();
+        let password_vec = password.map(|p| p.to_vec());
+        let probe = self
+            .op_with_degrade(resolved, move |input| {
+                Self::run_probe(
+                    backend.clone(),
+                    input,
+                    prefix.clone(),
+                    password_vec.clone(),
+                )
+            })
+            .await?;
         self.store_probe(key, probe.clone(), generation);
         Ok(probe)
     }
@@ -517,13 +697,13 @@ impl ArchiveService {
     ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor).await?;
         let password = self.passwords.get(&resolved.identity);
         let backend = self.backend_for(resolved.format);
         let _permit = self.acquire_format(resolved.format).await?;
         let key = (resolved.identity.clone(), resolved.prefix.clone());
         let probe = match self
-            .probe_or_cache(&backend, &resolved.input, &key, generation, password.as_deref().map(|v| v.as_slice()))
+            .probe_or_cache(&backend, &mut resolved, &key, generation, password.as_deref().map(|v| v.as_slice()))
             .await
         {
             Ok(probe) => probe,
@@ -566,13 +746,13 @@ impl ArchiveService {
     ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor).await?;
         let backend = self.backend_for(resolved.format);
         let _permit = self.acquire_format(resolved.format).await?;
         let key = (resolved.identity.clone(), resolved.prefix.clone());
         // probe 本身对加密 header（RAR5 -hp）即密码校验：失败直接 WrongPassword
         let probe = match self
-            .probe_or_cache(&backend, &resolved.input, &key, generation, Some(password.as_slice()))
+            .probe_or_cache(&backend, &mut resolved, &key, generation, Some(password.as_slice()))
             .await
         {
             Ok(probe) => probe,
@@ -630,14 +810,15 @@ impl ArchiveService {
     }
 
     /// 列条目（catalog LRU 优先）。catalog 不做密码判定；backend 返回
-    /// PasswordRequired/WrongPassword（RAR -hp）时清场并透传。
+    /// PasswordRequired/WrongPassword（RAR -hp）时清场并透传。流式输入的 catalog
+    /// 经降级协议（任务 10：白名单错误重试一次 → 物化 → Path 重跑）。
     pub async fn list(
         &self,
         descriptor: &SourceDescriptor,
     ) -> Result<Vec<MediaEntry>, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor).await?;
         let key = (resolved.identity.clone(), resolved.prefix.clone());
         if let Some(cached) = self.lru_catalog(&key) {
             return Ok(cached.entries);
@@ -645,13 +826,19 @@ impl ArchiveService {
         let backend = self.backend_for(resolved.format);
         let _permit = self.acquire_format(resolved.format).await?;
         let password = self.passwords.get(&resolved.identity);
-        let catalog = match Self::run_catalog(
-            backend.clone(),
-            resolved.input.clone(),
-            resolved.prefix.clone(),
-            password_bytes(&password),
-        )
-        .await
+        let backend_clone = backend.clone();
+        let prefix = resolved.prefix.clone();
+        let password_vec = password_bytes(&password);
+        let catalog = match self
+            .op_with_degrade(&mut resolved, move |input| {
+                Self::run_catalog(
+                    backend_clone.clone(),
+                    input,
+                    prefix.clone(),
+                    password_vec.clone(),
+                )
+            })
+            .await
         {
             Ok(catalog) => catalog,
             Err(ArchiveAccessError::PasswordRequired) | Err(ArchiveAccessError::WrongPassword) => {
@@ -672,7 +859,7 @@ impl ArchiveService {
     ) -> Result<Vec<u8>, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor).await?;
         let password = self.passwords.get(&resolved.identity);
         let backend = self.backend_for(resolved.format);
         let entry = qualified_entry_name(&resolved.prefix, path);
@@ -680,7 +867,7 @@ impl ArchiveService {
         // entry_dict 按目标条目名从缓存的 probe 查询（仅 7z 非零；solid folder
         // 内多条目共享同值，不取全容器最大值）
         let probe = self
-            .probe_or_cache(&backend, &resolved.input, &key, generation, password.as_deref().map(|v| v.as_slice()))
+            .probe_or_cache(&backend, &mut resolved, &key, generation, password.as_deref().map(|v| v.as_slice()))
             .await?;
         let entry_dict = probe.entry_dictionaries.get(&entry).copied().unwrap_or(0);
         let _permit = self.acquire_format(resolved.format).await?;
@@ -862,6 +1049,25 @@ impl ArchiveService {
         }
     }
 
+    /// Ready → Prepared 状态（任务 10：仅 Streaming 携带 commit-gated 预载意图；
+    /// Materialized/本地不启动后台任务，PasswordRequired → AwaitingPassword）
+    fn prepared_state(
+        descriptor: &SourceDescriptor,
+        result: &ArchivePrepareResult,
+    ) -> RequestState {
+        match result {
+            ArchivePrepareResult::Ready { access_mode, progress_key } => {
+                let prefetch = if *access_mode == ArchiveAccessMode::Streaming {
+                    streaming_prefetch_intent(descriptor, progress_key)
+                } else {
+                    None
+                };
+                RequestState::Prepared { progress_key: progress_key.clone(), prefetch }
+            }
+            ArchivePrepareResult::PasswordRequired => RequestState::AwaitingPassword,
+        }
+    }
+
     pub async fn prepare_with_request(
         &self,
         descriptor: &SourceDescriptor,
@@ -870,12 +1076,7 @@ impl ArchiveService {
         self.register_request(&request_id)?;
         match self.prepare(descriptor).await {
             Ok(result) => {
-                let state = match &result {
-                    ArchivePrepareResult::Ready { progress_key, .. } => {
-                        RequestState::Prepared { progress_key: progress_key.clone() }
-                    }
-                    ArchivePrepareResult::PasswordRequired => RequestState::AwaitingPassword,
-                };
+                let state = Self::prepared_state(descriptor, &result);
                 self.set_request_state(&request_id, state);
                 Ok(result)
             }
@@ -895,12 +1096,7 @@ impl ArchiveService {
         self.register_request(&request_id)?;
         match self.unlock(descriptor, password).await {
             Ok(result) => {
-                let state = match &result {
-                    ArchivePrepareResult::Ready { progress_key, .. } => {
-                        RequestState::Prepared { progress_key: progress_key.clone() }
-                    }
-                    ArchivePrepareResult::PasswordRequired => RequestState::AwaitingPassword,
-                };
+                let state = Self::prepared_state(descriptor, &result);
                 self.set_request_state(&request_id, state);
                 Ok(result)
             }
@@ -914,27 +1110,43 @@ impl ArchiveService {
     /// 幂等 commit：只接受 Prepared active；成功写入精确 `last_committed` 并移除
     /// active。只有 `sequence == last_committed` 的重试返回成功（不用 <= 把稀疏
     /// sequence 误判成功）。旧 session 的迟到 commit 一律 Cancelled。
+    /// 任务 10：消费 Prepared 的 streaming 预载意图——**只有这里**才启动后台物化
+    /// （锁外调用 hook；cancel Prepared 时意图随 active 一起丢弃，永不启动）。
     pub async fn commit_request(&self, id: &ArchiveRequestId) -> Result<(), ArchiveAccessError> {
-        let mut registry = self.registry.lock().unwrap();
-        let Some(current) = registry.as_mut() else {
-            return Err(ArchiveAccessError::Cancelled);
-        };
-        if current.session_id != id.session_id {
-            return Err(ArchiveAccessError::Cancelled);
-        }
-        if current.last_committed == Some(id.sequence) {
-            return Ok(());
-        }
-        match current.active.take() {
-            Some((sequence, RequestState::Prepared { .. })) if sequence == id.sequence => {
-                current.last_committed = Some(sequence);
-                Ok(())
+        let pending_intent = {
+            let mut registry = self.registry.lock().unwrap();
+            let Some(current) = registry.as_mut() else {
+                return Err(ArchiveAccessError::Cancelled);
+            };
+            if current.session_id != id.session_id {
+                return Err(ArchiveAccessError::Cancelled);
             }
-            Some((sequence, _)) if sequence == id.sequence => Err(
-                ArchiveAccessError::InvalidRequest("request 尚未 Prepared，不能 commit".into()),
-            ),
-            _ => Err(ArchiveAccessError::Cancelled),
+            if current.last_committed == Some(id.sequence) {
+                return Ok(());
+            }
+            match current.active.take() {
+                Some((sequence, RequestState::Prepared { prefetch, .. })) if sequence == id.sequence => {
+                    current.last_committed = Some(sequence);
+                    Ok(prefetch)
+                }
+                Some((sequence, _)) if sequence == id.sequence => Err(
+                    ArchiveAccessError::InvalidRequest("request 尚未 Prepared，不能 commit".into()),
+                ),
+                _ => Err(ArchiveAccessError::Cancelled),
+            }
+        }?;
+        // 锁外消费预载意图：hook 内部 spawn（生产为 Prefetcher::prefetch_committed，
+        // 同一 progress_key 贯穿后台 subscriber 的每一条进度事件）
+        if let Some(pending_intent) = pending_intent {
+            if let Some(hook) = self.committed_prefetch.read().unwrap().as_ref() {
+                hook.prefetch_committed(
+                    pending_intent.origin,
+                    pending_intent.rel,
+                    pending_intent.progress_key,
+                );
+            }
         }
+        Ok(())
     }
 
     /// 幂等 cancel：推进取消高水位；active.sequence ≤ 水位时取消未 commit 项。
@@ -960,6 +1172,39 @@ impl ArchiveService {
 // 辅助纯函数
 // ---------------------------------------------------------------------------
 
+/// 降级白名单（任务 10）：RemoteRangeUnavailable（短 Range / Range 强契约违反）、
+/// Network、Timeout 三类才触发「原位重试一次 → 物化降级」；Cancelled（clear/cancel
+/// 语义）、密码类、坏包、unsupported codec 等一律透传。
+fn is_network_degradable(e: &ArchiveAccessError) -> bool {
+    matches!(
+        e,
+        ArchiveAccessError::RemoteRangeUnavailable(_)
+            | ArchiveAccessError::Network(_)
+            | ArchiveAccessError::Timeout(_)
+    )
+}
+
+/// `Materialize` trait 对象 → `RangeOrigin` 适配器（任务 10）：Service 持有的是
+/// trait 对象，流式 reader 的块加载经 trait 的 `read_origin_range`（生产实现即
+/// Materializer 的精确 Range + 短读类型化）。
+struct TraitRangeOrigin {
+    mat: Arc<dyn Materialize>,
+    origin: SourceDescriptor,
+    rel: String,
+    size: u64,
+}
+
+#[async_trait::async_trait]
+impl RangeOrigin for TraitRangeOrigin {
+    async fn read_range(&self, offset: u64, length: u64) -> Result<Vec<u8>, MaterializeError> {
+        self.mat.read_origin_range(&self.origin, &self.rel, offset, length).await
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+}
+
 /// prefix 视图内条目全名：`page.png` + prefix `章节一` → `章节一/page.png`
 fn qualified_entry_name(prefix: &str, path: &str) -> String {
     if prefix.is_empty() {
@@ -967,6 +1212,30 @@ fn qualified_entry_name(prefix: &str, path: &str) -> String {
     } else {
         format!("{}/{}", prefix.trim_end_matches('/'), path)
     }
+}
+
+/// Ready(Streaming) 的 commit-gated 预载意图构造：仅远程 ZIP/CBZ 且 progress_key
+/// 存在（progress_key 即 Materializer cache key——后台物化的 opaque 事件 key）
+fn streaming_prefetch_intent(
+    descriptor: &SourceDescriptor,
+    progress_key: &Option<String>,
+) -> Option<StreamingPrefetchIntent> {
+    let SourceDescriptor::Archive { format, origin, archive_rel_path, .. } = descriptor else {
+        return None;
+    };
+    let (Some(origin), Some(rel), Some(key)) =
+        (origin.as_deref(), archive_rel_path.as_deref(), progress_key.as_ref())
+    else {
+        return None;
+    };
+    if !matches!(format, ArchiveFormat::Zip | ArchiveFormat::Cbz) {
+        return None;
+    }
+    Some(StreamingPrefetchIntent {
+        origin: origin.clone(),
+        rel: rel.to_string(),
+        progress_key: key.clone(),
+    })
 }
 
 fn fs_metadata(path: &std::path::Path) -> Result<std::fs::Metadata, ArchiveAccessError> {
@@ -1890,5 +2159,603 @@ mod tests {
         );
         let back: ArchiveRequestId = serde_json::from_value(json).unwrap();
         assert_eq!(back, id);
+    }
+
+    // =========================================================================
+    // 任务 10：远程 ZIP 流式 prepare、自动降级、clear gate 与 commit 后台物化
+    // =========================================================================
+
+    use crate::commands::archive_cache::ArchiveCacheError;
+    use crate::source::archive::materializer::{
+        cache_key, ArchiveMaterializeProgress, Materializer,
+    };
+    use crate::source::archive::prefetch::CommittedPrefetch;
+    use crate::source::archive::remote_zip::{RangeOrigin, RemoteZipReader, BLOCK_SIZE};
+    use crate::source::trait_def::{ByteRange, FileStat, MediaSource, MediaSourceError};
+    use std::sync::atomic::AtomicBool;
+
+    const TEST_SHORT_TIMEOUT: Duration = Duration::from_millis(50);
+    const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nmirapage-remote-zip-test-image";
+
+    /// io::Error → ArchiveAccessError：Remote marker 优先恢复（try_block_load 用）
+    fn remote_io_to_access(e: std::io::Error) -> ArchiveAccessError {
+        e.get_ref()
+            .and_then(|c| {
+                c.downcast_ref::<crate::source::archive::backend::RemoteZipIoError>()
+            })
+            .map(|r| r.0.clone())
+            .unwrap_or_else(|| ArchiveAccessError::Io(e.to_string()))
+    }
+
+    /// 任务 10 harness 源：真实 ZIP 字节的 `MediaSource` + `RangeOrigin` 双实现。
+    /// 记账：range 列表 / 全量下载（offset==0 且 length==size，物化下载的形状）/
+    /// read 启动计数；注入：定点短读（persistent——原位重试仍短，触发降级白名单）
+    /// 与门控（blocking_zip：read 进入后挂起，release 放行——tokio Semaphore，
+    /// 不阻塞 worker 线程）。**mock 只造短 Range，不直接造目标错误**（降级用例
+    /// 的 RemoteRangeUnavailable 由 load_block 的长度复核产生）。
+    struct RemoteZipOrigin {
+        bytes: Vec<u8>,
+        ranges: Mutex<Vec<ByteRange>>,
+        full_downloads: AtomicUsize,
+        reads_started: AtomicUsize,
+        short_at_offset: Mutex<Option<u64>>,
+        gated: bool,
+        gate: tokio::sync::Semaphore,
+    }
+
+    impl RemoteZipOrigin {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                ranges: Mutex::new(Vec::new()),
+                full_downloads: AtomicUsize::new(0),
+                reads_started: AtomicUsize::new(0),
+                short_at_offset: Mutex::new(None),
+                gated: false,
+                gate: tokio::sync::Semaphore::new(0),
+            }
+        }
+
+        fn with_short_at(mut self, at: u64) -> Self {
+            *self.short_at_offset.lock().unwrap() = Some(at);
+            self
+        }
+
+        fn gated(mut self) -> Self {
+            self.gated = true;
+            self
+        }
+
+        fn first_range(&self) -> ByteRange {
+            *self.ranges.lock().unwrap().first().expect("至少一次 range read")
+        }
+
+        fn clear_range_calls(&self) {
+            self.ranges.lock().unwrap().clear();
+        }
+
+        fn range_call_count(&self) -> usize {
+            self.ranges.lock().unwrap().len()
+        }
+
+        fn full_download_count(&self) -> usize {
+            self.full_downloads.load(Ordering::SeqCst)
+        }
+
+        fn reads_started_count(&self) -> usize {
+            self.reads_started.load(Ordering::SeqCst)
+        }
+
+        fn release(&self) {
+            self.gate.add_permits(8);
+        }
+
+        fn snapshot_bytes(&self) -> Vec<u8> {
+            self.bytes.clone()
+        }
+
+        async fn read_core(
+            &self,
+            offset: u64,
+            length: u64,
+        ) -> std::result::Result<Vec<u8>, MediaSourceError> {
+            self.reads_started.fetch_add(1, Ordering::SeqCst);
+            if self.gated {
+                let _ = self.gate.acquire().await;
+            }
+            self.ranges.lock().unwrap().push(ByteRange { offset, length });
+            if offset == 0 && length as usize == self.bytes.len() {
+                self.full_downloads.fetch_add(1, Ordering::SeqCst);
+            }
+            let mut len = length;
+            if *self.short_at_offset.lock().unwrap() == Some(offset) {
+                len = len.saturating_sub(1);
+            }
+            let start = offset as usize;
+            let end = (offset + len) as usize;
+            self.bytes.get(start..end).map(|s| s.to_vec()).ok_or_else(|| {
+                MediaSourceError::Network(format!(
+                    "mock range 越界 {start}..{end} > {}",
+                    self.bytes.len()
+                ))
+            })
+        }
+    }
+
+    #[async_trait]
+    impl MediaSource for RemoteZipOrigin {
+        fn descriptor_type(&self) -> &'static str {
+            "remote-zip-harness"
+        }
+
+        async fn list_directory(
+            &self,
+            _: &SourceDescriptor,
+            _: &str,
+        ) -> crate::source::trait_def::Result<Vec<MediaEntry>> {
+            Err(MediaSourceError::NotImplemented("harness 不支持 list".into()))
+        }
+
+        async fn read_file(
+            &self,
+            _: &SourceDescriptor,
+            _: &str,
+            range: Option<ByteRange>,
+        ) -> crate::source::trait_def::Result<Vec<u8>> {
+            match range {
+                Some(r) => self.read_core(r.offset, r.length).await,
+                None => {
+                    self.reads_started.fetch_add(1, Ordering::SeqCst);
+                    Ok(self.bytes.clone())
+                }
+            }
+        }
+
+        async fn file_count(
+            &self,
+            _: &SourceDescriptor,
+            _: &str,
+        ) -> crate::source::trait_def::Result<u64> {
+            Ok(0)
+        }
+
+        async fn stat(
+            &self,
+            _: &SourceDescriptor,
+            _: &str,
+        ) -> crate::source::trait_def::Result<FileStat> {
+            Ok(FileStat { size: self.bytes.len() as u64, modified_at: Some(1000) })
+        }
+
+        async fn test(&self, _: &SourceDescriptor) -> crate::source::trait_def::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl RangeOrigin for RemoteZipOrigin {
+        async fn read_range(
+            &self,
+            offset: u64,
+            length: u64,
+        ) -> std::result::Result<Vec<u8>, MaterializeError> {
+            self.read_core(offset, length).await.map_err(|e| e.into())
+        }
+
+        fn size(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+    }
+
+    /// 尾块大小超过 BLOCK_SIZE、总大小低于 CHUNK 的 stored ZIP：probe/catalog 只
+    /// 触碰尾部块（首 range 恰为最后一块），物化下载是单次 (0, size) 全量读。
+    fn harness_zip_bytes() -> Vec<u8> {
+        let pad = vec![0x5Au8; BLOCK_SIZE + 256 * 1024];
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            use std::io::Write;
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("page1.png", options).unwrap();
+            zip.write_all(PNG_BYTES).unwrap();
+            zip.start_file("pad.bin", options).unwrap();
+            zip.write_all(&pad).unwrap();
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn remote_webdav_origin() -> SourceDescriptor {
+        crate::source::archive::materializer::tests::webdav("")
+    }
+
+    /// commit-gated 后台物化的观察桩（替代生产 Prefetcher）：计数 + 经
+    /// `ensure_cached_background_subscribed` 注入进度 channel 采集事件；完成后
+    /// drain 残留事件再置 done（防「ready 已入队但未采集」的假通过）。
+    struct CountingPrefetchHook {
+        mat: Arc<Materializer>,
+        starts: Arc<AtomicUsize>,
+        events: Arc<Mutex<Vec<ArchiveMaterializeProgress>>>,
+        done: Arc<AtomicBool>,
+    }
+
+    impl CommittedPrefetch for CountingPrefetchHook {
+        fn prefetch_committed(&self, origin: SourceDescriptor, rel: String, progress_key: String) {
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            let mat = self.mat.clone();
+            let events = self.events.clone();
+            let done = self.done.clone();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                let epoch = mat.current_epoch();
+                let _ = mat
+                    .ensure_cached_background_subscribed(
+                        &origin,
+                        &rel,
+                        epoch,
+                        progress_key,
+                        ArchiveFormat::Cbz,
+                        Some(tx),
+                    )
+                    .await;
+                while let Ok(ev) = rx.try_recv() {
+                    events.lock().unwrap().push(ev);
+                }
+                done.store(true, Ordering::SeqCst);
+            });
+        }
+    }
+
+    struct ArchiveUsageSnapshot {
+        count: i64,
+        #[allow(dead_code)]
+        bytes: i64,
+    }
+
+    fn archive_cache_usage(db: &crate::db::Db) -> rusqlite::Result<ArchiveUsageSnapshot> {
+        let conn = db.conn();
+        crate::source::archive::dao::usage(&conn)
+            .map(|(count, bytes)| ArchiveUsageSnapshot { count, bytes })
+    }
+
+    /// 任务 10 全链路 harness：真实 Materializer（共享唯一 coordinator）+ 真实
+    /// 三格式 backend + Service；committed-prefetch 换观察桩。
+    struct RemoteServiceHarness {
+        service: Arc<ArchiveService>,
+        mat: Arc<Materializer>,
+        coordinator: Arc<ArchiveCacheCoordinator>,
+        origin: Arc<RemoteZipOrigin>,
+        db: crate::db::Db,
+        descriptor: SourceDescriptor,
+        clear_timeout: Duration,
+        prefetch_starts: Arc<AtomicUsize>,
+        events: Arc<Mutex<Vec<ArchiveMaterializeProgress>>>,
+        background_done: Arc<AtomicBool>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl RemoteServiceHarness {
+        fn build(
+            origin: RemoteZipOrigin,
+            clear_timeout: Duration,
+            seed_ready_row: bool,
+        ) -> Self {
+            let origin = Arc::new(origin);
+            let coordinator = ArchiveCacheCoordinator::new_shared();
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("part")).unwrap();
+            let db = crate::db::Db::open_in_memory().unwrap();
+            let mat = Arc::new(Materializer::new(
+                origin.clone() as Arc<dyn MediaSource>,
+                Arc::new(RemoteZipOrigin::new(Vec::new())) as Arc<dyn MediaSource>,
+                db.clone(),
+                dir.path().to_path_buf(),
+                coordinator.clone(),
+            ));
+            let service = Arc::new(ArchiveService::with_parts(
+                mat.clone() as Arc<dyn Materialize>,
+                coordinator.clone(),
+                Arc::new(ZipBackend),
+                Arc::new(RarBackend),
+                Arc::new(SevenZBackend),
+                ArchiveLimits::production(),
+                Arc::new(tokio::sync::Semaphore::new(512)),
+            ));
+            let prefetch_starts = Arc::new(AtomicUsize::new(0));
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let background_done = Arc::new(AtomicBool::new(false));
+            service.set_committed_prefetcher(Arc::new(CountingPrefetchHook {
+                mat: mat.clone(),
+                starts: prefetch_starts.clone(),
+                events: events.clone(),
+                done: background_done.clone(),
+            }));
+            let descriptor = SourceDescriptor::Archive {
+                archive_path: "https://d/x/book.cbz".into(),
+                entry_prefix: String::new(),
+                format: ArchiveFormat::Cbz,
+                origin: Some(Box::new(remote_webdav_origin())),
+                origin_entry_path: None,
+                archive_rel_path: Some("book.cbz".into()),
+            };
+            let harness = Self {
+                service,
+                mat,
+                coordinator,
+                origin,
+                db,
+                descriptor,
+                clear_timeout,
+                prefetch_starts,
+                events,
+                background_done,
+                _dir: dir,
+            };
+            if seed_ready_row {
+                harness.seed_ready("ready.cbz");
+            }
+            harness
+        }
+
+        /// 铺一行新鲜 ready 缓存（文件 + 表行；stat 尺寸/mtime 与 mock 一致）：
+        /// clear gate 测试的 ready-hit 准入路径用——gate 开时会真实命中
+        fn seed_ready(&self, rel: &str) {
+            let key = cache_key(&remote_webdav_origin(), rel);
+            let abs = self._dir.path().join(format!("{key}.cbz"));
+            std::fs::write(&abs, self.origin.snapshot_bytes()).unwrap();
+            let size = self.origin.size() as i64;
+            let conn = self.db.conn();
+            crate::source::archive::dao::upsert(
+                &conn,
+                &crate::source::archive::dao::NewCacheRow {
+                    cache_key: key,
+                    origin_kind: "webdav".into(),
+                    archive_rel_path: rel.into(),
+                    origin_size: size,
+                    origin_mtime: Some(1000),
+                    cache_abs_path: abs.display().to_string(),
+                    byte_size: size,
+                },
+            )
+            .unwrap();
+        }
+
+        fn zip() -> Self {
+            Self::build(RemoteZipOrigin::new(harness_zip_bytes()), Duration::from_secs(2), false)
+        }
+
+        fn real_zip_with_short_range() -> Self {
+            let bytes = harness_zip_bytes();
+            let tail = ((bytes.len() as u64 - 1) / BLOCK_SIZE as u64) * BLOCK_SIZE as u64;
+            Self::build(
+                RemoteZipOrigin::new(bytes).with_short_at(tail),
+                Duration::from_secs(2),
+                false,
+            )
+        }
+
+        fn blocking_zip() -> Self {
+            Self::blocking_zip_with_clear_timeout(Duration::from_secs(2))
+        }
+
+        fn blocking_zip_with_clear_timeout(timeout: Duration) -> Self {
+            Self::build(
+                RemoteZipOrigin::new(harness_zip_bytes()).gated(),
+                timeout,
+                true,
+            )
+        }
+
+        fn expected_progress_key(&self) -> String {
+            cache_key(&remote_webdav_origin(), "book.cbz")
+        }
+
+        fn prefetch_start_count(&self) -> usize {
+            self.prefetch_starts.load(Ordering::SeqCst)
+        }
+
+        fn background_events(&self) -> Vec<ArchiveMaterializeProgress> {
+            self.events.lock().unwrap().clone()
+        }
+
+        async fn wait_background_ready(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !self.background_done.load(Ordering::SeqCst) {
+                assert!(Instant::now() < deadline, "后台物化在 10s 内未完成");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        fn spawn_prepare(
+            &self,
+        ) -> tokio::task::JoinHandle<Result<ArchivePrepareResult, ArchiveAccessError>> {
+            let service = self.service.clone();
+            let descriptor = self.descriptor.clone();
+            tokio::spawn(async move { service.prepare(&descriptor).await })
+        }
+
+        async fn wait_range_started(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while self.origin.reads_started_count() < 1 {
+                assert!(Instant::now() < deadline, "range 加载在 10s 内未启动");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+
+        async fn wait_until_global_clear_gate_is_closed(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while self.coordinator.try_admit().is_ok() {
+                assert!(Instant::now() < deadline, "clear gate 在 10s 内未关闭");
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        }
+
+        fn release_range(&self) {
+            self.origin.release();
+        }
+
+        async fn clear_archive_cache(&self) -> Result<(), ArchiveCacheError> {
+            crate::commands::archive_cache::clear_archive_cache_impl_with_timeout(
+                &self.db,
+                &self.mat,
+                &self.service,
+                self.clear_timeout,
+            )
+            .await
+        }
+
+        fn spawn_clear_archive_cache(
+            &self,
+        ) -> tokio::task::JoinHandle<Result<(), ArchiveCacheError>> {
+            let db = self.db.clone();
+            let mat = self.mat.clone();
+            let service = self.service.clone();
+            let timeout = self.clear_timeout;
+            tokio::spawn(async move {
+                crate::commands::archive_cache::clear_archive_cache_impl_with_timeout(
+                    &db, &mat, &service, timeout,
+                )
+                .await
+            })
+        }
+
+        /// 全新 ready-cache 准入（seeded ready.cbz 行 + 新鲜磁盘文件）
+        async fn try_ready_cache_hit(
+            &self,
+        ) -> Result<Option<std::path::PathBuf>, ArchiveAccessError> {
+            self.mat
+                .ready_path_if_fresh(&remote_webdav_origin(), "ready.cbz", ArchiveFormat::Cbz)
+                .await
+                .map_err(map_materialize_error)
+        }
+
+        /// 全新 catalog 尝试（service.list：admission → resolve → streaming catalog）
+        async fn try_catalog(&self) -> Result<Vec<MediaEntry>, ArchiveAccessError> {
+            self.service.list(&self.descriptor).await
+        }
+
+        /// 全新 block 加载（共享 block cache 上的 1 字节读）
+        async fn try_block_load(&self) -> Result<Vec<u8>, ArchiveAccessError> {
+            use std::io::Read as _;
+            let mut reader = RemoteZipReader::new(
+                ArchiveIdentity::new("try-block-load", 1, None),
+                self.origin.clone(),
+                self.service.block_cache(),
+                tokio::runtime::Handle::current(),
+            );
+            let mut byte = [0u8; 1];
+            reader.read_exact(&mut byte).map_err(remote_io_to_access)?;
+            Ok(byte.to_vec())
+        }
+
+        /// 全新物化准入（ensure_cached：格式校验 → coordinator admission）
+        async fn try_materialize(
+            &self,
+        ) -> Result<std::path::PathBuf, ArchiveAccessError> {
+            self.mat
+                .ensure_cached(&remote_webdav_origin(), "book.cbz", ArchiveFormat::Cbz)
+                .await
+                .map_err(map_materialize_error)
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_zip_prepares_with_tail_range_before_full_materialization() {
+        let harness = RemoteServiceHarness::zip();
+        let result = harness.service.prepare(&harness.descriptor).await.unwrap();
+        assert_eq!(
+            result,
+            ArchivePrepareResult::Ready {
+                access_mode: ArchiveAccessMode::Streaming,
+                progress_key: Some(harness.expected_progress_key()),
+            }
+        );
+        let first = harness.origin.first_range();
+        let expected_offset = ((harness.origin.size() - 1) / BLOCK_SIZE as u64) * BLOCK_SIZE as u64;
+        assert_eq!(first.offset, expected_offset);
+        assert_eq!(first.length, harness.origin.size() - expected_offset);
+        assert_eq!(harness.origin.full_download_count(), 0);
+        assert_eq!(harness.prefetch_start_count(), 0); // prepare 不能逃逸后台任务
+    }
+
+    #[tokio::test]
+    async fn broken_range_falls_back_to_materialized_file() {
+        // 必须使用真实 RemoteZipReader + ZipBackend，不允许 fake backend 直接返回目标错误。
+        let harness = RemoteServiceHarness::real_zip_with_short_range();
+        let result = harness.service.prepare(&harness.descriptor).await.unwrap();
+        assert_eq!(
+            result,
+            ArchivePrepareResult::Ready {
+                access_mode: ArchiveAccessMode::Materialized,
+                progress_key: Some(harness.expected_progress_key()),
+            }
+        );
+        assert_eq!(harness.origin.full_download_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn clear_during_range_load_does_not_repopulate_runtime_or_disk_cache() {
+        let harness = RemoteServiceHarness::blocking_zip();
+        let opening = harness.spawn_prepare();
+        harness.wait_range_started().await;
+        let clearing = harness.spawn_clear_archive_cache();
+        harness.wait_until_global_clear_gate_is_closed().await;
+        // spec 验收：关闸后新 catalog / block / ready-cache / materialize 四条准入路径都要被
+        // gate 拒绝；进行中的 opening 是关闸前启动的旧请求，覆盖不到另外三条新路径——
+        // 三个调用各自发起新准入（全新 catalog 尝试 / 全新 block 加载 / 全新物化），
+        // 漏掉 admission guard 的实现会在此重插缓存而被抓住
+        assert!(matches!(harness.try_ready_cache_hit().await, Err(ArchiveAccessError::Cancelled)));
+        assert!(matches!(harness.try_catalog().await, Err(ArchiveAccessError::Cancelled)));
+        assert!(matches!(harness.try_block_load().await, Err(ArchiveAccessError::Cancelled)));
+        assert!(matches!(harness.try_materialize().await, Err(ArchiveAccessError::Cancelled)));
+        harness.release_range();
+        clearing.await.unwrap().unwrap();
+        assert!(matches!(opening.await.unwrap(), Err(ArchiveAccessError::Cancelled)));
+        assert_eq!(harness.service.catalog_cache_len(), 0);
+        assert_eq!(harness.service.block_cache_len(), 0);
+        assert_eq!(archive_cache_usage(&harness.db).unwrap().count, 0);
+    }
+
+    #[tokio::test]
+    async fn clear_timeout_drops_gate_and_does_not_deadlock_followup_admission() {
+        let harness = RemoteServiceHarness::blocking_zip_with_clear_timeout(TEST_SHORT_TIMEOUT);
+        let opening = harness.spawn_prepare();
+        harness.wait_range_started().await;
+        let err = harness.clear_archive_cache().await.unwrap_err();
+        assert!(matches!(err, ArchiveCacheError::DrainTimeout));
+        assert!(harness.coordinator.try_admit().is_ok()); // ClearGuard 已同步复位
+        harness.release_range();
+        let _ = opening.await;
+    }
+
+    #[tokio::test]
+    async fn ready_cache_is_preferred_after_background_download() {
+        let harness = RemoteServiceHarness::zip();
+        let session_id = "550e8400-e29b-41d4-a716-446655440010";
+        harness.service.begin_session(session_id, 1_000).unwrap();
+        let request_id = ArchiveRequestId::new(session_id, 1);
+        let ready = harness
+            .service
+            .prepare_with_request(&harness.descriptor, request_id.clone())
+            .await
+            .unwrap();
+        let progress_key = ready.progress_key().unwrap().to_owned();
+        assert_eq!(harness.prefetch_start_count(), 0);
+        harness.service.commit_request(&request_id).await.unwrap();
+        harness.wait_background_ready().await;
+        // Iterator::all 对空集合恒真：先证明后台确实发出事件（且含 "ready" 终态，
+        // 沿用现有 emit_progress 的 phase 值域），再逐条比较 progress_key——
+        // 零事件时此处必须红灯而非假通过
+        let events = harness.background_events();
+        assert!(!events.is_empty(), "后台 subscriber 必须收到事件");
+        assert!(events.iter().any(|e| e.phase == "ready"), "必须存在 ready 终态事件");
+        assert!(events
+            .iter()
+            .all(|event| event.progress_key.as_bytes() == progress_key.as_bytes()));
+        harness.origin.clear_range_calls();
+        let bytes = harness.service.read(&harness.descriptor, "page1.png").await.unwrap();
+        assert_eq!(bytes, PNG_BYTES);
+        assert_eq!(harness.origin.range_call_count(), 0);
     }
 }

@@ -57,6 +57,12 @@ impl ArchiveCacheCoordinator {
         Ok(AdmissionGuard { coordinator: Some(Arc::clone(self)), generation })
     }
 
+    /// 一次性尝试准入（任务 10 测试/诊断探测：clear gate 关闭时 Err）——
+    /// [`Self::admit`] 的别名，语义相同（成功即持有一个 admission guard）
+    pub fn try_admit(self: &Arc<Self>) -> Result<AdmissionGuard, ArchiveAccessError> {
+        self.admit()
+    }
+
     /// 原子开闸清空：置 clearing、推进 generation。返回的 [`ClearGuard`] Drop 时同步
     /// 复位 gate（不实现 async Drop）；物理清理只能在 guard 存活且 `wait_drained`
     /// 返回 true 后执行。

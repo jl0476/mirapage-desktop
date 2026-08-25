@@ -1170,6 +1170,35 @@ impl crate::source::archive_impl::Materialize for Materializer {
         // MediaSourceError 垫片扁平化
         Materializer::ensure_cached(self, origin, archive_rel_path, format).await
     }
+
+    // 任务 10 streaming 支持面：同样显式 inherent 调用（trait / inherent 同名）
+    async fn stat_origin(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str,
+    ) -> std::result::Result<crate::source::trait_def::FileStat, MaterializeError> {
+        Materializer::stat_origin(self, origin, archive_rel_path).await
+    }
+
+    async fn read_origin_range(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, offset: u64, length: u64,
+    ) -> std::result::Result<Vec<u8>, MaterializeError> {
+        Materializer::read_origin_range(self, origin, archive_rel_path, offset, length).await
+    }
+
+    async fn ready_path_if_fresh(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+    ) -> std::result::Result<Option<PathBuf>, MaterializeError> {
+        Materializer::ready_path_if_fresh(self, origin, archive_rel_path, format).await
+    }
+
+    async fn ensure_cached_background(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, expected_epoch: u64,
+        progress_key: String, format: ArchiveFormat,
+    ) -> std::result::Result<PathBuf, MaterializeError> {
+        Materializer::ensure_cached_background(
+            self, origin, archive_rel_path, expected_epoch, progress_key, format,
+        )
+        .await
+    }
 }
 
 /// 进度事件（非阻塞；模式同 thumbnail://progress）——类型化载荷统一 emit

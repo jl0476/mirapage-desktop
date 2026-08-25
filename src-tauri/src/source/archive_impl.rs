@@ -21,11 +21,60 @@ use std::path::PathBuf;
 /// 错误类型化（审查修复 + 任务 8 收紧）：直接返回 `MaterializeError` 而非
 /// MediaSourceError/String——NotFound/Network 保类型，FormatMismatch/Cancelled 由
 /// Service 边界按变体映射（InvalidRequest / Cancelled），不被 `to_string()` 扁平化。
+///
+/// 任务 10 起 trait 增加 streaming 支持面（stat_origin / read_origin_range /
+/// ready_path_if_fresh / ensure_cached_background）：默认实现返回「不支持」——
+/// 本地与非 ZIP 远程路径不触达这些方法，既有 mock 沿用默认即可编译；生产由
+/// Materializer 实现（Service 的远程 ZIP 流式 prepare / ready 优先 / commit 后台
+/// 物化全走 trait 对象）。
 #[async_trait]
 pub trait Materialize: Send + Sync {
     async fn ensure_cached(
         &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
     ) -> std::result::Result<PathBuf, crate::source::archive::materializer::MaterializeError>;
+
+    /// origin 元数据 stat（任务 10 streaming identity / ready 校验用）
+    async fn stat_origin(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str,
+    ) -> std::result::Result<crate::source::trait_def::FileStat, crate::source::archive::materializer::MaterializeError>
+    {
+        let _ = (origin, archive_rel_path);
+        Err(crate::source::archive::materializer::MaterializeError::Other(
+            "该物化实现不支持 stat_origin".into(),
+        ))
+    }
+
+    /// origin 精确 Range 读取（远程 ZIP 流式 reader 的块加载入口；短读必须类型化
+    /// RemoteRangeUnavailable——降级白名单首项）
+    async fn read_origin_range(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, offset: u64, length: u64,
+    ) -> std::result::Result<Vec<u8>, crate::source::archive::materializer::MaterializeError> {
+        let _ = (origin, archive_rel_path, offset, length);
+        Err(crate::source::archive::materializer::MaterializeError::Other(
+            "该物化实现不支持 read_origin_range".into(),
+        ))
+    }
+
+    /// 无下载的 ready cache 查询（任务 10 ready 优先；gate 语义在实现内）
+    async fn ready_path_if_fresh(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+    ) -> std::result::Result<Option<PathBuf>, crate::source::archive::materializer::MaterializeError> {
+        let _ = (origin, archive_rel_path, format);
+        Err(crate::source::archive::materializer::MaterializeError::Other(
+            "该物化实现不支持 ready_path_if_fresh".into(),
+        ))
+    }
+
+    /// commit-gated 后台物化（任务 10：opaque progress_key 承载全部进度事件）
+    async fn ensure_cached_background(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, expected_epoch: u64,
+        progress_key: String, format: ArchiveFormat,
+    ) -> std::result::Result<PathBuf, crate::source::archive::materializer::MaterializeError> {
+        let _ = (origin, archive_rel_path, expected_epoch, progress_key, format);
+        Err(crate::source::archive::materializer::MaterializeError::Other(
+            "该物化实现不支持 ensure_cached_background".into(),
+        ))
+    }
 }
 
 pub struct ArchiveMediaSource {

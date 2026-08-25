@@ -6,6 +6,13 @@ use crate::source::descriptor::SourceDescriptor;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// commit-gated 后台物化入口（任务 10）：`ArchiveService::commit_request` 消费
+/// Prepared 的 streaming 预载意图时调用。生产实现为 [`ArchivePrefetcher`]
+/// （开关 + epoch + spawn），Service 测试注入观察桩（计数 / 事件采集）。
+pub trait CommittedPrefetch: Send + Sync {
+    fn prefetch_committed(&self, origin: SourceDescriptor, rel: String, progress_key: String);
+}
+
 pub struct ArchivePrefetcher {
     mat: Arc<Materializer>,
     /// Arc：notify_window 的 spawn 闭包持有克隆，循环内逐 rel 读**实时**开关——
@@ -69,6 +76,39 @@ impl ArchivePrefetcher {
                 let _ = mat.ensure_cached_cancellable(&origin, rel, batch_epoch, format).await;
             }
         });
+    }
+
+    /// 已打开 archive 的后台物化入口（任务 10 step 3）：prepare(Ready/Streaming)
+    /// 只记录预载意图，**commit_request 消费意图时才调到这里**——开关关闭直接
+    /// 丢弃（不启动后台任务）；epoch 取任务诞生时刻（窗口推进即取消）；同一个
+    /// `progress_key` 传给 `ensure_cached_background`，由后台 subscriber 保存并
+    /// 用于每一条进度事件。
+    pub fn prefetch_committed(&self, origin: SourceDescriptor, rel: String, progress_key: String) {
+        if !self.is_enabled() {
+            return;
+        }
+        // format 从 rel 扩展名派生（与 notify_window 同源）；不支持的扩展名丢弃
+        let ext = std::path::Path::new(&rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let Some(format) = crate::source::descriptor::ArchiveFormat::from_extension(ext) else {
+            return;
+        };
+        let mat = self.mat.clone();
+        let expected_epoch = mat.current_epoch();
+        tokio::spawn(async move {
+            let _ = mat
+                .ensure_cached_background(&origin, &rel, expected_epoch, progress_key, format)
+                .await;
+        });
+    }
+}
+
+impl CommittedPrefetch for ArchivePrefetcher {
+    fn prefetch_committed(&self, origin: SourceDescriptor, rel: String, progress_key: String) {
+        // 显式 inherent 调用（trait / inherent 同名）
+        ArchivePrefetcher::prefetch_committed(self, origin, rel, progress_key)
     }
 }
 

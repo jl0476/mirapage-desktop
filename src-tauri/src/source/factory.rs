@@ -29,6 +29,9 @@ pub struct MediaSourceFactory {
     /// 任务 7：五格式共享服务——ArchiveMediaSource、session/prepare IPC（任务 11）
     /// 与 commit-gated prefetch（任务 10）共用同一实例
     archive_service: Arc<ArchiveService>,
+    /// 任务 10：commit-gated 后台物化的生产入口（Service 的 committed hook 注入
+    /// 同一实例；lib.rs setup 从这里取，与 notify_archive_window 命令共享开关）
+    archive_prefetcher: Arc<crate::source::archive::prefetch::ArchivePrefetcher>,
     smb: Arc<SmbMediaSource>,
     webdav: Arc<WebDavMediaSource>,
 }
@@ -61,12 +64,19 @@ impl MediaSourceFactory {
             materializer.clone() as Arc<dyn Materialize>,
             cache_coordinator.clone(),
         ));
+        // 任务 10：commit-gated 后台物化——Service 的 committed hook 注入同一
+        // Prefetcher 实例（开关 / epoch 语义单点），setup 经 archive_prefetcher() 复用
+        let archive_prefetcher = Arc::new(
+            crate::source::archive::prefetch::ArchivePrefetcher::new(materializer.clone()),
+        );
+        archive_service.set_committed_prefetcher(archive_prefetcher.clone());
         Self {
             local,
             archive: Arc::new(ArchiveMediaSource::new(archive_service.clone())),
             materializer,
             cache_coordinator,
             archive_service,
+            archive_prefetcher,
             smb,
             webdav,
         }
@@ -88,6 +98,14 @@ impl MediaSourceFactory {
     /// commit-gated prefetch（任务 10）从这里取同一实例，不得另建
     pub fn archive_service(&self) -> Arc<ArchiveService> {
         self.archive_service.clone()
+    }
+
+    /// 任务 10：commit-gated 后台物化的生产 Prefetcher——Service committed hook
+    /// 已注入同一实例；lib.rs setup 从这里取（开关读取/设置单点，不另建）
+    pub fn archive_prefetcher(
+        &self,
+    ) -> Arc<crate::source::archive::prefetch::ArchivePrefetcher> {
+        self.archive_prefetcher.clone()
     }
 
     /// 按 `SourceDescriptor` 类型返回对应的 `MediaSource` 实现
