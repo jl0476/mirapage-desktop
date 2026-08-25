@@ -1,23 +1,25 @@
 //! `ArchiveMediaSource` —— CBZ / CBR / ZIP / RAR / 7z 压缩包
 //!
-//! Phase 3 实现。CBZ/ZIP 用 `zip` crate;CBR/RAR 用 `unrar`(RAR5 部分包可能失败,
-//! 按 DESIGN §9 缓解);7z 用 `sevenz-rust`(末尾索引,需整包读,远程源场景
+//! Phase 3 实现。CBZ/ZIP 自任务 4 起委托 `source::archive::zip_backend::ZipBackend`
+//! （路径输入、无整包读取；ZipCrypto/AES 密码与资源限额合同见该模块文档）；
+//! CBR/RAR 用 `unrar`(RAR5 部分包可能失败, 按 DESIGN §9 缓解);
+//! 7z 用 `sevenz-rust`(末尾索引,需整包读,远程源场景
 //! 先下载到 cacheDir 后再解压)。
 //!
 //! 设计要点:
-//! - 压缩包内容缓存在内存(RAM 限制 OK,因为常见漫画 < 1 GB)
-//! - 大文件支持 Range 读取(只解压条目所需字节)
-//! - 命名空间:`archive_path` + `entry_prefix` 可定位压缩包内的子目录
+//! - `archive_path` + `entry_prefix` 可定位压缩包内的子目录
 //!
-//! 解压策略:
-//! - `read_file(entry, None)`:整条目解压到 Vec<u8>
+//! 解压策略(任务 4 起):
+//! - `read_file(entry, None)`:backend 流式解压整条目(LimitedEntryWriter 限额)
 //! - `read_file(entry, Some(range))`:整条目解压后切片(desktop 优化:大图按需读取)
 
-use crate::algorithm::mime::is_image;
+use crate::source::archive::backend::{
+    ArchiveAccessError, ArchiveBackend, ArchiveInput, DecodeBudget,
+};
+use crate::source::archive::zip_backend::ZipBackend;
 use crate::source::descriptor::{ArchiveFormat, MediaEntry, SourceDescriptor};
 use crate::source::trait_def::{ByteRange, MediaSource, MediaSourceError, Result};
 use async_trait::async_trait;
-use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 /// 物化抽象（生产 = source::archive::materializer::Materializer；测试 = mock）
@@ -69,21 +71,45 @@ impl ArchiveMediaSource {
     }
 }
 
-fn read_entry_bytes(archive_bytes: &[u8], entry_name: &str, format: ArchiveFormat) -> Result<Vec<u8>> {
+/// ArchiveAccessError → MediaSourceError：`EntryNotFound` 保留 NotFound 语义
+/// （media:// 404 合同，任务 2 特征测试锁定）；其余类型化进 `Archive` 变体
+/// （`#[from]`），由协议层按变体分类。
+fn map_backend_error(e: ArchiveAccessError) -> MediaSourceError {
+    match e {
+        ArchiveAccessError::EntryNotFound(name) => MediaSourceError::NotFound(name),
+        other => MediaSourceError::Archive(other),
+    }
+}
+
+/// 归档文件前置检查：整包 `tokio::fs::read` 路径已删（任务 4 路径化），此处仅
+/// metadata 一次 stat，保留 M3 的 NotFound / PermissionDenied 错误面。
+async fn ensure_archive_file(resolved: &Path) -> Result<()> {
+    if let Err(e) = tokio::fs::metadata(resolved).await {
+        return Err(match e.kind() {
+            std::io::ErrorKind::NotFound => {
+                MediaSourceError::NotFound(resolved.display().to_string())
+            }
+            std::io::ErrorKind::PermissionDenied => {
+                MediaSourceError::PermissionDenied(resolved.display().to_string())
+            }
+            _ => MediaSourceError::Io(e),
+        });
+    }
+    Ok(())
+}
+
+fn read_entry_bytes(path: &Path, entry_name: &str, format: ArchiveFormat) -> Result<Vec<u8>> {
     match format {
         ArchiveFormat::Cbz | ArchiveFormat::Zip => {
-            use zip::ZipArchive;
-            let cursor = Cursor::new(archive_bytes);
-            let mut archive = ZipArchive::new(cursor)
-                .map_err(|e| MediaSourceError::Other(format!("zip open: {e}")))?;
-            let mut entry = archive
-                .by_name(entry_name)
-                .map_err(|_| MediaSourceError::NotFound(entry_name.to_string()))?;
-            let mut out = Vec::with_capacity(entry.size() as usize);
-            entry
-                .read_to_end(&mut out)
-                .map_err(|e| MediaSourceError::Other(format!("zip read: {e}")))?;
-            Ok(out)
+            let mut budget = DecodeBudget::unbounded();
+            ZipBackend
+                .read_entry(
+                    &ArchiveInput::Path(path.to_path_buf()),
+                    entry_name,
+                    None,
+                    &mut budget,
+                )
+                .map_err(map_backend_error)
         }
         ArchiveFormat::Cbr | ArchiveFormat::Rar | ArchiveFormat::SevenZ => Err(
             MediaSourceError::NotImplemented(format!(
@@ -94,68 +120,20 @@ fn read_entry_bytes(archive_bytes: &[u8], entry_name: &str, format: ArchiveForma
     }
 }
 
-/// 列出压缩包内条目(过滤图片)
-fn list_archive_entries(archive_bytes: &[u8], format: ArchiveFormat, prefix: &str) -> Result<Vec<MediaEntry>> {
+/// 列出压缩包内条目(过滤图片)——ZIP/CBZ 委托 ZipBackend（central directory
+/// 路径化列表；密码判定不在 backend 层，见 zip_backend 文档）
+fn list_archive_entries(path: &Path, format: ArchiveFormat, prefix: &str) -> Result<Vec<MediaEntry>> {
     match format {
         ArchiveFormat::Cbz | ArchiveFormat::Zip => {
-            use zip::ZipArchive;
-            let cursor = Cursor::new(archive_bytes);
-            let mut archive = ZipArchive::new(cursor)
-                .map_err(|e| MediaSourceError::Other(format!("zip open: {e}")))?;
-            let mut out = Vec::new();
-            for i in 0..archive.len() {
-                let entry = archive
-                    .by_index(i)
-                    .map_err(|e| MediaSourceError::Other(format!("zip index: {e}")))?;
-                let name = entry.name().to_string();
-                if !name.starts_with(prefix) {
-                    continue;
-                }
-                if !is_image(&name) {
-                    continue;
-                }
-                // entry.path() 相对于 entry_prefix 的相对路径
-                let relative = if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    name.strip_prefix(prefix)
-                        .map(|s| s.trim_start_matches('/').to_string())
-                        .unwrap_or_else(|| name.clone())
-                };
-                let size = entry.size();
-                // ZIP 内 DOS timestamp 精度低（2-sec，1980-2107），且 zip 2.4.2 的
-                // DateTime 只暴露 year/month/day/... getter，无 timestamp() 方法。
-                // 漫画阅读器场景 modified_at 不展示在 UI（archive 条目是内部列表），
-                // 留 None 即可。
-                let modified_at: Option<i64> = None;
-                out.push(MediaEntry {
-                    name: relative.clone(),
-                    path: relative,
-                    is_directory: false,
-                    is_archive: false,
-                    size,
-                    modified_at,
-                });
-            }
-            // 自然排序
-            out.sort_by(|a, b| crate::algorithm::natural_compare(&a.name, &b.name));
-            Ok(out)
+            let catalog = ZipBackend
+                .catalog(&ArchiveInput::Path(path.to_path_buf()), prefix, None)
+                .map_err(map_backend_error)?;
+            Ok(catalog.entries)
         }
         _ => Err(MediaSourceError::NotImplemented(
             "非 ZIP/CBZ 列表暂不直接支持".into(),
         )),
     }
-}
-
-/// 读压缩包到内存(小文件 OK,大文件应考虑 mmap)
-fn read_archive_to_bytes(path: &Path) -> Result<Vec<u8>> {
-    std::fs::read(path).map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => MediaSourceError::NotFound(path.display().to_string()),
-        std::io::ErrorKind::PermissionDenied => {
-            MediaSourceError::PermissionDenied(path.display().to_string())
-        }
-        _ => MediaSourceError::Io(e),
-    })
 }
 
 #[async_trait]
@@ -186,14 +164,8 @@ impl MediaSource for ArchiveMediaSource {
         let resolved = self
             .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
             .await?;
-        let bytes = tokio::fs::read(&resolved).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(resolved.display().to_string()),
-            std::io::ErrorKind::PermissionDenied => {
-                MediaSourceError::PermissionDenied(resolved.display().to_string())
-            }
-            _ => MediaSourceError::Io(e.into()),
-        })?;
-        list_archive_entries(&bytes, format, &entry_prefix)
+        ensure_archive_file(&resolved).await?;
+        list_archive_entries(&resolved, format, &entry_prefix)
     }
 
     async fn read_file(
@@ -219,19 +191,13 @@ impl MediaSource for ArchiveMediaSource {
         let resolved = self
             .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
             .await?;
-        let bytes = tokio::fs::read(&resolved).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(resolved.display().to_string()),
-            std::io::ErrorKind::PermissionDenied => {
-                MediaSourceError::PermissionDenied(resolved.display().to_string())
-            }
-            _ => MediaSourceError::Io(e.into()),
-        })?;
+        ensure_archive_file(&resolved).await?;
         let entry_name = if entry_prefix.is_empty() {
             path.to_string()
         } else {
             format!("{}/{}", entry_prefix.trim_end_matches('/'), path)
         };
-        let full = read_entry_bytes(&bytes, &entry_name, format)?;
+        let full = read_entry_bytes(&resolved, &entry_name, format)?;
         match range {
             None => Ok(full),
             Some(r) => {
@@ -281,13 +247,7 @@ impl MediaSource for ArchiveMediaSource {
         let resolved = self
             .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
             .await?;
-        let bytes = tokio::fs::read(&resolved).await.map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => MediaSourceError::NotFound(resolved.display().to_string()),
-            std::io::ErrorKind::PermissionDenied => {
-                MediaSourceError::PermissionDenied(resolved.display().to_string())
-            }
-            _ => MediaSourceError::Io(e.into()),
-        })?;
+        ensure_archive_file(&resolved).await?;
         let entry_name = if entry_prefix.is_empty() {
             path.to_string()
         } else {
@@ -295,15 +255,12 @@ impl MediaSource for ArchiveMediaSource {
         };
         match format {
             ArchiveFormat::Cbz | ArchiveFormat::Zip => {
-                use zip::ZipArchive;
-                let cursor = Cursor::new(&bytes[..]);
-                let mut archive = ZipArchive::new(cursor)
-                    .map_err(|e| MediaSourceError::Other(format!("zip open: {e}")))?;
-                let entry = archive
-                    .by_name(&entry_name)
-                    .map_err(|_| MediaSourceError::NotFound(entry_name.clone()))?;
+                // central directory 声明的解压后 size（明文元数据，无密码参与）
+                let size = ZipBackend
+                    .stat_entry(&ArchiveInput::Path(resolved), &entry_name, None)
+                    .map_err(map_backend_error)?;
                 Ok(crate::source::trait_def::FileStat {
-                    size: entry.size(),
+                    size,
                     modified_at: None, // DOS 时间精度低且无消费方（spec rev3）
                 })
             }
