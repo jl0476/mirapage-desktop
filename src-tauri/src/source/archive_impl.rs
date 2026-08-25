@@ -384,6 +384,18 @@ mod tests {
         ArchiveMediaSource::new(std::sync::Arc::new(NeverMaterialize))
     }
 
+    /// 本地直开 descriptor 构造 helper（origin None / 空 entry_prefix）
+    fn archive_descriptor(path: PathBuf, format: ArchiveFormat) -> SourceDescriptor {
+        SourceDescriptor::Archive {
+            archive_path: path.display().to_string(),
+            entry_prefix: String::new(),
+            format,
+            origin: None,
+            origin_entry_path: None,
+            archive_rel_path: None,
+        }
+    }
+
     /// 固定路径物化 mock——ensure_cached 返回预置 ZIP 路径并记录调用次数
     struct FixedMaterialize {
         path: PathBuf,
@@ -660,5 +672,57 @@ mod tests {
                 "物化错误应类型保真穿透（NotFound↔404 / Network↔502）, 实际 {res:?}"
             );
         }
+    }
+
+    /// 特征测试：子目录前缀（entry_prefix）+ Unicode 条目名 + 非图片过滤 +
+    /// 严格 Range 切片 + entry stat——锁定 ZIP 读取契约，供后续路径化重构对齐
+    #[tokio::test]
+    async fn zip_contract_nested_unicode_filter_range_and_stat() {
+        let path = create_test_cbz(&[
+            "章节一/第01页.png",
+            "章节一/第02页.jpg",
+            "章节一/readme.txt",
+            "章节二/第03页.png",
+        ]);
+        let descriptor = SourceDescriptor::Archive {
+            archive_path: path.display().to_string(),
+            entry_prefix: "章节一".into(),
+            format: ArchiveFormat::Cbz,
+            origin: None,
+            origin_entry_path: None,
+            archive_rel_path: None,
+        };
+        let source = never_source();
+        let entries = source.list_directory(&descriptor, "").await.unwrap();
+        assert_eq!(entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+                   vec!["第01页.png", "第02页.jpg"]);
+        let stat = source.stat(&descriptor, "第01页.png").await.unwrap();
+        assert_eq!(stat.size, 8);
+        assert_eq!(stat.modified_at, None);
+        let slice = source.read_file(
+            &descriptor,
+            "第01页.png",
+            Some(ByteRange { offset: 1, length: 3 }),
+        ).await.unwrap();
+        assert_eq!(slice, vec![b'P', b'N', b'G']);
+    }
+
+    /// 特征测试：Range offset 加法溢出与末尾越界都必须报错
+    /// （Range 强契约：不允许静默返回短数据或 panic）
+    #[tokio::test]
+    async fn zip_contract_range_overflow_and_end_overrun_fail() {
+        let path = create_test_cbz(&["page.png"]);
+        let descriptor = archive_descriptor(path, ArchiveFormat::Cbz);
+        let source = never_source();
+        assert!(source.read_file(
+            &descriptor,
+            "page.png",
+            Some(ByteRange { offset: u64::MAX, length: 1 }),
+        ).await.is_err());
+        assert!(source.read_file(
+            &descriptor,
+            "page.png",
+            Some(ByteRange { offset: 7, length: 2 }),
+        ).await.is_err());
     }
 }
