@@ -17,7 +17,7 @@
 | `rar.exe`（绝对版本输出） | RAR 7.11 x64   Copyright (c) 1993-2025 Alexander Roshal   20 Mar 2025 |
 | RAR4 回退工具（见「工具链偏离」①） | RAR 6.24 x64   Copyright (c) 1993-2023 Alexander Roshal   3 Oct 2023 |
 | generate.py SHA-256 | `968dee5b3bd1517534d806c2a29c86b16fbb119bb5d5aca94ca3fd9ce4af2ad8` |
-| gen_declared_dict.py SHA-256 | `620cc8f72e2a70e8900fe3f17db0d80d91bb597d30a641345edb30934228edac` |
+| gen_declared_dict.py SHA-256 | `c4968d98b68843fc1eba23b29b4c78be2ac4bb8f58b4ba60f7d97b2dfe210aab`（2026-08-25 任务 6 对齐版：合法 encoded 变体 payload 改 Python `lzma` FORMAT_RAW 真实压缩，重生成环境 Python 3.11.4） |
 | requirements.in SHA-256 | `b03a883ff2d38595950cce563d3e572aadfb82c892cc8d0d9af506d4f84f12b8` |
 
 ## 二十四 fixture 清单（SHA-256 为真值）
@@ -43,15 +43,15 @@ UTF-8 编码派生密钥（与 AE-1/AE-2 的 pyzipper 默认及上层应用 `Str
 | 13 | multidisk.zip | ZIP 手写 EOCD/ZIP64 盘字段非零 | 无 | page1.png（stored；不包含相邻分盘文件） | generate.py 手写 |
 | 14 | dict-oversize-lzma.7z | 构造性 7z | 无 | LZMA 声明 dict=0xFFFFFFFF | gen_declared_dict.py |
 | 15 | dict-oversize-lzma2.7z | 构造性 7z | 无 | LZMA2 props=0x28（4 GiB） | gen_declared_dict.py |
-| 16 | dict-budget-oversum.7z | 构造性 7z | 无 | 3 folder × 512 MiB（合计 1.5 GiB） | gen_declared_dict.py |
-| 17 | header-encoded-oversize.7z | 构造性 7z | 无 | encoded header 内 LZMA dict=0xFFFFFFFF | gen_declared_dict.py |
-| 18 | header-numfiles-over.7z | 构造性 7z | 无 | kFilesInfo numFiles=10,000,000 | gen_declared_dict.py |
-| 19 | header-copy.7z | 构造性 7z | 无 | COPY coder（对照，预检应放行） | gen_declared_dict.py |
-| 20 | header-lzma.7z | 构造性 7z | 无 | LZMA dict=64 KiB（对照） | gen_declared_dict.py |
-| 21 | header-delta-lzma2.7z | 构造性 7z | 无 | [LZMA2(2 MiB), Delta(dist=1)] 链（对照） | gen_declared_dict.py |
-| 22 | header-bcj-x86-lzma2.7z | 构造性 7z | 无 | [LZMA2(2 MiB), BCJ-x86] 链（对照） | gen_declared_dict.py |
-| 23 | header-kdf-over.7z | 构造性 7z | 无 | encoded header AES256SHA256 numCyclesPower=24 | gen_declared_dict.py |
-| 24 | content-kdf-over.7z | 构造性 7z | 无 | 主 streams AES256SHA256 numCyclesPower=24 | gen_declared_dict.py |
+| 16 | dict-budget-oversum.7z | 构造性 7z | 无 | LZMA2 dict=4 MiB + page.png 真实 3 MiB 可解码 payload | gen_declared_dict.py |
+| 17 | header-encoded-oversize.7z | 构造性 7z | 无 | encoded header 外层 LZMA2 声明 unpack 16 MiB > 8 MiB 上限 | gen_declared_dict.py |
+| 18 | header-numfiles-over.7z | 构造性 7z | 无 | encoded header 内层（解码后）numFiles=100,001 | gen_declared_dict.py |
+| 19 | header-copy.7z | 构造性 7z | 无 | encoded header 外层 COPY（对照，预检应放行） | gen_declared_dict.py |
+| 20 | header-lzma.7z | 构造性 7z | 无 | encoded header 外层 LZMA（FILTER_LZMA1 压缩，对照） | gen_declared_dict.py |
+| 21 | header-delta-lzma2.7z | 构造性 7z | 无 | encoded header 外层 [LZMA2, Delta] 链（对照） | gen_declared_dict.py |
+| 22 | header-bcj-x86-lzma2.7z | 构造性 7z | 无 | encoded header 外层 [LZMA2, BCJ-x86] 链（对照） | gen_declared_dict.py |
+| 23 | header-kdf-over.7z | 构造性 7z | 无 | encoded header AES props=[0x20]（cycles=32>24） | gen_declared_dict.py |
+| 24 | content-kdf-over.7z | 构造性 7z | 无 | 主 streams AES props=[0x20]（folder 级 KDF 防线） | gen_declared_dict.py |
 
 `kat_vectors.json` 为 11 个构造性 7z 的已知答案（KAT）元数据，不计入 24 计数。
 
@@ -73,15 +73,15 @@ c988620a1c285112a527354efe6a479f3738b50f79de9bacd118fbca14abb4b1  password-ae2.z
 16978c8b4774ea3683521b6f4412148b2c019eab18696837a9c94e074b04812e  multidisk.zip
 18634d27828357179f62b60407c194a74e0397af53ff0716051a7c4eafdddbcd  dict-oversize-lzma.7z
 55cb56fb532a3a1c6bc343452a721a630341bedc73272e540d3b94df9813cd59  dict-oversize-lzma2.7z
-a5c68611baf650fff82188326830da96c8a318ff914ee7313131649eaeecf791  dict-budget-oversum.7z
-835b84c24119cf5179c9f521dae2977907fbc0cc1a29495cb1f9165542b2480f  header-encoded-oversize.7z
-9de6f803a207ed200bcc63b6dab24624fda5a44a8f3a6bd6636f8edf4972b75c  header-numfiles-over.7z
-1d05e550383f972a2fff86fd8e71d441859e5fa4cf58ecee91b755bbb1902445  header-copy.7z
-5f214bd4f1c56fd6c6f7245b11c078abfeb4fa3e733d170b0378f434ea092e6c  header-lzma.7z
-a5766861344901a43894d42ecdd69325a7fa38c15069a5a18b87828a3bf63167  header-delta-lzma2.7z
-80ae25010169c23219009b1fe4a473427645557456d916471d94d0f3a79c19b2  header-bcj-x86-lzma2.7z
-76cbda71194e9b50042125e01a13d0093d89f72521c5eec8c61602f835d6f887  header-kdf-over.7z
-5c4de03db885d66de8378c86ebe06fe7a2a8d25cf5ff28ddb2511bae0a6ca0bc  content-kdf-over.7z
+c65ac1fad04f59615f794db6139b574d8133f64b1a660abf3552e403edf58e6e  dict-budget-oversum.7z
+592c52a5d6b20b0bc3e19cf9ab6896dd6da7b723106c67953d41e62224b87ff4  header-encoded-oversize.7z
+830cb1cf25f0548fff5e98cc6d956d07479eceb2bdbe648860e191f50dd26d73  header-numfiles-over.7z
+0438a19bbfbf7e16e61198773411f1c4dd87122dc3aaf4a5607b7a602478066b  header-copy.7z
+847146dc3e5aa4e31bfe56e9091ee7474de248f7abe8600a21af6dafdfd19df3  header-lzma.7z
+118c2ea9803ff1d115e72a87628e80a739f71045ab51c066f36da6bc3b4b1a04  header-delta-lzma2.7z
+0fb1e0a9922bbd0ac79e8e129990b2bcee9058cc0a3c1340e5f55b0a772b05ab  header-bcj-x86-lzma2.7z
+ee1b7454138dafd7fbacc32ce5a5dbce8118508e8588d03904e6f66c15ca84df  header-kdf-over.7z
+af13459de13641821d86a8717be6323fdfd19c2b10c25a7c35cd40ddc801c8e1  content-kdf-over.7z
 ```
 
 ## 生成流程（完整命令，自上而下）
@@ -172,33 +172,41 @@ RAR5 签名 + 主头分卷标志并打印 `[降级]` 提示——属预期行为
 
 ## 构造性 7z fixture 合同（11 个，逐个）
 
-纯 Python 手写 7z 字节（签名头 + StartHeader/NextHeader CRC + sevenz-rust 0.6.1 reader
-语义的变长 number / folder / coder 序列化）。pack 数据为确定性合成字节（64 bytes/folder，
-`(i*31+7)&0xFF`），**不代表可解压内容**——它们是任务 6 `sevenz_header_precheck.rs` 的
-声明探针；运行时可解压的 7z fixture 由任务 6 测试用 dev-dependency `SevenZWriter`（compress
-feature）另行生成。KAT（kat_vectors.json）由**产物解析**（非构造常量回填）生成，
-`--verify-kat` 独立复算逐字段比对（size/sha256/next_header/num_folders/num_files/coders/
-total_declared_dict），任何漂移非零退出。
+Python 手写 7z 字节（签名头 + StartHeader/NextHeader CRC + sevenz-rust 0.6.1 reader
+语义的变长 number / folder / coder 序列化）。恶意防线 fixture 的 pack 为确定性合成字节
+（`(i*31+7)&0xFF`，不代表可解压内容——解码前即拒）；**合法对照变体（#16、#19-22）的
+payload 经 Python 标准库 `lzma` FORMAT_RAW 真实压缩、可完整解码**（任务 6 预检受限
+decoder 的 COPY / LZMA1 / LZMA2 / Delta+LZMA2 / BCJ-x86+LZMA2 链路真值载体，已用
+7-Zip 24.09 `7z l`/`7z t` 参考实现验证）；运行时 SevenZWriter fixture 由任务 6 测试用
+dev-dependency `compress` feature 另行生成。KAT（kat_vectors.json）由**产物解析**
+（非构造常量回填）生成——encoded 变体经脚本内置受限解码（与任务 6 Rust 实现同构的
+Python lzma 镜像）递归进内层声明；`--verify-kat` 独立复算逐字段比对
+（size/sha256/next_header/num_folders/num_files/coders/total_declared_dict/outer），
+任何漂移非零退出。
 
 | 文件 | 合同（coder properties / header 声明） | 预检预期 |
 |---|---|---|
-| dict-oversize-lzma.7z | plain header；LZMA（id 030101）props `5d ff ff ff ff`，声明 dict=0xFFFFFFFF（4 GiB-1） | 拒绝（单 coder 超限） |
-| dict-oversize-lzma2.7z | plain header；LZMA2（id 21）props `28`（d=40 → (2|0)<<(40/2+11) = 4 GiB） | 拒绝（单 coder 超限） |
-| dict-budget-oversum.7z | plain header；3 folder × LZMA dict=0x20000000（512 MiB，单个均未超 u32 上限），合计 0x60000000（1.5 GiB） | 拒绝（跨 folder 总预算） |
-| header-encoded-oversize.7z | encoded header（0x17）；header coder LZMA 声明 dict=0xFFFFFFFF | 拒绝（须递归进 encoded header 声明） |
-| header-numfiles-over.7z | plain header；kFilesInfo numFiles=10,000,000，无任何 streams | 拒绝（条目分配前按数量拒绝） |
-| header-copy.7z | plain header；COPY coder（id 00，无 props） | 放行（对照） |
-| header-lzma.7z | plain header；LZMA props `5d 00 00 01 00`（dict=64 KiB） | 放行（对照） |
-| header-delta-lzma2.7z | plain header；链 [LZMA2 props `12`（2 MiB）→ Delta props `01`]（2 out stream，kCodersUnpackSize ×2） | 放行（对照） |
-| header-bcj-x86-lzma2.7z | plain header；链 [LZMA2 props `12`（2 MiB）→ BCJ-x86（id 03030103，无 props）] | 放行（对照） |
-| header-kdf-over.7z | encoded header；AES256SHA256（id 06f10701）props 26 字节：cycles=24 + salt 8B + iv 16B（打包位格式 b0/b1，b0=0x58 b1=0x80） | 拒绝（header 解密 KDF 预算） |
-| content-kdf-over.7z | plain header 主 streams；AES256SHA256 同上 numCyclesPower=24 | 拒绝（内容解密 KDF 预算） |
+| dict-oversize-lzma.7z | plain header；LZMA（id 030101）props `5d ff ff ff ff`，声明 dict=0xFFFFFFFF（4 GiB-1）；第 0 字节 lc/lp/pb 非零，把"前 5 字节"当 dict 的错误实现会算错尺寸被用例抓出 | folder 级拒绝（单 coder 超限） |
+| dict-oversize-lzma2.7z | plain header；LZMA2（id 21）props `28`（d=40 → (2|0)<<(40/2+11) = 4 GiB） | folder 级拒绝（单 coder 超限） |
+| dict-budget-oversum.7z | plain header；LZMA2 props `14`（4 MiB）+ page.png 真实 3 MiB 重复字节数据（声明大小=实际 payload，substream CRC 正确） | 放行；预算内用例真实解码成功 |
+| header-encoded-oversize.7z | encoded header（0x17）；外层 LZMA2 dict 2 MiB 合法，声明 unpack 16 MiB > MAX_ENCODED_HEADER_BYTES（8 MiB），pack 为占位字节 | 阶段一拒绝（外层声明 unpack 累加超限） |
+| header-numfiles-over.7z | encoded header；外层 LZMA2 全法（FILTER_LZMA2 压缩），内层（解码后）kFilesInfo numFiles=100,001 > MAX_CATALOG_ENTRIES | 阶段二拒绝（numFiles 计数超限） |
+| header-copy.7z | encoded header；外层 COPY（id 00，无 props），内层属性流原样存放 | 放行（对照；open+catalog 完整链路） |
+| header-lzma.7z | encoded header；外层 LZMA props `5d 00 00 10 00`（dict 1 MiB），payload FILTER_LZMA1 压缩 | 放行（对照） |
+| header-delta-lzma2.7z | encoded header；外层链 [LZMA2 props `12`（2 MiB）→ Delta props `00`（dist=1）]（2 out stream，kCodersUnpackSize ×2，delta 保长） | 放行（对照） |
+| header-bcj-x86-lzma2.7z | encoded header；外层链 [LZMA2 props `12` → BCJ-x86（id 03030103，无 props）]（x86 保长） | 放行（对照） |
+| header-kdf-over.7z | encoded header；外层 AES256SHA256（id 06f10701）props=`20` 单字节（cycles=32>24、b0&0xC0==0 恰 1 字节——不得直接比较 properties[0]） | 阶段一拒绝（KDF 派生前；header_kdf_invocations==0） |
+| content-kdf-over.7z | plain header 主 streams；数据 folder AES props=`20` 同上 | folder 级拒绝（probe 阶段，条目解码前） |
 
-对照值：真实归档 LZMA2 dict 字节典型 0x16-0x1a；AES numCyclesPower 典型 19（0x13）。
-LZMA2 dict 映射：`(2 | (d & 1)) << (d / 2 + 11)`。实测 sevenz-rust 0.6.1 Archive::read 对
-8 个 plain header fixture 解析成功（HEADER-OK）；对 #17 在 header 解码路径触发其内置
-`dict size too large`、对 #18 于 files-info 校验报错（发生在 10M 条目分配之后）、对 #10
-解密合成数据失败——三者为探针目标面，预检（任务 6）必须在到达这些路径前以结构化错误拒绝。
+对照值：真实归档 LZMA2 dict 字节典型 0x16-0x1a；AES numCyclesPower 典型 19（0x13）、
+SevenZWriter 默认 8。LZMA2 dict 映射：`(2 | (d & 1)) << (d / 2 + 11)`。AES properties
+解码公式（7-Zip 7zAes.cpp）：`cycles = b0 & 0x3F`；`b0 & 0xC0 == 0` → 恰 1 字节；否则
+`salt_len = ((b0>>7)&1) + (b1>>4)`、`iv_len = ((b0>>6)&1) + (b1&0x0F)`（高位 **+1** 而非
+×16），总长 `2 + salt_len + iv_len`。**2026-08-25 任务 6 对齐说明**：首版生成器的 kdf
+fixture（cycles=24、iv=16 以"高位=16"错误公式编码）与 7zAes.cpp 公式自相矛盾（正确
+解码下 salt/iv 长度与 props 实长不符），且 dict-budget/合法 encoded 变体为纯合成形态、
+无法承载任务 6 简报的测试合同（真实解码成功、encoded 链路对照）；本版按任务 6 简报
+合同重生成上述 9 个产物（dict-oversize×2 字节不变），README/哈希/KAT 同步更新。
 
 ## 文件职责
 
