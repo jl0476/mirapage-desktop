@@ -160,6 +160,23 @@ export default {
     // M3 任务 7: 远程 archive 物化准备文案（loading 且 archive descriptor 时）
     archivePreparing: '正在准备压缩包（{downloaded} / {total} MB）',
     archivePreparingIndeterminate: '正在准备压缩包…',
+    // 任务 13: 压缩包会话密码 + 结构化错误文案 + 流式/物化进度
+    archive: {
+      passwordTitle: '压缩包需要密码',
+      passwordHint: '密码仅在本次运行期间保留',
+      showPassword: '显示密码',
+      wrongPassword: '密码不正确，请重试',
+      unsupportedCodec: '不支持的压缩算法：{message}',
+      multiVolumeUnsupported: '暂不支持分卷压缩包',
+      corruptArchive: '压缩包已损坏或内容不完整',
+      emptyArchive: '压缩包中没有可阅读图片',
+      resourceLimitExceeded: '压缩包条目或目录超过安全资源上限',
+      network: '无法从远程位置读取压缩包',
+      timeout: '读取压缩包超时，请重试',
+      io: '打开压缩包时发生文件读写错误',
+      backgroundCaching: '后台缓存 {percent}%',
+      streamFallback: '流式读取不可用，正在下载完整压缩包…',
+    },
     // v0.1.0-module3.0.8 (任务 9): 工具栏下一卷按钮 (跨卷连续阅读 spec §14.1)
     nextVolume: '下一卷',
     // v0.1.0-module3.0.8 (任务 10): masonry 浏览位置 toolbar 跳转

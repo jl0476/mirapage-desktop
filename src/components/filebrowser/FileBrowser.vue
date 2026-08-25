@@ -18,8 +18,9 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
-import { getSetting, setSetting, setFavorite, getBookStatus, addBookmark, listBookmarks, notifyArchiveWindow, type BookmarkItem } from '@/lib/tauri';
+import { getSetting, setSetting, setFavorite, getBookStatus, addBookmark, listBookmarks, notifyArchiveWindow, type BookmarkItem, type ArchiveAccessError } from '@/lib/tauri';
 import BookmarkJumpDialog from '@/components/reader/BookmarkJumpDialog.vue';
+import ArchivePasswordDialog from '@/components/filebrowser/ArchivePasswordDialog.vue';
 import { useFileBrowserStore, setScrollToIndexCallback } from '@/stores/fileBrowser';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useReadStatusStore } from '@/stores/readStatus';
@@ -327,11 +328,19 @@ const statusBarItemsText = computed(() => {
   return t('fileBrowser.statusBar.items', { count });
 });
 
-// M3 任务 7：loading 行文案 — archive descriptor（远程物化/本地 ZIP）显示压缩包准备
-// 文案（archive://progress 事件驱动，无进度数据时 indeterminate 兜底）；其余源通用 loading。
+// M3 任务 7 + 任务 13：loading 行文案。
+// 任务 13 候选物化阶段（pendingArchiveOpen 存在）：有 materializer 进度 → 「流式读取
+// 不可用，正在下载完整压缩包…（X / Y MB）」；无进度（含流式直开）→ indeterminate。
+// 进入压缩包后（archive descriptor + fetch）沿用 archivePreparing；其余源通用 loading。
 const loadingText = computed(() => {
+  const p = fb.archiveProgress;
+  if (fb.pendingArchiveOpen) {
+    if (p && p.total > 0) {
+      return `${t('fileBrowser.archive.streamFallback')}（${(p.downloaded / 1048576).toFixed(1)} / ${(p.total / 1048576).toFixed(1)} MB）`;
+    }
+    return t('fileBrowser.archivePreparingIndeterminate');
+  }
   if (fb.currentDescriptor?.type === 'archive') {
-    const p = fb.archiveProgress;
     if (p && p.total > 0) {
       return t('fileBrowser.archivePreparing', {
         downloaded: (p.downloaded / 1048576).toFixed(1),
@@ -341,6 +350,62 @@ const loadingText = computed(() => {
     return t('fileBrowser.archivePreparingIndeterminate');
   }
   return t('common.loading');
+});
+
+// ─── 任务 13：压缩包会话密码弹窗 + 结构化打开错误 + 流式后台进度 ───
+const archivePasswordBusy = ref(false);
+const archivePasswordError = ref<ArchiveAccessError['kind'] | null>(null);
+
+// store 的 submitArchivePassword 在 epoch 失效时会把 wrongPassword re-throw——
+// 调用侧必须 catch 自兜底（留在弹窗可重试 / 静默），否则是 unhandled rejection。
+async function onArchivePasswordSubmit(password: string): Promise<void> {
+  archivePasswordBusy.value = true;
+  archivePasswordError.value = null;
+  try {
+    await fb.submitArchivePassword(password);
+  } catch (error) {
+    const kind = (error as Partial<ArchiveAccessError>)?.kind;
+    archivePasswordError.value = kind ?? 'io';
+  } finally {
+    archivePasswordBusy.value = false;
+  }
+}
+
+function onArchivePasswordCancel(): void {
+  archivePasswordError.value = null;
+  fb.cancelArchivePassword();
+}
+
+// 页面内可关闭错误提示：镜像 store.archiveOpenError（新请求先清旧错误 → watch 同步为
+// null；关闭按钮只清本地镜像，不动 store）。
+const archiveErrorShown = ref<ArchiveAccessError | null>(null);
+watch(() => fb.archiveOpenError, (e) => { archiveErrorShown.value = e; }, { immediate: true });
+
+function closeArchiveError(): void {
+  archiveErrorShown.value = null;
+}
+
+/** 稳定 kind → i18n 文案（cancelled 永不显示——store 已过滤，default 兜底） */
+function archiveErrorMessage(err: ArchiveAccessError): string {
+  switch (err.kind) {
+    case 'unsupportedCodec': return t('fileBrowser.archive.unsupportedCodec', { message: err.message ?? '' });
+    case 'multiVolumeUnsupported': return t('fileBrowser.archive.multiVolumeUnsupported');
+    case 'corruptArchive': return t('fileBrowser.archive.corruptArchive');
+    case 'emptyArchive': return t('fileBrowser.archive.emptyArchive');
+    case 'resourceLimitExceeded': return t('fileBrowser.archive.resourceLimitExceeded');
+    case 'network': case 'remoteRangeUnavailable': return t('fileBrowser.archive.network');
+    case 'timeout': return t('fileBrowser.archive.timeout');
+    case 'wrongPassword': case 'passwordRequired': return t('fileBrowser.archive.wrongPassword');
+    case 'entryNotFound': return t('error.fileNotFound');
+    case 'invalidRequest': return t('error.unknown');
+    default: return t('fileBrowser.archive.io');
+  }
+}
+
+// 进入 Streaming 后：底栏上方非阻塞后台百分比（commit-gated 预载进度事件驱动）
+const streamingBackgroundPercent = computed<number | null>(() => {
+  if (fb.archiveAccessMode !== 'streaming' || !fb.archiveProgress || fb.archiveProgress.total <= 0) return null;
+  return Math.floor((fb.archiveProgress.downloaded / fb.archiveProgress.total) * 100);
 });
 
 /**
@@ -1188,6 +1253,29 @@ function onReadNowFromCtx(entry: MediaEntry) {
         </span>
       </p>
 
+      <!-- 任务 13: 压缩包打开结构化错误（稳定 kind 映射，可关闭；新请求自动清） -->
+      <p
+        v-if="archiveErrorShown"
+        class="flex items-center gap-3 px-4 py-3 bg-error/8 border border-error rounded text-sm text-text-primary shadow-[0_0_10px_rgba(248,113,113,0.3)]"
+        data-test="archive-open-error"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="var(--color-error)" stroke-width="2" stroke-linecap="round"
+             stroke-linejoin="round" class="shrink-0" aria-hidden="true">
+          <path :d="ICON_ALERT" />
+        </svg>
+        <span class="text-error flex-1 min-w-0 break-all">
+          {{ archiveErrorMessage(archiveErrorShown) }}
+        </span>
+        <button
+          data-test="archive-open-error-close"
+          class="px-3 py-1 border border-error bg-transparent text-error rounded-xs text-xs cursor-pointer transition-colors duration-100 hover:bg-error/20 shrink-0"
+          @click="closeArchiveError"
+        >
+          {{ t('common.close') }}
+        </button>
+      </p>
+
       <!-- Main: 左侧 FileList + 右侧 DetailPanel (1 选中时) -->
       <div class="flex-1 flex gap-2 min-h-0 overflow-hidden">
         <FileList
@@ -1222,8 +1310,32 @@ function onReadNowFromCtx(entry: MediaEntry) {
         />
       </div>
 
-      <p v-if="fb.loading" class="text-text-tertiary text-xs m-0 px-3 py-2">
-        {{ loadingText }}
+      <!-- 任务 13: 加载行 —— fb.loading（列表拉取）或 archiveOpening（候选物化）都显示；
+           候选阶段附取消按钮（cancelArchiveOpen 不提交 descriptor，恢复原目录） -->
+      <div
+        v-if="fb.loading || fb.archiveOpening"
+        class="flex items-center gap-2 px-3 py-2 text-xs text-text-tertiary m-0"
+        data-test="loading-row"
+      >
+        <span>{{ loadingText }}</span>
+        <button
+          v-if="fb.pendingArchiveOpen"
+          data-test="archive-open-cancel"
+          type="button"
+          class="px-2 py-0.5 xp-bd bg-transparent text-text-secondary rounded cursor-pointer transition-colors duration-100 hover:bg-surface-light hover:text-text-primary"
+          @click="fb.cancelArchiveOpen()"
+        >
+          {{ t('common.cancel') }}
+        </button>
+      </div>
+
+      <!-- 任务 13: Streaming 进入后的后台缓存百分比（非阻塞，底栏上方） -->
+      <p
+        v-if="streamingBackgroundPercent !== null"
+        class="text-text-tertiary text-xs m-0 px-3 pb-1"
+        data-test="archive-background-progress"
+      >
+        {{ t('fileBrowser.archive.backgroundCaching', { percent: streamingBackgroundPercent }) }}
       </p>
 
       <!-- StatusBar (v0.1.0-module1.22 新增, v0.1.0-module3.1.1 任务 6 接入预查) -->
@@ -1303,6 +1415,16 @@ function onReadNowFromCtx(entry: MediaEntry) {
       :bookmarks="bookmarkJumpList"
       @jump="onBookmarkJumpSelected"
       @close="bookmarkJumpShow = false"
+    />
+
+    <!-- 任务 13: 压缩包会话密码弹窗（store.pendingArchivePassword 驱动） -->
+    <ArchivePasswordDialog
+      :show="!!fb.pendingArchivePassword"
+      :archive-name="fb.pendingArchivePassword?.entryName ?? ''"
+      :busy="archivePasswordBusy"
+      :error-kind="archivePasswordError"
+      @submit="onArchivePasswordSubmit"
+      @cancel="onArchivePasswordCancel"
     />
   </main>
 </template>

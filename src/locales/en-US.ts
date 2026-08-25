@@ -158,6 +158,23 @@ export default {
     // M3 task 7: remote archive materialization preparing text (loading + archive descriptor)
     archivePreparing: 'Preparing archive ({downloaded} / {total} MB)',
     archivePreparingIndeterminate: 'Preparing archive…',
+    // Task 13: archive session password + structured error texts + streaming/materialized progress
+    archive: {
+      passwordTitle: 'This archive requires a password',
+      passwordHint: 'The password is kept for this session only',
+      showPassword: 'Show password',
+      wrongPassword: 'Incorrect password, please try again',
+      unsupportedCodec: 'Unsupported compression codec: {message}',
+      multiVolumeUnsupported: 'Multi-volume archives are not supported yet',
+      corruptArchive: 'The archive is corrupted or incomplete',
+      emptyArchive: 'No readable images in this archive',
+      resourceLimitExceeded: 'Archive entries or directories exceed the safe resource limit',
+      network: 'Cannot read the archive from the remote location',
+      timeout: 'Timed out reading the archive, please retry',
+      io: 'A file I/O error occurred while opening the archive',
+      backgroundCaching: 'Caching in background {percent}%',
+      streamFallback: 'Streaming unavailable, downloading the full archive…',
+    },
     // v0.1.0-module3.0.8 (Task 9): toolbar next-volume button (cross-volume spec §14.1)
     nextVolume: 'Next volume',
     // v0.1.0-module3.0.8 (Task 10): masonry browse position toolbar jump

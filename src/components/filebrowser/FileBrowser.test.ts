@@ -7,12 +7,36 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
+import { nextTick } from 'vue';
 import FileBrowser from './FileBrowser.vue';
-import { listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting, setFavorite, getBookStatus, notifyArchiveWindow } from '@/lib/tauri';
+import {
+  listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting, setFavorite, getBookStatus, notifyArchiveWindow,
+  beginArchiveSession, prepareArchive, unlockArchive, commitArchiveOpen, cancelArchivePrepare,
+} from '@/lib/tauri';
+import type { ArchivePrepareResult } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 import zhCN from '@/locales/zh-CN';
+
+// 任务 13：捕获 archive://progress 回调（FileBrowser onMounted 经 store 挂监听；
+// 对齐 stores/fileBrowser.test.ts 的 mock 模式）
+type ArchiveProgressEvent = {
+  requestId: { sessionId: string; sequence: number } | null;
+  progressKey: string;
+  relPath: string;
+  downloaded: number;
+  totalBytes: number;
+  phase: string;
+};
+type ArchiveProgressCb = (event: { payload: ArchiveProgressEvent }) => void;
+let capturedArchiveProgressCb: ArchiveProgressCb | null = null;
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (_ev: string, cb: ArchiveProgressCb) => {
+    capturedArchiveProgressCb = cb;
+    return () => { capturedArchiveProgressCb = null; };
+  }),
+}));
 
 vi.mock('@/lib/tauri', () => ({
   listDirectory: vi.fn(async () => []),
@@ -37,6 +61,12 @@ vi.mock('@/lib/tauri', () => ({
   getBookStatus: vi.fn(async () => null),
   // M3 任务 8 复审修复: useArchiveWindowPrefetch dispose 现在恒发一次空窗口取消
   notifyArchiveWindow: vi.fn(async () => undefined),
+  // 任务 13: 事务式 archive IPC 五命令（begin 数字返回契约 = 返回自身 boot）
+  beginArchiveSession: vi.fn((_sessionId: string, bootMs: number) => Promise.resolve(bootMs)),
+  prepareArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null })),
+  unlockArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null })),
+  commitArchiveOpen: vi.fn(async () => undefined),
+  cancelArchivePrepare: vi.fn(async () => undefined),
 }));
 
 // Cluster A: spy on router.push
@@ -1033,7 +1063,8 @@ function makeEntries(...names: string[]) {
     name: n,
     path: n,
     isDirectory: !n.includes('.'),
-    isArchive: n.endsWith('.cbz') || n.endsWith('.zip'),
+    // 任务 13: 对齐 store 的五格式判定（双击 .cbr/.rar/.7z 也走 openArchive）
+    isArchive: /\.(cbz|zip|cbr|rar|7z)$/i.test(n),
     size: 100,
   }));
 }
@@ -2467,6 +2498,130 @@ describe('FileBrowser — details 选中远程 CBZ 内容预载 (M3 最终审查
     vi.advanceTimersByTime(300);
     await flushPromises();
     expect(vi.mocked(notifyArchiveWindow)).not.toHaveBeenCalled();
+  });
+});
+
+// ─── 任务 13: 压缩包会话密码交互 + 候选物化进度/取消 + 结构化错误 ───
+// 偏差（行选择器）：简报用 [data-test="file-row-<name>"]，VirtualRow 实际 data-test
+// 恒为 'row'（改名会破坏本文件 ~30 处现有选择器）；行上已有唯一 :data-path="entry.path"，
+// 语义等价替换为 [data-path="<name>"]。
+describe('FileBrowser — 压缩包密码与事务 UI (任务 13)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // clearAllMocks 不清 once-queue / permanent implementation——五命令显式 reset
+    // 后重设默认（对齐 stores/fileBrowser.test.ts 任务 12 模式）
+    vi.mocked(beginArchiveSession).mockReset()
+      .mockImplementation((_s: string, bootMs: number) => Promise.resolve(bootMs));
+    vi.mocked(prepareArchive).mockReset()
+      .mockImplementation(async () => ({ status: 'ready' as const, accessMode: 'local' as const, progressKey: null }));
+    vi.mocked(unlockArchive).mockReset()
+      .mockImplementation(async () => ({ status: 'ready' as const, accessMode: 'local' as const, progressKey: null }));
+    vi.mocked(commitArchiveOpen).mockReset()
+      .mockImplementation(async () => undefined);
+    vi.mocked(cancelArchivePrepare).mockReset()
+      .mockImplementation(async () => undefined);
+    mockedList.mockResolvedValue([
+      { name: 'book.cbr', path: 'book.cbr', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 },
+      { name: 'book.7z', path: 'book.7z', isDirectory: false, isArchive: true, size: 100, modifiedAt: 0 },
+    ] as never);
+    mockedShortcuts.mockResolvedValue([]);
+  });
+
+  /** 任务 13 本地源挂载：setRoot 先行（行已在列表），teleport stub 让密码弹窗可被 wrapper.find */
+  async function mountFileBrowser() {
+    setActivePinia(createPinia());
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    const wrapper = mount(FileBrowser, {
+      global: { plugins: [i18n], stubs: { teleport: true } },
+    });
+    await flushPromises();
+    _mountedWrappers.push(wrapper);
+    return wrapper;
+  }
+
+  /** 任务 13 远程 webdav 源挂载（候选物化进度用例） */
+  async function mountRemoteFileBrowser(path: string) {
+    setActivePinia(createPinia());
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(
+      { type: 'webdav', accountId: 7, baseUrl: 'https://dav.example/dav', path: '' },
+      path,
+    );
+    const wrapper = mount(FileBrowser, {
+      global: { plugins: [i18n], stubs: { teleport: true } },
+    });
+    await flushPromises();
+    _mountedWrappers.push(wrapper);
+    return wrapper;
+  }
+
+  async function submitDialog(wrapper: ReturnType<typeof mount>, password: string) {
+    await wrapper.get('[data-test="archive-password-input"]').setValue(password);
+    await wrapper.get('[data-test="archive-password-submit"]').trigger('click');
+    await flushPromises();
+  }
+
+  /** 发一条 archive://progress 事件（监听未挂时惰性挂载） */
+  function emitArchiveProgress(payload: ArchiveProgressEvent): void {
+    if (!capturedArchiveProgressCb) {
+      useFileBrowserStore().startArchiveProgressListener();
+    }
+    capturedArchiveProgressCb!({ payload });
+  }
+
+  /** 手动控制 resolve 时机的 deferred */
+  function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+    let resolve!: (v: T) => void;
+    const promise = new Promise<T>((r) => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  it('双击加密 archive 弹密码框，错误保留，成功后进入', async () => {
+    vi.mocked(prepareArchive).mockResolvedValueOnce({ status: 'passwordRequired' });
+    vi.mocked(unlockArchive)
+      .mockRejectedValueOnce({ kind: 'wrongPassword' })
+      .mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
+    const wrapper = await mountFileBrowser();
+    await wrapper.get('[data-path="book.cbr"]').trigger('dblclick');
+    // 偏差（测试基建）：prepare → passwordRequired 经过 begin/prepare 两次 IPC await，
+    // trigger 的 nextTick 不足以排空微任务链，需 flushPromises 后弹窗才渲染
+    await flushPromises();
+    expect(wrapper.find('[data-test="archive-password-dialog"]').exists()).toBe(true);
+    await submitDialog(wrapper, 'bad');
+    expect(wrapper.text()).toContain('密码不正确');
+    await submitDialog(wrapper, 'secret');
+    expect(wrapper.find('[data-test="archive-password-dialog"]').exists()).toBe(false);
+    expect(useFileBrowserStore().currentDescriptor).toMatchObject({ type: 'archive', format: 'cbr' });
+  });
+
+  it('远程 RAR 在候选物化阶段显示进度且取消后留在原目录', async () => {
+    const pending = deferred<ArchivePrepareResult>();
+    vi.mocked(prepareArchive).mockReturnValueOnce(pending.promise);
+    const wrapper = await mountRemoteFileBrowser('comics');
+    await wrapper.get('[data-path="book.cbr"]').trigger('dblclick');
+    const requestId = useFileBrowserStore().pendingArchiveOpen!.requestId;
+    emitArchiveProgress({ requestId, progressKey: 'opaque-rar-key', relPath: 'comics/book.cbr', downloaded: 5 * 1048576, totalBytes: 10 * 1048576, phase: 'downloading' });
+    await nextTick();
+    expect(wrapper.text()).toContain('5.0');
+    await wrapper.get('[data-test="archive-open-cancel"]').trigger('click');
+    pending.resolve({ status: 'ready', accessMode: 'materialized', progressKey: 'opaque-rar-key' });
+    await flushPromises();
+    expect(useFileBrowserStore().currentPath).toBe('comics');
+  });
+
+  it.each([
+    ['multiVolumeUnsupported', '暂不支持分卷压缩包'],
+    ['resourceLimitExceeded', '超过安全资源上限'],
+    ['network', '无法从远程位置读取'],
+    ['corruptArchive', '压缩包已损坏'],
+  ] as const)('prepare %s 显示结构化错误且不产生未处理 rejection', async (kind, text) => {
+    vi.mocked(prepareArchive).mockRejectedValueOnce({ kind });
+    const wrapper = await mountFileBrowser();
+    await wrapper.get('[data-path="book.7z"]').trigger('dblclick');
+    await flushPromises();
+    expect(wrapper.get('[data-test="archive-open-error"]').text()).toContain(text);
+    expect(useFileBrowserStore().currentDescriptor).toBeNull();
   });
 });
 
