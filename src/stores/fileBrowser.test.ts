@@ -1191,6 +1191,29 @@ describe('fileBrowser store — 事务式 archive 打开', () => {
     expect(commitArchiveOpen).not.toHaveBeenCalled();
   });
 
+  it('候选期间 navigate 推进 epoch：迟到 ready 不提交导航（spec §6.1）', async () => {
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(webdavRoot(), 'comics');
+    const pending = deferred<ArchivePrepareResult>();
+    vi.mocked(prepareArchive).mockReturnValueOnce(pending.promise);
+    const opening = fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+    await vi.waitFor(() => expect(fb.pendingArchiveOpen).not.toBeNull());
+    const oldRequestId = fb.pendingArchiveOpen!.requestId;
+    // 候选物化期间（远程 RAR/7z 下载，秒到分钟级）用户页内导航 → 视为离开：
+    // 原子摘走 pending/password/commit-pending id 并 best-effort 后端取消
+    await fb.navigate('elsewhere');
+    expect(cancelArchivePrepare).toHaveBeenCalledWith(oldRequestId);
+    expect(fb.pendingArchiveOpen).toBeNull();
+    expect(fb.currentPath).toBe('elsewhere');
+    pending.resolve({ status: 'ready', accessMode: 'materialized', progressKey: 'opaque-key' });
+    await opening;
+    // 迟到 ready 不提交导航：currentDescriptor/currentPath 不被 archive 覆写（导航劫持）
+    expect(fb.currentDescriptor).toMatchObject({ type: 'webdav' });
+    expect(fb.currentPath).toBe('elsewhere');
+    expect(commitArchiveOpen).not.toHaveBeenCalled();
+    expect(fb.archiveOpening).toBe(false);
+  });
+
   it('取消后立即重开同一路径时只接受新 requestId 的进度', async () => {
     const fb = useFileBrowserStore();
     await fb.openDescriptorAt(webdavRoot(), 'comics');

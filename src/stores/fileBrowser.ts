@@ -208,7 +208,10 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       }
       return;
     }
-    // 非 Local：置入 descriptor（navigate → fetch → activeDescriptor 取该源）
+    // 非 Local：置入 descriptor（navigate → fetch → activeDescriptor 取该源）。
+    // spec §6.1：跨源打开视为离开——非 Local 分支无 setRoot/navigate 入口，必须
+    // 在此显式失效在途压缩包事务（Local 分支经 setRoot 守卫空过不双重取消）。
+    invalidatePendingArchiveOnNavigate();
     currentDescriptor.value = descriptor;
     if (relCheck.normalized) {
       await navigate(relCheck.normalized);
@@ -285,6 +288,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
 
 
   async function setRoot(root: string | null): Promise<void> {
+    // spec §6.1：换根视为离开——先失效在途压缩包打开事务（防迟到 commit 劫持导航）。
+    invalidatePendingArchiveOnNavigate();
     // 异步身份防护: 切 root 必失效所有在途请求（spec §6.5）。
     // setRoot(null) 不调 fetch, 必须显式 ++ 让旧请求 await 后判 stale 丢弃。
     ++fetchRequestId;
@@ -305,6 +310,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     // 路径身份修复: 校验失败不改 currentPath、不发 IPC。
     const normPath = assertRelPath(path);
     if (normPath === null) return;
+    // spec §6.1：候选物化期间的页内导航 → 推进 epoch 并取消（迟到 ready 不提交导航）。
+    invalidatePendingArchiveOnNavigate();
     currentPath.value = normPath;
     searchQuery.value = ''; // v0.1.0-module3.0.3: 换目录清空搜索 (对齐 PV)
     await fetch(normPath);
@@ -315,6 +322,8 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   }
 
   async function up(): Promise<void> {
+    // spec §6.1：up 同为页内导航——先失效在途压缩包事务（顶层 exitArchive 路径空过）。
+    invalidatePendingArchiveOnNavigate();
     if (currentPath.value === '') {
       // module3.2.0（spec §3.3）：ZIP 条目视图在顶层再向上 = 退出压缩包
       if (archiveParent.value) {
@@ -429,6 +438,40 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
 
   function recordArchiveDiagnostic(scope: string, cause: unknown): void {
     log(`[fileBrowser] ${scope} failed`, cause instanceof Error ? cause.message : String(cause));
+  }
+
+  /** 原子摘走在途压缩包打开事务（候选 / 密码弹窗 / commit-pending 任一形态）：
+   *  推进 epoch 使迟到 ready/unlock/commit 因 epoch 失配全部丢弃，并 best-effort
+   *  通知后端取消 Prepared（rejection 必须被捕获，不产生 unhandled promise）。
+   *  cancelArchivePassword / cancelArchiveOpen / exitArchive 与导航失效守卫共用。 */
+  function takeAndCancelPendingArchiveOpen(scope: string): void {
+    const requestId = pendingArchiveOpen.value?.requestId
+      ?? pendingArchivePassword.value?.requestId
+      ?? archiveCommitPendingId.value;
+    archiveOpenEpoch += 1;
+    pendingArchiveOpen.value = null;
+    pendingArchivePassword.value = null;
+    archiveCommitPendingId.value = null;
+    archiveOpening.value = false;
+    archiveProgress.value = null;
+    archiveProgressKey.value = null;
+    if (requestId) {
+      void cancelArchivePrepare(requestId).catch((cause) =>
+        recordArchiveDiagnostic(scope, cause));
+    }
+  }
+
+  /** spec §6.1 触发器补全：候选物化期间（远程 RAR/7z 下载，秒到分钟级）页内导航
+   *  （navigate / up / setRoot / openDescriptorAt）视为离开——推进 epoch 并取消，
+   *  防迟到 ready 无条件 commitArchive 覆写 currentDescriptor/currentPath（导航劫持）。
+   *  无在途事务时空过；exitArchive 先清空再走 navigate/openDescriptorAt，路径天然空过。 */
+  function invalidatePendingArchiveOnNavigate(): void {
+    if (
+      pendingArchiveOpen.value === null
+      && pendingArchivePassword.value === null
+      && archiveCommitPendingId.value === null
+    ) return;
+    takeAndCancelPendingArchiveOpen('cancelNavigatedAwayArchive');
   }
 
   /** 打开压缩包：事务式进入条目视图。本地源 archivePath 绝对路径（rev2 §3.3）；
@@ -562,55 +605,19 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   /** 密码弹窗取消：保存 requestId → 推进 epoch → 清 pending/opening/progress →
    *  best-effort cancel（rejection 必须被捕获，不产生 unhandled promise）。 */
   function cancelArchivePassword(): void {
-    const requestId = pendingArchivePassword.value?.requestId;
-    archiveOpenEpoch += 1;
-    pendingArchivePassword.value = null;
-    pendingArchiveOpen.value = null;
-    archiveOpening.value = false;
-    archiveProgress.value = null;
-    archiveProgressKey.value = null;
-    if (requestId) {
-      void cancelArchivePrepare(requestId).catch((cause) =>
-        recordArchiveDiagnostic('cancelArchivePassword', cause));
-    }
+    takeAndCancelPendingArchiveOpen('cancelArchivePassword');
   }
 
   /** 打开事务取消（候选/commit-pending 阶段的「取消」按钮）：恢复原状态。 */
   function cancelArchiveOpen(): void {
-    const requestId = pendingArchiveOpen.value?.requestId
-      ?? pendingArchivePassword.value?.requestId
-      ?? archiveCommitPendingId.value;
-    archiveOpenEpoch += 1;
-    pendingArchiveOpen.value = null;
-    pendingArchivePassword.value = null;
-    archiveCommitPendingId.value = null;
-    archiveOpening.value = false;
-    archiveProgress.value = null;
-    archiveProgressKey.value = null;
-    if (requestId) {
-      void cancelArchivePrepare(requestId).catch((cause) =>
-        recordArchiveDiagnostic('cancelArchiveOpen', cause));
-    }
+    takeAndCancelPendingArchiveOpen('cancelArchiveOpen');
   }
 
   /** 退出压缩包：恢复进入前目录（Local=rootPath+navigate；远程=openDescriptorAt 复用）。
    *  同样取消 pending / commit-pending 的 Prepared，并清 accessMode/progressKey。 */
   async function exitArchive(): Promise<void> {
-    const requestId = pendingArchiveOpen.value?.requestId
-      ?? pendingArchivePassword.value?.requestId
-      ?? archiveCommitPendingId.value;
-    archiveOpenEpoch += 1;
-    pendingArchiveOpen.value = null;
-    pendingArchivePassword.value = null;
-    archiveCommitPendingId.value = null;
-    archiveOpening.value = false;
-    archiveProgress.value = null;
+    takeAndCancelPendingArchiveOpen('cancelExitArchive');
     archiveAccessMode.value = null;
-    archiveProgressKey.value = null;
-    if (requestId) {
-      void cancelArchivePrepare(requestId).catch((cause) =>
-        recordArchiveDiagnostic('cancelExitArchive', cause));
-    }
     const parent = archiveParent.value;
     archiveParent.value = null;
     currentDescriptor.value = null; // 回 activeDescriptor 的 rootPath 兜底（Local）
