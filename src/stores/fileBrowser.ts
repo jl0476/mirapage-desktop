@@ -15,14 +15,32 @@
 import { defineStore } from 'pinia';
 import { computed, ref, triggerRef } from 'vue';
 import { listen } from '@tauri-apps/api/event';
-import { listDirectory } from '@/lib/tauri';
+import {
+  listDirectory,
+  beginArchiveSession,
+  prepareArchive,
+  unlockArchive,
+  commitArchiveOpen,
+  cancelArchivePrepare,
+} from '@/lib/tauri';
+import type {
+  ArchiveAccessError,
+  ArchiveAccessMode,
+  ArchiveRequestId,
+} from '@/lib/tauri';
 import { log } from '@/lib/logger';
 import { sortEntries, type SortField } from '@/lib/fileSort';
 import { getSetting, setSetting } from '@/lib/tauri';
 import { useDirectorySortStore } from '@/stores/directorySort';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import { validateSourceRelativePath } from '@/lib/relativePath';
-import type { ArchiveFormat, MediaEntry, SourceDescriptor, SourceDescriptorLocal } from '@/lib/sourceDescriptor';
+import type {
+  ArchiveFormat,
+  MediaEntry,
+  SourceDescriptor,
+  SourceDescriptorArchive,
+  SourceDescriptorLocal,
+} from '@/lib/sourceDescriptor';
 
 export type FileBrowserError =
   | { kind: 'notFound'; message: string }
@@ -45,17 +63,33 @@ export interface PendingOpenLocation {
   relPath: string;
 }
 
-// ─── M3 任务 7: 远程 archive 物化进度（archive://progress 事件载荷）───
-// 后端 materializer.rs 统一类型化 emit（任务 8）：{ requestId, progressKey, relPath,
-// downloaded, totalBytes, phase }（phase: "downloading" / "ready"；store 只取
-// relPath 与字节数，requestId/progressKey/phase 不消费——任务 11 接请求级进度）。
+// ─── M3 任务 7 + 任务 12: 远程 archive 物化进度（archive://progress 事件载荷）───
+// 后端 materializer.rs 统一类型化 emit：{ requestId, progressKey, relPath,
+// downloaded, totalBytes, phase }（phase: "downloading" / "ready"）。
+// 任务 12 双分支匹配：候选事件（requestId ≠ null）只认 pending 的 requestId；
+// 已进入后的后台物化/预载事件固定 requestId=null，只认 Ready 保存的 opaque
+// progressKey（不由前端派生 cacheKey）。
 export interface ArchiveProgressPayload {
-  requestId: unknown;
+  requestId: ArchiveRequestId | null;
   progressKey: string;
   relPath: string;
   downloaded: number;
   totalBytes: number;
   phase: string;
+}
+
+// ─── 任务 12: 事务式 archive 打开的候选/请求类型 ───
+/** prepare 成功前的候选导航（纯数据，不碰任何导航 ref） */
+export interface ArchiveCandidate {
+  descriptor: SourceDescriptorArchive;
+  parent: { descriptor: SourceDescriptor; relPath: string };
+  entryName: string;
+}
+
+/** 已注册到后端的候选请求（携带 epoch 竞态防护 + requestId 关联 id） */
+export interface PendingArchiveOpen extends ArchiveCandidate {
+  epoch: number;
+  requestId: ArchiveRequestId;
 }
 
 // ─── v0.1.0-module3.0.4-virtuallist Phase 3 ───
@@ -79,6 +113,36 @@ export function setScrollToIndexCallback(
 // 过期请求（setRoot 切换、新 navigate 触发）的回写被丢弃，避免不同 root/path 的
 // entries 与路径状态混合。setRoot(null) 也要失效在途请求。
 let fetchRequestId = 0;
+
+// ─── 任务 12: 事务式 archive 打开的模块级纯函数 ───
+
+/** requestId 身份比较：sessionId + sequence 两字段相等（不得用对象引用 / relPath 替代） */
+function sameArchiveRequestId(a: ArchiveRequestId | null, b: ArchiveRequestId | null): boolean {
+  if (!a || !b) return false;
+  return a.sessionId === b.sessionId && a.sequence === b.sequence;
+}
+
+const ARCHIVE_ERROR_KINDS: ReadonlySet<string> = new Set([
+  'passwordRequired', 'wrongPassword', 'unsupportedCodec', 'multiVolumeUnsupported',
+  'corruptArchive', 'emptyArchive', 'resourceLimitExceeded', 'entryNotFound',
+  'remoteRangeUnavailable', 'cancelled', 'invalidRequest', 'io', 'network', 'timeout',
+]);
+
+/** 只接受 IPC 结构化 kind/message；未知值收敛为 { kind: 'io' }，不解析错误字符串 */
+function normalizeArchiveAccessError(cause: unknown): ArchiveAccessError {
+  if (typeof cause === 'object' && cause !== null) {
+    const kind = (cause as { kind?: unknown }).kind;
+    if (typeof kind === 'string' && ARCHIVE_ERROR_KINDS.has(kind)) {
+      const message = (cause as { message?: unknown }).message;
+      const base = { kind: kind as ArchiveAccessError['kind'] };
+      return typeof message === 'string' ? { ...base, message } : base;
+    }
+  }
+  return { kind: 'io' };
+}
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => window.setTimeout(resolve, ms));
 
 export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
@@ -268,55 +332,287 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     await fetch(normParent);
   }
 
-  // ─── module3.2.0（spec §3.3）+ M3 任务 7（spec §6.2 rev2）: ZIP 进入/退出 ───
+  // ─── module3.2.0（spec §3.3）+ M3 任务 7 + 任务 12: 压缩包事务式进入/退出 ───
+  // 任务 12 契约：prepare 成功 → 前端原子提交导航 → commitArchiveOpen 才启动后台
+  // 物化/预载；取消/失败恢复原状态（候选期间不碰任何导航 ref）。
 
-  /** 打开压缩包：进入条目视图。本地源 archivePath 绝对路径（rev2 §3.3）；
-   *  远程源（M3 物化链）构造 origin descriptor + 虚拟 archivePath。 */
-  async function openArchive(entry: MediaEntry): Promise<void> {
-    archiveProgress.value = null; // 新一轮 fetch 前清进度（事件迟到不串台）
+  const pendingArchivePassword = ref<PendingArchiveOpen | null>(null);
+  const pendingArchiveOpen = ref<PendingArchiveOpen | null>(null);
+  const archiveOpening = ref(false);
+  const archiveAccessMode = ref<ArchiveAccessMode | null>(null);
+  const archiveProgressKey = ref<string | null>(null);
+  const archiveOpenError = ref<ArchiveAccessError | null>(null);
+  const archiveCommitPendingId = ref<ArchiveRequestId | null>(null);
+  let archiveOpenEpoch = 0;
+  let archiveSessionId = crypto.randomUUID();
+  let archiveBootMs = Date.now(); // 页面代次：store 创建时捕获一次，随 begin 上报防旧 WebView 迟到 begin 反夺
+  let archiveRequestSequence = 0;
+  let archiveSessionReady: Promise<void> | null = null;
+
+  async function ensureArchiveSession(): Promise<void> {
+    archiveSessionReady ??= ensureArchiveSessionOnce().catch((cause) => {
+      archiveSessionReady = null; // 初始化 IPC 恢复后允许下一次 open 重试
+      throw cause;
+    });
+    await archiveSessionReady;
+  }
+
+  async function ensureArchiveSessionOnce(): Promise<void> {
+    let effectiveBootMs = await beginArchiveSession(archiveSessionId, archiveBootMs);
+    if (effectiveBootMs > archiveBootMs) {
+      // 本页面 boot 已过期（Date.now() 非严格单调：时钟回拨后重载等已知场景）。
+      // 换新 UUID、以生效代次 + 1 重试一次——恢复路径，不会与正常 reload 的死者 begin 竞争。
+      archiveBootMs = effectiveBootMs + 1;
+      archiveSessionId = crypto.randomUUID();
+      effectiveBootMs = await beginArchiveSession(archiveSessionId, archiveBootMs);
+      if (effectiveBootMs > archiveBootMs) {
+        throw { kind: 'invalidRequest', message: 'archive session generation conflict' };
+      }
+    }
+  }
+
+  /** 把 Local/WebDAV/SMB descriptor 构造收拢为纯数据候选（不写任何 ref）。
+   *  远程分支只认 webdav/smb——在 archive 条目视图里再开压缩包（ZIP 内 ZIP）时
+   *  activeDescriptor 是 archive descriptor，走本地形态构造（name 直拼）。 */
+  function buildArchiveCandidate(entry: MediaEntry): ArchiveCandidate {
     const dir = currentPath.value;
     const relInside = dir ? `${dir}/${entry.name}` : entry.name;
     const active = activeDescriptor();
-    if (active && active.type !== 'local') {
+    if (active && (active.type === 'webdav' || active.type === 'smb')) {
       // 远程源（M3 spec §6.2 rev2 统一）：虚拟 archivePath——WebDAV=URL 形态 /
       // SMB=`smb://{accountId}/{initialPath}/{rel}` 可读虚拟形态（非真 UNC：descriptor
       // 不含 host，host 查表太重且虚拟路径零解析消费方，仅展示与身份用）
       const origin = active;
       const virtualPath = origin.type === 'webdav'
         ? `${origin.baseUrl.replace(/\/+$/, '')}/${relInside}`
-        : origin.type === 'smb'
-          ? `smb://${origin.accountId}/${origin.initialPath ? origin.initialPath + '/' : ''}${relInside}`
-          : ''; // 不可达（外层已限定非 local）；空串防御
-      archiveParent.value = { descriptor: origin, relPath: dir };
-      currentDescriptor.value = {
-        type: 'archive', archivePath: virtualPath, entryPrefix: '',
-        format: archiveFormatOf(entry.name),
-        origin, originEntryPath: relInside, archiveRelPath: relInside,
-      };
-    } else {
-      // 本地源（module3.2.0 现状，零回归）
-      const root = rootPath.value ?? '';
-      // entry.path 只是相对当前目录的文件名（local.rs:97），join root+dir+name 拼绝对路径
-      const abs = [root, dir, entry.name]
-        .filter((s) => s.length > 0)
-        .join('/')
-        .replace(/\\/g, '/');
-      archiveParent.value = { descriptor: { type: 'local', rootPath: root }, relPath: dir };
-      currentDescriptor.value = {
-        type: 'archive', archivePath: abs, entryPrefix: '',
-        format: archiveFormatOf(entry.name),
+        : `smb://${origin.accountId}/${origin.initialPath ? origin.initialPath + '/' : ''}${relInside}`;
+      return {
+        descriptor: {
+          type: 'archive', archivePath: virtualPath, entryPrefix: '',
+          format: archiveFormatOf(entry.name),
+          origin, originEntryPath: relInside, archiveRelPath: relInside,
+        },
+        parent: { descriptor: origin, relPath: dir },
+        entryName: entry.name,
       };
     }
-    currentPath.value = '';
-    searchQuery.value = '';
-    await fetch('');
+    // 本地源（module3.2.0 现状，零回归）
+    const root = rootPath.value ?? '';
+    // entry.path 只是相对当前目录的文件名（local.rs:97），join root+dir+name 拼绝对路径
+    const abs = [root, dir, entry.name]
+      .filter((s) => s.length > 0)
+      .join('/')
+      .replace(/\\/g, '/');
+    return {
+      descriptor: {
+        type: 'archive', archivePath: abs, entryPrefix: '',
+        format: archiveFormatOf(entry.name),
+      },
+      parent: { descriptor: { type: 'local', rootPath: root }, relPath: dir },
+      entryName: entry.name,
+    };
   }
 
-  /** 退出压缩包：恢复进入前目录（Local=rootPath+navigate；远程=openDescriptorAt 复用） */
+  /** prepare/unlock Ready 后的原子导航提交（唯一写入口） */
+  function commitArchive(
+    candidate: PendingArchiveOpen,
+    mode: ArchiveAccessMode,
+    progressKey: string | null,
+  ): void {
+    archiveParent.value = candidate.parent;
+    currentDescriptor.value = candidate.descriptor;
+    currentPath.value = '';
+    searchQuery.value = '';
+    archiveAccessMode.value = mode;
+    archiveProgressKey.value = progressKey;
+  }
+
+  function recordArchiveDiagnostic(scope: string, cause: unknown): void {
+    log(`[fileBrowser] ${scope} failed`, cause instanceof Error ? cause.message : String(cause));
+  }
+
+  /** 打开压缩包：事务式进入条目视图。本地源 archivePath 绝对路径（rev2 §3.3）；
+   *  远程源（M3 物化链）构造 origin descriptor + 虚拟 archivePath。
+   *  本函数自身不 reject——一切失败落入 archiveOpenError（双击 handler 零泄漏）。 */
+  async function openArchive(entry: MediaEntry): Promise<void> {
+    archiveProgress.value = null;
+    archiveOpenError.value = null;
+    const epoch = ++archiveOpenEpoch;
+    // 同步摘走旧 id；先完成 best-effort cancel，才允许新 request 注册。
+    const supersededId = pendingArchiveOpen.value?.requestId
+      ?? pendingArchivePassword.value?.requestId
+      ?? archiveCommitPendingId.value;
+    pendingArchiveOpen.value = null;
+    pendingArchivePassword.value = null;
+    archiveCommitPendingId.value = null;
+    if (supersededId) {
+      await cancelArchivePrepare(supersededId).catch((cause) =>
+        recordArchiveDiagnostic('cancelSupersededArchive', cause));
+    }
+    if (epoch !== archiveOpenEpoch) return;
+    archiveOpening.value = true;
+    // 同步注册候选：vi.waitFor 首检在微任务 flush 之前执行，若首个 await 之后才置
+    // pendingArchiveOpen，`?.requestId` 类断言会对 null vacuous 通过。requestId 先用
+    // 当前 session id 构造（provisional）；下方 ensureArchiveSession 若发生回拨换代，
+    // 在 prepare 之前用最终 session id 重建（Rust 只见过最终 id）。
+    const candidate: PendingArchiveOpen = {
+      ...buildArchiveCandidate(entry),
+      epoch,
+      requestId: { sessionId: archiveSessionId, sequence: ++archiveRequestSequence },
+    };
+    pendingArchiveOpen.value = candidate;
+    try {
+      // session 初始化必须最先发生，且与 prepare 同处一个 try：begin IPC 失败要落入
+      // archiveOpenError（经 archiveSessionReady 重置后，下一次 open 重试），不得从
+      // 双击/click handler 泄漏 rejection。回拨恢复可能在此替换 archiveSessionId
+      //（换新 UUID），requestId 必须在恢复之后用最终 session id 构造——顺序颠倒会让
+      // prepare 携带已作废的旧 UUID，被 Rust 当作旧 session 的迟到请求拒绝。
+      await ensureArchiveSession();
+      if (epoch !== archiveOpenEpoch) return;
+      if (candidate.requestId.sessionId !== archiveSessionId) {
+        candidate.requestId = { sessionId: archiveSessionId, sequence: candidate.requestId.sequence };
+        pendingArchiveOpen.value = candidate;
+      }
+      const result = await prepareArchive(candidate.descriptor, candidate.requestId);
+      if (epoch !== archiveOpenEpoch) return;
+      if (result.status === 'passwordRequired') {
+        pendingArchivePassword.value = candidate;
+        return;
+      }
+      commitArchive(candidate, result.accessMode, result.progressKey);
+      // 先提交本地导航，再用同一 id 做有界幂等握手；失败不回滚导航。
+      archiveCommitPendingId.value = candidate.requestId;
+      await commitArchiveOpenWithCleanup(candidate.requestId, epoch);
+      await fetch('');
+    } catch (cause) {
+      if (epoch !== archiveOpenEpoch) return;
+      const error = normalizeArchiveAccessError(cause);
+      if (error.kind !== 'cancelled') archiveOpenError.value = error;
+    } finally {
+      if (epoch === archiveOpenEpoch) {
+        pendingArchiveOpen.value = null;
+        archiveOpening.value = false;
+      }
+    }
+  }
+
+  /** commit 有界幂等握手：同一 id 最多 3 次（0/25/75ms 退避）；每次退避苏醒、
+   *  发送 IPC 前复核 epoch。永久失败 best-effort cancel Prepared 并回收
+   *  archiveProgressKey（后台物化已不存在，迟到 key 事件不再被接受）。 */
+  async function commitArchiveOpenWithCleanup(
+    requestId: ArchiveRequestId,
+    epoch: number,
+  ): Promise<void> {
+    const backoffMs = [0, 25, 75] as const;
+    for (let attempt = 0; attempt < backoffMs.length; attempt += 1) {
+      if (epoch !== archiveOpenEpoch) break;
+      if (backoffMs[attempt] > 0) {
+        await delay(backoffMs[attempt]);
+        // 退避苏醒后必须复核 epoch：等待期间的新 open/取消/退出已 cancel 该 id，
+        // 而后端对已 commit id 的 cancel 是 no-op——迟到 commit 会把已取消的 Prepared
+        // 变成无法停止的后台预载。失效请求直接跳出循环进入 cancel 清理。
+        if (epoch !== archiveOpenEpoch) break;
+      }
+      try {
+        await commitArchiveOpen(requestId);
+        if (sameArchiveRequestId(archiveCommitPendingId.value, requestId)) {
+          archiveCommitPendingId.value = null;
+        }
+        return;
+      } catch (cause) {
+        recordArchiveDiagnostic('commitArchiveOpen', cause);
+      }
+    }
+    await cancelArchivePrepare(requestId).catch((cause) =>
+      recordArchiveDiagnostic('cancelUncommittedArchive', cause));
+    if (sameArchiveRequestId(archiveCommitPendingId.value, requestId)) {
+      archiveCommitPendingId.value = null;
+      // 后台物化已取消：回收 progressKey，迟到 key 事件不再把 UI 推入"后台缓存中"。
+      archiveProgressKey.value = null;
+    }
+  }
+
+  /** 密码弹窗提交：unlock 成功（epoch 仍为当前值）→ 同一提交流程；
+   *  wrongPassword 向弹窗抛出且不清 pending；其他错误写 archiveOpenError。 */
+  async function submitArchivePassword(password: string): Promise<void> {
+    const candidate = pendingArchivePassword.value;
+    if (!candidate) return;
+    try {
+      const result = await unlockArchive(candidate.descriptor, password, candidate.requestId);
+      if (candidate.epoch !== archiveOpenEpoch) return;
+      if (result.status === 'passwordRequired') {
+        pendingArchivePassword.value = candidate;
+        return;
+      }
+      pendingArchivePassword.value = null;
+      commitArchive(candidate, result.accessMode, result.progressKey);
+      archiveCommitPendingId.value = candidate.requestId;
+      await commitArchiveOpenWithCleanup(candidate.requestId, candidate.epoch);
+      await fetch('');
+    } catch (cause) {
+      const error = normalizeArchiveAccessError(cause);
+      if (error.kind === 'wrongPassword') throw error;
+      if (candidate.epoch === archiveOpenEpoch) {
+        pendingArchivePassword.value = null;
+        archiveOpenError.value = error;
+      }
+    }
+  }
+
+  /** 密码弹窗取消：保存 requestId → 推进 epoch → 清 pending/opening/progress →
+   *  best-effort cancel（rejection 必须被捕获，不产生 unhandled promise）。 */
+  function cancelArchivePassword(): void {
+    const requestId = pendingArchivePassword.value?.requestId;
+    archiveOpenEpoch += 1;
+    pendingArchivePassword.value = null;
+    pendingArchiveOpen.value = null;
+    archiveOpening.value = false;
+    archiveProgress.value = null;
+    archiveProgressKey.value = null;
+    if (requestId) {
+      void cancelArchivePrepare(requestId).catch((cause) =>
+        recordArchiveDiagnostic('cancelArchivePassword', cause));
+    }
+  }
+
+  /** 打开事务取消（候选/commit-pending 阶段的「取消」按钮）：恢复原状态。 */
+  function cancelArchiveOpen(): void {
+    const requestId = pendingArchiveOpen.value?.requestId
+      ?? pendingArchivePassword.value?.requestId
+      ?? archiveCommitPendingId.value;
+    archiveOpenEpoch += 1;
+    pendingArchiveOpen.value = null;
+    pendingArchivePassword.value = null;
+    archiveCommitPendingId.value = null;
+    archiveOpening.value = false;
+    archiveProgress.value = null;
+    archiveProgressKey.value = null;
+    if (requestId) {
+      void cancelArchivePrepare(requestId).catch((cause) =>
+        recordArchiveDiagnostic('cancelArchiveOpen', cause));
+    }
+  }
+
+  /** 退出压缩包：恢复进入前目录（Local=rootPath+navigate；远程=openDescriptorAt 复用）。
+   *  同样取消 pending / commit-pending 的 Prepared，并清 accessMode/progressKey。 */
   async function exitArchive(): Promise<void> {
+    const requestId = pendingArchiveOpen.value?.requestId
+      ?? pendingArchivePassword.value?.requestId
+      ?? archiveCommitPendingId.value;
+    archiveOpenEpoch += 1;
+    pendingArchiveOpen.value = null;
+    pendingArchivePassword.value = null;
+    archiveCommitPendingId.value = null;
+    archiveOpening.value = false;
+    archiveProgress.value = null;
+    archiveAccessMode.value = null;
+    archiveProgressKey.value = null;
+    if (requestId) {
+      void cancelArchivePrepare(requestId).catch((cause) =>
+        recordArchiveDiagnostic('cancelExitArchive', cause));
+    }
     const parent = archiveParent.value;
     archiveParent.value = null;
-    archiveProgress.value = null;
     currentDescriptor.value = null; // 回 activeDescriptor 的 rootPath 兜底（Local）
     if (!parent) return;
     if (parent.descriptor.type === 'local') {
@@ -327,25 +623,29 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     }
   }
 
-  // ─── M3 任务 7: archive://progress 监听（消费组件 onMounted 挂一次）───
+  // ─── M3 任务 7 + 任务 12: archive://progress 监听（消费组件 onMounted 挂一次）───
   let archiveProgressAttached = false;
 
   /** 挂 archive://progress 事件监听（幂等，app 生命周期一次）。
    *  happy-dom / 普通浏览器环境无 __TAURI_INTERNALS__，listen() reject — 静默
    *  （3.0.8 useMasonryThumbnails 同款防御）。
-   *  终审二批 P2-2：事件按当前 archive 过滤——payload.relPath 必须等于当前
-   *  currentDescriptor.archiveRelPath 才写入（后台预载其他 CBZ 时准备页不串台；
-   *  本地 ZIP 无 archiveRelPath → 不消费远程进度事件，走 indeterminate 兜底）。
-   *  phase === 'ready' 且匹配当前 → 清 archiveProgress（fetch 完成后 loading
-   *  自然结束，防陈旧数字残留）。 */
+   *  任务 12 双分支：候选事件只接受与 pending requestId 两字段相等的事件（同路径
+   *  取消后重开的旧事件必须被拒绝——不得用 relPath / 对象引用 / 闭包 epoch 替代
+   *  后端关联 id）；进入后的后台物化事件固定 requestId=null，只以 Ready 保存的
+   *  opaque archiveProgressKey 匹配，不由前端派生 cacheKey，不与候选进度共用分支。
+   *  phase === 'ready' 且匹配 → 清 archiveProgress（防陈旧数字残留）。 */
   function startArchiveProgressListener(): void {
     if (archiveProgressAttached) return;
     archiveProgressAttached = true;
     void listen<ArchiveProgressPayload>('archive://progress', (event) => {
-      const d = currentDescriptor.value;
-      const rel = d && d.type === 'archive' ? d.archiveRelPath : undefined;
       const p = event.payload;
-      if (!rel || p.relPath !== rel) return;
+      const rid = p.requestId ?? null;
+      if (rid !== null) {
+        const pending = pendingArchiveOpen.value;
+        if (!pending || !sameArchiveRequestId(rid, pending.requestId)) return;
+      } else {
+        if (archiveProgressKey.value === null || p.progressKey !== archiveProgressKey.value) return;
+      }
       if (p.phase === 'ready') {
         archiveProgress.value = null;
         return;
@@ -643,6 +943,17 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     // M3 任务 7: 远程 archive 物化进度
     archiveProgress,
     startArchiveProgressListener,
+    // 任务 12: 事务式 archive 打开状态/actions（Task 13 组件经这些公开成员访问）
+    pendingArchiveOpen,
+    pendingArchivePassword,
+    archiveCommitPendingId,
+    archiveOpening,
+    archiveAccessMode,
+    archiveProgressKey,
+    archiveOpenError,
+    submitArchivePassword,
+    cancelArchivePassword,
+    cancelArchiveOpen,
     // v0.1.0-module3.0.3-hotfix (Bug 2): 导航上下文保存/恢复
     saveNavigationContext,
     restoreNavigationContext,

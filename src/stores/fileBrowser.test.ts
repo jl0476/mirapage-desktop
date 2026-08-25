@@ -5,14 +5,26 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useFileBrowserStore, setScrollToIndexCallback } from './fileBrowser';
-import { listDirectory, getSetting, setSetting } from '@/lib/tauri';
+import {
+  listDirectory, getSetting, setSetting,
+  beginArchiveSession, prepareArchive, unlockArchive, commitArchiveOpen, cancelArchivePrepare,
+} from '@/lib/tauri';
+import type { ArchivePrepareResult, ArchiveRequestId } from '@/lib/tauri';
 import { useShortcutsStore } from '@/stores/shortcuts';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 // 终审二批 P2-2：捕获 archive://progress 回调（startArchiveProgressListener 区域用）
-type ArchiveProgressCb = (event: { payload: {
-  cacheKey: string; relPath: string; downloaded: number; totalBytes: number; phase: string;
-} }) => void;
+// 任务 12：载荷升级——requestId（候选关联 id；进入后的后台事件固定 null）+
+// progressKey（Ready 保存的 opaque key，后台分支唯一匹配源）。
+type ArchiveProgressEvent = {
+  requestId: ArchiveRequestId | null;
+  progressKey: string;
+  relPath: string;
+  downloaded: number;
+  totalBytes: number;
+  phase: string;
+};
+type ArchiveProgressCb = (event: { payload: ArchiveProgressEvent }) => void;
 let capturedArchiveProgressCb: ArchiveProgressCb | null = null;
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (_ev: string, cb: ArchiveProgressCb) => {
@@ -31,6 +43,12 @@ vi.mock('@/lib/tauri', async () => {
     recordHistory: vi.fn(async () => undefined),
     getDirectorySort: vi.fn(async () => null),
     setDirectorySort: vi.fn(async () => undefined),
+    // 任务 12（简报步骤 1 逐字）：事务式 archive IPC 五命令 mock
+    beginArchiveSession: vi.fn((_sessionId: string, bootMs: number) => Promise.resolve(bootMs)), // 数字返回契约：正常安装返回自身 boot
+    prepareArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null })),
+    unlockArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null })),
+    commitArchiveOpen: vi.fn(async () => undefined),
+    cancelArchivePrepare: vi.fn(async () => undefined),
   };
 });
 const mockedList = vi.mocked(listDirectory);
@@ -42,7 +60,7 @@ function makeEntries(...names: string[]): MediaEntry[] {
     name: n,
     path: n,
     isDirectory: !n.includes('.'),
-    isArchive: n.endsWith('.cbz') || n.endsWith('.zip'),
+    isArchive: /\.(cbz|zip|cbr|rar|7z)$/i.test(n),
     size: 100,
     modifiedAt: 0,
   }));
@@ -58,6 +76,27 @@ function makeEntry(name: string, opts: Partial<MediaEntry> = {}): MediaEntry {
     modifiedAt: 0,
     ...opts,
   };
+}
+
+/** 任务 12：手动控制 resolve 时机的 deferred（事务时序测试用） */
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+/** 任务 12：远程源测试固定 webdav descriptor */
+function webdavRoot(): SourceDescriptor {
+  return { type: 'webdav', accountId: 7, baseUrl: 'https://dav.example', path: '' };
+}
+
+/** 任务 12：发一条 archive://progress 事件（监听未挂时惰性挂载——mock 的 listen
+ *  回调捕获在调用同步段完成，无需 flush） */
+function emitArchiveProgress(payload: ArchiveProgressEvent): void {
+  if (!capturedArchiveProgressCb) {
+    useFileBrowserStore().startArchiveProgressListener();
+  }
+  capturedArchiveProgressCb!({ payload });
 }
 
 function mkMouseEvent(modifiers: { ctrlKey?: boolean; shiftKey?: boolean; metaKey?: boolean } = {}): MouseEvent {
@@ -990,7 +1029,9 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
   });
 });
 
-// ─── 终审二批 P2-2: archive://progress 按当前 archive relPath 过滤 ───
+// ─── 任务 12: archive://progress 双分支匹配（候选 requestId / 后台 progressKey）───
+// 旧 relPath 匹配已被契约废除：候选事件只认 pending 的 requestId（两字段相等），
+// 进入后的后台物化事件固定 requestId=null、只认 Ready 保存的 opaque progressKey。
 describe('fileBrowser store — archive://progress 过滤', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -998,49 +1039,292 @@ describe('fileBrowser store — archive://progress 过滤', () => {
     capturedArchiveProgressCb = null;
   });
 
-  /** 进入远程压缩包（webdav comics/book.cbz）并挂监听 */
-  async function setupRemoteArchive() {
+  /** 进入远程压缩包（webdav comics/book.cbz，streaming + opaque key）并挂监听 */
+  async function setupStreamingArchive(progressKey: string) {
     mockedList.mockResolvedValue(makeEntries('p1.jpg'));
     const fb = useFileBrowserStore();
     await fb.openDescriptorAt(
       { type: 'webdav', accountId: 7, baseUrl: 'https://d/x', path: '' }, 'comics');
+    vi.mocked(prepareArchive).mockResolvedValueOnce({
+      status: 'ready', accessMode: 'streaming', progressKey,
+    });
     await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
     fb.startArchiveProgressListener();
     expect(capturedArchiveProgressCb).toBeTruthy();
     return fb;
   }
 
-  const emit = (relPath: string, downloaded: number, totalBytes: number, phase = 'downloading') =>
-    capturedArchiveProgressCb!({ payload: { cacheKey: 'k', relPath, downloaded, totalBytes, phase } });
+  const emitBg = (progressKey: string, downloaded: number, totalBytes: number, phase = 'downloading') =>
+    emitArchiveProgress({ requestId: null, progressKey, relPath: 'comics/book.cbz', downloaded, totalBytes, phase });
 
-  it('另一 relPath 的事件（后台预载其他 CBZ）不写入 archiveProgress', async () => {
-    const fb = await setupRemoteArchive();
-    emit('other/book.cbz', 50, 100);
+  it('另一 key 的后台事件（预载其他 CBZ）不写入 archiveProgress', async () => {
+    const fb = await setupStreamingArchive('opaque-key');
+    emitBg('other-key', 50, 100);
     expect(fb.archiveProgress).toBeNull();
-    // 匹配的 relPath 正常写入
-    emit('comics/book.cbz', 30, 100);
+    // 匹配的 key 正常写入
+    emitBg('opaque-key', 30, 100);
     expect(fb.archiveProgress).toEqual({ downloaded: 30, total: 100 });
     // 再来一个不匹配的也不覆盖已有进度
-    emit('other/book.cbz', 99, 100);
+    emitBg('other-key', 99, 100);
     expect(fb.archiveProgress).toEqual({ downloaded: 30, total: 100 });
   });
 
-  it('匹配当前的 ready 事件清空 archiveProgress（防陈旧数字残留）', async () => {
-    const fb = await setupRemoteArchive();
-    emit('comics/book.cbz', 30, 100);
+  it('匹配 key 的 ready 事件清空 archiveProgress（防陈旧数字残留）', async () => {
+    const fb = await setupStreamingArchive('opaque-key');
+    emitBg('opaque-key', 30, 100);
     expect(fb.archiveProgress).toEqual({ downloaded: 30, total: 100 });
-    emit('comics/book.cbz', 100, 100, 'ready');
+    emitBg('opaque-key', 100, 100, 'ready');
     expect(fb.archiveProgress).toBeNull();
   });
 
-  it('非当前 archive（本地 ZIP 无 archiveRelPath / 非 archive descriptor）不消费事件', async () => {
+  it('本地 ZIP（progressKey null）与无 pending 时的 requestId 事件均不消费', async () => {
     mockedList.mockResolvedValue(makeEntries('p1.jpg'));
     const fb = useFileBrowserStore();
     await fb.setRoot('F:/comics');
     await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
     fb.startArchiveProgressListener();
     expect(fb.currentDescriptor?.type).toBe('archive');
-    emit('book.cbz', 50, 100); // 本地 ZIP：archiveRelPath undefined → 过滤
+    // 后台分支：无 progressKey（local 直开 Ready 无 key）→ 拒绝
+    emitArchiveProgress({ requestId: null, progressKey: 'any-key', relPath: 'book.cbz', downloaded: 50, totalBytes: 100, phase: 'downloading' });
+    // 候选分支：无 pending（open 已完成）→ 拒绝
+    emitArchiveProgress({ requestId: { sessionId: 'sid', sequence: 1 }, progressKey: 'any-key', relPath: 'book.cbz', downloaded: 50, totalBytes: 100, phase: 'downloading' });
     expect(fb.archiveProgress).toBeNull();
+  });
+});
+
+// ─── 任务 12: 事务式 openArchive（prepare → Ready → 原子提交导航 → commit 握手）───
+describe('fileBrowser store — 事务式 archive 打开', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    capturedArchiveProgressCb = null;
+    mockedList.mockResolvedValue(makeEntries('p1.jpg'));
+    // 防御：clearAllMocks 不清 implementation，上一用例的永久 mock
+    // （mockRejectedValue / mockReturnValue(new Promise(...))）不能泄漏进本用例。
+    vi.mocked(beginArchiveSession).mockImplementation((_s: string, bootMs: number) => Promise.resolve(bootMs));
+    vi.mocked(prepareArchive).mockImplementation(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null }));
+    vi.mocked(unlockArchive).mockImplementation(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null }));
+    vi.mocked(commitArchiveOpen).mockImplementation(async () => undefined);
+    vi.mocked(cancelArchivePrepare).mockImplementation(async () => undefined);
+  });
+
+  it('prepare ready 后才原子提交 archive 导航', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.navigate('sub');
+    const pending = deferred<ArchivePrepareResult>();
+    vi.mocked(prepareArchive).mockReturnValueOnce(pending.promise);
+    const opening = fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+    expect(fb.currentPath).toBe('sub');
+    expect(fb.currentDescriptor).toBeNull();
+    pending.resolve({ status: 'ready', accessMode: 'local', progressKey: null });
+    await opening;
+    expect(fb.currentPath).toBe('');
+    expect(fb.currentDescriptor).toMatchObject({ type: 'archive', format: 'cbr' });
+    expect(commitArchiveOpen).toHaveBeenCalledWith(expect.objectContaining({ sessionId: expect.any(String), sequence: 1 }));
+  });
+
+  it('password-required 不污染原导航', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.navigate('sub');
+    vi.mocked(prepareArchive).mockResolvedValueOnce({ status: 'passwordRequired' });
+    await fb.openArchive(makeEntry('book.7z', { isArchive: true }));
+    expect(fb.pendingArchivePassword?.descriptor.format).toBe('7z');
+    expect(fb.currentPath).toBe('sub');
+    expect(fb.currentDescriptor).toBeNull();
+    fb.cancelArchivePassword();
+    expect(fb.pendingArchivePassword).toBeNull();
+    expect(fb.currentPath).toBe('sub');
+  });
+
+  it.each([
+    'multiVolumeUnsupported',
+    'resourceLimitExceeded',
+    'network',
+    'corruptArchive',
+  ] as const)('prepare %s 进入结构化错误状态且不污染原导航', async (kind) => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.navigate('sub');
+    vi.mocked(prepareArchive).mockRejectedValueOnce({ kind });
+    await fb.openArchive(makeEntry('book.7z', { isArchive: true }));
+    expect(fb.archiveOpenError).toMatchObject({ kind });
+    expect(fb.currentPath).toBe('sub');
+    expect(fb.currentDescriptor).toBeNull();
+    expect(fb.archiveOpening).toBe(false);
+  });
+
+  it('错误密码保留请求，正确密码提交候选导航', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    vi.mocked(prepareArchive).mockResolvedValueOnce({ status: 'passwordRequired' });
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    vi.mocked(unlockArchive).mockRejectedValueOnce({ kind: 'wrongPassword' });
+    await expect(fb.submitArchivePassword('bad')).rejects.toMatchObject({ kind: 'wrongPassword' });
+    expect(fb.pendingArchivePassword).not.toBeNull();
+    vi.mocked(unlockArchive).mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
+    await fb.submitArchivePassword('secret');
+    expect(fb.pendingArchivePassword).toBeNull();
+    expect(fb.currentDescriptor?.type).toBe('archive');
+  });
+
+  it('候选未提交时消费物化进度，取消后丢弃迟到回包与事件', async () => {
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(webdavRoot(), 'comics');
+    const pending = deferred<ArchivePrepareResult>();
+    vi.mocked(prepareArchive).mockReturnValueOnce(pending.promise);
+    const opening = fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+    expect(fb.archiveOpening).toBe(true);
+    await vi.waitFor(() => expect(fb.pendingArchiveOpen).not.toBeNull());
+    const oldRequestId = fb.pendingArchiveOpen!.requestId;
+    emitArchiveProgress({ requestId: oldRequestId, progressKey: 'candidate-key', relPath: 'comics/book.cbr', downloaded: 4, totalBytes: 10, phase: 'downloading' });
+    expect(fb.archiveProgress).toEqual({ downloaded: 4, total: 10 });
+    fb.cancelArchiveOpen();
+    expect(cancelArchivePrepare).toHaveBeenCalledWith(oldRequestId);
+    pending.resolve({ status: 'ready', accessMode: 'materialized', progressKey: 'opaque-old-key' });
+    await opening;
+    emitArchiveProgress({ requestId: oldRequestId, progressKey: 'opaque-old-key', relPath: 'comics/book.cbr', downloaded: 10, totalBytes: 10, phase: 'ready' });
+    expect(fb.currentDescriptor).toMatchObject({ type: 'webdav' });
+    expect(fb.archiveProgress).toBeNull();
+    expect(fb.archiveOpening).toBe(false);
+    expect(commitArchiveOpen).not.toHaveBeenCalled();
+  });
+
+  it('取消后立即重开同一路径时只接受新 requestId 的进度', async () => {
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(webdavRoot(), 'comics');
+    vi.mocked(prepareArchive).mockReturnValue(new Promise(() => {}));
+    void fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+    await vi.waitFor(() => expect(fb.pendingArchiveOpen).not.toBeNull());
+    const oldId = fb.pendingArchiveOpen!.requestId;
+    fb.cancelArchiveOpen();
+    void fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+    await vi.waitFor(() => expect(fb.pendingArchiveOpen?.requestId).not.toBe(oldId));
+    const newId = fb.pendingArchiveOpen!.requestId;
+    expect(newId).not.toBe(oldId);
+    emitArchiveProgress({ requestId: oldId, progressKey: 'old-key', relPath: 'comics/book.cbr', downloaded: 8, totalBytes: 10, phase: 'downloading' });
+    expect(fb.archiveProgress).toBeNull();
+    emitArchiveProgress({ requestId: newId, progressKey: 'new-key', relPath: 'comics/book.cbr', downloaded: 2, totalBytes: 10, phase: 'downloading' });
+    expect(fb.archiveProgress).toEqual({ downloaded: 2, total: 10 });
+  });
+
+  it('新 open 取消 commit-pending 的旧 Prepared，再注册唯一的新 request', async () => {
+    const fb = useFileBrowserStore();
+    const firstCommit = deferred<void>();
+    vi.mocked(prepareArchive)
+      .mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null })
+      .mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
+    vi.mocked(commitArchiveOpen).mockReturnValueOnce(firstCommit.promise);
+    const openingOld = fb.openArchive(makeEntry('old.cbz', { isArchive: true }));
+    // 旧请求已 Ready：本地导航已提交、commit IPC 挂起 → Prepared/commit-pending 确实存在
+    await vi.waitFor(() => expect(fb.archiveCommitPendingId).not.toBeNull());
+    const oldId = fb.archiveCommitPendingId!;
+    const openingNew = fb.openArchive(makeEntry('new.cbz', { isArchive: true }));
+    await vi.waitFor(() => expect(vi.mocked(prepareArchive).mock.calls.length).toBe(2));
+    // 新 open 先 cancel 该 commit-pending id，cancel 完成后才注册第二个 prepare
+    expect(cancelArchivePrepare).toHaveBeenCalledWith(oldId);
+    expect(vi.mocked(cancelArchivePrepare).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(prepareArchive).mock.invocationCallOrder[1]);
+    firstCommit.resolve(); // 迟到的旧 commit 回包不得污染新导航
+    await Promise.all([openingOld, openingNew]);
+    expect(fb.currentDescriptor).toMatchObject({ archivePath: expect.stringContaining('new.cbz') });
+    expect(fb.archiveCommitPendingId).toBeNull(); // 新请求自己的 commit 已成功清位
+  });
+
+  it('commit 暂时失败时用同一 id 重试且只启动一次预载', async () => {
+    const fb = useFileBrowserStore();
+    vi.mocked(commitArchiveOpen)
+      .mockRejectedValueOnce(new Error('ipc unavailable'))
+      .mockResolvedValueOnce(undefined);
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    expect(commitArchiveOpen).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(commitArchiveOpen).mock.calls[0][0])
+      .toEqual(vi.mocked(commitArchiveOpen).mock.calls[1][0]);
+    expect(cancelArchivePrepare).not.toHaveBeenCalled();
+  });
+
+  it('commit 永久失败时保留导航、取消 Prepared 并回收后台 key', async () => {
+    const fb = useFileBrowserStore();
+    vi.mocked(prepareArchive).mockResolvedValueOnce({
+      status: 'ready', accessMode: 'streaming', progressKey: 'server-key-42',
+    });
+    vi.mocked(commitArchiveOpen).mockRejectedValue(new Error('ipc unavailable'));
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    expect(fb.currentDescriptor).toMatchObject({ type: 'archive' });
+    expect(commitArchiveOpen).toHaveBeenCalledTimes(3);
+    expect(cancelArchivePrepare).toHaveBeenCalledWith(
+      vi.mocked(commitArchiveOpen).mock.calls[2][0],
+    );
+    // 后台物化已被取消：key 回收，UI 不进入"后台缓存中"，任何 key 的迟到事件都不再更新进度
+    expect(fb.archiveProgressKey).toBeNull();
+    for (const key of ['client-derived-wrong', 'server-key-42']) {
+      emitArchiveProgress({ requestId: null, progressKey: key, relPath: 'book.cbz', downloaded: 8, totalBytes: 10, phase: 'downloading' });
+      expect(fb.archiveProgress).toBeNull();
+    }
+  });
+
+  it('session 初始化失败写入 archiveOpenError 且下一次 open 重试', async () => {
+    const fb = useFileBrowserStore();
+    vi.mocked(beginArchiveSession).mockRejectedValueOnce(new Error('ipc unavailable'));
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true })); // openArchive 自身不得 reject
+    expect(fb.archiveOpenError).toMatchObject({ kind: 'io' }); // 未结构化的 IPC 错误收敛为 io
+    expect(prepareArchive).not.toHaveBeenCalled();
+    expect(fb.archiveOpening).toBe(false);
+    expect(fb.pendingArchiveOpen).toBeNull();
+    vi.mocked(prepareArchive).mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    expect(fb.archiveOpenError).toBeNull();
+    expect(fb.currentDescriptor?.type).toBe('archive');
+  });
+
+  it('时钟回拨恢复后 prepare 携带换代后的 sessionId', async () => {
+    const fb = useFileBrowserStore();
+    const resumedUuid = '0e2f9a55-1234-4c56-9abc-def012345678';
+    const randomSpy = vi.spyOn(crypto, 'randomUUID').mockReturnValue(resumedUuid);
+    const futureBoot = Date.now() + 60_000;
+    vi.mocked(beginArchiveSession)
+      .mockResolvedValueOnce(futureBoot)      // 第一次 begin 返回更大生效代次 → 本页过期
+      .mockResolvedValueOnce(futureBoot + 1); // 换代 begin 成功
+    vi.mocked(prepareArchive).mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
+    await fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+    expect(beginArchiveSession).toHaveBeenNthCalledWith(2, resumedUuid, futureBoot + 1);
+    // requestId 必须取换代后的最终 session id，而不是模块加载时的旧 UUID
+    expect(vi.mocked(prepareArchive).mock.calls[0][1].sessionId).toBe(resumedUuid);
+    expect(fb.currentDescriptor?.type).toBe('archive'); // 最终成功，不是静默 Cancelled
+    randomSpy.mockRestore();
+  });
+
+  it('commit 退避等待中被取消后不再发送陈旧 commit', async () => {
+    vi.useFakeTimers();
+    try {
+      const fb = useFileBrowserStore();
+      vi.mocked(prepareArchive).mockResolvedValueOnce({ status: 'ready', accessMode: 'local', progressKey: null });
+      vi.mocked(commitArchiveOpen).mockRejectedValueOnce(new Error('ipc unavailable'));
+      const opening = fb.openArchive(makeEntry('book.cbz', { isArchive: true }));
+      await vi.advanceTimersByTimeAsync(0); // 第一次 commit 已失败，任务进入 25ms 退避
+      expect(commitArchiveOpen).toHaveBeenCalledTimes(1);
+      const pendingId = fb.archiveCommitPendingId!;
+      fb.cancelArchiveOpen(); // 退避窗口内用户取消：epoch 前进、cancel 已发出
+      await vi.advanceTimersByTimeAsync(25); // 旧任务苏醒：epoch 已失效 → 不再发 commit，转入 cancel 清理
+      expect(commitArchiveOpen).toHaveBeenCalledTimes(1);
+      expect(cancelArchivePrepare).toHaveBeenCalledWith(pendingId);
+      await opening;
+      expect(fb.archiveCommitPendingId).toBeNull();
+      expect(fb.archiveOpenError).toBeNull(); // 取消不显示错误
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // 简报步骤 5：五格式扩展各断言一次 format
+  it.each(['cbz', 'cbr', 'zip', 'rar', '7z'] as const)('openArchive(book.%s) 构造对应 format', async (fmt) => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.openArchive(makeEntry(`book.${fmt}`, { isArchive: true }));
+    const d = fb.currentDescriptor;
+    expect(d?.type).toBe('archive');
+    if (d?.type !== 'archive') return;
+    expect(d.format).toBe(fmt);
   });
 });
