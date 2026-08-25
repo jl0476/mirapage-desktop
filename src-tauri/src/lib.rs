@@ -225,6 +225,13 @@ pub fn run() {
             // M3 任务 9: cache 管理命令（clear 四段式 / info 用量统计）
             commands::archive_cache::get_archive_cache_info,
             commands::archive_cache::clear_archive_cache,
+            // 任务 11: session/prepare/unlock/commit/cancel 结构化准备 IPC
+            // （request registry 状态机；factory.archive_service() 同一 Arc manage）
+            commands::archive_access::begin_archive_session,
+            commands::archive_access::prepare_archive,
+            commands::archive_access::unlock_archive,
+            commands::archive_access::commit_archive_open,
+            commands::archive_access::cancel_archive_prepare,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

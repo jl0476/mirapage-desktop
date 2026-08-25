@@ -75,6 +75,26 @@ pub trait Materialize: Send + Sync {
             "该物化实现不支持 ensure_cached_background".into(),
         ))
     }
+
+    /// 交互订阅者强制物化（任务 11 IPC）：prepare/unlock 的 request registry id 直接
+    /// 作为 subscriber 身份——`cancel_interactive` 可单独取消该订阅者（最后一个交互
+    /// 订阅者且无后台订阅者时物理下载终止且无 final/DAO 落盘）。默认回落匿名
+    /// `ensure_cached`（既有 mock 语义不变：不可按 id 取消）。
+    async fn ensure_cached_interactive(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+        request_id: crate::source::archive::service::ArchiveRequestId,
+    ) -> std::result::Result<PathBuf, crate::source::archive::materializer::MaterializeError> {
+        let _ = &request_id;
+        self.ensure_cached(origin, archive_rel_path, format).await
+    }
+
+    /// 取消一个交互订阅者的在途物化（无该 id 的在途项时 no-op）。默认 no-op
+    /// （不支持订阅者模型的 mock 无可取消对象）。
+    async fn cancel_interactive(
+        &self, request_id: &crate::source::archive::service::ArchiveRequestId,
+    ) {
+        let _ = request_id;
+    }
 }
 
 pub struct ArchiveMediaSource {

@@ -4,6 +4,7 @@
 //! UI 不直接接触具体实现。新增远程源不影响 commands 签名。
 
 pub mod accounts;
+pub mod archive_access;
 pub mod archive_cache;
 pub mod archive_prefetch;
 pub mod bookmarks;

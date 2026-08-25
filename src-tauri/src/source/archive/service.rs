@@ -70,6 +70,11 @@ impl ArchiveRequestId {
     pub fn new(session_id: &str, sequence: u64) -> Self {
         Self { session_id: session_id.to_owned(), sequence }
     }
+
+    /// 所属 session id（命令层测试断言用）
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -124,6 +129,38 @@ pub enum RequestState {
     },
     Cancelled,
 }
+
+/// 手写 PartialEq（SourceDescriptor 未派生，不能 derive）：Prepared 的 prefetch
+/// 以（origin serde 形状, rel, progress_key）判等——命令测试断言 `request_state`
+/// 快照相等性用，不做语义比较。
+impl PartialEq for RequestState {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Running, Self::Running)
+            | (Self::AwaitingPassword, Self::AwaitingPassword)
+            | (Self::Cancelled, Self::Cancelled) => true,
+            (
+                Self::Prepared { progress_key: ka, prefetch: pa },
+                Self::Prepared { progress_key: kb, prefetch: pb },
+            ) => {
+                ka == kb
+                    && match (pa, pb) {
+                        (None, None) => true,
+                        (Some(x), Some(y)) => {
+                            x.rel == y.rel
+                                && x.progress_key == y.progress_key
+                                && serde_json::to_value(&x.origin).ok()
+                                    == serde_json::to_value(&y.origin).ok()
+                        }
+                        _ => false,
+                    }
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RequestState {}
 
 // ---------------------------------------------------------------------------
 // 最小 LRU（无外部依赖；容量 32，O(n) touch 可接受）
@@ -225,6 +262,9 @@ struct ResolvedArchive {
     /// 流式远程 ZIP 的降级目标（origin, rel）：Some 时 probe/catalog 的白名单错误
     /// 走「原位重试一次 → ensure_cached 物化 → Path input 重跑」；降级完成后置 None
     streaming_origin: Option<(SourceDescriptor, String)>,
+    /// 发起本次解析的请求（任务 11）：Some 时强制物化（含降级物化）以该 id attach
+    /// 为交互订阅者——IPC cancel 可即刻终止；list/read 等无请求上下文为 None（匿名）
+    request_id: Option<ArchiveRequestId>,
 }
 
 pub struct ArchiveService {
@@ -383,7 +423,13 @@ impl ArchiveService {
     /// （Streaming，尾部 Range 优先）。Cbr/Rar/7z 与物化降级路径保持完整物化。
     /// Local identity = 规范化绝对路径 + fs metadata size/mtime；非 ZIP 远程
     /// identity 用物化产物 metadata（原语义）。
-    async fn resolve(&self, descriptor: &SourceDescriptor) -> Result<ResolvedArchive, ArchiveAccessError> {
+    /// 任务 11：`request_id` Some 时强制物化（非 ZIP 远程 / stat 回落 / 流式降级）
+    /// 以 `ensure_cached_interactive` attach——cancel 可按 id 终止在途下载。
+    async fn resolve(
+        &self,
+        descriptor: &SourceDescriptor,
+        request_id: Option<&ArchiveRequestId>,
+    ) -> Result<ResolvedArchive, ArchiveAccessError> {
         let SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } =
             descriptor
         else {
@@ -432,6 +478,7 @@ impl ArchiveService {
                                 access_mode: ArchiveAccessMode::Materialized,
                                 progress_key: Some(progress_key),
                                 streaming_origin: None,
+                                request_id: request_id.cloned(),
                             }),
                             None => {
                                 let range_origin: Arc<dyn RangeOrigin> = Arc::new(
@@ -459,6 +506,7 @@ impl ArchiveService {
                                         (**origin_desc).clone(),
                                         rel.to_string(),
                                     )),
+                                    request_id: request_id.cloned(),
                                 })
                             }
                         };
@@ -466,10 +514,10 @@ impl ArchiveService {
                 }
                 // 非 ZIP 远程格式 / stat_origin 回落：完整物化（任务 10 前原语义）
                 // mock/生产实现均返回类型化 MaterializeError——Service 边界按变体映射
-                // （FormatMismatch→InvalidRequest / Cancelled→Cancelled / NotFound 保真）
+                // （FormatMismatch→InvalidRequest / Cancelled→Cancelled / NotFound 保真）。
+                // 任务 11：有请求上下文时按 request id attach（可取消），否则匿名。
                 let path = self
-                    .materializer
-                    .ensure_cached(origin_desc, rel, *format)
+                    .ensure_cached_for_request(origin_desc, rel, *format, request_id)
                     .await
                     .map_err(map_materialize_error)?;
                 let meta = fs_metadata(&path)?;
@@ -491,7 +539,27 @@ impl ArchiveService {
             access_mode,
             progress_key,
             streaming_origin: None,
+            request_id: None,
         })
+    }
+
+    /// 强制物化的请求路由（任务 11）：Some → 交互订阅者（cancel_interactive 可终止）；
+    /// None → 匿名 ensure_cached（list/read 等原语义零回归）。
+    async fn ensure_cached_for_request(
+        &self,
+        origin: &SourceDescriptor,
+        rel: &str,
+        format: ArchiveFormat,
+        request_id: Option<&ArchiveRequestId>,
+    ) -> Result<std::path::PathBuf, MaterializeError> {
+        match request_id {
+            Some(id) => {
+                self.materializer
+                    .ensure_cached_interactive(origin, rel, format, id.clone())
+                    .await
+            }
+            None => self.materializer.ensure_cached(origin, rel, format).await,
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -582,14 +650,15 @@ impl ArchiveService {
         if !is_network_degradable(&second) {
             return Err(second);
         }
-        // 物化降级：ensure_cached 后 Path input 重跑；降级完成清除降级目标（防链式）
+        // 物化降级：ensure_cached 后 Path input 重跑；降级完成清除降级目标（防链式）。
+        // 任务 11：带请求上下文的降级物化同样以 request id attach（可取消）。
         let (origin, rel) = resolved
             .streaming_origin
             .clone()
             .expect("streaming_origin 已在上文确认存在");
+        let request_id = resolved.request_id.as_ref();
         let path = self
-            .materializer
-            .ensure_cached(&origin, &rel, resolved.format)
+            .ensure_cached_for_request(&origin, &rel, resolved.format, request_id)
             .await
             .map_err(map_materialize_error)?;
         resolved.input = ArchiveInput::Path(path);
@@ -695,9 +764,18 @@ impl ArchiveService {
         &self,
         descriptor: &SourceDescriptor,
     ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
+        self.prepare_inner(descriptor, None).await
+    }
+
+    /// 任务 11：`request_id` Some 时强制物化以该 id attach（IPC cancel 可终止）
+    async fn prepare_inner(
+        &self,
+        descriptor: &SourceDescriptor,
+        request_id: Option<&ArchiveRequestId>,
+    ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let mut resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor, request_id).await?;
         let password = self.passwords.get(&resolved.identity);
         let backend = self.backend_for(resolved.format);
         let _permit = self.acquire_format(resolved.format).await?;
@@ -744,9 +822,19 @@ impl ArchiveService {
         descriptor: &SourceDescriptor,
         password: Zeroizing<Vec<u8>>,
     ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
+        self.unlock_inner(descriptor, password, None).await
+    }
+
+    /// 任务 11：`request_id` Some 时强制物化以该 id attach（IPC cancel 可终止）
+    async fn unlock_inner(
+        &self,
+        descriptor: &SourceDescriptor,
+        password: Zeroizing<Vec<u8>>,
+        request_id: Option<&ArchiveRequestId>,
+    ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let mut resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor, request_id).await?;
         let backend = self.backend_for(resolved.format);
         let _permit = self.acquire_format(resolved.format).await?;
         let key = (resolved.identity.clone(), resolved.prefix.clone());
@@ -818,7 +906,7 @@ impl ArchiveService {
     ) -> Result<Vec<MediaEntry>, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let mut resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor, None).await?;
         let key = (resolved.identity.clone(), resolved.prefix.clone());
         if let Some(cached) = self.lru_catalog(&key) {
             return Ok(cached.entries);
@@ -859,7 +947,7 @@ impl ArchiveService {
     ) -> Result<Vec<u8>, ArchiveAccessError> {
         let admission = self.coordinator.admit()?;
         let generation = admission.generation();
-        let mut resolved = self.resolve(descriptor).await?;
+        let mut resolved = self.resolve(descriptor, None).await?;
         let password = self.passwords.get(&resolved.identity);
         let backend = self.backend_for(resolved.format);
         let entry = qualified_entry_name(&resolved.prefix, path);
@@ -886,7 +974,7 @@ impl ArchiveService {
         path: &str,
     ) -> Result<u64, ArchiveAccessError> {
         let _admission = self.coordinator.admit()?;
-        let resolved = self.resolve(descriptor).await?;
+        let resolved = self.resolve(descriptor, None).await?;
         let backend = self.backend_for(resolved.format);
         let _permit = self.acquire_format(resolved.format).await?;
         let entry = qualified_entry_name(&resolved.prefix, path);
@@ -970,7 +1058,7 @@ impl ArchiveService {
         descriptor: &SourceDescriptor,
     ) -> Result<(), ArchiveAccessError> {
         let _admission = self.coordinator.admit()?;
-        let resolved = self.resolve(descriptor).await?;
+        let resolved = self.resolve(descriptor, None).await?;
         self.passwords.forget(&resolved.identity);
         Ok(())
     }
@@ -981,33 +1069,61 @@ impl ArchiveService {
 
     /// 安装/换代 session：同 id 幂等返回该 session 的 boot；`boot_ms >=` 当前 boot
     /// 才换代（取消旧 active、清 cancelled_through/last_committed）；严格更旧的
-    /// 迟到 begin 不安装不取消，返回现有 boot。session id 非空且 ≤ 64 bytes。
+    /// 迟到 begin 不安装不取消，返回现有 boot。session id 必须是 canonical UUID
+    /// 文本（36 字符 8-4-4-4-12 hex，≤64 bytes 约束随之满足）。
     pub fn begin_session(&self, session_id: &str, boot_ms: u64) -> Result<u64, ArchiveAccessError> {
-        if session_id.is_empty() || session_id.len() > 64 {
+        if !is_uuid_text(session_id) {
             return Err(ArchiveAccessError::InvalidRequest(
-                "session id 非法（需 1..=64 bytes）".into(),
+                "session id 非法（需 canonical UUID 文本）".into(),
             ));
         }
-        let mut registry = self.registry.lock().unwrap();
-        match registry.as_mut() {
-            Some(current) if current.session_id == session_id => Ok(current.boot_ms),
-            Some(current) if boot_ms < current.boot_ms => Ok(current.boot_ms),
-            _ => {
-                *registry = Some(SessionState {
-                    session_id: session_id.to_string(),
-                    boot_ms,
-                    cancelled_through: 0,
-                    last_committed: None,
-                    active: None,
+        let rollover_active = {
+            let mut registry = self.registry.lock().unwrap();
+            if let Some(current) = registry.as_mut() {
+                if current.session_id == session_id {
+                    return Ok(current.boot_ms);
+                }
+                if boot_ms < current.boot_ms {
+                    return Ok(current.boot_ms);
+                }
+            }
+            // 换代前摘出旧 session 的 active（连带其在途物化订阅者一并取消）
+            let old_active = registry.as_ref().and_then(|cur| {
+                cur.active
+                    .as_ref()
+                    .map(|(seq, _)| ArchiveRequestId::new(&cur.session_id, *seq))
+            });
+            *registry = Some(SessionState {
+                session_id: session_id.to_string(),
+                boot_ms,
+                cancelled_through: 0,
+                last_committed: None,
+                active: None,
+            });
+            old_active
+        };
+        // 锁外取消旧 session 的在途请求：物化订阅者即刻收到 Cancelled（最后一个
+        // 交互订阅者且无后台时物理下载终止）。begin_session 保持同步（IPC 合同）——
+        // 取消经当前 runtime spawn 交付；无 runtime 上下文（同步单测，无可能在途）
+        // 时跳过。
+        if let Some(old_id) = rollover_active {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let mat = self.materializer.clone();
+                handle.spawn(async move {
+                    mat.cancel_interactive(&old_id).await;
                 });
-                Ok(boot_ms)
             }
         }
+        Ok(boot_ms)
     }
 
     /// 注册请求：session 不符或 sequence ≤ 取消水位（cancel-before-register）→
-    /// `Cancelled`；否则原子取消/替换旧 active（每 session 恰零或一个 active）。
-    fn register_request(&self, id: &ArchiveRequestId) -> Result<(), ArchiveAccessError> {
+    /// `Cancelled`；否则原子取消/替换旧 active（每 session 恰零或一个 active），
+    /// 返回被替换的旧 active id（Some 时调用方需取消其在途物化订阅者）。
+    fn register_request(
+        &self,
+        id: &ArchiveRequestId,
+    ) -> Result<Option<ArchiveRequestId>, ArchiveAccessError> {
         let mut registry = self.registry.lock().unwrap();
         let Some(current) = registry.as_mut() else {
             return Err(ArchiveAccessError::Cancelled);
@@ -1015,8 +1131,12 @@ impl ArchiveService {
         if current.session_id != id.session_id || id.sequence <= current.cancelled_through {
             return Err(ArchiveAccessError::Cancelled);
         }
+        let displaced = current
+            .active
+            .take()
+            .map(|(seq, _)| ArchiveRequestId::new(&current.session_id, seq));
         current.active = Some((id.sequence, RequestState::Running));
-        Ok(())
+        Ok(displaced)
     }
 
     /// 更新 active 状态：仅当 active 仍是同一 sequence（未被 cancel/替换）时生效
@@ -1073,8 +1193,10 @@ impl ArchiveService {
         descriptor: &SourceDescriptor,
         request_id: ArchiveRequestId,
     ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
-        self.register_request(&request_id)?;
-        match self.prepare(descriptor).await {
+        if let Some(displaced) = self.register_request(&request_id)? {
+            self.materializer.cancel_interactive(&displaced).await;
+        }
+        match self.prepare_inner(descriptor, Some(&request_id)).await {
             Ok(result) => {
                 let state = Self::prepared_state(descriptor, &result);
                 self.set_request_state(&request_id, state);
@@ -1093,8 +1215,10 @@ impl ArchiveService {
         password: Zeroizing<Vec<u8>>,
         request_id: ArchiveRequestId,
     ) -> Result<ArchivePrepareResult, ArchiveAccessError> {
-        self.register_request(&request_id)?;
-        match self.unlock(descriptor, password).await {
+        if let Some(displaced) = self.register_request(&request_id)? {
+            self.materializer.cancel_interactive(&displaced).await;
+        }
+        match self.unlock_inner(descriptor, password, Some(&request_id)).await {
             Ok(result) => {
                 let state = Self::prepared_state(descriptor, &result);
                 self.set_request_state(&request_id, state);
@@ -1151,20 +1275,75 @@ impl ArchiveService {
 
     /// 幂等 cancel：推进取消高水位；active.sequence ≤ 水位时取消未 commit 项。
     /// 已提交 id 为 no-op；旧 session 的迟到 cancel 不影响新 session。
+    /// 任务 11：水位/active 清理后在物化器侧取消该 id 的在途订阅者（含被水位
+    /// 取消的 active）——对应 command 即刻返回 `Cancelled`；最后一个交互订阅者
+    /// 且无后台订阅者时物理下载终止（无 final/DAO 落盘）。
     pub async fn cancel_request(&self, id: &ArchiveRequestId) {
-        let mut registry = self.registry.lock().unwrap();
-        let Some(current) = registry.as_mut() else { return };
-        if current.session_id != id.session_id {
-            return;
+        let watermarked_active = {
+            let mut registry = self.registry.lock().unwrap();
+            let Some(current) = registry.as_mut() else { return };
+            if current.session_id != id.session_id {
+                return;
+            }
+            current.cancelled_through = current.cancelled_through.max(id.sequence);
+            current
+                .active
+                .take()
+                .filter(|(sequence, _)| *sequence <= current.cancelled_through)
+                .map(|(sequence, _)| ArchiveRequestId::new(&current.session_id, sequence))
+        };
+        self.materializer.cancel_interactive(id).await;
+        if let Some(displaced) = watermarked_active {
+            if displaced != *id {
+                self.materializer.cancel_interactive(&displaced).await;
+            }
         }
-        current.cancelled_through = current.cancelled_through.max(id.sequence);
-        if current
-            .active
+    }
+
+    // -----------------------------------------------------------------------
+    // 测试/诊断访问器（任务 11 命令测试用；非 IPC 面）
+    // -----------------------------------------------------------------------
+
+    /// identity 是否已有已验证密码
+    pub fn has_password(&self, identity: &ArchiveIdentity) -> bool {
+        self.passwords.get(identity).is_some()
+    }
+
+    /// session 是否为当前生效 session
+    pub fn has_session(&self, session_id: &str) -> bool {
+        self.registry
+            .lock()
+            .unwrap()
             .as_ref()
-            .is_some_and(|(sequence, _)| *sequence <= current.cancelled_through)
-        {
-            current.active = None;
-        }
+            .is_some_and(|s| s.session_id == session_id)
+    }
+
+    /// session 的取消高水位（session 不存在 → None）
+    pub fn cancelled_through(&self, session_id: &str) -> Option<u64> {
+        self.registry
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|s| s.session_id == session_id)
+            .map(|s| s.cancelled_through)
+    }
+
+    /// active 请求状态快照（无 session / 非 active → None）
+    pub fn request_state(&self, id: &ArchiveRequestId) -> Option<RequestState> {
+        self.registry
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|current| {
+                if current.session_id != id.session_id {
+                    return None;
+                }
+                current
+                    .active
+                    .as_ref()
+                    .filter(|(sequence, _)| *sequence == id.sequence)
+                    .map(|(_, state)| state.clone())
+            })
     }
 }
 
@@ -1212,6 +1391,17 @@ fn qualified_entry_name(prefix: &str, path: &str) -> String {
     } else {
         format!("{}/{}", prefix.trim_end_matches('/'), path)
     }
+}
+
+/// canonical UUID 文本（36 字符 8-4-4-4-12、hex 小写/大写均可）：session id 的
+/// IPC 输入校验。只做文本形状校验（版本/variant 位不限定——前端 crypto.randomUUID
+/// 产 v4，恢复路径手工 +1 换代不改变形状）。36 ≤ 64 bytes，长度上限随之满足。
+fn is_uuid_text(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
 }
 
 /// Ready(Streaming) 的 commit-gated 预载意图构造：仅远程 ZIP/CBZ 且 progress_key
@@ -2007,23 +2197,27 @@ mod tests {
         let harness = ServiceHarness::new();
         let descriptor = harness.local_descriptor("plain.cbz", ArchiveFormat::Cbz);
         harness.zip.add_plain_image("page.png");
-        assert_eq!(harness.service.begin_session("s1", 100).unwrap(), 100);
+        // 任务 11 起 session id 校验 canonical UUID 文本
+        let s1 = "550e8400-e29b-41d4-a716-4466554400a1";
+        let s2 = "550e8400-e29b-41d4-a716-4466554400a2";
+        let s3 = "550e8400-e29b-41d4-a716-4466554400a3";
+        assert_eq!(harness.service.begin_session(s1, 100).unwrap(), 100);
         // 更旧 boot 的迟到 begin：不安装、不取消，返回现有 session 的 boot
-        assert_eq!(harness.service.begin_session("s2", 50).unwrap(), 100);
-        let id = ArchiveRequestId { session_id: "s1".into(), sequence: 1 };
+        assert_eq!(harness.service.begin_session(s2, 50).unwrap(), 100);
+        let id = ArchiveRequestId { session_id: s1.into(), sequence: 1 };
         assert!(matches!(
             harness.service.prepare_with_request(&descriptor, id.clone()).await.unwrap(),
             ArchivePrepareResult::Ready { .. }
         ));
         // 同 boot（>=）新 session 换代：旧 session 的 commit 即刻失效
-        assert_eq!(harness.service.begin_session("s3", 100).unwrap(), 100);
+        assert_eq!(harness.service.begin_session(s3, 100).unwrap(), 100);
         assert_eq!(
             harness.service.commit_request(&id).await.unwrap_err(),
             ArchiveAccessError::Cancelled
         );
         // 同 id 重试幂等：返回该 session 的 boot
-        assert_eq!(harness.service.begin_session("s3", 100).unwrap(), 100);
-        assert_eq!(harness.service.begin_session("s3", 77).unwrap(), 100);
+        assert_eq!(harness.service.begin_session(s3, 100).unwrap(), 100);
+        assert_eq!(harness.service.begin_session(s3, 77).unwrap(), 100);
     }
 
     #[tokio::test]
@@ -2031,37 +2225,38 @@ mod tests {
         let harness = ServiceHarness::new();
         let descriptor = harness.local_descriptor("plain.cbz", ArchiveFormat::Cbz);
         harness.zip.add_plain_image("page.png");
+        let s = "550e8400-e29b-41d4-a716-4466554400b1";
         // 无 session：一切请求直接 Cancelled
         assert_eq!(
             harness
                 .service
                 .prepare_with_request(
                     &descriptor,
-                    ArchiveRequestId { session_id: "s".into(), sequence: 1 },
+                    ArchiveRequestId { session_id: s.into(), sequence: 1 },
                 )
                 .await
                 .unwrap_err(),
             ArchiveAccessError::Cancelled
         );
-        harness.service.begin_session("s", 1).unwrap();
+        harness.service.begin_session(s, 1).unwrap();
         // cancel-before-register：sequence 水位先行，后到的 register 直接 Cancelled
         harness
             .service
-            .cancel_request(&ArchiveRequestId { session_id: "s".into(), sequence: 5 })
+            .cancel_request(&ArchiveRequestId { session_id: s.into(), sequence: 5 })
             .await;
         assert_eq!(
             harness
                 .service
                 .prepare_with_request(
                     &descriptor,
-                    ArchiveRequestId { session_id: "s".into(), sequence: 5 },
+                    ArchiveRequestId { session_id: s.into(), sequence: 5 },
                 )
                 .await
                 .unwrap_err(),
             ArchiveAccessError::Cancelled
         );
         // 正常 register → Prepared → 精确幂等 commit
-        let id6 = ArchiveRequestId { session_id: "s".into(), sequence: 6 };
+        let id6 = ArchiveRequestId { session_id: s.into(), sequence: 6 };
         assert!(matches!(
             harness.service.prepare_with_request(&descriptor, id6.clone()).await.unwrap(),
             ArchivePrepareResult::Ready { .. }
@@ -2073,7 +2268,7 @@ mod tests {
         assert_eq!(
             harness
                 .service
-                .commit_request(&ArchiveRequestId { session_id: "s".into(), sequence: 4 })
+                .commit_request(&ArchiveRequestId { session_id: s.into(), sequence: 4 })
                 .await
                 .unwrap_err(),
             ArchiveAccessError::Cancelled
@@ -2081,7 +2276,7 @@ mod tests {
         assert_eq!(
             harness
                 .service
-                .commit_request(&ArchiveRequestId { session_id: "s".into(), sequence: 7 })
+                .commit_request(&ArchiveRequestId { session_id: s.into(), sequence: 7 })
                 .await
                 .unwrap_err(),
             ArchiveAccessError::Cancelled
@@ -2098,6 +2293,15 @@ mod tests {
         let long = "x".repeat(65);
         assert!(matches!(
             harness.service.begin_session(&long, 1),
+            Err(ArchiveAccessError::InvalidRequest(_))
+        ));
+        // 任务 11：非 canonical UUID 文本（含旧测试用的短 id）一律拒绝
+        assert!(matches!(
+            harness.service.begin_session("s1", 1),
+            Err(ArchiveAccessError::InvalidRequest(_))
+        ));
+        assert!(matches!(
+            harness.service.begin_session("550e8400-e29b-41d4-a716_4466554400ff", 1),
             Err(ArchiveAccessError::InvalidRequest(_))
         ));
     }

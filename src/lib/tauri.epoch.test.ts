@@ -14,6 +14,13 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 import { notifyArchiveWindow } from './tauri';
+import {
+  beginArchiveSession,
+  prepareArchive,
+  unlockArchive,
+  commitArchiveOpen,
+  cancelArchivePrepare,
+} from './tauri';
 import type { SourceDescriptor } from './sourceDescriptor';
 
 const webdav: SourceDescriptor = {
@@ -52,5 +59,28 @@ describe('notifyArchiveWindow epoch 递增计数器', () => {
     const epochs = invokedEpochs();
     // 相对断言：首值在 Date.now() 时间基座量级（播种 + 一次 ++），不钉绝对值防时钟 flake
     expect(epochs[0]).toBeGreaterThan(Date.now() - 60_000);
+  });
+});
+
+describe('archive access session/prepare/unlock/commit/cancel IPC', () => {
+  beforeEach(() => {
+    invokeMock.mockClear();
+  });
+
+  it('session/prepare/unlock/commit/cancel 使用稳定命令名且密码只放 IPC 参数', async () => {
+    const descriptor = { type: 'archive', archivePath: 'C:/book.cbz', entryPrefix: '', format: 'cbz' } as const;
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const requestId = { sessionId, sequence: 1 };
+    await beginArchiveSession(sessionId, 1724000000000);
+    expect(invokeMock).toHaveBeenCalledWith('begin_archive_session', { sessionId, bootMs: 1724000000000 });
+    await prepareArchive(descriptor, requestId);
+    expect(invokeMock).toHaveBeenCalledWith('prepare_archive', { descriptor, requestId });
+    await unlockArchive(descriptor, 'secret', requestId);
+    expect(invokeMock).toHaveBeenCalledWith('unlock_archive', { descriptor, password: 'secret', requestId });
+    await commitArchiveOpen(requestId);
+    expect(invokeMock).toHaveBeenCalledWith('commit_archive_open', { requestId });
+    await cancelArchivePrepare(requestId);
+    expect(invokeMock).toHaveBeenCalledWith('cancel_archive_prepare', { requestId });
+    expect(JSON.stringify(descriptor)).not.toContain('secret');
   });
 });

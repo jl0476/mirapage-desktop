@@ -630,6 +630,17 @@ impl Materializer {
             AttachSpec::Interactive { request_id: id, observer: None }).await
     }
 
+    /// 交互订阅者强制物化（任务 11 IPC）：以调用方的 request registry id attach——
+    /// `cancel_interactive` 按 id 即刻送达 `Err(Cancelled)` 并（最后一个交互订阅者
+    /// 且无后台时）终止物理下载；同 key 的后续订阅者共享同一物理下载。
+    pub async fn ensure_cached_interactive(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+        request_id: ArchiveRequestId,
+    ) -> Result<PathBuf, MaterializeError> {
+        self.ensure_cached_subscribed_inner(origin, archive_rel_path, format, None,
+            AttachSpec::Interactive { request_id, observer: None }).await
+    }
+
     /// 预载路径——窗口 epoch 与 generation 双通道均可取消。expected_epoch 是任务
     /// **诞生时刻**（notify_window 的批次 epoch）的身份，全程显式携带（终审 P1-4：
     /// 身份不从环境读——旧实现 download 内捕获 current_epoch，批次循环检查与调用
@@ -1198,6 +1209,19 @@ impl crate::source::archive_impl::Materialize for Materializer {
             self, origin, archive_rel_path, expected_epoch, progress_key, format,
         )
         .await
+    }
+
+    // 任务 11 IPC 支持面：同样显式 inherent 调用（trait / inherent 同名）
+    async fn ensure_cached_interactive(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+        request_id: ArchiveRequestId,
+    ) -> std::result::Result<PathBuf, MaterializeError> {
+        Materializer::ensure_cached_interactive(self, origin, archive_rel_path, format, request_id)
+            .await
+    }
+
+    async fn cancel_interactive(&self, request_id: &ArchiveRequestId) {
+        Materializer::cancel_interactive(self, request_id).await
     }
 }
 

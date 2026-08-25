@@ -710,3 +710,74 @@ export async function getArchiveCacheInfo(): Promise<ArchiveCacheInfo> {
 export async function clearArchiveCache(): Promise<void> {
   await invoke<void>('clear_archive_cache');
 }
+
+// ─── 任务 11: session/prepare/unlock/commit/cancel 结构化准备 IPC ────────
+/** 归档就绪后的读取形态：本地直开 / 远程 ZIP 流式 / 远程物化产物 */
+export type ArchiveAccessMode = 'local' | 'streaming' | 'materialized';
+
+/** 结构化准备请求身份（session = WebView 页面代次；sequence 页面内单调递增） */
+export interface ArchiveRequestId {
+  sessionId: string;
+  sequence: number;
+}
+
+/** prepare/unlock 结果：ready 携带访问形态与 opaque progress key（进度事件用） */
+export type ArchivePrepareResult =
+  | { status: 'ready'; accessMode: ArchiveAccessMode; progressKey: string | null }
+  | { status: 'passwordRequired' };
+
+/** 归档访问错误（Rust `ArchiveAccessError`：tag=kind + content=message camelCase） */
+export interface ArchiveAccessError {
+  kind:
+    | 'passwordRequired'
+    | 'wrongPassword'
+    | 'unsupportedCodec'
+    | 'multiVolumeUnsupported'
+    | 'corruptArchive'
+    | 'emptyArchive'
+    | 'resourceLimitExceeded'
+    | 'entryNotFound'
+    | 'remoteRangeUnavailable'
+    | 'cancelled'
+    | 'invalidRequest'
+    | 'io'
+    | 'network'
+    | 'timeout';
+  message?: string;
+}
+
+/**
+ * 安装/换代 session（幂等）。返回生效代次：大于自己上报的 boot 说明后端已有
+ * 更新代次（系统时钟回拨后重载）——调用方应换新 UUID、以返回值 + 1 为 boot
+ * 重试一次（ensureArchiveSession，任务 12）。
+ */
+export function beginArchiveSession(sessionId: string, bootMs: number): Promise<number> {
+  return invoke<number>('begin_archive_session', { sessionId, bootMs });
+}
+
+/** 就绪检查：Ready 只转 Prepared（不预载）；加密包返回 passwordRequired。 */
+export function prepareArchive(
+  descriptor: SourceDescriptor,
+  requestId: ArchiveRequestId,
+): Promise<ArchivePrepareResult> {
+  return invoke<ArchivePrepareResult>('prepare_archive', { descriptor, requestId });
+}
+
+/** 密码验证：完整读取校验成功才入库（会话密码库）；密码只作 IPC 参数，不落日志。 */
+export function unlockArchive(
+  descriptor: SourceDescriptor,
+  password: string,
+  requestId: ArchiveRequestId,
+): Promise<ArchivePrepareResult> {
+  return invoke<ArchivePrepareResult>('unlock_archive', { descriptor, password, requestId });
+}
+
+/** 幂等提交：streaming 预载意图此时才启动（commit-gated prefetch）。 */
+export function commitArchiveOpen(requestId: ArchiveRequestId): Promise<void> {
+  return invoke<void>('commit_archive_open', { requestId });
+}
+
+/** 幂等取消：迟到/未知 id 均 no-op；在途物化即刻终止（无 final/DAO 落盘）。 */
+export function cancelArchivePrepare(requestId: ArchiveRequestId): Promise<void> {
+  return invoke<void>('cancel_archive_prepare', { requestId });
+}
