@@ -76,6 +76,12 @@ pub enum MaterializeError {
     /// Service/loader 边界映射 `ArchiveAccessError::Cancelled`（不触发网络降级）。
     #[error("已取消")]
     Cancelled,
+    /// 远程 origin Range 供给不可用（短读等强契约违反，spec §7.4）：任务 9 起作为
+    /// 「原位重试一次 → 物化降级」降级触发的**类型化载体**——loader / Service 边界
+    /// 映射 `ArchiveAccessError::RemoteRangeUnavailable`，不得经 `Other` 扁平化成 Io
+    /// 而错过任务 10 的降级白名单。
+    #[error("远程 Range 不可用: {0}")]
+    RemoteRangeUnavailable(String),
     #[error("其他: {0}")]
     Other(String),
 }
@@ -107,6 +113,9 @@ impl From<MaterializeError> for MediaSourceError {
                 format!("格式与扩展名不一致: declared={declared:?} rel={rel_path}"),
             ),
             MaterializeError::Cancelled => MediaSourceError::Other("cancelled".into()),
+            // MediaSource 层无 Range 概念：按远端供给失败归类 Network，消息原样保留
+            //（任务 9 合同：From<MediaSourceError> 方向没有 Range 来源，不改）
+            MaterializeError::RemoteRangeUnavailable(s) => MediaSourceError::Network(s),
             MaterializeError::Other(s) => MediaSourceError::Other(s),
         }
     }
@@ -474,6 +483,26 @@ impl Materializer {
     ) -> Result<FileStat, MaterializeError> {
         let src = self.origin_source(origin)?;
         src.stat(origin, rel).await.map_err(|e| e.into())
+    }
+    /// origin Range 接口（任务 9）：远程 ZIP 流式 reader 的块加载入口——精确
+    /// [offset, offset+length)。**短 Range 必须类型化**为 `RemoteRangeUnavailable`：
+    /// Service 只对 RemoteRangeUnavailable/Network/Timeout 走「原位重试一次 →
+    /// 物化降级」（任务 10），落入 `Other` 会退化成 Io 而错过降级路径。
+    pub async fn read_origin_range(
+        &self,
+        origin: &SourceDescriptor,
+        rel: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, MaterializeError> {
+        let source = self.origin_source(origin)?;
+        let bytes = source.read_file(origin, rel, Some(ByteRange { offset, length })).await?;
+        if bytes.len() as u64 != length {
+            return Err(MaterializeError::RemoteRangeUnavailable(format!(
+                "Range 长度不符: offset={offset} expected={length} actual={}", bytes.len()
+            )));
+        }
+        Ok(bytes)
     }
     pub async fn inflight_empty(&self) -> bool { self.inflight.lock().await.map.is_empty() }
     /// clear 用：等待在途任务退出（chunk/检查点粒度快速退出）；超时返回 false
@@ -964,6 +993,7 @@ fn clone_materialize_error(e: &MaterializeError) -> MaterializeError {
             rel_path: rel_path.clone(),
         },
         MaterializeError::Cancelled => MaterializeError::Cancelled,
+        MaterializeError::RemoteRangeUnavailable(s) => MaterializeError::RemoteRangeUnavailable(s.clone()),
         MaterializeError::Other(s) => MaterializeError::Other(s.clone()),
     }
 }
@@ -1203,6 +1233,9 @@ pub(crate) mod tests {
         /// 第 N 次 stat（1-based）触发旁路副作用后消费（测试模拟：stat 网络窗口内并发
         /// 任务完成物化——刷新表行 + 写 final 文件；失效竞态修复用例的确定性注入点）
         interject_on_stat: std::sync::Mutex<Option<(usize, Box<dyn Fn() + Send + Sync>)>>,
+        /// 定点短读注入（任务 9）：Some(k) 时下一次成功 ranged read 只返回前 k 字节
+        /// （read_origin_range 短读 → RemoteRangeUnavailable 用例）
+        pub(crate) short_next_read: std::sync::Mutex<Option<usize>>,
     }
 
     impl MockOrigin {
@@ -1218,6 +1251,7 @@ pub(crate) mod tests {
                 last_ranges: std::sync::Mutex::new(Vec::new()),
                 flip_on_stat: std::sync::Mutex::new(None),
                 interject_on_stat: std::sync::Mutex::new(None),
+                short_next_read: std::sync::Mutex::new(None),
             }
         }
     }
@@ -1246,7 +1280,18 @@ pub(crate) mod tests {
                     let start = r.offset as usize;
                     let end = (r.offset + r.length) as usize;
                     match bytes.get(start..end) {
-                        Some(slice) => Ok(slice.to_vec()),
+                        Some(slice) => {
+                            // 任务 9：短读注入（一次性）——成功但短于请求长度
+                            let take = *self.short_next_read.lock().unwrap();
+                            let slice: &[u8] = match take {
+                                Some(k) if k < slice.len() => {
+                                    *self.short_next_read.lock().unwrap() = None;
+                                    &slice[..k]
+                                }
+                                _ => slice,
+                            };
+                            Ok(slice.to_vec())
+                        }
                         None => Err(MediaSourceError::Network(
                             format!("mock range 越界 {start}..{end} > {}", bytes.len()))),
                     }
@@ -1569,6 +1614,44 @@ pub(crate) mod tests {
         assert!(sidecar_path(&part_path).exists(), "sidecar 保留");
         let conn = db.conn();
         assert!(crate::source::archive::dao::get(&conn, &key).unwrap().is_none(), "表无行");
+    }
+
+    /// 任务 9：origin Range 接口——精确 Range 原样返回；短读类型化为
+    /// `RemoteRangeUnavailable`（不落 Network/Other，降级白名单的触发载体）
+    #[tokio::test]
+    async fn read_origin_range_exact_pass_and_short_read_is_typed() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, _g, _db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        assert_eq!(
+            m.read_origin_range(&origin, "a.cbz", 2, 5).await.unwrap(),
+            vec![7u8; 5],
+            "精确 Range 原样返回"
+        );
+        // 短读（远端只给了 3/10 字节）→ RemoteRangeUnavailable
+        *mock.short_next_read.lock().unwrap() = Some(3);
+        let err = m.read_origin_range(&origin, "a.cbz", 0, 10).await.unwrap_err();
+        assert!(
+            matches!(err, MaterializeError::RemoteRangeUnavailable(_)),
+            "短读必须类型化为 RemoteRangeUnavailable，得到 {err:?}"
+        );
+        // 短读注入一次性消费：后续精确读恢复正常
+        assert_eq!(
+            m.read_origin_range(&origin, "a.cbz", 0, 10).await.unwrap(),
+            vec![7u8; 10]
+        );
+    }
+
+    /// 任务 9：`From<MaterializeError> for MediaSourceError` 补臂——
+    /// RemoteRangeUnavailable → Network（MediaSource 层无 Range 概念，消息原样保留）
+    #[test]
+    fn remote_range_unavailable_converts_to_media_source_network() {
+        let mse: MediaSourceError =
+            MaterializeError::RemoteRangeUnavailable("Range 长度不符: offset=0".into()).into();
+        assert!(matches!(
+            mse,
+            MediaSourceError::Network(ref s) if s == "Range 长度不符: offset=0"
+        ));
     }
 
     /// 最终审查 I1（任务 8 泛化）：cbr/rar/7z/无扩展名等「descriptor 格式与扩展名

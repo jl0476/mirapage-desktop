@@ -29,6 +29,7 @@ use crate::source::archive::backend::{
 use crate::source::archive::cache_coordinator::ArchiveCacheCoordinator;
 use crate::source::archive::password::{ArchiveIdentity, ArchivePasswordStore};
 use crate::source::archive::rar_backend::RarBackend;
+use crate::source::archive::remote_zip::{RangeBlockCache, BLOCK_CACHE_BYTES};
 use crate::source::archive::sevenz_backend::SevenZBackend;
 use crate::source::archive::zip_backend::ZipBackend;
 use crate::source::archive_impl::Materialize;
@@ -200,6 +201,9 @@ pub struct ArchiveService {
     /// 加权内存 semaphore：1 MiB 粒度 permit（生产 512 个 = 工作集 512 MiB）
     memory_semaphore: Arc<tokio::sync::Semaphore>,
     catalog_lru: Mutex<LruCache<CatalogKey, CachedCatalog>>,
+    /// 远程 ZIP 块 LRU（任务 9）：与 catalog LRU 同一 coordinator（同一 clear gate），
+    /// 任务 10 streaming 路径经 `block_cache()` 取同一实例注入 ReaderFactory
+    block_cache: Arc<RangeBlockCache>,
     /// 单主窗口：仅一个 current session
     registry: Mutex<Option<SessionState>>,
 }
@@ -236,6 +240,12 @@ impl ArchiveService {
     ) -> Self {
         Self {
             materializer,
+            // 块 LRU 接入本 Service 持有的唯一 coordinator（任务 9 合同：
+            // clear gate / generation 与 catalog LRU、Materializer 同闸）
+            block_cache: Arc::new(RangeBlockCache::with_coordinator(
+                BLOCK_CACHE_BYTES,
+                coordinator.clone(),
+            )),
             coordinator,
             zip,
             rar,
@@ -255,15 +265,27 @@ impl ArchiveService {
         self.coordinator.clone()
     }
 
-    /// 清运行时缓存（catalog LRU）。只能在 `ClearGuard` 存活且 active admission
-    /// 排空后调用；代次不符（陈旧清空）no-op。**不清 password store**——手动清磁盘
-    /// cache 不应强制用户重新输入密码；清 catalog 使下次访问重新解析并继续用同
-    /// identity 的已验证密码。
+    /// 远程 ZIP 块缓存句柄（任务 10 streaming ReaderFactory 注入用）：
+    /// 与 Service 内部 clear 逻辑共用同一实例。
+    pub fn block_cache(&self) -> Arc<RangeBlockCache> {
+        self.block_cache.clone()
+    }
+
+    /// 就绪块数（诊断 / 测试）
+    pub fn block_cache_len(&self) -> usize {
+        self.block_cache.len()
+    }
+
+    /// 清运行时缓存（catalog LRU + 远程 ZIP 块 LRU）。只能在 `ClearGuard` 存活且
+    /// active admission 排空后调用；代次不符（陈旧清空）no-op。**不清 password
+    /// store**——手动清磁盘 cache 不应强制用户重新输入密码；清 catalog 使下次访问
+    /// 重新解析并继续用同 identity 的已验证密码。
     pub fn clear_runtime_caches_while_gated(&self, generation: u64) {
         if self.coordinator.generation() != generation {
             return;
         }
         self.catalog_lru.lock().unwrap().clear();
+        self.block_cache.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -983,6 +1005,11 @@ fn map_materialize_error(e: MaterializeError) -> ArchiveAccessError {
         }
         // 取消不触发网络降级（任务 10 白名单外；IPC 层映射取消状态）
         MaterializeError::Cancelled => ArchiveAccessError::Cancelled,
+        // 短 Range / Range 强契约违反：类型化保真（任务 10 降级白名单首项），
+        // 不得折入 Io
+        MaterializeError::RemoteRangeUnavailable(s) => {
+            ArchiveAccessError::RemoteRangeUnavailable(s)
+        }
         MaterializeError::Io(io) => ArchiveAccessError::Io(io.to_string()),
         MaterializeError::Other(s) => ArchiveAccessError::Io(s),
     }

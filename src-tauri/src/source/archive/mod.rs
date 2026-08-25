@@ -10,6 +10,7 @@ pub mod password;
 pub mod prefetch;
 pub mod rar_backend;
 pub mod rar_callback;
+pub mod remote_zip;
 pub mod service;
 pub mod sevenz_backend;
 pub mod sevenz_header_precheck;
