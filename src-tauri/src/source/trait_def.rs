@@ -32,6 +32,9 @@ pub enum MediaSourceError {
 
     #[error("路径越出数据源根: {0}")]
     PathEscape(String),
+
+    #[error(transparent)]
+    Archive(#[from] crate::source::archive::backend::ArchiveAccessError),
 }
 
 pub type Result<T> = std::result::Result<T, MediaSourceError>;
