@@ -711,6 +711,19 @@ impl<R: Read> Read for BcjSimpleReader<R> {
 
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
+/// 密文非 16 字节对齐的专属错误形态：经 `io::Error` payload 传递，
+/// `stage_read_error` downcast 识别后归 CorruptArchive（截断/损坏，与密码对错无关）。
+#[derive(Debug)]
+struct CiphertextMisaligned;
+
+impl std::fmt::Display for CiphertextMisaligned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AES ciphertext not 16-byte aligned")
+    }
+}
+
+impl std::error::Error for CiphertextMisaligned {}
+
 /// 预检注入点：KDF 计数（测试）与生产实现。
 pub(crate) type DeriveKeyFn =
     Arc<dyn Fn(&[u8], &Zeroizing<Vec<u8>>, u8) -> Zeroizing<[u8; 32]> + Send + Sync>;
@@ -769,9 +782,11 @@ impl<R: Read> AesCbcStageReader<R> {
             return Ok(());
         }
         if filled % 16 != 0 {
+            // 截断/损坏信号（不是密码错误）：携带专属 marker，stage_read_error downcast
+            // 识别后归 CorruptArchive——正确密码下也不得被归一成 WrongPassword 反复重输
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "AES ciphertext not 16-byte aligned",
+                CiphertextMisaligned,
             ));
         }
         self.pending.extend_from_slice(&chunk[..filled]);
@@ -1295,8 +1310,15 @@ fn build_stage(
     }
 }
 
-/// 解码阶段 io 错误分类：链上有 AES 且提供了密码时，垃圾输出多半是错密码 → WrongPassword
+/// 解码阶段 io 错误分类：链上有 AES 且提供了密码时，垃圾输出多半是错密码 → WrongPassword；
+/// 但非对齐密文（`CiphertextMisaligned` marker）是截断/损坏信号，正确密码下也不归 WrongPassword
 fn stage_read_error(e: std::io::Error, has_aes: bool, has_password: bool) -> ArchiveAccessError {
+    if e.get_ref()
+        .and_then(|c| c.downcast_ref::<CiphertextMisaligned>())
+        .is_some()
+    {
+        return corrupt(&format!("encoded header AES 密文非 16 字节对齐（截断/损坏）: {e}"));
+    }
     if has_aes && has_password {
         ArchiveAccessError::WrongPassword
     } else {
@@ -2025,6 +2047,60 @@ mod tests {
             run_precheck(&path),
             Err(ArchiveAccessError::CorruptArchive(_))
         ));
+    }
+
+    #[test]
+    fn sevenz_precheck_classifies_misaligned_aes_ciphertext_as_corrupt_not_wrong_password() {
+        // 负例：带 AES 的 encoded header 声明 pack_size=17（非 16 字节对齐——截断/损坏形态）。
+        // 字节级构造（镜像 gen_declared_dict.py 的 encoded_header / write_streams_info 布局），
+        // 本 fixture 所有 number 均小于 0x80，7z 变长 number 恒单字节。
+        const M_AES: [u8; 4] = [0x06, 0xF1, 0x07, 0x01];
+        let pack = [0xABu8; 17];
+        let mut nh = vec![K_ENCODED_HEADER];
+        // PackInfo：kPackInfo pack_pos=0 num=1 kSize sizes=[17] kEnd
+        nh.extend_from_slice(&[
+            K_PACK_INFO,
+            0,
+            1,
+            K_SIZE,
+            pack.len() as u8,
+            K_END,
+        ]);
+        // UnpackInfo：kUnpackInfo kFolder num=1 external=0
+        nh.extend_from_slice(&[K_UNPACK_INFO, K_FOLDER, 1, 0]);
+        //   folder：num_coders=1；flags=|id|=4|0x20；id=AES256SHA256；props_len=1；
+        //   props=[0x01]（cycles=1 ≤ 24 且高位 0 → 恰 1 字节，KDF 防线放行）；无 bind pair
+        nh.push(1);
+        nh.push(0x04 | 0x20);
+        nh.extend_from_slice(&M_AES);
+        nh.extend_from_slice(&[1, 0x01]);
+        //   kCodersUnpackSize sizes=[128] kEnd
+        nh.extend_from_slice(&[K_CODERS_UNPACK_SIZE, 128, K_END]);
+        // SubStreamsInfo 缺省形态（每 folder 1 stream、无 CRC）+ streams info 终止
+        nh.extend_from_slice(&[K_SUB_STREAMS_INFO, K_END, K_END]);
+
+        let mut start = Vec::new();
+        start.extend_from_slice(&(pack.len() as u64).to_le_bytes());
+        start.extend_from_slice(&(nh.len() as u64).to_le_bytes());
+        start.extend_from_slice(&crc32(&nh).to_le_bytes());
+        let mut file = Vec::new();
+        file.extend_from_slice(&SEVEN_Z_SIGNATURE);
+        file.extend_from_slice(&[0, 4]);
+        file.extend_from_slice(&crc32(&start).to_le_bytes());
+        file.extend_from_slice(&start);
+        file.extend_from_slice(&pack);
+        file.extend_from_slice(&nh);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("misaligned-aes.7z");
+        std::fs::write(&path, file).unwrap();
+        // 供了密码且链上有 AES 的旧分类会归 WrongPassword；非对齐必须归 CorruptArchive
+        let err = precheck(&path, Some(b"any"), &PrecheckHooks::default()).unwrap_err();
+        assert!(
+            matches!(err, ArchiveAccessError::CorruptArchive(_)),
+            "非对齐密文应归 CorruptArchive，实际 {err:?}"
+        );
+        assert_ne!(err, ArchiveAccessError::WrongPassword);
     }
 }
 
