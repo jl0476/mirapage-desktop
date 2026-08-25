@@ -1,0 +1,252 @@
+{
+  "format": 1,
+  "generator": "gen_declared_dict.py",
+  "fixtures": [
+    {
+      "name": "dict-oversize-lzma.7z",
+      "size": 145,
+      "sha256": "18634d27828357179f62b60407c194a74e0397af53ff0716051a7c4eafdddbcd",
+      "contract": "plain header；LZMA coder 声明 dict=0xFFFFFFFF（4 GiB-1），预检须拒绝",
+      "next_header": {
+        "kind": "plain",
+        "offset": 96,
+        "size": 49
+      },
+      "num_folders": 1,
+      "num_files": 1,
+      "coders": [
+        {
+          "id": "030101",
+          "props": "5dffffffff",
+          "declared_dict": 4294967295
+        }
+      ],
+      "total_declared_dict": 4294967295
+    },
+    {
+      "name": "dict-oversize-lzma2.7z",
+      "size": 139,
+      "sha256": "55cb56fb532a3a1c6bc343452a721a630341bedc73272e540d3b94df9813cd59",
+      "contract": "plain header；LZMA2 props=0x28 映射 dict=4 GiB，预检须拒绝",
+      "next_header": {
+        "kind": "plain",
+        "offset": 96,
+        "size": 43
+      },
+      "num_folders": 1,
+      "num_files": 1,
+      "coders": [
+        {
+          "id": "21",
+          "props": "28",
+          "declared_dict": 4294967296
+        }
+      ],
+      "total_declared_dict": 4294967296
+    },
+    {
+      "name": "dict-budget-oversum.7z",
+      "size": 325,
+      "sha256": "a5c68611baf650fff82188326830da96c8a318ff914ee7313131649eaeecf791",
+      "contract": "plain header；3 folder × LZMA dict=512 MiB（单个均未超 u32 上限），合计 1.5 GiB 总预算拒绝载体",
+      "next_header": {
+        "kind": "plain",
+        "offset": 224,
+        "size": 101
+      },
+      "num_folders": 3,
+      "num_files": 3,
+      "coders": [
+        {
+          "id": "030101",
+          "props": "5d00000020",
+          "declared_dict": 536870912
+        },
+        {
+          "id": "030101",
+          "props": "5d00000020",
+          "declared_dict": 536870912
+        },
+        {
+          "id": "030101",
+          "props": "5d00000020",
+          "declared_dict": 536870912
+        }
+      ],
+      "total_declared_dict": 1610612736
+    },
+    {
+      "name": "header-encoded-oversize.7z",
+      "size": 125,
+      "sha256": "835b84c24119cf5179c9f521dae2977907fbc0cc1a29495cb1f9165542b2480f",
+      "contract": "encoded header（0x17）；header coder LZMA 声明 dict=0xFFFFFFFF，预检须递归进 encoded header 拒绝",
+      "next_header": {
+        "kind": "encoded",
+        "offset": 96,
+        "size": 29
+      },
+      "num_folders": 1,
+      "num_files": 0,
+      "coders": [
+        {
+          "id": "030101",
+          "props": "5dffffffff",
+          "declared_dict": 4294967295
+        }
+      ],
+      "total_declared_dict": 4294967295
+    },
+    {
+      "name": "header-numfiles-over.7z",
+      "size": 40,
+      "sha256": "9de6f803a207ed200bcc63b6dab24624fda5a44a8f3a6bd6636f8edf4972b75c",
+      "contract": "plain header；kFilesInfo numFiles=10,000,000 且无 streams，预检须在条目分配前按数量拒绝",
+      "next_header": {
+        "kind": "plain",
+        "offset": 32,
+        "size": 8
+      },
+      "num_folders": 0,
+      "num_files": 10000000,
+      "coders": [],
+      "total_declared_dict": 0
+    },
+    {
+      "name": "header-copy.7z",
+      "size": 136,
+      "sha256": "1d05e550383f972a2fff86fd8e71d441859e5fa4cf58ecee91b755bbb1902445",
+      "contract": "plain header；COPY coder（无 props）对照，预检应放行",
+      "next_header": {
+        "kind": "plain",
+        "offset": 96,
+        "size": 40
+      },
+      "num_folders": 1,
+      "num_files": 1,
+      "coders": [
+        {
+          "id": "00",
+          "props": null
+        }
+      ],
+      "total_declared_dict": 0
+    },
+    {
+      "name": "header-lzma.7z",
+      "size": 145,
+      "sha256": "5f214bd4f1c56fd6c6f7245b11c078abfeb4fa3e733d170b0378f434ea092e6c",
+      "contract": "plain header；LZMA dict=64 KiB 对照，预检应放行",
+      "next_header": {
+        "kind": "plain",
+        "offset": 96,
+        "size": 49
+      },
+      "num_folders": 1,
+      "num_files": 1,
+      "coders": [
+        {
+          "id": "030101",
+          "props": "5d00000100",
+          "declared_dict": 65536
+        }
+      ],
+      "total_declared_dict": 65536
+    },
+    {
+      "name": "header-delta-lzma2.7z",
+      "size": 147,
+      "sha256": "a5766861344901a43894d42ecdd69325a7fa38c15069a5a18b87828a3bf63167",
+      "contract": "plain header；[LZMA2(1 MiB), Delta(dist=1)] 链对照，预检应放行",
+      "next_header": {
+        "kind": "plain",
+        "offset": 96,
+        "size": 51
+      },
+      "num_folders": 1,
+      "num_files": 1,
+      "coders": [
+        {
+          "id": "21",
+          "props": "12",
+          "declared_dict": 2097152
+        },
+        {
+          "id": "03",
+          "props": "01"
+        }
+      ],
+      "total_declared_dict": 2097152
+    },
+    {
+      "name": "header-bcj-x86-lzma2.7z",
+      "size": 148,
+      "sha256": "80ae25010169c23219009b1fe4a473427645557456d916471d94d0f3a79c19b2",
+      "contract": "plain header；[LZMA2(1 MiB), BCJ-x86] 链对照，预检应放行",
+      "next_header": {
+        "kind": "plain",
+        "offset": 96,
+        "size": 52
+      },
+      "num_folders": 1,
+      "num_files": 1,
+      "coders": [
+        {
+          "id": "21",
+          "props": "12",
+          "declared_dict": 2097152
+        },
+        {
+          "id": "03030103",
+          "props": null
+        }
+      ],
+      "total_declared_dict": 2097152
+    },
+    {
+      "name": "header-kdf-over.7z",
+      "size": 147,
+      "sha256": "76cbda71194e9b50042125e01a13d0093d89f72521c5eec8c61602f835d6f887",
+      "contract": "encoded header；AES256SHA256 numCyclesPower=24（真实归档典型 19），header 解密预算拒绝载体",
+      "next_header": {
+        "kind": "encoded",
+        "offset": 96,
+        "size": 51
+      },
+      "num_folders": 1,
+      "num_files": 0,
+      "coders": [
+        {
+          "id": "06f10701",
+          "props": "5880030e19242f3a455005121f2c394653606d7a8794a1aebbc8",
+          "cycles_power": 24,
+          "salt_size": 8,
+          "iv_size": 16
+        }
+      ],
+      "total_declared_dict": 0
+    },
+    {
+      "name": "content-kdf-over.7z",
+      "size": 167,
+      "sha256": "5c4de03db885d66de8378c86ebe06fe7a2a8d25cf5ff28ddb2511bae0a6ca0bc",
+      "contract": "plain header 主 streams；AES256SHA256 numCyclesPower=24，内容解密预算拒绝载体",
+      "next_header": {
+        "kind": "plain",
+        "offset": 96,
+        "size": 71
+      },
+      "num_folders": 1,
+      "num_files": 1,
+      "coders": [
+        {
+          "id": "06f10701",
+          "props": "5880030e19242f3a455005121f2c394653606d7a8794a1aebbc8",
+          "cycles_power": 24,
+          "salt_size": 8,
+          "iv_size": 16
+        }
+      ],
+      "total_declared_dict": 0
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# mirapage-desktop 归档 fixture 生成环境（pip 锁定输入文件）
+# 锁文件 requirements.txt 由 pip-compile 生成：
+#   python -m piptools compile --generate-hashes --resolver=backtracking \
+#     --output-file src-tauri/tests/fixtures/archive/requirements.txt \
+#     src-tauri/tests/fixtures/archive/requirements.in
+# 安装：
+#   python -m pip install --require-hashes -r src-tauri/tests/fixtures/archive/requirements.txt
+pyzipper==0.4.0

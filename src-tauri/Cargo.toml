@@ -57,10 +57,29 @@ time = { version = "0.3", features = ["macros"] }
 reqwest = { version = "0.12", features = ["stream", "rustls-tls"], default-features = false }
 quick-xml = "0.36"   # WebDAV PROPFIND 响应 XML 解析
 
-# 压缩包（Phase 3 启用：CBZ/ZIP 已实装,RAR/7z 占位）
-zip = "2"
-# unrar = "0.7"   # Phase 3 RAR 实装时启用
-# sevenz-rust = "0.6"  # Phase 3 7z 实装时启用
+# Archive readers；版本必须保持 Rust 1.75 可编译。
+zip = { version = "=2.4.2", features = ["aes-crypto"] }
+unrar_sys = "=0.5.8" # 直接使用 UnRAR 低层 API + data callback；不引入高层 unrar crate（密码时序与 NEEDPASSWORD 缺陷，见任务 5 步骤 4）
+# sevenz-rust 0.6.1 的 aes256sha256.rs:7 存在未加 cfg 门禁的 `use lzma_rust::CountingWriter;`
+# （其唯一使用点 mod enc 有 #[cfg(feature = "compress")] 门，import 本身没有），而
+# CountingWriter 只在 lzma-rust 的 encoder feature 下存在——因此 0.6.1 在任何未启用
+# `lzma-rust/encoder` 的特性组合下都无法编译。按任务简报的回退条款：生产依赖显式启用
+# `compress`（= lzma-rust/encoder）。代价：LZMA 编码器会进入发布二进制，这与"生产只留
+# 解码"的初衷冲突，属上游缺陷强制妥协（升级 sevenz-rust 修复门禁后可回收）。
+sevenz-rust = { version = "=0.6.1", default-features = false, features = ["aes256", "compress"] }
+# 任务 6 header 预检（sevenz_header_precheck.rs）的直接依赖：aes/cbc 在 sevenz-rust 中
+# 只是可选依赖，本项目不能隐式依赖传递解析，必须显式声明；lzma-rust 与其传递版本同版锁定，
+# 且必须 default-features = false——lzma-rust 0.1.7 的默认 feature 就是 encoder，
+# 直接裸引会在生产构建重新启用编码器，与"生产只留解码"冲突。
+lzma-rust = { version = "=0.1.7", default-features = false }
+aes = { version = "0.8", features = ["zeroize"] } # zeroize feature：清除 AES key schedule（§5.2 密码生命周期约束）
+cbc = "0.1"
+# zeroize 锁 1.8.1 + 锁文件钉 zeroize_derive 1.4.2：zeroize 1.9 把 `derive` 变为默认
+# feature，且 zip 2.4.2 的 aes-crypto 又显式启用 zeroize/zeroize_derive——两者都会拉入
+# zeroize_derive 1.5.0（edition2024，cargo 1.75 无法解析其 manifest），违反「新增依赖
+# 不得新增 1.75 失败」约束。1.8.1 默认不含 derive；1.4.2 满足 zeroize ^1.3 / zip 传递
+# 需求且为 edition 2021。勿运行裸 `cargo update`（会把 derive 顶回 1.5.0）。
+zeroize = "=1.8.1"
 
 # 数据库（运行时依赖，原误置 [dev-dependencies]：db/* 与 commands/* 模块 use rusqlite）
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -102,6 +121,8 @@ windows = { version = "0.58", features = ["Win32_System_Power"] }
 tempfile = "3"
 # 仅 benchmark：对比 image crate resize vs fast-image-resize（SIMD）加速比
 fast_image_resize = "5"
+# 任务 6 测试用 SevenZWriter 运行时生成 fixture；`compress` 只在测试构建启用。
+sevenz-rust = { version = "=0.6.1", default-features = false, features = ["aes256", "compress"] }
 
 [features]
 # 此特性用于在生产环境构建时启用自定义协议
