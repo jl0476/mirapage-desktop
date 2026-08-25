@@ -725,8 +725,6 @@ RAR_COMMANDS = """\
 #   rar.exe a -idq -ma5 -ptest-pass-中文 password-rar5.rar page1.png
 #   rar.exe a -idq -ma5 -hptest-pass-中文 encrypted-headers-rar5.rar page1.png
 #   rar.exe a -idq -ma4 -ptest-pass-中文 password-nonimage-rar4.rar note.txt
-#   rar.exe a -idq -ma5 empty-rar5.rar note.txt
-#   rar.exe d -idq empty-rar5.rar note.txt
 #   rar.exe a -idq -ma5 mixed-dirs-rar5.rar a\\note.txt b\\page.png
 #   rar.exe a -idq -ma5 -m0 -v1k multipart.rar page1.png padding.bin
 # 完成后把 9 个产物（multipart 全部卷）复制到本目录，再运行:

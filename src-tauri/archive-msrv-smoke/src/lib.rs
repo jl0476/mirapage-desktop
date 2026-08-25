@@ -3,8 +3,8 @@
 //! 主仓库全树 1.75 被预存在的 `smb → aead`（edition2024）阻断，本 crate 以隔离
 //! 依赖图实际编译并调用 zip / unrar_sys / sevenz-rust / lzma-rust / aes / cbc /
 //! zeroize 的关键 API；测试断言锁文件钉版与关键类型可用，防止裸 `cargo update`
-//! 顶破钉版后静默漂移。CI 在 `verify.yml` 用 `cargo +1.75.0 check` 编译本 crate
-//!（见 `.github/workflows/verify.yml` MSRV 步骤）。
+//! 顶破钉版后静默漂移。CI 在 `verify.yml` 用 `cargo +1.75.0 test` 编译并运行本
+//! crate 的测试（见 `.github/workflows/verify.yml` MSRV 步骤）。
 
 #![allow(dead_code)]
 

@@ -19,6 +19,9 @@ src-tauri-algorithm-tests/target/
 # Archive MSRV 1.75 smoke crate (任务 14：隔离依赖图的 CI 编译守卫)
 src-tauri/archive-msrv-smoke/target/
 
+# 归档 fixture 生成脚本的工作目录（generate.py 确定性输入暂存，README 承诺不入仓）
+src-tauri/tests/fixtures/archive/.work/
+
 # IDEs and editors
 .idea/
 .vscode/*

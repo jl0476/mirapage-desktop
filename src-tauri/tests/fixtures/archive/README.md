@@ -16,7 +16,7 @@
 | `7z i`（首行版本） | 7-Zip 24.09 (x64) : Copyright (c) 1999-2024 Igor Pavlov : 2024-11-29 |
 | `rar.exe`（绝对版本输出） | RAR 7.11 x64   Copyright (c) 1993-2025 Alexander Roshal   20 Mar 2025 |
 | RAR4 回退工具（见「工具链偏离」①） | RAR 6.24 x64   Copyright (c) 1993-2023 Alexander Roshal   3 Oct 2023 |
-| generate.py SHA-256 | `968dee5b3bd1517534d806c2a29c86b16fbb119bb5d5aca94ca3fd9ce4af2ad8` |
+| generate.py SHA-256 | `adfa0d9890a04680a66f90b30cb2c41e66769bfed25fbdb3727130640c638c0e`（2026-08-25 终审修复版：RAR_COMMANDS 帮助文本删两条不可行的 empty-rar5「先加后删」命令） |
 | gen_declared_dict.py SHA-256 | `c4968d98b68843fc1eba23b29b4c78be2ac4bb8f58b4ba60f7d97b2dfe210aab`（2026-08-25 任务 6 对齐版：合法 encoded 变体 payload 改 Python `lzma` FORMAT_RAW 真实压缩，重生成环境 Python 3.11.4） |
 | requirements.in SHA-256 | `b03a883ff2d38595950cce563d3e572aadfb82c892cc8d0d9af506d4f84f12b8` |
 
