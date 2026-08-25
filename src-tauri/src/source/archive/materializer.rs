@@ -1755,8 +1755,12 @@ pub(crate) mod tests {
             origin_entry_path: Some(rel.into()),
             archive_rel_path: Some(rel.into()),
         };
-        let src = crate::source::archive_impl::ArchiveMediaSource::new(
-            StdArc::new(m) as StdArc<dyn crate::source::archive_impl::Materialize>);
+        let src = crate::source::archive_impl::ArchiveMediaSource::new(StdArc::new(
+            crate::source::archive::service::ArchiveService::new(
+                StdArc::new(m) as StdArc<dyn crate::source::archive_impl::Materialize>,
+                crate::source::archive::cache_coordinator::ArchiveCacheCoordinator::new_shared(),
+            ),
+        ));
         // list：物化（真下载 mock 字节 → final）+ 解压列条目 + 自然排序
         let entries = src.list_directory(&descriptor, "").await.unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();

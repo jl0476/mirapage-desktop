@@ -1,26 +1,20 @@
-//! `ArchiveMediaSource` —— CBZ / CBR / ZIP / RAR / 7z 压缩包
+//! `ArchiveMediaSource` —— CBZ / CBR / ZIP / RAR / 7z 五格式**薄适配器**（任务 7 起）
 //!
-//! Phase 3 实现。CBZ/ZIP 自任务 4 起委托 `source::archive::zip_backend::ZipBackend`
-//! （路径输入、无整包读取；ZipCrypto/AES 密码与资源限额合同见该模块文档）；
-//! CBR/RAR 用 `unrar`(RAR5 部分包可能失败, 按 DESIGN §9 缓解);
-//! 7z 用 `sevenz-rust`(末尾索引,需整包读,远程源场景
-//! 先下载到 cacheDir 后再解压)。
+//! 所有读取经共享 `ArchiveService`（格式分派 / 会话密码库 / catalog LRU / 工作集
+//! 预算 / 唯一 cache coordinator，合同见 `source::archive::service`）；本类型只做
+//! `MediaSource` trait 到 service 的转发与 Range 切片。
 //!
 //! 设计要点:
-//! - `archive_path` + `entry_prefix` 可定位压缩包内的子目录
-//!
-//! 解压策略(任务 4 起):
-//! - `read_file(entry, None)`:backend 流式解压整条目(LimitedEntryWriter 限额)
-//! - `read_file(entry, Some(range))`:整条目解压后切片(desktop 优化:大图按需读取)
+//! - `archive_path` + `entry_prefix` 可定位压缩包内的子目录（service 内部拼接）
+//! - `read_file(entry, None)`:整条目解压;`read_file(entry, Some(range))`:整条目
+//!   解压后切片(desktop 优化:大图按需读取;Range 强契约——溢出/越界一律报错)
 
-use crate::source::archive::backend::{
-    ArchiveAccessError, ArchiveBackend, ArchiveInput, DecodeBudget,
-};
-use crate::source::archive::zip_backend::ZipBackend;
+use crate::source::archive::backend::ArchiveAccessError;
+use crate::source::archive::service::ArchiveService;
 use crate::source::descriptor::{ArchiveFormat, MediaEntry, SourceDescriptor};
 use crate::source::trait_def::{ByteRange, MediaSource, MediaSourceError, Result};
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// 物化抽象（生产 = source::archive::materializer::Materializer；测试 = mock）
 ///
@@ -35,104 +29,25 @@ pub trait Materialize: Send + Sync {
 }
 
 pub struct ArchiveMediaSource {
-    materializer: std::sync::Arc<dyn Materialize>,
+    service: std::sync::Arc<ArchiveService>,
 }
 
 impl ArchiveMediaSource {
-    pub fn new(materializer: std::sync::Arc<dyn Materialize>) -> Self {
-        Self { materializer }
-    }
-
-    fn archive_path<'a>(&self, descriptor: &'a SourceDescriptor) -> Option<&'a Path> {
-        match descriptor {
-            SourceDescriptor::Archive { archive_path, .. } => Some(Path::new(archive_path)),
-            _ => None,
-        }
-    }
-
-    /// 三方法统一前置（spec §5）：origin None 本地直开 / Some 物化
-    async fn resolve_archive_path(
-        &self,
-        archive_path: &str,
-        origin: &Option<Box<SourceDescriptor>>,
-        archive_rel_path: &Option<String>,
-    ) -> Result<PathBuf> {
-        match origin {
-            None => Ok(PathBuf::from(archive_path)),
-            Some(origin_desc) => {
-                let rel = archive_rel_path.as_deref().ok_or_else(|| {
-                    MediaSourceError::Other("远程 archive 缺少 archiveRelPath".into())
-                })?;
-                // mock/生产实现均返回类型化 MediaSourceError——直接透传，
-                // NotFound/Network 变体保真到 media:// 协议层（404/502）
-                self.materializer.ensure_cached(origin_desc, rel).await
-            }
-        }
+    pub fn new(service: std::sync::Arc<ArchiveService>) -> Self {
+        Self { service }
     }
 }
 
 /// ArchiveAccessError → MediaSourceError：`EntryNotFound` 保留 NotFound 语义
-/// （media:// 404 合同，任务 2 特征测试锁定）；其余类型化进 `Archive` 变体
+/// （media:// 404 合同，任务 2 特征测试锁定）；`Network`/`Timeout` 保真同名变体
+/// （502/超时分类，物化错误穿透回归锁定）；其余类型化进 `Archive` 变体
 /// （`#[from]`），由协议层按变体分类。
 fn map_backend_error(e: ArchiveAccessError) -> MediaSourceError {
     match e {
         ArchiveAccessError::EntryNotFound(name) => MediaSourceError::NotFound(name),
+        ArchiveAccessError::Network(s) => MediaSourceError::Network(s),
+        ArchiveAccessError::Timeout(s) => MediaSourceError::Timeout(s),
         other => MediaSourceError::Archive(other),
-    }
-}
-
-/// 归档文件前置检查：整包 `tokio::fs::read` 路径已删（任务 4 路径化），此处仅
-/// metadata 一次 stat，保留 M3 的 NotFound / PermissionDenied 错误面。
-async fn ensure_archive_file(resolved: &Path) -> Result<()> {
-    if let Err(e) = tokio::fs::metadata(resolved).await {
-        return Err(match e.kind() {
-            std::io::ErrorKind::NotFound => {
-                MediaSourceError::NotFound(resolved.display().to_string())
-            }
-            std::io::ErrorKind::PermissionDenied => {
-                MediaSourceError::PermissionDenied(resolved.display().to_string())
-            }
-            _ => MediaSourceError::Io(e),
-        });
-    }
-    Ok(())
-}
-
-fn read_entry_bytes(path: &Path, entry_name: &str, format: ArchiveFormat) -> Result<Vec<u8>> {
-    match format {
-        ArchiveFormat::Cbz | ArchiveFormat::Zip => {
-            let mut budget = DecodeBudget::unbounded();
-            ZipBackend
-                .read_entry(
-                    &ArchiveInput::Path(path.to_path_buf()),
-                    entry_name,
-                    None,
-                    &mut budget,
-                )
-                .map_err(map_backend_error)
-        }
-        ArchiveFormat::Cbr | ArchiveFormat::Rar | ArchiveFormat::SevenZ => Err(
-            MediaSourceError::NotImplemented(format!(
-                "{:?} 实装见 commands::archive::read_archive_entry",
-                format
-            )),
-        ),
-    }
-}
-
-/// 列出压缩包内条目(过滤图片)——ZIP/CBZ 委托 ZipBackend（central directory
-/// 路径化列表；密码判定不在 backend 层，见 zip_backend 文档）
-fn list_archive_entries(path: &Path, format: ArchiveFormat, prefix: &str) -> Result<Vec<MediaEntry>> {
-    match format {
-        ArchiveFormat::Cbz | ArchiveFormat::Zip => {
-            let catalog = ZipBackend
-                .catalog(&ArchiveInput::Path(path.to_path_buf()), prefix, None)
-                .map_err(map_backend_error)?;
-            Ok(catalog.entries)
-        }
-        _ => Err(MediaSourceError::NotImplemented(
-            "非 ZIP/CBZ 列表暂不直接支持".into(),
-        )),
     }
 }
 
@@ -147,25 +62,7 @@ impl MediaSource for ArchiveMediaSource {
         descriptor: &SourceDescriptor,
         _path: &str,
     ) -> Result<Vec<MediaEntry>> {
-        let (archive_path, entry_prefix, format, origin, archive_rel_path) = match descriptor {
-            SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } => (
-                archive_path.clone(),
-                entry_prefix.clone(),
-                *format,
-                origin.clone(),
-                archive_rel_path.clone(),
-            ),
-            _ => {
-                return Err(MediaSourceError::NotImplemented(
-                    "ArchiveMediaSource::list_directory 仅处理 Archive descriptor".into(),
-                ));
-            }
-        };
-        let resolved = self
-            .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
-            .await?;
-        ensure_archive_file(&resolved).await?;
-        list_archive_entries(&resolved, format, &entry_prefix)
+        self.service.list(descriptor).await.map_err(map_backend_error)
     }
 
     async fn read_file(
@@ -174,30 +71,11 @@ impl MediaSource for ArchiveMediaSource {
         path: &str,
         range: Option<ByteRange>,
     ) -> Result<Vec<u8>> {
-        let (archive_path, entry_prefix, format, origin, archive_rel_path) = match descriptor {
-            SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } => (
-                archive_path.clone(),
-                entry_prefix.clone(),
-                *format,
-                origin.clone(),
-                archive_rel_path.clone(),
-            ),
-            _ => {
-                return Err(MediaSourceError::NotImplemented(
-                    "ArchiveMediaSource::read_file 仅处理 Archive descriptor".into(),
-                ));
-            }
-        };
-        let resolved = self
-            .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
-            .await?;
-        ensure_archive_file(&resolved).await?;
-        let entry_name = if entry_prefix.is_empty() {
-            path.to_string()
-        } else {
-            format!("{}/{}", entry_prefix.trim_end_matches('/'), path)
-        };
-        let full = read_entry_bytes(&resolved, &entry_name, format)?;
+        let full = self
+            .service
+            .read(descriptor, path)
+            .await
+            .map_err(map_backend_error)?;
         match range {
             None => Ok(full),
             Some(r) => {
@@ -223,52 +101,22 @@ impl MediaSource for ArchiveMediaSource {
         Ok(entries.len() as u64)
     }
 
-    /// entry stat（spec rev3 §3.1）：返回 ZIP 内条目**解压后** size——语义是
-    /// 「压缩包内这张图」，不是 ZIP 容器（容器 stat 由 M3 materializer 对 origin 调）。
+    /// entry stat（spec rev3 §3.1）：返回压缩包内条目**解压后** size——语义是
+    /// 「压缩包内这张图」，不是容器（容器 stat 由 M3 materializer 对 origin 调）。
     async fn stat(
         &self,
         descriptor: &SourceDescriptor,
         path: &str,
     ) -> Result<crate::source::trait_def::FileStat> {
-        let (archive_path, entry_prefix, format, origin, archive_rel_path) = match descriptor {
-            SourceDescriptor::Archive { archive_path, entry_prefix, format, origin, archive_rel_path, .. } => (
-                archive_path.clone(),
-                entry_prefix.clone(),
-                *format,
-                origin.clone(),
-                archive_rel_path.clone(),
-            ),
-            _ => {
-                return Err(MediaSourceError::NotImplemented(
-                    "ArchiveMediaSource::stat 仅处理 Archive descriptor".into(),
-                ));
-            }
-        };
-        let resolved = self
-            .resolve_archive_path(&archive_path, &origin, &archive_rel_path)
-            .await?;
-        ensure_archive_file(&resolved).await?;
-        let entry_name = if entry_prefix.is_empty() {
-            path.to_string()
-        } else {
-            format!("{}/{}", entry_prefix.trim_end_matches('/'), path)
-        };
-        match format {
-            ArchiveFormat::Cbz | ArchiveFormat::Zip => {
-                // central directory 声明的解压后 size（明文元数据，无密码参与）
-                let size = ZipBackend
-                    .stat_entry(&ArchiveInput::Path(resolved), &entry_name, None)
-                    .map_err(map_backend_error)?;
-                Ok(crate::source::trait_def::FileStat {
-                    size,
-                    modified_at: None, // DOS 时间精度低且无消费方（spec rev3）
-                })
-            }
-            _ => Err(MediaSourceError::NotImplemented(format!(
-                "{:?} stat 未实装",
-                format
-            ))),
-        }
+        let size = self
+            .service
+            .stat_entry_size(descriptor, path)
+            .await
+            .map_err(map_backend_error)?;
+        Ok(crate::source::trait_def::FileStat {
+            size,
+            modified_at: None, // DOS 时间精度低且无消费方（spec rev3）
+        })
     }
 
     async fn test(&self, descriptor: &SourceDescriptor) -> Result<()> {
@@ -338,7 +186,16 @@ mod tests {
     }
 
     fn never_source() -> ArchiveMediaSource {
-        ArchiveMediaSource::new(std::sync::Arc::new(NeverMaterialize))
+        test_source(std::sync::Arc::new(NeverMaterialize))
+    }
+
+    /// 测试构造：mock 物化器 + 独立 coordinator 包成真 service——薄适配器测试
+    /// 与生产同一条转发路径（backend 用生产 ZipBackend/RarBackend/SevenZBackend）
+    fn test_source(materializer: std::sync::Arc<dyn Materialize>) -> ArchiveMediaSource {
+        ArchiveMediaSource::new(std::sync::Arc::new(ArchiveService::new(
+            materializer,
+            crate::source::archive::cache_coordinator::ArchiveCacheCoordinator::new_shared(),
+        )))
     }
 
     /// 本地直开 descriptor 构造 helper（origin None / 空 entry_prefix）
@@ -540,7 +397,7 @@ mod tests {
             origin_entry_path: Some("a.cbz".into()),
             archive_rel_path: Some("a.cbz".into()),
         };
-        let src = ArchiveMediaSource::new(mock.clone());
+        let src = test_source(mock.clone());
         let entries = src.list_directory(&descriptor, "").await.unwrap();
         // 物化路径被使用：ZIP 内 3 条目过滤 README.txt 后剩 2 图
         assert_eq!(entries.len(), 2);
@@ -617,7 +474,7 @@ mod tests {
         ] {
             // 期望变体先于 move 捕获（MediaSourceError 未 derive Clone）
             let expect_not_found = matches!(err, MediaSourceError::NotFound(_));
-            let src = ArchiveMediaSource::new(std::sync::Arc::new(FailingMaterialize { err }));
+            let src = test_source(std::sync::Arc::new(FailingMaterialize { err }));
             let res = src.list_directory(&remote_descriptor(), "").await;
             let type_preserved = match res {
                 Err(MediaSourceError::NotFound(_)) if expect_not_found => true,

@@ -98,6 +98,9 @@ pub fn run() {
             app.manage(factory.clone());
             // cache 管理命令直接触达物化器（factory 与 manage 共享同一 Arc）
             app.manage(factory.archive_materializer());
+            // 任务 7：五格式共享 ArchiveService——session/prepare IPC（任务 11）与
+            // commit-gated prefetch（任务 10）从这里取同一实例，不得另建
+            app.manage(factory.archive_service());
 
             // M3 任务 8：三级预载调度器（spec §7）——持 factory 同一物化器 Arc；
             // 开关读 settings（默认 true，仅 "false" 关闭，脏值 fail-open）
