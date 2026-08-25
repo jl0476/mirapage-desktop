@@ -522,6 +522,7 @@ fn finish(
 }
 
 fn error_to_status(e: crate::source::trait_def::MediaSourceError) -> tauri::http::Response<Vec<u8>> {
+    use crate::source::archive::backend::ArchiveAccessError;
     use crate::source::trait_def::MediaSourceError;
     use tauri::http::StatusCode;
     match e {
@@ -534,6 +535,25 @@ fn error_to_status(e: crate::source::trait_def::MediaSourceError) -> tauri::http
         }
         MediaSourceError::NotImplemented(_) => {
             err_response(StatusCode::NOT_IMPLEMENTED, "not implemented")
+        }
+        // Archive 专项映射（任务 14）：响应体是固定短语，不含第三方错误文本与密码信息。
+        // 注意：容器本身不可读（如权限拒绝）在 service 层归 Io（ArchiveAccessError 无
+        // PermissionDenied 变体，任务 7 收口），落入末尾 Archive(_) => 422。
+        MediaSourceError::Archive(ArchiveAccessError::PasswordRequired)
+        | MediaSourceError::Archive(ArchiveAccessError::WrongPassword) => {
+            err_response(StatusCode::LOCKED, "archive locked")
+        }
+        MediaSourceError::Archive(ArchiveAccessError::EntryNotFound(_)) => {
+            err_response(StatusCode::NOT_FOUND, "not found")
+        }
+        MediaSourceError::Archive(ArchiveAccessError::ResourceLimitExceeded(_)) => {
+            err_response(StatusCode::PAYLOAD_TOO_LARGE, "archive resource limit")
+        }
+        MediaSourceError::Archive(ArchiveAccessError::Network(_)) => {
+            err_response(StatusCode::BAD_GATEWAY, "bad gateway")
+        }
+        MediaSourceError::Archive(_) => {
+            err_response(StatusCode::UNPROCESSABLE_ENTITY, "archive error")
         }
         _ => err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
     }
@@ -685,5 +705,72 @@ mod tests {
         let (descriptor, file) = local_descriptor_for_abs_path("/x.jpg").unwrap();
         assert!(matches!(descriptor, source::descriptor::SourceDescriptor::Local { root_path } if root_path == "/"));
         assert_eq!(file, "x.jpg");
+    }
+
+    // =========================================================================
+    // media:// Archive 错误映射（任务 14）：状态码正确 + 响应体固定短语无细节泄漏
+    // =========================================================================
+
+    #[test]
+    fn archive_password_error_maps_to_locked_response_without_detail() {
+        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
+            crate::source::archive::backend::ArchiveAccessError::PasswordRequired,
+        ));
+        assert_eq!(response.status(), tauri::http::StatusCode::LOCKED);
+        assert_eq!(response.body().as_slice(), b"archive locked");
+
+        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
+            crate::source::archive::backend::ArchiveAccessError::WrongPassword,
+        ));
+        assert_eq!(response.status(), tauri::http::StatusCode::LOCKED);
+        assert_eq!(response.body().as_slice(), b"archive locked");
+    }
+
+    #[test]
+    fn archive_resource_limit_maps_to_payload_too_large() {
+        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
+            crate::source::archive::backend::ArchiveAccessError::ResourceLimitExceeded(
+                "entry > 512 MiB".into(),
+            ),
+        ));
+        assert_eq!(response.status(), tauri::http::StatusCode::PAYLOAD_TOO_LARGE);
+        // 携带细节的源错误只决定状态码，不进响应体
+        assert!(!response.body().as_slice().windows(11).any(|w| w == b"512 MiB"));
+        assert_eq!(response.body().as_slice(), b"archive resource limit");
+    }
+
+    #[test]
+    fn archive_entry_not_found_and_network_map_to_404_and_502() {
+        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
+            crate::source::archive::backend::ArchiveAccessError::EntryNotFound("page.png".into()),
+        ));
+        assert_eq!(response.status(), tauri::http::StatusCode::NOT_FOUND);
+        assert_eq!(response.body().as_slice(), b"not found");
+
+        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
+            crate::source::archive::backend::ArchiveAccessError::Network("tcp reset".into()),
+        ));
+        assert_eq!(response.status(), tauri::http::StatusCode::BAD_GATEWAY);
+        assert_eq!(response.body().as_slice(), b"bad gateway");
+    }
+
+    #[test]
+    fn archive_remaining_kinds_map_to_unprocessable_entity() {
+        // 容器不可读在 service 层归 Io（任务 7 收口：无 PermissionDenied 变体）→ 422
+        for err in [
+            crate::source::archive::backend::ArchiveAccessError::Io("permission denied (demo)".into()),
+            crate::source::archive::backend::ArchiveAccessError::CorruptArchive(
+                "bad start header 0x00000000".into(),
+            ),
+            crate::source::archive::backend::ArchiveAccessError::MultiVolumeUnsupported(
+                "part1 of 3".into(),
+            ),
+            crate::source::archive::backend::ArchiveAccessError::UnsupportedCodec("BCJ2".into()),
+        ] {
+            let response =
+                error_to_status(crate::source::trait_def::MediaSourceError::Archive(err));
+            assert_eq!(response.status(), tauri::http::StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(response.body().as_slice(), b"archive error");
+        }
     }
 }

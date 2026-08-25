@@ -2069,6 +2069,24 @@ mod tests {
         );
     }
 
+    // 密码泄漏守卫（任务 14 步骤 1）：错误密码尝试后，密码不得出现在
+    // descriptor 序列化、错误 Debug 或错误 Display 任何一面。
+    #[tokio::test]
+    async fn password_never_appears_in_descriptor_error_or_debug_output() {
+        let harness = ServiceHarness::new();
+        let descriptor = harness.local_descriptor("encrypted.cbr", ArchiveFormat::Cbr);
+        harness.rar.require_password("page.png", b"secret");
+        let err = harness
+            .service
+            .unlock(&descriptor, Zeroizing::new(b"DO-NOT-LEAK".to_vec()))
+            .await
+            .unwrap_err();
+        assert_eq!(err, ArchiveAccessError::WrongPassword);
+        assert!(!serde_json::to_string(&descriptor).unwrap().contains("DO-NOT-LEAK"));
+        assert!(!format!("{err:?}").contains("DO-NOT-LEAK"));
+        assert!(!err.to_string().contains("DO-NOT-LEAK"));
+    }
+
     #[tokio::test]
     async fn weighted_memory_budget_serializes_large_decodes() {
         let harness = ServiceHarness::with_memory_budget_mib(8);
