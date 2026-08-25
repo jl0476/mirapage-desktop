@@ -7,4 +7,6 @@ pub mod dao;
 pub mod materializer;
 pub mod password;
 pub mod prefetch;
+pub mod rar_backend;
+pub mod rar_callback;
 pub mod zip_backend;
