@@ -694,4 +694,74 @@ mod tests {
         assert!(matches!(harness.service.begin_session(&"a".repeat(65), 1_000),
                          Err(ArchiveAccessError::InvalidRequest(_))));
     }
+
+    // =========================================================================
+    // 审查回归修复用例（任务 11 复审）
+    // =========================================================================
+
+    /// 回归（关键）：同步 `#[tauri::command]` 在 wry 主线程内联执行、无 ambient
+    /// tokio 上下文——旧实现 `Handle::try_current()` 在该形状下恒 Err，换代取消被
+    /// 静默跳过（#[tokio::test] 的 ambient runtime 是测试盲区）。用纯 std 线程模拟
+    /// 生产上下文：rollover 取消经 `tauri::async_runtime`（懒初始化全局 runtime）
+    /// 仍必须交付——旧请求的物化订阅者收到 Cancelled。
+    #[tokio::test]
+    async fn rollover_cancel_is_delivered_without_ambient_runtime() {
+        let harness = CommandHarness::blocking_remote_rar();
+        let old_session = "550e8400-e29b-41d4-a716-446655440060";
+        harness.service.begin_session(old_session, 1_000).unwrap();
+        let old = ArchiveRequestId::new(old_session, 1);
+        let opening = harness.spawn_prepare(old.clone());
+        harness.wait_download_started().await;
+        // 纯 std 线程：无 ambient tokio runtime（生产 wry 主线程形状）内联换代
+        let service = harness.service.clone();
+        std::thread::spawn(move || {
+            service
+                .begin_session("550e8400-e29b-41d4-a716-446655440061", 2_000)
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(opening.await.unwrap().unwrap_err(), ArchiveAccessError::Cancelled);
+        assert!(!harness.service.has_session(old.session_id()));
+        assert_eq!(
+            harness.service.commit_request(&old).await.unwrap_err(),
+            ArchiveAccessError::Cancelled
+        );
+    }
+
+    /// 回归（重要）：迟到 cancel(N) 且 N < active M 时不得清 M 槽——take-then-filter
+    /// 会无条件清槽，使 M 的 prepare 成功后 commit 落入 Err(Cancelled)、预载意图
+    /// 丢失；正确语义是 M 保持 Prepared 并正常 commit。
+    #[tokio::test]
+    async fn late_cancel_below_active_sequence_keeps_slot_and_commit_succeeds() {
+        let harness = CommandHarness::streaming_remote_zip();
+        let session_id = "550e8400-e29b-41d4-a716-446655440050";
+        harness.service.begin_session(session_id, 1_000).unwrap();
+        let active = ArchiveRequestId::new(session_id, 9);
+        let ready = prepare_archive_inner(
+            &harness.service, harness.descriptor.clone(), active.clone()
+        ).await.unwrap();
+        let progress_key = match ready {
+            ArchivePrepareResult::Ready { access_mode: ArchiveAccessMode::Streaming, progress_key: Some(key) } => key,
+            other => panic!("unexpected result: {other:?}"),
+        };
+        // 迟到 cancel：sequence 5 < active 9——不得移除 active 槽、不得取消其订阅者
+        cancel_archive_prepare_inner(&harness.service, ArchiveRequestId::new(session_id, 5)).await;
+        assert!(matches!(
+            harness.service.request_state(&active),
+            Some(RequestState::Prepared { .. })
+        ));
+        // M 之后正常 commit：成功且预载意图恰好启动一次
+        assert_eq!(harness.prefetch_start_count(), 0);
+        commit_archive_open_inner(&harness.service, active).await.unwrap();
+        assert_eq!(harness.prefetch_start_count(), 1);
+        assert_eq!(harness.last_background_progress_key(), Some(progress_key));
+        // N=5 已在水位内：其后的 register 仍按 cancel-before-register 拒绝
+        assert_eq!(
+            prepare_archive_inner(
+                &harness.service, harness.descriptor.clone(), ArchiveRequestId::new(session_id, 5)
+            ).await.unwrap_err(),
+            ArchiveAccessError::Cancelled
+        );
+    }
 }

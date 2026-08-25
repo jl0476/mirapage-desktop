@@ -1104,15 +1104,15 @@ impl ArchiveService {
         };
         // 锁外取消旧 session 的在途请求：物化订阅者即刻收到 Cancelled（最后一个
         // 交互订阅者且无后台时物理下载终止）。begin_session 保持同步（IPC 合同）——
-        // 取消经当前 runtime spawn 交付；无 runtime 上下文（同步单测，无可能在途）
-        // 时跳过。
+        // 但同步 #[tauri::command] 在 wry 主线程内联执行、无 ambient tokio 上下文，
+        // `Handle::try_current()` 恒 Err（取消被静默跳过的测试盲区：#[tokio::test]
+        // 恰好提供 ambient runtime）。经 `tauri::async_runtime`（async 命令共用的
+        // 全局 runtime，任意线程可调、懒初始化）交付取消。
         if let Some(old_id) = rollover_active {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let mat = self.materializer.clone();
-                handle.spawn(async move {
-                    mat.cancel_interactive(&old_id).await;
-                });
-            }
+            let mat = self.materializer.clone();
+            let _ = tauri::async_runtime::spawn(async move {
+                mat.cancel_interactive(&old_id).await;
+            });
         }
         Ok(boot_ms)
     }
@@ -1286,11 +1286,22 @@ impl ArchiveService {
                 return;
             }
             current.cancelled_through = current.cancelled_through.max(id.sequence);
-            current
+            // 条件清槽（任务 7 原语义，审查回归修复）：只有 active.sequence ≤ 水位
+            // （本次或历史 cancel 确实覆盖它）才移除。迟到 cancel 的 N < active M
+            // 时保留 M 槽——M 的 prepare 完成与后续 commit 不受影响；take-then-filter
+            // 会无条件清槽导致 M 落入 Err(Cancelled)、预载意图丢失。
+            if current
                 .active
-                .take()
-                .filter(|(sequence, _)| *sequence <= current.cancelled_through)
-                .map(|(sequence, _)| ArchiveRequestId::new(&current.session_id, sequence))
+                .as_ref()
+                .is_some_and(|(sequence, _)| *sequence <= current.cancelled_through)
+            {
+                current
+                    .active
+                    .take()
+                    .map(|(sequence, _)| ArchiveRequestId::new(&current.session_id, sequence))
+            } else {
+                None
+            }
         };
         self.materializer.cancel_interactive(id).await;
         if let Some(displaced) = watermarked_active {
