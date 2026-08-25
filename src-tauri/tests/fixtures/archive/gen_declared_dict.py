@@ -217,7 +217,7 @@ DICT_OVER = 0xFFFFFFFF          # LZMA u32 上限：4 GiB - 1
 LZMA2_DICT_BYTE_OVER = 0x28     # 40 → (2|0)<<(40/2+11) = 4 GiB
 BUDGET_EACH = 0x20000000        # 512 MiB / folder × 3 = 1.5 GiB
 LZMA_DICT_CONTROL = 0x10000     # 64 KiB（对照）
-LZMA2_DICT_BYTE_CONTROL = 0x12  # 18 → (2)<<(18/2+11) = 1 MiB
+LZMA2_DICT_BYTE_CONTROL = 0x12  # 18 → (2|(0))<<(18/2+11) = 2 MiB（1 MiB 是 props 0x10）
 NUM_FILES_OVER = 10_000_000
 KDF_CYCLES_OVER = 24            # numCyclesPower（真实归档典型 19）
 
@@ -305,7 +305,7 @@ def build_specs() -> dict[str, bytes]:
         p64,
         plain_header([64], [[(M_LZMA, lzma_props(LZMA_DICT_CONTROL))]], [[128]], ["a.txt"]),
     )
-    # 8. header-delta-lzma2：[LZMA2(1 MiB), Delta(dist=1)] 链对照
+    # 8. header-delta-lzma2：[LZMA2(2 MiB), Delta(dist=1)] 链对照
     #    2 coder = 2 out stream → kCodersUnpackSize 需 2 个值
     specs["header-delta-lzma2.7z"] = build_7z(
         p64,
@@ -316,7 +316,7 @@ def build_specs() -> dict[str, bytes]:
             ["a.txt"],
         ),
     )
-    # 9. header-bcj-x86-lzma2：[LZMA2(1 MiB), BCJ-x86] 链对照
+    # 9. header-bcj-x86-lzma2：[LZMA2(2 MiB), BCJ-x86] 链对照
     specs["header-bcj-x86-lzma2.7z"] = build_7z(
         p64,
         plain_header(
@@ -528,8 +528,8 @@ CONTRACTS: dict[str, str] = {
     "header-numfiles-over.7z": "plain header；kFilesInfo numFiles=10,000,000 且无 streams，预检须在条目分配前按数量拒绝",
     "header-copy.7z": "plain header；COPY coder（无 props）对照，预检应放行",
     "header-lzma.7z": "plain header；LZMA dict=64 KiB 对照，预检应放行",
-    "header-delta-lzma2.7z": "plain header；[LZMA2(1 MiB), Delta(dist=1)] 链对照，预检应放行",
-    "header-bcj-x86-lzma2.7z": "plain header；[LZMA2(1 MiB), BCJ-x86] 链对照，预检应放行",
+    "header-delta-lzma2.7z": "plain header；[LZMA2(2 MiB), Delta(dist=1)] 链对照，预检应放行",
+    "header-bcj-x86-lzma2.7z": "plain header；[LZMA2(2 MiB), BCJ-x86] 链对照，预检应放行",
     "header-kdf-over.7z": "encoded header；AES256SHA256 numCyclesPower=24（真实归档典型 19），header 解密预算拒绝载体",
     "content-kdf-over.7z": "plain header 主 streams；AES256SHA256 numCyclesPower=24，内容解密预算拒绝载体",
 }

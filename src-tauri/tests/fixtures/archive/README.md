@@ -16,8 +16,8 @@
 | `7z i`（首行版本） | 7-Zip 24.09 (x64) : Copyright (c) 1999-2024 Igor Pavlov : 2024-11-29 |
 | `rar.exe`（绝对版本输出） | RAR 7.11 x64   Copyright (c) 1993-2025 Alexander Roshal   20 Mar 2025 |
 | RAR4 回退工具（见「工具链偏离」①） | RAR 6.24 x64   Copyright (c) 1993-2023 Alexander Roshal   3 Oct 2023 |
-| generate.py SHA-256 | `ecf9998a57ae484786e049251f90fd4d86ee04a9f3cd8f86ecdfd85c912ff682` |
-| gen_declared_dict.py SHA-256 | `fc278006e26dbf8b33e1c99d70ecb67a4ab34fdc27a73a7451f776ca971a4f89` |
+| generate.py SHA-256 | `968dee5b3bd1517534d806c2a29c86b16fbb119bb5d5aca94ca3fd9ce4af2ad8` |
+| gen_declared_dict.py SHA-256 | `620cc8f72e2a70e8900fe3f17db0d80d91bb597d30a641345edb30934228edac` |
 | requirements.in SHA-256 | `b03a883ff2d38595950cce563d3e572aadfb82c892cc8d0d9af506d4f84f12b8` |
 
 ## 二十四 fixture 清单（SHA-256 为真值）
@@ -48,8 +48,8 @@ UTF-8 编码派生密钥（与 AE-1/AE-2 的 pyzipper 默认及上层应用 `Str
 | 18 | header-numfiles-over.7z | 构造性 7z | 无 | kFilesInfo numFiles=10,000,000 | gen_declared_dict.py |
 | 19 | header-copy.7z | 构造性 7z | 无 | COPY coder（对照，预检应放行） | gen_declared_dict.py |
 | 20 | header-lzma.7z | 构造性 7z | 无 | LZMA dict=64 KiB（对照） | gen_declared_dict.py |
-| 21 | header-delta-lzma2.7z | 构造性 7z | 无 | [LZMA2(1 MiB), Delta(dist=1)] 链（对照） | gen_declared_dict.py |
-| 22 | header-bcj-x86-lzma2.7z | 构造性 7z | 无 | [LZMA2(1 MiB), BCJ-x86] 链（对照） | gen_declared_dict.py |
+| 21 | header-delta-lzma2.7z | 构造性 7z | 无 | [LZMA2(2 MiB), Delta(dist=1)] 链（对照） | gen_declared_dict.py |
+| 22 | header-bcj-x86-lzma2.7z | 构造性 7z | 无 | [LZMA2(2 MiB), BCJ-x86] 链（对照） | gen_declared_dict.py |
 | 23 | header-kdf-over.7z | 构造性 7z | 无 | encoded header AES256SHA256 numCyclesPower=24 | gen_declared_dict.py |
 | 24 | content-kdf-over.7z | 构造性 7z | 无 | 主 streams AES256SHA256 numCyclesPower=24 | gen_declared_dict.py |
 
@@ -189,8 +189,8 @@ total_declared_dict），任何漂移非零退出。
 | header-numfiles-over.7z | plain header；kFilesInfo numFiles=10,000,000，无任何 streams | 拒绝（条目分配前按数量拒绝） |
 | header-copy.7z | plain header；COPY coder（id 00，无 props） | 放行（对照） |
 | header-lzma.7z | plain header；LZMA props `5d 00 00 01 00`（dict=64 KiB） | 放行（对照） |
-| header-delta-lzma2.7z | plain header；链 [LZMA2 props `12`（1 MiB）→ Delta props `01`]（2 out stream，kCodersUnpackSize ×2） | 放行（对照） |
-| header-bcj-x86-lzma2.7z | plain header；链 [LZMA2 props `12`（1 MiB）→ BCJ-x86（id 03030103，无 props）] | 放行（对照） |
+| header-delta-lzma2.7z | plain header；链 [LZMA2 props `12`（2 MiB）→ Delta props `01`]（2 out stream，kCodersUnpackSize ×2） | 放行（对照） |
+| header-bcj-x86-lzma2.7z | plain header；链 [LZMA2 props `12`（2 MiB）→ BCJ-x86（id 03030103，无 props）] | 放行（对照） |
 | header-kdf-over.7z | encoded header；AES256SHA256（id 06f10701）props 26 字节：cycles=24 + salt 8B + iv 16B（打包位格式 b0/b1，b0=0x58 b1=0x80） | 拒绝（header 解密 KDF 预算） |
 | content-kdf-over.7z | plain header 主 streams；AES256SHA256 同上 numCyclesPower=24 | 拒绝（内容解密 KDF 预算） |
 

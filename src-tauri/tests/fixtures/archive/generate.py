@@ -560,21 +560,34 @@ def verify_rar_product(
             # 完整校验：part1 起全卷解压
             pass
         else:
-            # 降级：仅校验 part1 RAR5 签名 + 主头 MHD_VOLUME 分卷标志
-            head = data[:32]
+            # 降级：仅校验 part1 RAR5 签名 + 主头 archive flags 的 MHFL_VOLUME(bit0)。
+            # 注意 bit 语义：header flags vint 的 bit0=HFL_EXTRA / bit1=HFL_DATA，
+            # 分卷标志在其后的 archive flags vint（需按 extra-size/data-size 跳过后读）。
+            head = data[:64]
             if not head.startswith(RAR5_SIG):
                 fail(f"{spec['name']}: 分卷降级校验需 RAR5 签名")
             pos = 8 + 4  # 签名(8) + header CRC(4)
             hsize, pos = rar5_vint(head, pos)
             htype, pos = rar5_vint(head, pos)
-            flags, pos = rar5_vint(head, pos)
+            hflags, pos = rar5_vint(head, pos)
             if htype != 1:
                 fail(f"{spec['name']}: 主头类型应为 1，实际 {htype}")
-            if not flags & 0x0001:
-                fail(f"{spec['name']}: 主头缺少 MHD_VOLUME 分卷标志")
+            if hflags & 0x0001:  # HFL_EXTRA：跳过 extra area size
+                _, pos = rar5_vint(head, pos)
+            if hflags & 0x0002:  # HFL_DATA：跳过 data size
+                _, pos = rar5_vint(head, pos)
+            archive_flags, pos = rar5_vint(head, pos)
+            if not archive_flags & 0x0001:  # MHFL_VOLUME
+                fail(
+                    f"{spec['name']}: 主头 archive flags 缺少 MHFL_VOLUME 分卷标志"
+                    f"（archive_flags={archive_flags:#x}）"
+                )
             result["degraded"] = True
             result["volumes_present"] = []
-            print(f"  [降级] {spec['name']}: 附属卷已删除，仅校验 part1 header 分卷标志")
+            print(
+                f"  [降级] {spec['name']}: 附属卷已删除，"
+                f"仅校验 part1 archive flags MHFL_VOLUME（={archive_flags:#x}）"
+            )
             return result
 
     # 条目清单（multipart：lb 只列出 part1 头内条目，padding.bin 头在后续卷）
