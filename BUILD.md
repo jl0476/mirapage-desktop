@@ -35,6 +35,11 @@ winget install --id Microsoft.VisualStudio.2022.BuildTools `
   --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
 ```
 
+> **UnRAR（RAR/CBR 支持）对 C++ 工具链是硬要求**：`unrar_sys` crate 内嵌 UnRAR C++ 内核
+> 源码，由 `cc` crate 调 MSVC `cl.exe` 编译——没有 VS Build Tools + C++ 工作负载，
+> `cargo check` 即失败。UnRAR 许可（不得用于开发 RAR 压缩器等三条款）见仓库内
+> [`THIRD_PARTY_LICENSES/UNRAR.txt`](./THIRD_PARTY_LICENSES/UNRAR.txt)。
+
 装完**重开终端**，验证：
 
 ```powershell
@@ -196,10 +201,12 @@ cd src-tauri && cargo test     # 需完整 Tauri 环境（见 §1）
 cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\cargo-test.bat"
 ```
 
-**已知失败的 1 个测试**（当前实测，与本模块无关，先记着后续修）：
-- `source::webdav_impl::tests::parse_propfind_extracts_collection_and_files`（预存在）
+**历史已知失败（已修复）**：`source::webdav_impl::tests::parse_propfind_extracts_collection_and_files`
+曾在本地红（3.0.14 修复 `local_name()` 命名空间剥离），2026-08-25 五格式模块全量实测已绿
+（lib 578 passed / 0 failed）。
 
-CI workflow 只跑 `cargo check`，不会因此失败；本地完整 `cargo test` 仍会红 1 条预存在用例。
+CI workflow 跑 `cargo check` + `cargo test`（3.0.14 起）+ 归档 MSRV smoke（§4.4）；
+本地如复现用例失败，先对照 CI 结果再排查。
 
 ### 4.3 前端
 
@@ -209,6 +216,24 @@ npm run type-check             # vue-tsc
 npm run build                  # vue-tsc + Vite 生产构建
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
+
+### 4.4 归档依赖 MSRV 1.75 验证（smoke crate）
+
+主仓库**全树** `cargo +1.75.0 check` 被预存在依赖阻断：`smb 0.11.2 → aead-0.6.0-rc.2`
+的 manifest 是 edition2024，cargo 1.75 无法 parse（任务 1 在依赖改动前后双向取证，
+与归档依赖无关）。因此「新增归档依赖（zip/unrar_sys/sevenz-rust/lzma-rust/aes/cbc/
+zeroize）保持 Rust 1.75 可编译」用隔离 smoke crate 做正向证明：
+
+```bash
+cargo +1.75.0 test --manifest-path src-tauri/archive-msrv-smoke/Cargo.toml
+```
+
+- crate 内实际编译调用 zip / unrar / sevenz / password（zeroize）关键 API；
+  测试断言 `Cargo.lock` 钉版（含 zeroize_derive 1.4.2 / indexmap 2.11.4 / time 0.3.41
+  等 edition2024 风险传递依赖）。
+- **勿在该目录裸跑 `cargo update`**——会顶破钉版，1.75 立即失败（测试会指明漂移的包名）。
+- CI（`verify.yml`）在 windows job 末尾运行同一命令；`rar_callback` 宽字符
+  `cfg(unix)` 分支另由 ubuntu-latest `cargo check` job 守卫（macOS 随 Phase 9 补）。
 
 ---
 

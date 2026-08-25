@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | 骨架 + algorithm 纯函数 | ✅ |
 | 2 | OpenSeadragon 阅读器 + 文件浏览器 | ✅ |
-| 3 | 压缩包（ZIP ✅ / RAR·7z 占位） | 🟡 |
+| 3 | 压缩包五格式（ZIP/CBZ、RAR/CBR 4·5、7z，含密码） | ✅ 见下方「压缩包支持与限制」 |
 | 4 | 书签 / 喜欢 / 历史 / 书架 / 标签 / 搜索 | ✅ |
 | 5 | 跨卷连续阅读 + 幻灯片（3.0.13 打磨：幻灯片跨卷续播 / 自动跳过已读卷 / 排序与父目录一致 / 跨卷记阅览记录） | ✅ |
 | 6 | i18n（中 / 英） | ✅ |
@@ -45,6 +45,19 @@
 P0：文件浏览器、阅读器、压缩包、书签、喜欢、阅读记录、书架收藏、i18n
 P1：标签、搜索、跨卷连续阅读、幻灯片、瀑布流缩略图缓存与单图生成进度
 P2：SMB、WebDAV
+
+## 压缩包支持与限制（Phase 3 完成，v0.1.0 五格式 + 密码 + 远程流式）
+
+支持格式：**ZIP/CBZ**（含 ZipCrypto / AES AE-1 / AE-2 加密）、**RAR4/RAR5（CBR）**、**7z**（普通 / solid / AES-256 加密）。
+
+- **仅单卷**：multi-disk ZIP、分卷 RAR、分卷 7z 一律返回专用错误（`MultiVolumeUnsupported`），不尝试拼接。
+- **密码仅会话内存**：不写入 descriptor / DB / 日志 / 事件 / sidecar；关闭应用或清除密码缓存后需重新输入，已缓存的加密 catalog 在密码缓存清除后不再返回 ready。
+- **远程（SMB/WebDAV）ZIP/CBZ 流式优先**：首请求只发尾部 Range 读 central directory，不先整包下载；Range 失败自动降级为完整物化，后台物化完成后新请求不再发 Range。
+- **远程 RAR/CBR/7z 先完整物化**：下载到本地缓存后才可读（带进度与取消 UI），按 LRU 容量上限淘汰。
+- **兼容性退化声明**：
+  - 7z 的 **BCJ2**（x86 分支过滤器）不支持——预检阶段直接报 `UnsupportedCodec`，不静默解出损坏数据（其余 BCJ/BCJ-ARM 等 filter 已实现）。
+  - **损坏的 7z start header**（头部 CRC 或偏移校验失败）在预检阶段报 `CorruptArchive`，不做模糊恢复。
+- 资源上限：单条目 512 MiB、catalog 10 万条目、路径 4096 字节、7z dictionary 与进程级解压预算；越界返回 `ResourceLimitExceeded`（media:// 413），服务继续可用。
 
 ## 开发环境要求
 

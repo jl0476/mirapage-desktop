@@ -1591,8 +1591,8 @@ export function useReaderInput() {
 
 | 项 | 现状 | 说明 | 量级 |
 |---|---|---|---|
-| RAR / 7z 压缩包（Phase 3 收尾） | 🟡 ZIP 已通 | `unrar` / `sevenz-rust` 依赖已加未启，`ArchiveMediaSource` 实装两种格式；7z 末尾索引需整包读（先落 cacheDir 再读，见 §3 预研）——**该 cacheDir 物化管线已由 M3（module3.4.0 `source/archive/` Materializer）交付为通用基础设施，RAR/7z 实装时直接复用**；CBR 依赖 RAR | 中 |
-| 远程 Archive 物化（M3，远程 ZIP/CBZ） | ✅ `v0.1.0-module3.4.0-remote-archive` | SMB/WebDAV 上的 CBZ/ZIP 整包下载至本地 `app_cache_dir()/archive-cache` 后按本地 ZIP 读取；migration 016 `archive_cache` 索引表 + `source/archive/`（dao / materializer：sidecar 断点续传四关校验 + cancellation generation 四检查点 + clearing 闸门防复活 / prefetch 三级预载）+ `archive_impl.rs` 三方法接 Materialize trait（origin None 本地直开零回归）+ webdav `is_archive` 扩展名判定 + 前端 `openArchive` 泛化（虚拟路径/descriptor parent/进度文案）+ Settings remote section。**待实机手测**（本环境无 GUI/NAS，M1/M2 同款标注）：WebDAV/SMB 8 项（首开准备态/二次秒开/失效重下/断网+重启续传/LRU 淘汰+清空/远程 masonry 缩略图/SMB 复跑/预载开关）+ 本地 GUI（Local ZIP 零回归/Settings 用量上限清空）；自动化 Rust lib 439 + 12 integration + 前端 1144 全绿 0 回归 + type-check 0 err |
+| RAR / 7z 压缩包（Phase 3 收尾） | ✅ 五格式 + 密码 + 远程流式（module3.4.0 后续，main 直推未打 tag，任务 1-14 于 2026-08-25 交付） | ZIP/CBZ（ZipCrypto + AES AE-1/AE-2）、RAR4/RAR5（unrar_sys 低层 API + data callback 硬上限）、7z（sevenz-rust + header 预检）统一经 `source/archive/` Service（backend 三实现 + 会话密码库 + catalog/password LRU + cache coordinator + weighted 内存预算）；media:// 错误映射：密码类→423 LOCKED、EntryNotFound→404、ResourceLimit→413、Network→502、其余 Archive（含容器不可读归 Io，任务 7 收口）→422，响应体固定短语零细节。**限制（README「压缩包支持与限制」同款声明）**：仅单卷（分卷三格式专用错误）；密码仅会话内存（零持久化，不进 descriptor/DB/日志/事件/sidecar/错误文本）；远程 ZIP/CBZ 流式优先（尾部 Range 首开，失败降级完整物化）；远程 RAR/CBR/7z 先完整物化；**7z BCJ2 不支持（预检 UnsupportedCodec）**、**损坏 start header 预检 CorruptArchive 不模糊恢复**。MSRV 1.75 由 `src-tauri/archive-msrv-smoke/` 隔离 smoke crate + CI 守卫（全树 1.75 被预存在 smb→aead edition2024 阻断，任务 1 取证）；`rar_callback` 宽字符 `cfg(unix)` 分支由 CI ubuntu cargo check 守卫 | — |
+| 远程 Archive 物化（M3，远程 ZIP/CBZ） | ✅ `v0.1.0-module3.4.0-remote-archive`；远程 ZIP 流式首开由五格式模块增补 | SMB/WebDAV 上的 CBZ/ZIP 整包下载至本地 `app_cache_dir()/archive-cache` 后按本地 ZIP 读取；migration 016 `archive_cache` 索引表 + `source/archive/`（dao / materializer：sidecar 断点续传四关校验 + cancellation generation 四检查点 + clearing 闸门防复活 / prefetch 三级预载）+ `archive_impl.rs` 三方法接 Materialize trait（origin None 本地直开零回归）+ webdav `is_archive` 扩展名判定 + 前端 `openArchive` 泛化（虚拟路径/descriptor parent/进度文案）+ Settings remote section。五格式模块在此基础上：远程 ZIP/CBZ 升级为尾部 Range 流式首开（未先整包下载），Range 失败降级物化、后台完成后新请求不再发 Range；RAR/CBR/7z 走完整物化（进度 + 取消 UI）。**待实机手测**（本环境无 GUI/NAS）：WebDAV/SMB 8 项（首开准备态/二次秒开/失效重下/断网+重启续传/LRU 淘汰+清空/远程 masonry 缩略图/SMB 复跑/预载开关）+ 本地 GUI（Local ZIP 零回归/Settings 用量上限清空） | — |
 | SMB 协议层（Phase 7） | ✅ `v0.1.0-module3.3.0-smb` 真实现 | `source/smb/` 模块化交付（`source` 5 方法实装 / `connection` TTL 懒回收 / `real_transport` share_connect+query+read_block / `transport` 错误分类 / `path` UNC 拼接 / `mock_transport` 测试桩）；旧 `smb_impl.rs` 已删；M1（module3.2.0）交付的 accounts CRUD + keyring 凭据 + `test_connection` 真握手沿用。**待实机手测**：本机无 NAS/凭据管理器访问，spec §8 六项 + spike 未实机跑（自动化 404 lib + 12 integration + 1126 前端 + 0 回归 + 编译/契约锁覆盖语义等价）；详见 `docs/superpowers/reports/2026-08-19-smb-m2-spike.md`（如未生成 = spike 未跑） |
 | Phase 9 分发 | 🟡 Windows CI 已通 | 代码签名 / macOS `.dmg`（需 mac 环境 + notarization）/ Linux AppImage / 自动更新（`updater` 插件占位） | 中，依赖环境 |
 
@@ -1606,7 +1606,7 @@ export function useReaderInput() {
 
 ### 16.4 建议实施顺序
 
-1. RAR/7z → SMB → 分发（三个大件按此序；分发依赖 mac / Linux 环境，可并行等待环境）
+1. ~~RAR/7z~~（✅ 2026-08-25 五格式 + 密码 + 远程流式交付）→ SMB（✅）→ 分发（依赖 mac / Linux 环境，可并行等待环境）
 
 > 3.0.14（2026-08-16）已收走：cargo test 进 CI、webdav 修复、useCrossVolume flag、重置进度落空、喜欢 toggle、ease-out 清理、右键菜单缩略图二合一、瀑布流选中描边环。
 
