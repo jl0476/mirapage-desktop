@@ -28,7 +28,7 @@
 
 ## 3. 非目标（YAGNI）
 
-- 不动 SMB 库默认超时、不动 SMB stat/列目录（UI 驱动天然串行，不过闸）。
+- 不接 list_directory 并发闸（WebDAV PROPFIND 与 SMB 列目录均 UI 驱动串行）；不改 smb 库内部默认值（项目级超时在调用侧包装，见 §7）。
 - 不动 media LRU 256 MiB 结构本身。
 - 不拆 thumbnail actor 自身的 4 并发 + 64 MiB 双闸（保留为二级限流）。
 - 不改 `MediaSource` trait 签名（仍返回 `Vec<u8>`）。
@@ -41,7 +41,7 @@ media:// GET ──┐                     ┌─ RemoteGate（全局共享，Ar
 warm 预读 ─────┼→ read_file ──过闸──→│  ① 并发 permit（8）——发请求前拿
 缩略图远取 ────┤   (webdav/smb)      │  ② 字节 permit（512 MiB 预算，载荷 ×2 保守记账）——响应头后按 CL 拿
 materializer ──┘                     └─ 两类 permit 随 RAII 同时释放
-media:// stat（lib.rs:271，WebDAV=HEAD）→ 仅过并发闸（无字节 permit），封住 WebView 多图 HEAD 无上限并发
+media:// stat（lib.rs:271；WebDAV=HEAD / SMB=query）→ 仅过并发闸（无字节 permit），封住 WebView 多图 stat 无上限并发与 SMB 冷启动并发建连
                 ↑
       media path singleflight（media_cache::fetch_remote_to_cache）
       ——仅 media:// miss 与 warm 两条路径，缩略图/物化各已有去重，不接
@@ -92,7 +92,7 @@ impl RemotePermit {
 ```
 
 - **注入而非替换全局**（P1 修复）：`WebDavMediaSource::new` 与 `SmbMediaSource::new` 增加 `gate: Arc<RemoteGate>` 参数，生产 factory 传 `RemoteGate::global_arc()`，测试构造传 `RemoteGate::new(小闸值, 小超时)`——测试不触碰全局单例，并行测试不串扰。
-- **WebDAV `stat()` 过并发闸**（复审 P1）：`handle_media_request` 先 `stat()`（=HEAD）后 `read_file`（`lib.rs:271`），WebView 多图并发时 HEAD 在闸外无上限、reqwest 活跃连接不受 idle-pool 设置约束——削弱"降连接压力"目标。stat 改为 `enter_conn_only()`（仅并发 permit，无字节），permit 持有 ≤ 10s（既有 stat 超时）。**SMB stat 不过闸**（单账户单持久连接，无连接增长，维持 §3 边界）。
+- **WebDAV 与 SMB 的 `stat()` 都过并发闸**（复审 P1 × 2 轮）：`handle_media_request` 先 `stat()` 后 `read_file`（`lib.rs:271`）——WebDAV stat = HEAD，reqwest 活跃连接不受 idle-pool 设置约束；SMB 侧 `get_or_connect` 是两阶段无锁建连（`connection.rs:119-159`：锁内查/回收 → **无锁建连** → 短锁写回去重），冷启动 / TTL 过期 / 断线后同一账户的并发 stat 各自建立 transport，仅在写回阶段收敛——media:// 多图请求恰好触发。两源 stat 均改 `enter_conn_only()`（仅并发 permit，无字节）；WebDAV permit 持有 ≤ 10s（既有 stat 超时），SMB stat 包 `SMB_READ_TIMEOUT`（见 §7，超时同样摘槽——维持 §14"permit 持有有界"不变量）。**两源 `list_directory()` 维持不过闸**（UI 驱动串行）。
 - **字节预算是"网络载荷 ×2"的保守记账口径**（P1 修复）：一次完整读取存在源 `Vec`、LRU 副本、响应 `Vec` 三类生命周期，峰值内存 ≈ 3× 载荷。预算按 2× 载荷预扣后，512 MiB 预算下最坏峰值内存 ≈ 3/2 × 预算 = 768 MiB；两条 256 MiB 载荷读取不可能并存（一条即占满 512 记账）。SMB 同口径（`total × 2`）。
 - **闸门等待有界**（P2 修复）：两阶段 acquire 均带 30s 上限，超时返回 `Network("远程读取闸门繁忙")`——单个卡死读取最多拖累后来者 30s，不会无限排队。permit **持有**时长由各协议自身超时界定（WebDAV per-request 30s × 重试 2；SMB 见 §7 读取超时）。
 - SMB 侧无"响应头"概念：`enter()` 与 `reserve_bytes(total × 2)` 在读前一次性完成（total 已由 stat/Range length 得出，`smb/source.rs:99-113` 现成）。
@@ -156,8 +156,10 @@ match out {
 ```
 
 - `SmbMediaSource::new(manager, gate: Arc<RemoteGate>)`——构造注入（§5）。
-- **读取超时 + 摘槽**（P2 修复）：smb 库默认超时不可依赖；超时后该账户 transport 状态未知，直接走 `manager` 已有的 `evict` 摘槽路径（`connection.rs:162`，对齐"连接级错误 → 剔除重建重试一次"），不留脏连接给后续请求。
-- stat / list_directory 不过闸、不加读超时（维持 §3 边界；列目录走 SMB 库自身行为）。
+- **读取超时 + 摘槽**（P2 修复）：smb 库默认超时不可依赖；超时后该账户 transport 状态未知，直接摘槽走重连路径，不留脏连接给后续请求。**需新增公开的 `SmbConnectionManager::invalidate(account_id)`**——现有 `evict`（`connection.rs:162`）是私有方法，公开化（或改名 invalidate 暴露）以支撑 source 层超时摘槽。
+- `stat()` 同样 `enter_conn_only()` 过闸，并包 `SMB_READ_TIMEOUT`（超时同样 `invalidate` 摘槽）——防挂起的 stat 永久占住并发 permit（§14 不变量）。
+- stat / read 的摘槽复用同一恢复语义：下次 `get_or_connect` 重建（对齐"连接级错误 → 剔除重建重试一次"）。
+- `list_directory` 不过闸、不加读超时（维持 §3 边界；列目录走 SMB 库自身行为）。
 
 ## 8. media path singleflight（media_cache.rs）
 
@@ -250,8 +252,8 @@ Rust 单测：
 3. singleflight：并发两个同 path `fetch_remote_to_cache`，注入计数 fetch 闭包只调 1 次；owner 失败时 waiter 得 Err；不同 path 各自下载；owner 完成后新调用直接 LRU 命中不再下载。
 4. generation 守卫：owner 在途期间 `clear_all()` → 结果被丢弃（LRU 无该 key）、waiter 得 Err；`put_if_generation` 与 `clear_all` 临界区互斥（并发压力下无旧代写入，逻辑断言 generation 单调）。
 5. client 复用：`shared_client(bad_tls)` 两次调用 `std::ptr::eq` 同实例；strict/bad_tls 两实例不同。
-6. SMB 过闸 + 读超时：`RemoteGate::new(1, …)` 注入 `SmbMediaSource`，mock transport 延迟钩子下两并发 read_file 断言 transport 观测最大并发 = 1；mock transport 挂起钩子 + 小超时注入断言返回超时错误且账户槽被摘（下次调用重连）。
-7. WebDAV stat 过闸：`RemoteGate::new(1, 大预算, 100ms)` 注入 `WebDavMediaSource`，外部占住唯一 permit 后调 `stat()` → 期望 `Err`（闸门繁忙，acquire 超时先于任何网络请求，无需 HTTP mock server）；释放 permit 后 stat 正常发出。
+6. SMB 过闸 + 读超时：`RemoteGate::new(1, …)` 注入 `SmbMediaSource`，mock transport 延迟钩子下两并发 read_file 断言 transport 观测最大并发 = 1；mock transport 挂起钩子 + 小超时注入（`#[cfg(test)]` 构造器或 `pub(crate)` 可调 `read_timeout`，避免测试等真实 60s）断言返回超时错误且账户槽被摘（下次调用重连）。
+7. WebDAV + SMB stat 过闸：`RemoteGate::new(1, 大预算, 100ms)` 注入两个 source，外部占住唯一 permit 后调 `stat()` → 期望 `Err`（闸门繁忙，acquire 超时先于任何网络/transport 调用，无需 mock server）；释放 permit 后正常发出。SMB 侧同模式断言（占位即闸忙，不触 transport）。
 
 回归：`cargo test` 全绿（现有 webdav parse 测试、warm 相关、12 integration 不回归）；前端 `type-check` + 测试零改动零回归。
 
@@ -271,6 +273,6 @@ Rust 单测：
 - **死锁**：闸内无二次入闸（read_file 不递归）；materializer 每块独立 acquire/release；缩略图 actor 自身闸与全局闸是先后关系（actor 闸 → read_file 全局闸）非嵌套持有（actor permit 在 fetch 期间持有，fetch 内部再进全局闸——两层串联限流，等待图无环）。
 - **峰值内存界定**：预算是 ×2 记账口径的网络载荷预算，非精确内存预算；最坏峰值 ≈ 3× 单载荷 ≤ 768 MiB（单载荷 ≤ 256 MiB 被响应上限封死、且两条 256 MiB 载荷不能并存）。真实图片（几十 MB 级）下典型峰值 ≈ 预算 × 1.5 远达不到。
 - **无 CL 响应的 512 MiB 预留**占满整预算——有意保守；真实图片 GET 几乎都有 CL（HEAD/stat 已要求 CL 存在），materializer Range 块 CL 恒为 4 MiB×2。
-- **permit 持有时长有界**：WebDAV read 由 per-request timeout（30s × 2 attempts）+ connect_timeout 界定；WebDAV stat permit ≤ 10s（既有 stat 超时）；SMB 由 `SMB_READ_TIMEOUT` 界定（超时摘槽）；acquire 排队由 `GATE_ACQUIRE_TIMEOUT` 界定——四级超时链下无永久占位路径。
+- **permit 持有时长有界**：WebDAV read 由 per-request timeout（30s × 2 attempts）+ connect_timeout 界定；WebDAV stat permit ≤ 10s（既有 stat 超时）；SMB read 与 stat 均由 `SMB_READ_TIMEOUT` 界定（超时摘槽）；acquire 排队由 `GATE_ACQUIRE_TIMEOUT` 界定——四级超时链下无永久占位路径。
 - **重试期间 permit 持有**：一次 read_file 一个并发 permit（含重试两 attempt），语义为"一个读取任务一个槽"，无泄漏。
 - **测试隔离**：所有闸门相关测试用 `RemoteGate::new` 注入，不触碰 `global_arc` 单例——并行测试不串扰。
