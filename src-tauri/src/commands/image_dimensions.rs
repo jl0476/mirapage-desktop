@@ -48,8 +48,16 @@ pub async fn list_image_dimensions(
         tasks.spawn(async move {
             // 拿不到 permit 不读（Semaphore drop 时所有 permit 释放）
             let _permit = permit.acquire_owned().await.ok()?;
+            // 请求长度钳位到条目实际大小：archive 源的 Range 是强契约（越界报错，
+            // zip_contract_range_overflow_and_end_overrun_fail 锁定）——小于 header
+            // 探测长度的小图（如 favicon 级 802B）固定请求 HEADER_READ_LEN 会被
+            // 整体拒绝，实机验证 masonry 缩略图卡死抓到。stat 只读元数据。
+            let read_len = match source.stat(&descriptor, &path).await {
+                Ok(st) => HEADER_READ_LEN.min(st.size),
+                Err(_) => return None,
+            };
             let bytes = source
-                .read_file(&descriptor, &path, Some(ByteRange::new(0, HEADER_READ_LEN)))
+                .read_file(&descriptor, &path, Some(ByteRange::new(0, read_len)))
                 .await
                 .ok()?;
             let dim = image_dimensions(&bytes)?;
