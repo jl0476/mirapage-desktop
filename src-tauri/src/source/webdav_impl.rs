@@ -84,15 +84,28 @@ impl WebDavMediaSource {
         }
     }
 
-    /// 解 PROPFIND multi-status XML,提取每个 <href> 的文件名/大小/类型
+    /// 解 PROPFIND multi-status XML,提取每个 <href> 的文件名/大小/类型。
     /// module3.0.14: 标签匹配一律走 local_name（剥 `d:` 等命名空间前缀），
     /// collection 检测覆盖自闭合 `<collection/>`（Empty 事件）与展开式（Start 事件）。
-    fn parse_propfind(body: &str, prefix: &str) -> Result<Vec<MediaEntry>> {
+    /// 2026-08-26 群晖实机修复三处：
+    /// ① current_field 在 End 事件清理 + resourcetype 改用独立标志——真实服务器每个
+    ///   propstat 带 `<status>HTTP/1.1 200 OK</status>`，其 Text 会打进上一个未清理
+    ///   字段（实测：is_collection 被 contains("collection") 覆盖回 false、size 被
+    ///   parse 失败覆盖成 None；mock fixture 无 status 元素从未暴露）。
+    /// ② name 取 href basename + percent-decode——真实服务器 href 是绝对路径
+    ///   `/home/xxx/`，按请求前缀剥离对不上（base_url 是用户配置的子路径，
+    ///   服务器命名空间与它无关）。
+    /// ③ 自身条目过滤——Depth:1 首条 response 是请求集合本身（href == 请求 URL path）。
+    fn parse_propfind(body: &str, request_url: &str) -> Result<Vec<MediaEntry>> {
+        let self_path = reqwest::Url::parse(request_url)
+            .map(|u| u.path().trim_end_matches('/').to_string())
+            .unwrap_or_default();
         let mut reader = Reader::from_str(body);
         reader.config_mut().trim_text(true);
         let mut entries: Vec<MediaEntry> = Vec::new();
         let mut current: Option<PartialEntry> = None;
         let mut current_field: Option<String> = None;
+        let mut in_resourcetype = false;
         let mut buf = Vec::new();
 
         loop {
@@ -103,26 +116,33 @@ impl WebDavMediaSource {
                     let name = local_name(e.name().as_ref()).to_owned();
                     match name.as_str() {
                         "response" => current = Some(PartialEntry::default()),
-                        "href" | "getcontentlength" | "resourcetype" | "getlastmodified" => {
+                        "href" | "getcontentlength" | "getlastmodified" => {
                             current_field = Some(name);
                         }
+                        // resourcetype 的值由子元素 <collection/> 表达，无 Text 形态
+                        "resourcetype" => in_resourcetype = true,
                         // 展开式 <collection></collection>：Start 事件到达
-                        "collection" => {
-                            if current_field.as_deref() == Some("resourcetype") {
-                                if let Some(cur) = current.as_mut() {
-                                    cur.is_collection = true;
-                                }
+                        "collection" if in_resourcetype => {
+                            if let Some(cur) = current.as_mut() {
+                                cur.is_collection = true;
                             }
                         }
                         _ => {}
                     }
                 }
                 Ok(Event::End(e)) => {
-                    let qname = e.name();
-                    let name = local_name(qname.as_ref());
+                    let name = local_name(e.name().as_ref()).to_owned();
+                    // 字段归属边界：标签闭合即清理——后续兄弟标签（如 <status>）的
+                    // Text 不得打进已闭合字段（is_collection/size 覆盖事故根源）
+                    if current_field.as_deref() == Some(name.as_str()) {
+                        current_field = None;
+                    }
+                    if name == "resourcetype" {
+                        in_resourcetype = false;
+                    }
                     if name == "response" {
                         if let Some(p) = current.take() {
-                            if let Some(entry) = p.finalize(prefix) {
+                            if let Some(entry) = p.finalize(&self_path) {
                                 entries.push(entry);
                             }
                         }
@@ -130,9 +150,7 @@ impl WebDavMediaSource {
                 }
                 Ok(Event::Empty(e)) => {
                     // 自闭合 <d:collection/>：quick-xml 以 Empty 事件到达（不拆成 Start+End）
-                    if local_name(e.name().as_ref()) == "collection"
-                        && current_field.as_deref() == Some("resourcetype")
-                    {
+                    if local_name(e.name().as_ref()) == "collection" && in_resourcetype {
                         if let Some(cur) = current.as_mut() {
                             cur.is_collection = true;
                         }
@@ -240,22 +258,20 @@ impl PartialEntry {
             "getcontentlength" => {
                 self.size = value.parse().ok();
             }
-            "resourcetype" => {
-                self.is_collection = value.contains("collection");
-            }
+            // getlastmodified：modified_at 尚未透出（保持 None），字段保留给后续
             _ => {}
         }
     }
 
-    fn finalize(self, prefix: &str) -> Option<MediaEntry> {
+    /// self_path = 请求 URL 的 path（剥尾斜杠）；条目 href 与其相同 = Depth:1 的
+    /// 自身条目，过滤。name 取 href 最后一段（绝对/相对 href 形态通吃）+ decode。
+    fn finalize(self, self_path: &str) -> Option<MediaEntry> {
         let href = self.href?;
-        // href 是 URL-encoded 的相对路径;strip prefix 与目录
-        let stripped = if let Some(idx) = href.find(prefix) {
-            &href[idx + prefix.len()..]
-        } else {
-            &href
-        };
-        let name = urlencoding_decode(stripped.trim_end_matches('/'));
+        let trimmed = href.trim_end_matches('/');
+        if urlencoding_decode(trimmed) == self_path || trimmed == self_path {
+            return None; // 自身条目
+        }
+        let name = urlencoding_decode(trimmed.rsplit('/').next().unwrap_or(""));
         if name.is_empty() {
             return None;
         }
@@ -339,7 +355,7 @@ impl MediaSource for WebDavMediaSource {
             .text()
             .await
             .map_err(|e| MediaSourceError::Network(format!("body: {e}")))?;
-        Self::parse_propfind(&body, path)
+        Self::parse_propfind(&body, &url)
     }
 
     async fn read_file(
@@ -406,20 +422,26 @@ impl MediaSource for WebDavMediaSource {
                 let (user, pass, bad_tls) = self.credentials_for(*account_id)?;
                 let client = Self::build_client(bad_tls, Duration::from_secs(10))?;
                 let url = format!("{}/{}", base_url.trim_end_matches('/'), path);
-                let mut req = client.head(&url);
+                // 2026-08-26 群晖实机：HEAD 对目录回 403 Forbidden——连接测试改
+                // PROPFIND Depth:0（WebDAV 必须支持的核心方法，对目录语义明确）
+                let mut req = client
+                    .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url.clone())
+                    .header(HeaderName::from_static("depth"), "0")
+                    .header(header::CONTENT_TYPE, "application/xml")
+                    .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>");
                 if let (Some(u), Some(p)) = (&user, &pass) {
                     req = req.basic_auth(u, Some(p));
                 }
                 let resp = req
                     .send()
                     .await
-                    .map_err(|e| MediaSourceError::Network(format!("head: {e}")))?;
+                    .map_err(|e| MediaSourceError::Network(format!("propfind: {e}")))?;
                 if resp.status() == StatusCode::NOT_FOUND {
                     return Err(MediaSourceError::NotFound(url));
                 }
                 if !resp.status().is_success() {
                     return Err(MediaSourceError::Network(format!(
-                        "HEAD status {}",
+                        "PROPFIND status {}",
                         resp.status()
                     )));
                 }
@@ -526,7 +548,7 @@ mod tests {
     </d:prop></d:propstat>
   </d:response>
 </d:multistatus>"#;
-        let entries = WebDavMediaSource::parse_propfind(body, "/dav/").unwrap();
+        let entries = WebDavMediaSource::parse_propfind(body, "https://dav.example/dav/").unwrap();
         assert_eq!(entries.len(), 2);
         // collection first (sort alphabetically? actually natural: 'file.txt' < 'sub1/' due to '/')
         // 自然排序:'file.txt' < 'sub1/' 因 f < s
@@ -556,13 +578,58 @@ mod tests {
     </prop></propstat>
   </response>
 </multistatus>"#;
-        let entries = WebDavMediaSource::parse_propfind(body, "/dav/").unwrap();
+        let entries = WebDavMediaSource::parse_propfind(body, "https://dav.example/dav/").unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "pic.zip");
         assert_eq!(entries[0].size, 999);
         assert!(!entries[0].is_directory);
         assert_eq!(entries[1].name, "sub1");
         assert!(entries[1].is_directory);
+    }
+
+    #[test]
+    fn parse_propfind_synology_real_body_shape() {
+        // 实机切片（2026-08-26 群晖 SYNO_WebDAV）：绝对路径 href + 混合前缀
+        // （resourcetype 用 lp1、collection 用 D）+ 大量无关属性（supportedlock 等）。
+        let body = r#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:ns0="DAV:">
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://apache.org/dav/props/">
+<D:href>/home/</D:href>
+<D:propstat><D:prop>
+<lp1:resourcetype><D:collection/></lp1:resourcetype>
+<lp1:getlastmodified>Sun, 09 Aug 2026 14:36:33 GMT</lp1:getlastmodified>
+<D:getcontenttype>httpd/unix-directory</D:getcontenttype>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://apache.org/dav/props/">
+<D:href>/home/Drive/</D:href>
+<D:propstat><D:prop>
+<lp1:resourcetype><D:collection/></lp1:resourcetype>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+<D:response xmlns:lp1="DAV:" xmlns:lp2="http://apache.org/dav/props/">
+<D:href>/home/photo.jpg</D:href>
+<D:propstat><D:prop>
+<lp1:resourcetype/>
+<lp1:getcontentlength>123</lp1:getcontentlength>
+</D:prop>
+<D:status>HTTP/1.1 200 OK</D:status>
+</D:propstat>
+</D:response>
+</D:multistatus>"#;
+        let entries = WebDavMediaSource::parse_propfind(body, "https://192.168.50.168:5006/home").unwrap();
+        for e in &entries {
+            println!("name={:?} is_dir={} size={}", e.name, e.is_directory, e.size);
+        }
+        assert!(entries.len() <= 3, "自身条目应被过滤: {entries:?}");
+        let drive = entries.iter().find(|e| e.name.contains("Drive"));
+        assert!(drive.unwrap().is_directory, "Drive 应是目录: {entries:?}");
+        let photo = entries.iter().find(|e| e.name.contains("photo"));
+        assert!(photo.unwrap().size == 123, "photo 尺寸: {entries:?}");
     }
 
     #[test]
@@ -574,7 +641,7 @@ mod tests {
   <d:response><d:href>/dav/img.jpg</d:href>
     <d:propstat><d:prop><d:getcontentlength>1</d:getcontentlength></d:prop></d:propstat></d:response>
 </d:multistatus>"#;
-        let entries = WebDavMediaSource::parse_propfind(body, "/dav/").unwrap();
+        let entries = WebDavMediaSource::parse_propfind(body, "https://dav.example/dav/").unwrap();
         assert!(entries[0].is_archive, ".cbz 按扩展名标记");
         assert!(!entries[1].is_archive, "普通文件不标记");
     }
