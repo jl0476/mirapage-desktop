@@ -260,6 +260,7 @@ export default {
     browseTitle: 'Open this account root in the file browser',
     passwordPlaceholder: 'Enter password',
     passwordKeep: 'Leave blank to keep',
+    acceptInvalidTls: 'Trust self-signed certificate (common on LAN NAS)',
     credentialWarning: 'Credential may remain in OS credential manager, please clean up manually',
     typeLocked: 'Type is immutable (delete and re-add to change)',
   },

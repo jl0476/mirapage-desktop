@@ -45,6 +45,7 @@ const draft = ref({
   share: '',
   username: '',
   password: '',
+  acceptInvalidTls: false,
 });
 
 /** M2 task 7：testResult 由 boolean 扩为 { ok, message } 对象，支持三态失败分类。 */
@@ -115,6 +116,7 @@ function startAdd() {
     share: '',
     username: '',
     password: '',
+    acceptInvalidTls: false,
   };
   showAdd.value = true;
 }
@@ -129,6 +131,7 @@ function startEdit(acct: AccountItem) {
     share: acct.share ?? '',
     username: acct.username ?? '',
     password: '',
+    acceptInvalidTls: acct.acceptInvalidTls ?? false,
   };
   showAdd.value = true;
 }
@@ -143,6 +146,7 @@ async function save() {
     share: draft.value.share,
     username: draft.value.username,
     password: draft.value.password || null,
+    acceptInvalidTls: draft.value.kind === 'webdav' ? draft.value.acceptInvalidTls : false,
   });
   showAdd.value = false;
   await refresh();
@@ -428,6 +432,15 @@ const ICON_PULSE = 'M22 12h-4l-3 9L9 3l-3 9H2';
             :placeholder="editing ? t('accounts.passwordKeep') : t('accounts.passwordPlaceholder')"
             class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
           />
+        </label>
+        <label v-if="draft.kind === 'webdav'" class="flex items-center gap-2 text-xs text-text-secondary">
+          <input
+            v-model="draft.acceptInvalidTls"
+            type="checkbox"
+            data-test="accept-invalid-tls"
+            class="accent-accent cursor-pointer"
+          />
+          {{ t('accounts.acceptInvalidTls') }}
         </label>
         <div class="flex justify-end gap-2 mt-2">
           <button

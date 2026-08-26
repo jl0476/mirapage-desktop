@@ -566,6 +566,8 @@ export interface AccountItem {
   port?: number;
   share?: string;
   username?: string;
+  /** WebDAV 自签证书豁免（migration 017；SMB 恒 false 不消费） */
+  acceptInvalidTls?: boolean;
 }
 export async function listAccounts(): Promise<AccountItem[]> {
   return invoke<AccountItem[]>('list_accounts');

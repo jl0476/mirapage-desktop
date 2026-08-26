@@ -79,6 +79,26 @@ describe('Accounts.vue', () => {
       expect.objectContaining({ password: 'secret', type: 'smb', name: 'n' }));
   });
 
+  it('WebDAV 勾选信任自签证书后保存随 payload 传递（SMB 无 checkbox）', async () => {
+    const wrapper = mount(Accounts, { global: { plugins: [i18n] } });
+    await flushPromises();
+    await wrapper.find('[data-test="add-btn"]').trigger('click');
+    // SMB 态无 checkbox
+    expect(wrapper.find('[data-test="accept-invalid-tls"]').exists()).toBe(false);
+    const select = wrapper.find('[data-test="kind-select"]');
+    await select.setValue('webdav');
+    const box = wrapper.find('[data-test="accept-invalid-tls"]');
+    expect(box.exists()).toBe(true);
+    (box.element as HTMLInputElement).checked = true;
+    await box.trigger('change');
+    await wrapper.find('[data-test="name"]').setValue('nas');
+    await wrapper.find('[data-test="host"]').setValue('https://192.168.50.168:5006/home');
+    await wrapper.find('[data-test="save-btn"]').trigger('click');
+    await flushPromises();
+    expect(mocks.upsertAccount).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'webdav', acceptInvalidTls: true }));
+  });
+
   it('删除返回 warning 时展示提示', async () => {
     mocks.deleteAccount.mockResolvedValue({ warning: '凭据可能残留在系统凭据管理器（webdav-3），请手动清理' });
     const wrapper = mount(Accounts, { global: { plugins: [i18n] } });

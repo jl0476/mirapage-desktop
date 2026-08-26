@@ -13,6 +13,8 @@ pub struct AccountItem {
     pub port: Option<i64>,
     pub share: Option<String>,
     pub username: Option<String>,
+    /// WebDAV 自签证书豁免（migration 017；SMB 恒 false 不消费）
+    pub accept_invalid_tls: bool,
     // 不返回密码(凭据 keyring 已加密)
 }
 
@@ -27,6 +29,8 @@ pub struct UpsertAccountArgs {
     pub port: Option<i64>,
     pub share: Option<String>,
     pub username: Option<String>,
+    /// WebDAV 自签证书豁免；None = false（默认严格校验）
+    pub accept_invalid_tls: Option<bool>,
     /// 纯文本密码(后端用 keyring 加密后丢弃)
     pub password: Option<String>,
 }
@@ -36,7 +40,7 @@ pub fn list_accounts(db: tauri::State<crate::db::Db>) -> Result<Vec<AccountItem>
     let conn = db.conn();
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, type, host, port, share, username FROM account ORDER BY name",
+            "SELECT id, name, type, host, port, share, username, accept_invalid_tls FROM account ORDER BY name",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt
@@ -49,6 +53,7 @@ pub fn list_accounts(db: tauri::State<crate::db::Db>) -> Result<Vec<AccountItem>
                 port: row.get::<_, Option<i64>>(4)?,
                 share: row.get::<_, Option<String>>(5)?,
                 username: row.get::<_, Option<String>>(6)?,
+                accept_invalid_tls: row.get::<_, bool>(7)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -84,6 +89,7 @@ pub fn upsert_account_impl(
         .map(|s| s.trim_matches(['/', '\\']).to_string())
         .filter(|s| !s.is_empty());
     let conn = db.conn();
+    let accept_invalid_tls = args.accept_invalid_tls.unwrap_or(false);
     match args.id {
         Some(id) => {
             // type 不可变（spec §3.4）：编辑改类型直接拒绝
@@ -94,20 +100,20 @@ pub fn upsert_account_impl(
                 return Err("账户类型不可修改；如需更换请删除后重新添加".into());
             }
             // 快照旧字段——keyring 写失败时回滚 DB，保持「账户配置 ↔ 凭据」一致
-            let (old_name, old_host, old_port, old_share, old_user): (String, Option<String>, Option<i64>, Option<String>, Option<String>) =
-                conn.query_row("SELECT name, host, port, share, username FROM account WHERE id = ?1", rusqlite::params![id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+            let (old_name, old_host, old_port, old_share, old_user, old_bad_tls): (String, Option<String>, Option<i64>, Option<String>, Option<String>, bool) =
+                conn.query_row("SELECT name, host, port, share, username, accept_invalid_tls FROM account WHERE id = ?1", rusqlite::params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))
                 .map_err(|e| e.to_string())?;
             conn.execute(
-                "UPDATE account SET name = ?1, host = ?2, port = ?3, share = ?4, username = ?5 WHERE id = ?6",
-                rusqlite::params![args.name, args.host, args.port, share, args.username, id],
+                "UPDATE account SET name = ?1, host = ?2, port = ?3, share = ?4, username = ?5, accept_invalid_tls = ?6 WHERE id = ?7",
+                rusqlite::params![args.name, args.host, args.port, share, args.username, accept_invalid_tls, id],
             )
             .map_err(|e| e.to_string())?;
             if let Some(p) = args.password.filter(|p| !p.is_empty()) {
                 if let Err(e) = creds.set_password(&crate::credentials::account_key(&args.kind, id), &p) {
                     let _ = conn.execute(
-                        "UPDATE account SET name = ?1, host = ?2, port = ?3, share = ?4, username = ?5 WHERE id = ?6",
-                        rusqlite::params![old_name, old_host, old_port, old_share, old_user, id],
+                        "UPDATE account SET name = ?1, host = ?2, port = ?3, share = ?4, username = ?5, accept_invalid_tls = ?6 WHERE id = ?7",
+                        rusqlite::params![old_name, old_host, old_port, old_share, old_user, old_bad_tls, id],
                     );
                     return Err(format!("凭据保存失败，本次修改已回滚: {e}"));
                 }
@@ -117,8 +123,8 @@ pub fn upsert_account_impl(
         }
         None => {
             conn.execute(
-                "INSERT INTO account (name, type, host, port, share, username, encrypted_password) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
-                rusqlite::params![args.name, args.kind, args.host, args.port, share, args.username],
+                "INSERT INTO account (name, type, host, port, share, username, encrypted_password, accept_invalid_tls) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
+                rusqlite::params![args.name, args.kind, args.host, args.port, share, args.username, accept_invalid_tls],
             )
             .map_err(|e| e.to_string())?;
             let id = conn.last_insert_rowid();
@@ -255,7 +261,7 @@ mod tests {
         let fail: Arc<dyn CredentialStore> = Arc::new(FailStore);
         let r = upsert_account_impl(&db, fail.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "webdav".into(), host: Some("https://d".into()),
-            port: None, share: None, username: Some("u".into()), password: Some("p".into()),
+            port: None, share: None, username: Some("u".into()), password: Some("p".into()), accept_invalid_tls: None,
         });
         assert!(r.is_err());
         // 回滚：行不存在
@@ -274,7 +280,7 @@ mod tests {
             let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
                 id: None, name: format!("n-{input:?}"), kind: "smb".into(),
                 host: Some("192.168.50.168".into()), port: Some(445),
-                share: Some(input.into()), username: None, password: None,
+                share: Some(input.into()), username: None, password: None, accept_invalid_tls: None,
             }).unwrap();
             let conn = db.conn();
             let stored: Option<String> = conn
@@ -288,14 +294,45 @@ mod tests {
     }
 
     #[test]
+    fn upsert_persists_accept_invalid_tls() {
+        // migration 017：WebDAV 自签证书豁免往返（默认 false；编辑更新生效）
+        let (db, store) = setup();
+        let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
+            id: None, name: "n".into(), kind: "webdav".into(),
+            host: Some("https://192.168.50.168:5006/home".into()), port: None,
+            share: None, username: None, password: None, accept_invalid_tls: Some(true) }).unwrap();
+        // MutexGuard 必须在下一次 upsert_account_impl（内部 db.conn() 再取锁）前释放——
+        // std::sync::Mutex 不可重入，guard 滞留即自锁（首轮编写即踩）
+        let v: bool = {
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT accept_invalid_tls FROM account WHERE id = ?1", rusqlite::params![id], |r| r.get(0),
+            ).unwrap()
+        };
+        assert!(v, "Some(true) 应落库为 1");
+        // 编辑改为 false
+        upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
+            id: Some(id), name: "n".into(), kind: "webdav".into(),
+            host: Some("https://192.168.50.168:5006/home".into()), port: None,
+            share: None, username: None, password: None, accept_invalid_tls: Some(false) }).unwrap();
+        let v2: bool = {
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT accept_invalid_tls FROM account WHERE id = ?1", rusqlite::params![id], |r| r.get(0),
+            ).unwrap()
+        };
+        assert!(!v2, "编辑应更新为 0");
+    }
+
+    #[test]
     fn upsert_edit_type_change_rejected() {
         let (db, store) = setup();
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "webdav".into(), host: None, port: None,
-            share: None, username: None, password: None }).unwrap();
+            share: None, username: None, password: None, accept_invalid_tls: None }).unwrap();
         let err = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: Some(id), name: "n".into(), kind: "smb".into(), host: None, port: None,
-            share: None, username: None, password: None });
+            share: None, username: None, password: None, accept_invalid_tls: None });
         assert!(err.is_err()); // type 不可变
     }
 
@@ -304,10 +341,10 @@ mod tests {
         let (db, store) = setup();
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "webdav".into(), host: None, port: None,
-            share: None, username: None, password: Some("old".into()) }).unwrap();
+            share: None, username: None, password: Some("old".into()), accept_invalid_tls: None }).unwrap();
         upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: Some(id), name: "n2".into(), kind: "webdav".into(), host: None, port: None,
-            share: None, username: None, password: None }).unwrap();
+            share: None, username: None, password: None, accept_invalid_tls: None }).unwrap();
         assert_eq!(store.get_password(&account_key("webdav", id)).unwrap().as_deref(), Some("old"));
     }
 
@@ -323,7 +360,7 @@ mod tests {
         let s: Arc<dyn CredentialStore> = Arc::new(FailDelete(MemoryStore::new()));
         let id = upsert_account_impl(&db, s.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "webdav".into(), host: None, port: None,
-            share: None, username: None, password: Some("p".into()) }).unwrap();
+            share: None, username: None, password: Some("p".into()), accept_invalid_tls: None }).unwrap();
         let out = delete_account_impl(&db, s.as_ref(), id).unwrap();
         assert!(out.warning.is_some()); // 凭据残留警告
     }
@@ -341,12 +378,12 @@ mod tests {
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "old-name".into(), kind: "webdav".into(),
             host: Some("https://old".into()), port: None, share: None,
-            username: Some("old-user".into()), password: Some("p".into()) }).unwrap();
+            username: Some("old-user".into()), password: Some("p".into()), accept_invalid_tls: None }).unwrap();
         let fail: Arc<dyn CredentialStore> = Arc::new(FailSet);
         let r = upsert_account_impl(&db, fail.as_ref(), UpsertAccountArgs {
             id: Some(id), name: "new-name".into(), kind: "webdav".into(),
             host: Some("https://new".into()), port: None, share: None,
-            username: Some("new-user".into()), password: Some("p2".into()) });
+            username: Some("new-user".into()), password: Some("p2".into()) , accept_invalid_tls: None });
         assert!(r.is_err());
         let conn = db.conn();
         let (name, host, user): (String, Option<String>, Option<String>) = conn.query_row(
@@ -363,7 +400,7 @@ mod tests {
         let (db, store) = setup();
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
-            port: Some(445), share: None, username: None, password: None }).unwrap();
+            port: Some(445), share: None, username: None, password: None, accept_invalid_tls: None }).unwrap();
         let factory = crate::source::MediaSourceFactory::new(
             db.clone(),
             std::sync::Arc::new(crate::credentials::MemoryStore::new()),
@@ -385,7 +422,7 @@ mod tests {
         let (db, store) = setup();
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
-            port: Some(99999), share: Some("media".into()), username: None, password: None }).unwrap();
+            port: Some(99999), share: Some("media".into()), username: None, password: None, accept_invalid_tls: None }).unwrap();
         let factory = crate::source::MediaSourceFactory::new(
             db.clone(),
             std::sync::Arc::new(crate::credentials::MemoryStore::new()),
@@ -404,7 +441,7 @@ mod tests {
         let (db, store) = setup();
         let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
             id: None, name: "n".into(), kind: "smb".into(), host: Some("192.168.1.1".into()),
-            port: Some(445), share: Some("media".into()), username: None, password: None }).unwrap();
+            port: Some(445), share: Some("media".into()), username: None, password: None, accept_invalid_tls: None }).unwrap();
         let factory = crate::source::MediaSourceFactory::new(
             db.clone(),
             std::sync::Arc::new(crate::credentials::MemoryStore::new()),

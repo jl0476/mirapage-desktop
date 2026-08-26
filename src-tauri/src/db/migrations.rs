@@ -150,6 +150,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 17 {
+        apply_017_account_accept_invalid_tls(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (17, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -660,6 +668,17 @@ fn apply_016_archive_cache(conn: &Connection) -> anyhow::Result<()> {
           created_at INTEGER NOT NULL,
           last_accessed_at INTEGER NOT NULL
         );",
+    )?;
+    Ok(())
+}
+
+/// Migration 017 —— WebDAV 自签证书信任开关（account 加列，默认 0 = 严格校验）。
+/// 内网 NAS 的 https WebDAV 几乎全是自签证书，reqwest 默认严格校验直接握手失败
+/// （实机 2026-08-26：群晖 https://ip:5006 不可访问，curl -k 可通佐证）。
+fn apply_017_account_accept_invalid_tls(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "ALTER TABLE account ADD COLUMN accept_invalid_tls INTEGER NOT NULL DEFAULT 0",
+        [],
     )?;
     Ok(())
 }
@@ -1350,7 +1369,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 16, "完整 run 后版本号应为 16");
+        assert_eq!(v, 17, "完整 run 后版本号应为 17");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -1699,7 +1718,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 16, "完整 run 后版本号应为 16");
+        assert_eq!(v, 17, "完整 run 后版本号应为 17");
 
         // 幂等：run() 的 current<12 守卫使重复调用不再执行 012
         super::run(&conn).expect("重复 run 应幂等无错");
@@ -1708,7 +1727,7 @@ mod tests {
         let v2: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 16, "重复 run 不应再升版本号");
+        assert_eq!(v2, 17, "重复 run 不应再升版本号");
     }
 
     /// 任务 7：EXPLAIN QUERY PLAN 手动验证（`--ignored --nocapture` 跑，输出写入报告）。

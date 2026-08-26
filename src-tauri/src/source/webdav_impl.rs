@@ -37,21 +37,40 @@ impl WebDavMediaSource {
         Self { db, creds }
     }
 
-    /// 从 account 表 + keyring 取 (username, password)（spec §3.4 Basic Auth）
-    fn credentials_for(&self, account_id: i64) -> Result<(Option<String>, Option<String>)> {
+    /// 从 account 表 + keyring 取 (username, password, accept_invalid_tls)（spec §3.4
+    /// Basic Auth + migration 017 自签证书开关——内网 NAS https 几乎全是自签证书，
+    /// reqwest 默认严格校验直接握手失败，curl -k 佐证后加的 per-account 豁免）。
+    fn credentials_for(
+        &self,
+        account_id: i64,
+    ) -> Result<(Option<String>, Option<String>, bool)> {
         let conn = self.db.conn();
-        let username = conn
+        let (username, accept_invalid_tls) = conn
             .query_row(
-                "SELECT username FROM account WHERE id = ?1 AND type = 'webdav'",
+                "SELECT username, accept_invalid_tls FROM account WHERE id = ?1 AND type = 'webdav'",
                 rusqlite::params![account_id],
-                |r| r.get::<_, Option<String>>(0),
+                |r| {
+                    Ok((
+                        r.get::<_, Option<String>>(0)?,
+                        r.get::<_, bool>(1)?,
+                    ))
+                },
             )
             .map_err(|_| MediaSourceError::NotFound(format!("webdav account {account_id}")))?;
         let password = self
             .creds
             .get_password(&crate::credentials::account_key("webdav", account_id))
             .map_err(MediaSourceError::Other)?;
-        Ok((username, password))
+        Ok((username, password, accept_invalid_tls))
+    }
+
+    /// 统一 client 构建：超时 + 可选自签证书豁免（四调用点共享，配置随账户行走）。
+    fn build_client(accept_invalid_tls: bool, timeout: Duration) -> Result<Client> {
+        Client::builder()
+            .timeout(timeout)
+            .danger_accept_invalid_certs(accept_invalid_tls)
+            .build()
+            .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))
     }
 
     fn extract<'a>(&self, descriptor: &'a SourceDescriptor) -> Option<(i64, &'a str, &'a str)> {
@@ -294,13 +313,10 @@ impl MediaSource for WebDavMediaSource {
         let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
         })?;
-        let (user, pass) = self.credentials_for(account_id)?;
+        let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
         let url = url.trim_end_matches('/');
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
+        let client = Self::build_client(bad_tls, Duration::from_secs(15))?;
         let mut req = client
             .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
             .header(HeaderName::from_static("depth"), "1")
@@ -335,12 +351,9 @@ impl MediaSource for WebDavMediaSource {
         let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
         })?;
-        let (user, pass) = self.credentials_for(account_id)?;
+        let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
-        let client = Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
+        let client = Self::build_client(bad_tls, Duration::from_secs(30))?;
         let mut req = client.get(&url);
         if let Some(r) = range {
             req = req.header(header::RANGE, format!("bytes={}-{}", r.offset, r.offset + r.length - 1));
@@ -390,11 +403,8 @@ impl MediaSource for WebDavMediaSource {
     async fn test(&self, descriptor: &SourceDescriptor) -> Result<()> {
         match descriptor {
             SourceDescriptor::WebDav { account_id, base_url, path } => {
-                let (user, pass) = self.credentials_for(*account_id)?;
-                let client = Client::builder()
-                    .timeout(Duration::from_secs(10))
-                    .build()
-                    .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
+                let (user, pass, bad_tls) = self.credentials_for(*account_id)?;
+                let client = Self::build_client(bad_tls, Duration::from_secs(10))?;
                 let url = format!("{}/{}", base_url.trim_end_matches('/'), path);
                 let mut req = client.head(&url);
                 if let (Some(u), Some(p)) = (&user, &pass) {
@@ -425,12 +435,9 @@ impl MediaSource for WebDavMediaSource {
         let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
         })?;
-        let (user, pass) = self.credentials_for(account_id)?;
+        let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))?;
+        let client = Self::build_client(bad_tls, Duration::from_secs(10))?;
         let mut req = client.head(&url);
         if let (Some(u), Some(p)) = (&user, &pass) {
             req = req.basic_auth(u, Some(p));

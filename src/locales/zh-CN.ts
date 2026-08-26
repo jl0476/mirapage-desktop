@@ -262,6 +262,7 @@ export default {
     browse: '浏览',
     browseTitle: '在文件浏览器中打开该账户的根目录',
     passwordKeep: '留空保持不变',
+    acceptInvalidTls: '信任自签证书（内网 NAS 常见）',
     credentialWarning: '凭据可能残留在系统凭据管理器，请手动清理',
     typeLocked: '类型不可修改（删除后重新添加可换类型）',
   },
