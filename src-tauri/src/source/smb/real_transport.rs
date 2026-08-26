@@ -50,8 +50,13 @@ fn map_smb_error(e: SmbError) -> TransportError {
         SmbError::NotFound(p) => TransportError::FileNotFound(p.clone()),
         SmbError::MissingPermissions(p) => TransportError::PermissionDenied(p.clone()),
         // 实际签名 ReceivedErrorMessage(u32, ErrorResponse)——Status::U32_* 是 u32 常量，
-        // 用 guard 比较（非枚举 match）；分派逻辑独立成纯函数供单测锁死
+        // 用 guard 比较（非枚举 match）；分派逻辑独立成纯函数供单测锁死。
+        // 实机修正（2026-08-26，SMB NAS 登录失败）：Session Setup 的失败以
+        // UnexpectedMessageStatus(u32) 形态上抛（与 ReceivedErrorMessage 并存的
+        // crate TODO 语义）——此前落 `_ => Other` 兜底，Logon Failure 被端到端
+        // 报成「网络错误」。同样走 map_status_code。
         SmbError::ReceivedErrorMessage(code, _) => map_status_code(*code, e.to_string()),
+        SmbError::UnexpectedMessageStatus(code) => map_status_code(*code, e.to_string()),
         _ => TransportError::Other(e.to_string()),
     }
 }
@@ -76,6 +81,9 @@ fn map_status_code(code: u32, ctx: String) -> TransportError {
             TransportError::FileNotFound(ctx)
         }
         c if c == S::U32_ACCESS_DENIED => TransportError::PermissionDenied(ctx),
+        // LogonFailure 无 U32_ 常量（smb-msg 只定义枚举值）——枚举 as u32 比较。
+        // 实机形态：用户名/密码错误时 Session Setup 返回 0xC000006D。
+        c if c == S::LogonFailure as u32 => TransportError::PermissionDenied(ctx),
         c if c == S::U32_NETWORK_NAME_DELETED
             || c == S::U32_NETWORK_SESSION_EXPIRED
             || c == S::U32_USER_SESSION_DELETED => TransportError::Disconnected,
@@ -302,6 +310,19 @@ mod tests {
         ));
         assert!(matches!(
             map_status_code(S::U32_ACCESS_DENIED, "c".into()),
+            TransportError::PermissionDenied(_)
+        ));
+        // 实机回归（2026-08-26）：Logon Failure（0xC000006D，用户名/密码错误）
+        // 必须归 PermissionDenied（→ MediaSourceError::PermissionDenied/403 →
+        // 前端 auth 档），不得落 Network 误导排查方向。enum as u32（无 U32_ 常量）。
+        assert!(matches!(
+            map_status_code(S::LogonFailure as u32, "c".into()),
+            TransportError::PermissionDenied(_)
+        ));
+        // Session Setup 失败以 UnexpectedMessageStatus 形态上抛（与
+        // ReceivedErrorMessage 并存）——两个变体都必须走 map_status_code
+        assert!(matches!(
+            map_smb_error(SmbError::UnexpectedMessageStatus(S::LogonFailure as u32)),
             TransportError::PermissionDenied(_)
         ));
         assert!(matches!(

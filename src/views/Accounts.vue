@@ -59,11 +59,15 @@ function showTestFail(msg: string): void {
   testFailTimer = setTimeout(() => { testFailMessage.value = null; }, 5000);
 }
 
-/** M2 task 7：按后端错误消息关键字路由三态。前端兜底，后端文案已人话；后端没有强制错误码。 */
+/** M2 task 7：按后端错误消息关键字路由三态。前端兜底，后端文案已人话；后端没有强制错误码。
+ *  实机（2026-08-26，SMB NAS）修正：SMB 认证失败报「Logon Failure (0xc000006d)」——
+ *  不含原 auth 关键字会被兜到 network 档误导排查方向，补 SMB/NT 状态词。 */
 function classifyTestFail(msg: string): 'auth' | 'config' | 'network' {
   const m = msg.toLowerCase();
   if (m.includes('权限') || m.includes('认证') || m.includes('auth')
-      || m.includes('credential') || m.includes('password')) {
+      || m.includes('credential') || m.includes('password')
+      || m.includes('logon') || m.includes('0xc000006d')
+      || m.includes('access_denied') || m.includes('denied')) {
     return 'auth';
   }
   if (m.includes('share') || m.includes('契约') || m.includes('配置')
