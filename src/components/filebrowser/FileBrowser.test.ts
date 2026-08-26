@@ -2720,3 +2720,36 @@ describe('FileBrowser — PickRootMenu 选根', () => {
     expect(fb.currentDescriptor).toBeNull();
   });
 });
+
+// ─── module3.5.0 后续: SMB 显示根解析账户 host（account-N 行号占位用户不可读）───
+describe('FileBrowser — SMB displayRoot host 解析', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    mockedAccounts.mockResolvedValue([]);
+    mockedGet.mockImplementation(async () => null);
+  });
+
+  it('SMB 会话状态栏显示 smb://host/initialPath（账户表查询）', async () => {
+    mockedAccounts.mockResolvedValue([
+      { id: 2, name: 'home', type: 'smb', host: '192.168.50.168', port: 445, share: 'Other1' },
+    ]);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    mockedList.mockResolvedValue(makeEntries('page1.jpg'));
+    await fb.openDescriptorAt({ type: 'smb', accountId: 2, initialPath: 'Other1/wall', path: '', port: 445 }, '');
+    await flushPromises();
+    expect(wrapper.find('[data-test="statusbar"]').text()).toContain('smb://192.168.50.168/Other1/wall');
+  });
+
+  it('账户查不到（已删）回退 account-N 形态', async () => {
+    mockedAccounts.mockResolvedValue([]);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    mockedList.mockResolvedValue(makeEntries('page1.jpg'));
+    await fb.openDescriptorAt({ type: 'smb', accountId: 9, initialPath: '', path: '', port: 445 }, '');
+    await flushPromises();
+    expect(wrapper.find('[data-test="statusbar"]').text()).toContain('smb://account-9');
+  });
+});

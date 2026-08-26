@@ -18,7 +18,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
-import { getSetting, setSetting, setFavorite, getBookStatus, addBookmark, listBookmarks, notifyArchiveWindow, type BookmarkItem, type ArchiveAccessError } from '@/lib/tauri';
+import { getSetting, setSetting, setFavorite, getBookStatus, addBookmark, listBookmarks, listAccounts, notifyArchiveWindow, type BookmarkItem, type ArchiveAccessError } from '@/lib/tauri';
 import BookmarkJumpDialog from '@/components/reader/BookmarkJumpDialog.vue';
 import ArchivePasswordDialog from '@/components/filebrowser/ArchivePasswordDialog.vue';
 import { useFileBrowserStore, setScrollToIndexCallback } from '@/stores/fileBrowser';
@@ -409,9 +409,29 @@ const streamingBackgroundPercent = computed<number | null>(() => {
   return Math.floor((fb.archiveProgress.downloaded / fb.archiveProgress.total) * 100);
 });
 
+// module3.5.0 后续: SMB 显示根解析用账户 host 映射（accountId → host）。
+// descriptor 不携带 host（在账户表），此前的 account-N 行号占位用户不可读。
+// 账户行被删（历史 Likes/快捷方式回放）时查不到 → displayRoot 回退 account-N。
+const accountHostById = ref<Record<number, string>>({});
+watch(
+  () => fb.currentDescriptor,
+  async (desc) => {
+    if (desc?.type !== 'smb') return;
+    if (accountHostById.value[desc.accountId]) return;
+    try {
+      const map: Record<number, string> = {};
+      for (const a of await listAccounts()) map[a.id] = a.host ?? '';
+      accountHostById.value = map;
+    } catch {
+      // 静默：IPC 失败回退 account-N 形态
+    }
+  },
+  { immediate: true },
+);
+
 /**
  * module3.2.0 打磨：当前数据源的显示根（四类源派生）。
- * Local=rootPath；WebDAV=baseUrl；Smb=initialPath（host 在账户表，M2 前不可达）；
+ * Local=rootPath；WebDAV=baseUrl（+path 锚点段）；Smb=账户 host + initialPath；
  * Archive=压缩包路径。无源=''。状态栏路径 / 面包屑根标签 / 详情面板 location 基座共用。
  */
 const displayRoot = computed(() => {
@@ -426,11 +446,12 @@ const displayRoot = computed(() => {
         const root = desc.baseUrl.replace(/\/+$/, '');
         return sub ? `${root}/${sub}` : root;
       }
-      // module3.5.0 后续：非空 initialPath 也带 smb:// 前缀（裸相对段在状态栏/
-      // 面包屑里无来源感）；host 在账户表，沿用 account-N 形态
+      // host 查不到（账户已删）回退 account-N 行号形态
       case 'smb': {
         const init = desc.initialPath.split(/[\\/]+/).filter(Boolean).join('/');
-        return init ? `smb://account-${desc.accountId}/${init}` : `smb://account-${desc.accountId}`;
+        const host = accountHostById.value[desc.accountId];
+        const base = host ? `smb://${host}` : `smb://account-${desc.accountId}`;
+        return init ? `${base}/${init}` : base;
       }
       case 'archive': return desc.archivePath.replace(/\\/g, '/');
     }
