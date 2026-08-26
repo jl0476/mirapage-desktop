@@ -171,10 +171,13 @@ async function test(id: number) {
   }
 }
 
-/** 副标题：host:port（SMB 追加 share）——mono 路径行（对齐 Likes/快捷方式双行制） */
+/** 副标题：SMB = host:port/share（mono 路径行，对齐 Likes/快捷方式双行制）；
+ *  WebDAV = host 原样（它本就是完整 base URL——拼 :port 会产生
+ *  「https://…/home:445」畸形串，2026-08-26 用户实机所见） */
 function hostLine(acct: AccountItem): string {
-  const host = `${acct.host ?? ''}:${acct.port ?? ''}`;
-  return acct.type === 'smb' && acct.share ? `${host}/${acct.share}` : host;
+  if (acct.type !== 'smb') return acct.host ?? '';
+  const host = acct.port ? `${acct.host ?? ''}:${acct.port}` : (acct.host ?? '');
+  return acct.share ? `${host}/${acct.share}` : host;
 }
 
 /** 浏览入口（实机补全 2026-08-26：账户配置好后此前无任何 UI 入口可达其目录——
