@@ -81,7 +81,9 @@ pub fn run() {
             let _ = PROGRESS_EMITTER.set(app_handle.clone());
 
             // 凭据存储（spec §3.4：keyring 生产实现，密码不落 DB）
-            let creds = std::sync::Arc::new(credentials::KeyringStore)
+                        // keyring 平台后端探测：mock 时 error 日志（密码不持久化的防御告警）
+            crate::credentials::warn_if_mock_backend();
+let creds = std::sync::Arc::new(credentials::KeyringStore)
                 as std::sync::Arc<dyn credentials::CredentialStore>;
             app.manage(creds.clone());
 

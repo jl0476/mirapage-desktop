@@ -75,6 +75,14 @@ pub fn upsert_account_impl(
     creds: &dyn crate::credentials::CredentialStore,
     args: UpsertAccountArgs,
 ) -> Result<i64, String> {
+    // share 归一化（实机 2026-08-26：`/Other1` 带前导斜杠会使 UNC 拼出
+    // `\ip\/Other1` 畸形共享名 → tree connect Object Name Not Found）：
+    // 去首尾的 `/` 与 `\`，空串归 None。用户在 UI 输入 share 时常带路径分隔符。
+    let share = args
+        .share
+        .as_deref()
+        .map(|s| s.trim_matches(['/', '\\']).to_string())
+        .filter(|s| !s.is_empty());
     let conn = db.conn();
     match args.id {
         Some(id) => {
@@ -92,7 +100,7 @@ pub fn upsert_account_impl(
                 .map_err(|e| e.to_string())?;
             conn.execute(
                 "UPDATE account SET name = ?1, host = ?2, port = ?3, share = ?4, username = ?5 WHERE id = ?6",
-                rusqlite::params![args.name, args.host, args.port, args.share, args.username, id],
+                rusqlite::params![args.name, args.host, args.port, share, args.username, id],
             )
             .map_err(|e| e.to_string())?;
             if let Some(p) = args.password.filter(|p| !p.is_empty()) {
@@ -110,7 +118,7 @@ pub fn upsert_account_impl(
         None => {
             conn.execute(
                 "INSERT INTO account (name, type, host, port, share, username, encrypted_password) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)",
-                rusqlite::params![args.name, args.kind, args.host, args.port, args.share, args.username],
+                rusqlite::params![args.name, args.kind, args.host, args.port, share, args.username],
             )
             .map_err(|e| e.to_string())?;
             let id = conn.last_insert_rowid();
@@ -208,10 +216,12 @@ pub async fn test_connection_impl(
             // 校验返回 TransportError::InvalidPath（→ MediaSourceError::InvalidPath）。
             let _host = host.clone().ok_or("smb 账户缺少 host")?;
             let share = share.clone().ok_or("smb 账户缺少 share（固定共享根必填）")?;
-            let initial = share;
+            // initial 留空 = share 根（实机修正 2026-08-26：share 名作 initial 会经
+            // unc_rel 拼成 share 内同名子目录——test 语义是「建连 + 认证 + tree
+            // connect 可访问」，列 share 根一次即可；share 变量保留给上面的非空校验）
             let port_val = port.unwrap_or(445);
             let d = crate::source::descriptor::SourceDescriptor::Smb {
-                account_id: id, initial_path: initial, path: String::new(), port: port_val as i32,
+                account_id: id, initial_path: String::new(), path: String::new(), port: port_val as i32,
             };
             factory.resolve(&d).test(&d).await
                 .map(|_| true).map_err(|e| e.to_string())
@@ -252,6 +262,29 @@ mod tests {
         let conn = db.conn();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM account", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn upsert_normalizes_share_separators() {
+        // 实机回归（2026-08-26）：`/Other1` 带前导斜杠入库 → UNC 拼出
+        // `\\ip\/Other1` 畸形共享名 → tree connect Object Name Not Found。
+        // 写侧归一：首尾 `/` 与 `\` 全剥，空串归 None。
+        let (db, store) = setup();
+        for input in ["/Other1", "\\Other1", "/Other1/", "Other1", "//share//x//"] {
+            let id = upsert_account_impl(&db, store.as_ref(), UpsertAccountArgs {
+                id: None, name: format!("n-{input:?}"), kind: "smb".into(),
+                host: Some("192.168.50.168".into()), port: Some(445),
+                share: Some(input.into()), username: None, password: None,
+            }).unwrap();
+            let conn = db.conn();
+            let stored: Option<String> = conn
+                .query_row("SELECT share FROM account WHERE id = ?1", rusqlite::params![id], |r| r.get(0))
+                .unwrap();
+            match input {
+                "//share//x//" => assert_eq!(stored.as_deref(), Some("share//x"), "只剥首尾不动内部"),
+                other => assert_eq!(stored.as_deref(), Some("Other1"), "{other} 应归一为 Other1"),
+            }
+        }
     }
 
     #[test]

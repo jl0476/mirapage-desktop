@@ -13,6 +13,27 @@ pub trait CredentialStore: Send + Sync {
     fn delete_password(&self, key: &str) -> Result<(), String>;
 }
 
+/// keyring 3 无平台后端时静默退化为 mock（密码存 Entry 实例、写入即丢）——
+/// 实机抓到过（2026-08-26 SMB Logon Failure：账户密码从未真正存储）。
+/// 生产 store 构造前探测一次，mock 时打 error 日志（防御 feature 声明被误删）。
+pub fn warn_if_mock_backend() {
+    let is_mock = keyring::Entry::new(KEYRING_SERVICE, "backend-probe")
+        .ok()
+        .is_some_and(|e| {
+            e.get_credential()
+                .downcast_ref::<keyring::mock::MockCredential>()
+                .is_some()
+        });
+    if is_mock {
+        crate::log::write_log(
+            "ERROR",
+            "credentials",
+            "keyring 处于 mock 后端：账户密码不会持久化——检查 Cargo.toml 的 keyring \
+             平台 feature（windows-native/apple-native/sync-secret-service）",
+        );
+    }
+}
+
 /// 生产实现：OS 凭据管理器（Windows Credential Manager / macOS Keychain / Linux Secret Service）
 pub struct KeyringStore;
 

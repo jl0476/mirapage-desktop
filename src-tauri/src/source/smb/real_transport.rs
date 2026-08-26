@@ -159,8 +159,12 @@ impl SmbTransport for SmbClientTransport {
         let mut out = Vec::new();
         while let Some(item) = stream.next().await {
             let info = item.map_err(map_smb_error)?;
-            // "." / ".." 由 SMB 服务器语义不返回（FSCC）；空名防御跳过
-            if info.file_name.is_empty() {
+            // 实机修正（2026-08-26，群晖等 NAS）：FSCC 语义上服务器「可以不返回」
+            // "." / ".."，但实际实现普遍返回——必须在此过滤（Local/WebDAV 不会产生
+            // 伪条目，SMB 不过滤会出现两个幽灵目录）；空名防御跳过
+            let name = String::try_from(info.file_name.clone())
+                .map_err(|e| TransportError::Io(e.to_string()))?;
+            if name.is_empty() || name == "." || name == ".." {
                 continue;
             }
             out.push(to_raw(&info));

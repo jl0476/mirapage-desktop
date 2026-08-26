@@ -90,6 +90,9 @@ impl SmbConnectionManager {
                 TransportError::FileNotFound(format!("smb account {account_id} 不存在"))
             })?
         };
+        // 读侧归一（兼容存量脏行：share 曾以 `/Other1` 形态入库，UNC 拼接即
+        // 畸形共享名 → Object Name Not Found）——与 upsert 写侧归一同语义
+        let share = share.map(|s| s.trim_matches(['/', '\\']).to_string()).filter(|s| !s.is_empty());
         super::path::share_root_matches(initial_path, share.as_deref())
             .map_err(|e| TransportError::InvalidPath(e.to_string()))?;
         let port = port.unwrap_or(445);

@@ -85,7 +85,12 @@ zeroize = "=1.8.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # 凭据（module3.2.0-media-display 启用：账户密码走 OS 凭据管理器，不落 DB）
-keyring = "3"
+# 实机修正（2026-08-26，SMB Logon Failure 排查）：keyring 3 默认**无平台后端**
+# （静默 mock：密码存 Entry 实例、写入即丢、新 Entry 读不到 → 空密码登录）——
+# 必须显式启用：windows = Credential Manager / macOS = Keychain /
+# Linux = Secret Service（dbus）。三个 feature 的依赖全部 target-gated，
+# 非当前平台启用为 no-op，跨平台单声明安全。
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
 
 # 错误处理
 thiserror = "1"

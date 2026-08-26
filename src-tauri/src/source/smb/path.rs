@@ -18,6 +18,12 @@ pub fn share_root_matches(initial_path: &str, account_share: Option<&str>) -> Re
     let Some(share) = account_share else {
         return Err("账户缺少 share 配置（固定共享根必填）");
     };
+    // 空 initial = share 根（实机修正 2026-08-26：原契约下 share 根不可达——
+    // initial 非空时 unc_rel 会把它拼进相对路径，列「initial 自身」需 share 根下
+    // 存在同名子目录，M2 待实机标注期间从未暴露）
+    if initial_path.is_empty() {
+        return Ok(());
+    }
     let first = initial_path.split('/').next().unwrap_or("");
     if first.is_empty() || first != share {
         return Err("initialPath 首段必须等于 account.share（跨 share 访问被拒绝）");
@@ -57,8 +63,9 @@ mod tests {
         assert!(share_root_matches("media/comics", Some("media")).is_ok());
         assert!(share_root_matches("other", Some("media")).is_err());   // 跨 share 越权
         assert!(share_root_matches("media", None).is_err());            // share NULL = 配置错误
-        // initial_path 为空同样违约（首段不存在）
-        assert!(share_root_matches("", Some("media")).is_err());
+        // 实机修正（2026-08-26）：空 initial = share 根，合法——原「首段不存在即拒」
+        // 使 share 根不可达（initial 非空会被 unc_rel 拼成 share 内同名子目录）
+        assert!(share_root_matches("", Some("media")).is_ok());
     }
 
     #[test]
