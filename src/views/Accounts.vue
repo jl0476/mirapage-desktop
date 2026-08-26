@@ -391,7 +391,10 @@ const ICON_PULSE = 'M22 12h-4l-3 9L9 3l-3 9H2';
             class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
           />
         </label>
-        <label class="flex flex-col gap-1 text-xs text-text-secondary">
+        <!-- 端口仅 SMB 消费（连接串 host:port）；WebDAV 的 host 字段是完整 base URL
+             （协议+端口+路径，accounts.rs test_connection 注释），单独的端口框不参与拼接，
+             展示只会误导（2026-08-26 用户填 WebDAV 时被误导暴露） -->
+        <label v-if="draft.kind === 'smb'" class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.port') }}
           <input
             v-model.number="draft.port"
