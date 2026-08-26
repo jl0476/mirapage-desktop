@@ -352,6 +352,10 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const archiveProgressKey = ref<string | null>(null);
   const archiveOpenError = ref<ArchiveAccessError | null>(null);
   const archiveCommitPendingId = ref<ArchiveRequestId | null>(null);
+  /** 替换旧打开的取消 IPC 在途（openArchive 清空三 ref → await cancel 的窗口）：
+   *  窗口内导航守卫看不到任何 pending（epoch 已 ++ 但新请求未注册），不补此标记
+   *  会让「取消返回 → 新请求 commitArchive」覆盖用户刚完成的导航（复审 P1-3） */
+  const archiveSupersedeInFlight = ref(false);
   let archiveOpenEpoch = 0;
   let archiveSessionId = crypto.randomUUID();
   let archiveBootMs = Date.now(); // 页面代次：store 创建时捕获一次，随 begin 上报防旧 WebView 迟到 begin 反夺
@@ -470,6 +474,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       pendingArchiveOpen.value === null
       && pendingArchivePassword.value === null
       && archiveCommitPendingId.value === null
+      && !archiveSupersedeInFlight.value
     ) return;
     takeAndCancelPendingArchiveOpen('cancelNavigatedAwayArchive');
   }
@@ -489,8 +494,15 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     pendingArchivePassword.value = null;
     archiveCommitPendingId.value = null;
     if (supersededId) {
-      await cancelArchivePrepare(supersededId).catch((cause) =>
-        recordArchiveDiagnostic('cancelSupersededArchive', cause));
+      // 过渡标记覆盖 await 窗口：三个 pending ref 已清空而新请求未注册——
+      // 此间导航必须仍能推进 epoch 使新请求整体失效（deferred-cancel）
+      archiveSupersedeInFlight.value = true;
+      try {
+        await cancelArchivePrepare(supersededId).catch((cause) =>
+          recordArchiveDiagnostic('cancelSupersededArchive', cause));
+      } finally {
+        archiveSupersedeInFlight.value = false;
+      }
     }
     if (epoch !== archiveOpenEpoch) return;
     archiveOpening.value = true;

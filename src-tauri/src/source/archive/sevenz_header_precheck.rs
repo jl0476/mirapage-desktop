@@ -1631,8 +1631,10 @@ pub(crate) fn precheck(
         .map_err(|e| ArchiveAccessError::Io(e.to_string()))?
         .len();
     let mut signature = [0u8; SIGNATURE_HEADER_SIZE as usize];
+    // 读不足 32 字节 = 截断/损坏的压缩包（非 IO 故障）：映射 CorruptArchive，
+    // 与后续所有「文件内容坏」错误同一模型，避免前端把坏包提示成 IO 问题
     file.read_exact(&mut signature)
-        .map_err(|e| ArchiveAccessError::Io(e.to_string()))?;
+        .map_err(|_| corrupt("7z 签名头不足 32 字节（截断）"))?;
     hooks
         .bytes_scanned
         .fetch_add(SIGNATURE_HEADER_SIZE, Ordering::Relaxed);
@@ -1672,6 +1674,11 @@ pub(crate) fn precheck(
     hooks.bytes_scanned.fetch_add(nh_size, Ordering::Relaxed);
     if crc32(&blob) != nh_crc {
         return Err(corrupt("next header CRC 不匹配"));
+    }
+    // 空 NextHeader（nh_size == 0 且空数据 CRC 恰为 0 可通过校验）不是合法 7z：
+    // 下方 blob[0] 会越界 panic——按损坏拒绝
+    if blob.is_empty() {
+        return Err(corrupt("next header 为空"));
     }
     match blob[0] {
         K_HEADER => {
@@ -2023,6 +2030,44 @@ mod tests {
             run_precheck(&path),
             Err(ArchiveAccessError::ResourceLimitExceeded(_))
         ));
+    }
+
+    #[test]
+    fn sevenz_precheck_rejects_empty_next_header_instead_of_panicking() {
+        // nh_size == 0 且 nh_crc == 0（空数据 CRC32 恰为 0）可同时通过 start CRC 与
+        // blob CRC 校验——修复前 blob[0] 直接越界 panic。空 NextHeader 按损坏拒绝。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty-nh.7z");
+        let start = {
+            let mut s = Vec::new();
+            s.extend_from_slice(&0u64.to_le_bytes()); // offset
+            s.extend_from_slice(&0u64.to_le_bytes()); // size == 0
+            s.extend_from_slice(&0u32.to_le_bytes()); // crc32(&[]) == 0
+            s
+        };
+        let mut file = Vec::new();
+        file.extend_from_slice(&SEVEN_Z_SIGNATURE);
+        file.extend_from_slice(&[0, 4]);
+        file.extend_from_slice(&crc32(&start).to_le_bytes());
+        file.extend_from_slice(&start);
+        std::fs::write(&path, file).unwrap();
+        assert!(matches!(
+            run_precheck(&path),
+            Err(ArchiveAccessError::CorruptArchive(_))
+        ));
+    }
+
+    #[test]
+    fn sevenz_precheck_classifies_truncated_signature_as_corrupt_not_io() {
+        // 不足 32 字节的本地文件 = 截断/损坏（非 IO 故障）——修复前 read_exact 的
+        // UnexpectedEof 被映射为 Io，前端会提示 IO 问题而非坏包
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("truncated.7z");
+        std::fs::write(&path, b"7z\xbc\xaf\x27\x1c\x00\x04\x12").unwrap(); // 9 字节
+        match run_precheck(&path) {
+            Err(ArchiveAccessError::CorruptArchive(_)) => {}
+            other => panic!("截断文件应为 CorruptArchive，实际 {other:?}"),
+        }
     }
 
     #[test]

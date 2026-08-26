@@ -1214,6 +1214,32 @@ describe('fileBrowser store — 事务式 archive 打开', () => {
     expect(fb.archiveOpening).toBe(false);
   });
 
+  it('替换取消窗口内导航使新请求整体失效（deferred-cancel，复审 P1-3）', async () => {
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt(webdavRoot(), 'comics');
+    // 第一次打开挂起（制造 pending）；第二次打开 supersede 且 cancel IPC 挂起——
+    // 清空三 ref 与注册新请求之间存在 await 窗口，守卫不得因 ref 全空而空过
+    vi.mocked(prepareArchive).mockReturnValue(new Promise(() => {}));
+    void fb.openArchive(makeEntry('book.cbr', { isArchive: true }));
+    await vi.waitFor(() => expect(fb.pendingArchiveOpen).not.toBeNull());
+    const cancelGate = deferred<void>();
+    vi.mocked(cancelArchivePrepare).mockReturnValueOnce(cancelGate.promise);
+    const second = fb.openArchive(makeEntry('book2.cbr', { isArchive: true }));
+    await vi.waitFor(() => expect(fb.pendingArchiveOpen).toBeNull());
+    // 窗口内导航：epoch 被推进，第二次 open 的取消返回后整体失效
+    await fb.navigate('elsewhere');
+    expect(fb.currentPath).toBe('elsewhere');
+    cancelGate.resolve();
+    await second;
+    // 两次请求都未发出 prepare：第一次在 ensure 恢复时 epoch 已失配丢弃，
+    // 第二次在取消返回后整体失效（不注册不提交）
+    expect(prepareArchive).not.toHaveBeenCalled();
+    expect(fb.currentDescriptor).toMatchObject({ type: 'webdav' });
+    expect(fb.currentPath).toBe('elsewhere');
+    expect(commitArchiveOpen).not.toHaveBeenCalled();
+    expect(fb.archiveOpening).toBe(false);
+  });
+
   it('取消后立即重开同一路径时只接受新 requestId 的进度', async () => {
     const fb = useFileBrowserStore();
     await fb.openDescriptorAt(webdavRoot(), 'comics');

@@ -210,16 +210,19 @@ fn path_of(input: &ArchiveInput) -> Result<&Path, ArchiveAccessError> {
     }
 }
 
-/// `.7z.001` 分卷命名拒绝（单卷 backend 合同）。
+/// `.7z.NNN` 分卷命名拒绝（单卷 backend 合同）：匹配任意数字卷号——只认 `.001`
+/// 会让 `.7z.002` 及以后漏进解析、被误分类为损坏/IO，而非专用的多卷错误。
 fn reject_split_name(path: &Path) -> Result<(), ArchiveAccessError> {
     let name = path
         .file_name()
         .and_then(|v| v.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let split = name
-        .strip_suffix(".7z.001")
-        .is_some_and(|stem| !stem.is_empty());
+    let split = name.rsplit_once(".7z.").is_some_and(|(stem, vol)| {
+        !stem.is_empty()
+            && !vol.is_empty()
+            && vol.bytes().all(|b| b.is_ascii_digit())
+    });
     if split {
         return Err(ArchiveAccessError::MultiVolumeUnsupported(name));
     }
@@ -890,6 +893,31 @@ pub(crate) mod tests {
             SevenZBackend.catalog(&ArchiveInput::Path(path), "", None),
             Err(ArchiveAccessError::MultiVolumeUnsupported(_))
         ));
+    }
+
+    #[test]
+    fn split_7z_any_numeric_volume_suffix_is_rejected() {
+        // 只认 .001 会让 .002 及以后漏进解析、被误分类为损坏/IO——完整数字卷号模式
+        let dir = tempdir().unwrap();
+        for name in ["book.7z.002", "book.7z.010", "book.7z.999", "大写.7z.003"] {
+            let path = dir.path().join(name);
+            assert!(
+                matches!(
+                    SevenZBackend.catalog(&ArchiveInput::Path(path), "", None),
+                    Err(ArchiveAccessError::MultiVolumeUnsupported(_))
+                ),
+                "{name} 应按多卷拒绝"
+            );
+        }
+        // 对照：非数字后缀不是分卷（进入正常解析，按损坏/不存在分类）
+        let not_split = dir.path().join("book.7z.backup");
+        assert!(
+            !matches!(
+                SevenZBackend.catalog(&ArchiveInput::Path(not_split), "", None),
+                Err(ArchiveAccessError::MultiVolumeUnsupported(_))
+            ),
+            ".backup 后缀不应按多卷拒绝"
+        );
     }
 
     #[test]
