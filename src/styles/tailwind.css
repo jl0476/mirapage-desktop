@@ -178,6 +178,39 @@
 
   .xp-divider-v { width: 1px; height: 16px; background-color: var(--color-border-default); }
   .xp-divider-h { height: 1px; background-color: var(--color-border-default); }
+
+  /* ─── 工具栏按钮统一 base (Xplorer 风格) ───
+   * 自 FileBrowser.vue scoped 提升（2026-08-26）：scoped 定义对 PickRootMenu /
+   * Settings 等其他组件的按钮不生效（选根按钮在工具栏挤压下折行暴露）。
+   * white-space: nowrap 为提升时新增——CJK 文本在 flex 挤压下会按字折行，
+   * 工具栏按钮语义是整钮换行（toolbar flex-wrap）而非内部折行。
+   */
+  .tb-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border: 0;
+    background: transparent;
+    color: var(--color-text-muted);
+    border-radius: 4px;
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 120ms ease-out, color 120ms ease-out;
+  }
+  .tb-btn:hover:not(:disabled) {
+    background: var(--color-surface-light);
+    color: var(--color-text-primary);
+  }
+  .tb-btn:active:not(:disabled) {
+    color: var(--color-accent);
+  }
+  .tb-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
 }
 
 /* ─── Light theme token override ────────────────────────────────────────────

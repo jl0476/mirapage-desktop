@@ -87,13 +87,13 @@ onUnmounted(() => document.removeEventListener('mousedown', onMouseDown));
     <button
       v-if="variant === 'toolbar'"
       type="button"
-      class="tb-btn"
+      class="tb-btn shrink-0"
       data-test="btn-pick"
       @click="toggle"
     >
       <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="2" stroke-linecap="round"
-           stroke-linejoin="round" aria-hidden="true">
+           stroke-linejoin="round" class="shrink-0" aria-hidden="true">
         <path :d="ICON_FOLDER" />
       </svg>
       {{ t('fileBrowser.pickRoot') }}

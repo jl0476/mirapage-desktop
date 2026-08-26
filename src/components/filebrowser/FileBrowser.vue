@@ -1477,32 +1477,8 @@ function onReadNowFromCtx(entry: MediaEntry) {
 </template>
 
 <style scoped>
-/* ─── 工具栏按钮统一 base (Xplorer 风格) ─── */
-.tb-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-muted);
-  border-radius: 4px;
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  transition: background 120ms ease-out, color 120ms ease-out;
-}
-.tb-btn:hover:not(:disabled) {
-  background: var(--color-surface-light);
-  color: var(--color-text-primary);
-}
-.tb-btn:active:not(:disabled) {
-  color: var(--color-accent);
-}
-.tb-btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
+/* .tb-btn 已提升为全局工具类（styles/tailwind.css @layer utilities）——scoped
+   定义对 PickRootMenu 等子组件按钮不生效（2026-08-26 选根按钮折行实机暴露） */
 
 /* v0.1.0-module3.0.7-masonry-task14: 视图按钮 SVG 资产容器.
    v-html 注入的 SVG 不会带 Vue scoped data-attribute, 但因为是 .vbtn-icon 的
