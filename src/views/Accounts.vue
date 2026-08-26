@@ -13,6 +13,9 @@
  * - 按错误字符串关键字路由三态：含「权限/认证/Auth/credential」→ testFailAuth、
  *   含「share/契约/配置」→ testFailConfig、其余 → testFailNetwork
  * - 删除按钮的 res.warning 走顶部 5s toast（保留已有 warning 行为）
+ *
+ * v0.1.0-module3.5.0 后续：视觉对齐 3.1.1 列表页统一范式（Likes/Bookmarks 同款
+ * header/行/按钮/空态 + 密码弹窗同款 modal token），删除旧 scoped 硬编码 hex。
  */
 import { onMounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
@@ -158,180 +161,246 @@ async function test(id: number) {
     showTestFail(t(testFailI18nKey(kind)));
   }
 }
+
+/** 副标题：host:port（SMB 追加 share）——mono 路径行（对齐 Likes/快捷方式双行制） */
+function hostLine(acct: AccountItem): string {
+  const host = `${acct.host ?? ''}:${acct.port ?? ''}`;
+  return acct.type === 'smb' && acct.share ? `${host}/${acct.share}` : host;
+}
+
+const ICON_SERVER = 'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z M3.27 6.96 12 12.01l8.73-5.05 M12 22.08V12';
+const ICON_PLUS = 'M12 5v14M5 12h14';
+const ICON_PULSE = 'M22 12h-4l-3 9L9 3l-3 9H2';
 </script>
 
 <template>
-  <main class="accounts-view">
-    <header>
-      <h2>{{ t('accounts.title') }}</h2>
-      <div class="actions">
-        <button data-test="add-btn" @click="startAdd">+ {{ t('accounts.add') }}</button>
-        <RouterLink to="/">← {{ t('common.back') }}</RouterLink>
+  <main class="accounts-view p-6 h-full overflow-y-auto">
+    <header class="flex justify-between items-center mb-6">
+      <h2 class="m-0 text-xl font-semibold tracking-tight">
+        {{ t('accounts.title') }}
+      </h2>
+      <div class="flex items-center gap-3">
+        <button
+          data-test="add-btn"
+          class="flex items-center gap-1 px-3 py-1.5 rounded text-xs xp-bd bg-transparent
+                 text-accent hover:bg-surface-2 transition-colors cursor-pointer"
+          @click="startAdd"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_PLUS" />
+          </svg>
+          {{ t('accounts.add') }}
+        </button>
+        <RouterLink
+          to="/"
+          class="text-text-secondary no-underline text-sm px-3 py-1.5 rounded hover:bg-surface-2 hover:text-text-primary transition-colors"
+        >
+          ← {{ t('common.back') }}
+        </RouterLink>
       </div>
     </header>
 
-    <p v-if="accounts.length === 0" class="hint">
-      {{ t('accounts.empty') }}
-    </p>
-
-    <!-- module3.2.0：凭据残留警告（keyring 删除失败，DB 已删） -->
-    <p v-if="warning" data-test="credential-warning" class="hint warning">
+    <!-- module3.2.0：凭据残留警告（keyring 删除失败，DB 已删）；
+         M2 task 7：测试连接失败三态原因 toast（顶部 5s，与上方共享同一 banner 位） -->
+    <p
+      v-if="warning"
+      data-test="credential-warning"
+      class="m-0 mb-4 px-3 py-2 rounded text-xs bg-error/8 border border-error text-error
+             shadow-[0_0_10px_rgba(248,113,113,0.3)]"
+    >
       {{ warning }}
     </p>
-
-    <!-- M2 task 7：测试连接失败三态原因 toast（顶部 5s 提示） -->
-    <p v-else-if="testFailMessage" data-test="test-fail" class="hint warning">
+    <p
+      v-else-if="testFailMessage"
+      data-test="test-fail"
+      class="m-0 mb-4 px-3 py-2 rounded text-xs bg-error/8 border border-error text-error
+             shadow-[0_0_10px_rgba(248,113,113,0.3)]"
+    >
       {{ testFailMessage }}
     </p>
 
-    <ul v-if="accounts.length > 0" data-test="list" class="accounts-list">
-      <li v-for="acct in accounts" :key="acct.id" data-test="row">
-        <span class="name">{{ acct.name }}</span>
-        <span class="kind" :class="acct.type">{{ t(`accounts.${acct.type}`) }}</span>
-        <span class="host">{{ acct.host ?? '' }}:{{ acct.port ?? '' }}</span>
-        <button data-test="test-btn" @click="test(acct.id)">{{ t('accounts.test') }}</button>
-        <span
-          v-if="testResult[acct.id] !== undefined"
-          class="test-result"
-          :class="{ ok: testResult[acct.id].ok, fail: !testResult[acct.id].ok }"
-          :data-test-fail-kind="testResult[acct.id].message
-            ? classifyTestFail(testResult[acct.id].message!) : null"
+    <!-- 列表（Likes/快捷方式同款双行制：主标题 + 徽章 + mono 副标题 host） -->
+    <ul
+      v-if="accounts.length > 0"
+      data-test="list"
+      class="list-none p-0 m-0 flex flex-col gap-2"
+    >
+      <li
+        v-for="acct in accounts"
+        :key="acct.id"
+        data-test="row"
+        class="flex items-center gap-4 p-3 px-4 bg-surface-1 xp-bd rounded-lg transition-colors duration-100 hover:border-accent hover:shadow-[0_0_10px_rgba(99,102,241,0.25)]"
+      >
+        <svg
+          width="18" height="18" viewBox="0 0 24 24"
+          fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true"
+          :class="['shrink-0', acct.type === 'smb' ? 'text-success' : 'text-accent']"
         >
-          {{ testResult[acct.id].ok ? t('accounts.testedOk') : t('accounts.testedFail') }}
-        </span>
-        <button data-test="edit-btn" @click="startEdit(acct)">{{ t('accounts.edit') }}</button>
-        <button data-test="delete-btn" @click="remove(acct.id)">{{ t('accounts.delete') }}</button>
+          <path :d="ICON_SERVER" />
+        </svg>
+        <div class="flex flex-col gap-0.5 flex-1 min-w-0">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="font-semibold text-sm text-text-primary truncate">{{ acct.name }}</span>
+            <span
+              class="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium"
+              :class="acct.type === 'smb'
+                ? 'bg-success/15 text-success'
+                : 'bg-accent/15 text-accent'"
+            >{{ t(`accounts.${acct.type}`) }}</span>
+            <span
+              v-if="testResult[acct.id] !== undefined"
+              class="test-result shrink-0 flex items-center gap-1 text-xs"
+              :class="testResult[acct.id].ok ? 'ok text-success' : 'fail text-error'"
+              :data-test-fail-kind="testResult[acct.id].message
+                ? classifyTestFail(testResult[acct.id].message!) : null"
+            >
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path :d="ICON_PULSE" />
+              </svg>
+              {{ testResult[acct.id].ok ? t('accounts.testedOk') : t('accounts.testedFail') }}
+            </span>
+          </div>
+          <span class="font-mono text-xs text-text-tertiary truncate" :title="hostLine(acct)">
+            {{ hostLine(acct) }}
+          </span>
+        </div>
+        <button
+          data-test="test-btn"
+          class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent
+                 text-text-secondary hover:bg-surface-2 hover:text-text-primary transition-colors cursor-pointer"
+          @click="test(acct.id)"
+        >{{ t('accounts.test') }}</button>
+        <button
+          data-test="edit-btn"
+          class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent
+                 text-text-secondary hover:bg-surface-2 hover:text-text-primary transition-colors cursor-pointer"
+          @click="startEdit(acct)"
+        >{{ t('accounts.edit') }}</button>
+        <button
+          data-test="delete-btn"
+          class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent
+                 text-text-secondary hover:bg-error/10 hover:text-error transition-colors cursor-pointer"
+          @click="remove(acct.id)"
+        >{{ t('accounts.delete') }}</button>
       </li>
     </ul>
 
-    <div v-if="showAdd" class="modal-backdrop" @click.self="showAdd = false">
-      <div class="modal" role="dialog">
-        <h3>{{ editing ? t('accounts.edit') : t('accounts.add') }}</h3>
-        <label>
+    <!-- 空状态（Likes 同款：图标盒 + hint + CTA） -->
+    <div
+      v-if="accounts.length === 0"
+      class="flex flex-col items-center justify-center gap-4 mt-12"
+      data-test="empty-state"
+    >
+      <div class="w-16 h-16 rounded-2xl bg-surface-1 xp-bd flex items-center justify-center backdrop-blur-md">
+        <svg
+          width="32" height="32" viewBox="0 0 24 24" fill="none"
+          stroke="#6366f1" stroke-width="1.5" stroke-linecap="round"
+          stroke-linejoin="round" aria-hidden="true"
+        >
+          <path :d="ICON_SERVER" />
+        </svg>
+      </div>
+      <p class="text-text-tertiary text-sm m-0">
+        {{ t('accounts.empty') }}
+      </p>
+      <button
+        data-test="add-btn-empty"
+        class="text-accent text-sm hover:text-accent-hover hover:underline transition-colors bg-transparent border-none cursor-pointer"
+        @click="startAdd"
+      >
+        + {{ t('accounts.add') }} →
+      </button>
+    </div>
+
+    <!-- 添加/编辑 modal（密码弹窗同款 token 卡片 + input 范式） -->
+    <div
+      v-if="showAdd"
+      class="fixed inset-0 z-[1200] bg-black/60 backdrop-blur-sm flex items-center justify-center"
+      @click.self="showAdd = false"
+    >
+      <div
+        role="dialog"
+        class="w-[420px] max-w-[90vw] bg-surface-1 xp-bd rounded-lg p-6 flex flex-col gap-3 text-text-primary shadow-xl"
+      >
+        <h3 class="m-0 text-base font-semibold">
+          {{ editing ? t('accounts.edit') : t('accounts.add') }}
+        </h3>
+        <label class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.name') }}
-          <input v-model="draft.name" data-test="name" />
+          <input
+            v-model="draft.name"
+            data-test="name"
+            class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
+          />
         </label>
-        <label>
+        <label class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.type') }}
           <!-- module3.2.0：type 不可变（spec §3.4——杜绝改类型后旧 keyring 条目遗留） -->
-          <select v-model="draft.kind" :disabled="!!editing" data-test="kind-select">
+          <select
+            v-model="draft.kind"
+            :disabled="!!editing"
+            data-test="kind-select"
+            class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)] disabled:opacity-40"
+          >
             <option value="smb">{{ t('accounts.smb') }}</option>
             <option value="webdav">{{ t('accounts.webdav') }}</option>
           </select>
         </label>
-        <label>
+        <label class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.host') }}
-          <input v-model="draft.host" data-test="host" />
+          <input
+            v-model="draft.host"
+            data-test="host"
+            class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
+          />
         </label>
-        <label>
+        <label class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.port') }}
-          <input v-model.number="draft.port" type="number" />
+          <input
+            v-model.number="draft.port"
+            type="number"
+            class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
+          />
         </label>
-        <label v-if="draft.kind === 'smb'">
+        <label v-if="draft.kind === 'smb'" class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.share') }}
-          <input v-model="draft.share" />
+          <input
+            v-model="draft.share"
+            class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
+          />
         </label>
-        <label>
+        <label class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.username') }}
-          <input v-model="draft.username" />
+          <input
+            v-model="draft.username"
+            class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
+          />
         </label>
-        <label>
+        <label class="flex flex-col gap-1 text-xs text-text-secondary">
           {{ t('accounts.password') }}
           <input
             v-model="draft.password"
             type="password"
             data-test="password"
             :placeholder="editing ? t('accounts.passwordKeep') : t('accounts.passwordPlaceholder')"
+            class="px-3 py-2 bg-surface-inset xp-bd text-text-primary text-sm rounded outline-none transition-[border-color,box-shadow] duration-100 focus:border-accent focus:shadow-[0_0_0_3px_var(--color-accent-soft)]"
           />
         </label>
-        <div class="modal-actions">
-          <button @click="showAdd = false">{{ t('common.cancel') }}</button>
-          <button data-test="save-btn" @click="save">{{ t('common.save') }}</button>
+        <div class="flex justify-end gap-2 mt-2">
+          <button
+            class="px-3 py-1.5 xp-bd bg-transparent text-text-secondary rounded cursor-pointer text-xs transition-[background,color] duration-100 hover:bg-surface-2 hover:text-text-primary"
+            @click="showAdd = false"
+          >{{ t('common.cancel') }}</button>
+          <button
+            data-test="save-btn"
+            class="px-3 py-1.5 rounded text-xs bg-accent text-white border-none cursor-pointer hover:bg-accent-hover transition-colors"
+            @click="save"
+          >{{ t('common.save') }}</button>
         </div>
       </div>
     </div>
   </main>
 </template>
-
-<style scoped>
-.accounts-view { padding: 24px; height: 100%; overflow-y: auto; }
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-}
-.actions { display: flex; gap: 12px; align-items: center; }
-h2 { margin: 0; }
-.accounts-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.accounts-list li {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border: 1px solid #444;
-  border-radius: 8px;
-  flex-wrap: wrap;
-}
-.accounts-list .name { font-weight: 600; min-width: 120px; }
-.accounts-list .kind {
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 12px;
-}
-.accounts-list .kind.smb { background: #5a9e3c; }
-.accounts-list .kind.webdav { background: #4060c0; }
-.accounts-list .host { opacity: 0.7; }
-.accounts-list .test-result.ok { color: #5dff5d; }
-.accounts-list .test-result.fail { color: #ff6b6b; }
-button {
-  padding: 4px 10px;
-  border: 1px solid #555;
-  border-radius: 4px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
-.modal {
-  background: #1f1f1f;
-  padding: 24px;
-  border-radius: 8px;
-  min-width: 400px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.modal h3 { margin: 0; }
-.modal label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-}
-.modal input, .modal select {
-  padding: 6px 8px;
-  background: #2a2a2a;
-  border: 1px solid #555;
-  border-radius: 4px;
-  color: inherit;
-}
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
-.hint { color: #888; text-align: center; margin-top: 24px; }
-.hint.warning { color: #ff6b6b; }
-</style>
