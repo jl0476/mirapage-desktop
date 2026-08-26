@@ -18,7 +18,10 @@
  * header/行/按钮/空态 + 密码弹窗同款 modal token），删除旧 scoped 硬编码 hex。
  */
 import { onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
+import type { SourceDescriptor } from '@/lib/sourceDescriptor';
 import {
   listAccounts,
   upsertAccount,
@@ -28,6 +31,8 @@ import {
 } from '@/lib/tauri';
 
 const { t } = useI18n();
+const router = useRouter();
+const fb = useFileBrowserStore();
 
 const accounts = ref<AccountItem[]>([]);
 const showAdd = ref(false);
@@ -172,8 +177,21 @@ function hostLine(acct: AccountItem): string {
   return acct.type === 'smb' && acct.share ? `${host}/${acct.share}` : host;
 }
 
+/** 浏览入口（实机补全 2026-08-26：账户配置好后此前无任何 UI 入口可达其目录——
+ *  FileBrowser 选根只有本地对话框，Shortcuts/Likes 的 openDescriptorAt 路径需要
+ *  先有记录，鸡生蛋）。SMB 从 share 根（空 initial，M2 实机修正后的合法形态）；
+ *  WebDAV 从 baseUrl 根。一次性意图经 requestOpenLocation，FileBrowser 消费。 */
+function openInBrowser(acct: AccountItem): void {
+  const desc: SourceDescriptor = acct.type === 'smb'
+    ? { type: 'smb', accountId: acct.id, initialPath: '', path: '', port: acct.port ?? 445 }
+    : { type: 'webdav', accountId: acct.id, baseUrl: acct.host ?? '', path: '' };
+  fb.requestOpenLocation(desc, '');
+  void router.push('/');
+}
+
 const ICON_SERVER = 'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z M3.27 6.96 12 12.01l8.73-5.05 M12 22.08V12';
 const ICON_PLUS = 'M12 5v14M5 12h14';
+const ICON_GRID = 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z';
 const ICON_PULSE = 'M22 12h-4l-3 9L9 3l-3 9H2';
 </script>
 
@@ -271,6 +289,20 @@ const ICON_PULSE = 'M22 12h-4l-3 9L9 3l-3 9H2';
             {{ hostLine(acct) }}
           </span>
         </div>
+        <button
+          v-if="acct.type === 'smb' || acct.host"
+          data-test="browse-btn"
+          :title="t('accounts.browseTitle')"
+          class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent
+                 text-text-secondary hover:bg-surface-2 hover:text-text-primary transition-colors cursor-pointer"
+          @click="openInBrowser(acct)"
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path :d="ICON_GRID" />
+          </svg>
+          {{ t('accounts.browse') }}
+        </button>
         <button
           data-test="test-btn"
           class="flex items-center gap-1 px-3 py-1 rounded text-xs xp-bd bg-transparent

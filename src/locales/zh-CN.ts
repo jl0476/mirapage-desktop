@@ -255,6 +255,8 @@ export default {
     testFailAuth: '认证失败（检查用户名/密码）',
     testFailConfig: '配置错误（缺少 share 或路径契约不符）',
     passwordPlaceholder: '输入密码',
+    browse: '浏览',
+    browseTitle: '在文件浏览器中打开该账户的根目录',
     passwordKeep: '留空保持不变',
     credentialWarning: '凭据可能残留在系统凭据管理器，请手动清理',
     typeLocked: '类型不可修改（删除后重新添加可换类型）',

@@ -7,13 +7,20 @@ import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import Accounts from './Accounts.vue';
+import { useFileBrowserStore } from '@/stores/fileBrowser';
 
 const mocks = vi.hoisted(() => ({
   listAccounts: vi.fn(),
   upsertAccount: vi.fn(),
   deleteAccount: vi.fn(),
   testConnection: vi.fn(),
+  routerPush: vi.fn(),
 }));
+
+vi.mock('vue-router', async () => {
+  const actual = await vi.importActual<typeof import('vue-router')>('vue-router');
+  return { ...actual, useRouter: () => ({ push: mocks.routerPush }) };
+});
 
 vi.mock('@/lib/tauri', async () => {
   const actual = await vi.importActual<typeof import('@/lib/tauri')>('@/lib/tauri');
@@ -32,6 +39,11 @@ const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': z
 const WEBDAV_ACCT = {
   id: 3, name: 'dav', type: 'webdav', host: 'https://d/x', port: null,
   share: null, username: 'u',
+};
+
+const SMB_ACCT = {
+  id: 2, name: 'home', type: 'smb', host: '192.168.50.168', port: 445,
+  share: '/Other1', username: 'jl',
 };
 
 beforeEach(() => {
@@ -147,5 +159,33 @@ describe('Accounts.vue', () => {
     const failBanner = wrapper.find('[data-test="test-fail"]');
     expect(failBanner.exists()).toBe(true);
     expect(failBanner.text()).toContain('网络错误');
+  });
+
+  it('浏览按钮写一次性打开意图并跳转文件浏览器（SMB 从 share 根）', async () => {
+    mocks.listAccounts.mockResolvedValue([SMB_ACCT]);
+    const wrapper = mount(Accounts, { global: { plugins: [i18n] } });
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await wrapper.find('[data-test="browse-btn"]').trigger('click');
+    expect(fb.pendingOpenLocation).toEqual({
+      descriptor: {
+        type: 'smb', accountId: 2, initialPath: '', path: '', port: 445,
+      },
+      relPath: '',
+    });
+    expect(mocks.routerPush).toHaveBeenCalledWith('/');
+  });
+
+  it('浏览按钮对 WebDAV 账户构造 baseUrl 根 descriptor', async () => {
+    const wrapper = mount(Accounts, { global: { plugins: [i18n] } });
+    await flushPromises();
+    const fb = useFileBrowserStore();
+    await wrapper.find('[data-test="browse-btn"]').trigger('click');
+    expect(fb.pendingOpenLocation).toEqual({
+      descriptor: {
+        type: 'webdav', accountId: 3, baseUrl: 'https://d/x', path: '',
+      },
+      relPath: '',
+    });
   });
 });

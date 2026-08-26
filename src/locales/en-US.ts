@@ -252,6 +252,8 @@ export default {
     testFailNetwork: 'Network error (check address/network)',
     testFailAuth: 'Authentication failed (check credentials)',
     testFailConfig: 'Configuration error (missing share or path contract)',
+    browse: 'Browse',
+    browseTitle: 'Open this account root in the file browser',
     passwordPlaceholder: 'Enter password',
     passwordKeep: 'Leave blank to keep',
     credentialWarning: 'Credential may remain in OS credential manager, please clean up manually',

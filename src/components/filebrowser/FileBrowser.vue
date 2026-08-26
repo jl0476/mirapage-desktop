@@ -419,7 +419,7 @@ const displayRoot = computed(() => {
     switch (desc.type) {
       case 'local': return desc.rootPath.replace(/\\/g, '/');
       case 'webdav': return desc.baseUrl;
-      case 'smb': return desc.initialPath;
+      case 'smb': return desc.initialPath || `smb://account-${desc.accountId}`;
       case 'archive': return desc.archivePath.replace(/\\/g, '/');
     }
   }
