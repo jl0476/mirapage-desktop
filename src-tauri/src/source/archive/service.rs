@@ -865,15 +865,16 @@ impl ArchiveService {
             ));
         };
         let entry_dict = probe.entry_dictionaries.get(&candidate).copied().unwrap_or(0);
-        let declared =
-            Self::run_stat(backend.clone(), resolved.input.clone(), candidate.clone(), Some(password.to_vec()))
-                .await?;
+        // 验证读同样经降级协议：流式输入验证条目时网络故障按既定流程物化兜底
+        let declared = self
+            .stat_with_degrade(&mut resolved, &backend, &candidate, Some(password.to_vec()))
+            .await?;
         match self
-            .read_with_budget(
+            .read_with_degrade(
+                &mut resolved,
                 &backend,
-                &resolved.input,
                 &candidate,
-                Some(password.as_slice()),
+                Some(password.to_vec()),
                 declared,
                 entry_dict,
             )
@@ -959,27 +960,87 @@ impl ArchiveService {
             .await?;
         let entry_dict = probe.entry_dictionaries.get(&entry).copied().unwrap_or(0);
         let _permit = self.acquire_format(resolved.format).await?;
-        // 声明大小总是可得（ZIP central directory / RAR UnpSize / 7z entry size）
-        let declared =
-            Self::run_stat(backend.clone(), resolved.input.clone(), entry.clone(), password_bytes(&password))
-                .await?;
-        self.read_with_budget(&backend, &resolved.input, &entry, password.as_deref().map(|v| v.as_slice()), declared, entry_dict)
-            .await
+        // 声明大小总是可得（ZIP central directory / RAR UnpSize / 7z entry size）；
+        // stat 与 payload read 均经降级协议（白名单网络错误 → 重试一次 → 物化 →
+        // Path 重跑），不把 Range 短读/网络错误直接抛给 media 协议
+        let declared = self
+            .stat_with_degrade(&mut resolved, &backend, &entry, password_bytes(&password))
+            .await?;
+        self.read_with_degrade(
+            &mut resolved,
+            &backend,
+            &entry,
+            password_bytes(&password),
+            declared,
+            entry_dict,
+        )
+        .await
     }
 
-    /// 条目声明 size（media:// 协议层 stat；明文元数据，无密码参与）
+    /// 条目声明 size（media:// 协议层 stat；明文元数据，无密码参与）。
+    /// stat 同样走降级协议：流式输入的块加载遇白名单网络错误时按
+    /// 「重试一次 → 物化降级 → Path 重跑」处理，不把 502 直接抛给 media 协议。
     pub async fn stat_entry_size(
         &self,
         descriptor: &SourceDescriptor,
         path: &str,
     ) -> Result<u64, ArchiveAccessError> {
         let _admission = self.coordinator.admit()?;
-        let resolved = self.resolve(descriptor, None).await?;
+        let mut resolved = self.resolve(descriptor, None).await?;
         let backend = self.backend_for(resolved.format);
         let _permit = self.acquire_format(resolved.format).await?;
         let entry = qualified_entry_name(&resolved.prefix, path);
         let password = self.passwords.get(&resolved.identity);
-        Self::run_stat(backend, resolved.input, entry, password_bytes(&password)).await
+        self.stat_with_degrade(&mut resolved, &backend, &entry, password_bytes(&password))
+            .await
+    }
+
+    /// stat 经降级协议（与 probe/catalog 同一 `op_with_degrade` 载体）。
+    async fn stat_with_degrade(
+        &self,
+        resolved: &mut ResolvedArchive,
+        backend: &Arc<dyn ArchiveBackend>,
+        entry: &str,
+        password: Option<Vec<u8>>,
+    ) -> Result<u64, ArchiveAccessError> {
+        self.op_with_degrade(resolved, |input| {
+            let backend = backend.clone();
+            let entry = entry.to_string();
+            let password = password.clone();
+            async move { Self::run_stat(backend, input, entry, password).await }
+        })
+        .await
+    }
+
+    /// 条目读取经降级协议。declared 由调用方先经 `stat_with_degrade` 取得——
+    /// 物化降级不改变条目集，同一 archive 的声明 size 沿用成立。
+    async fn read_with_degrade(
+        &self,
+        resolved: &mut ResolvedArchive,
+        backend: &Arc<dyn ArchiveBackend>,
+        entry: &str,
+        password: Option<Vec<u8>>,
+        declared: u64,
+        entry_dict: u64,
+    ) -> Result<Vec<u8>, ArchiveAccessError> {
+        self.op_with_degrade(resolved, |input| {
+            let this = self;
+            let backend = backend.clone();
+            let entry = entry.to_string();
+            let password = password.clone();
+            async move {
+                this.read_with_budget(
+                    &backend,
+                    &input,
+                    &entry,
+                    password.as_deref(),
+                    declared,
+                    entry_dict,
+                )
+                .await
+            }
+        })
+        .await
     }
 
     /// 工作集许可核心：声明预检 + 初始许可（`DecodeBudget::for_limits` 承载）→
@@ -2432,6 +2493,10 @@ mod tests {
         full_downloads: AtomicUsize,
         reads_started: AtomicUsize,
         short_at_offset: Mutex<Option<u64>>,
+        /// 命中该 offset 的 range 读注入持续性 Network 错误（read 降级用例：
+        /// entry data 块与 catalog 尾部块分离，只打击 payload 路径；全量物化
+        /// 走 read_file(None) 不受影响）
+        network_fail_at: Mutex<Option<u64>>,
         gated: bool,
         gate: tokio::sync::Semaphore,
     }
@@ -2444,6 +2509,7 @@ mod tests {
                 full_downloads: AtomicUsize::new(0),
                 reads_started: AtomicUsize::new(0),
                 short_at_offset: Mutex::new(None),
+                network_fail_at: Mutex::new(None),
                 gated: false,
                 gate: tokio::sync::Semaphore::new(0),
             }
@@ -2451,6 +2517,11 @@ mod tests {
 
         fn with_short_at(mut self, at: u64) -> Self {
             *self.short_at_offset.lock().unwrap() = Some(at);
+            self
+        }
+
+        fn with_network_fail_at(mut self, at: u64) -> Self {
+            *self.network_fail_at.lock().unwrap() = Some(at);
             self
         }
 
@@ -2499,6 +2570,18 @@ mod tests {
             self.ranges.lock().unwrap().push(ByteRange { offset, length });
             if offset == 0 && length as usize == self.bytes.len() {
                 self.full_downloads.fetch_add(1, Ordering::SeqCst);
+            }
+            if *self.network_fail_at.lock().unwrap() == Some(offset)
+                && offset % BLOCK_SIZE as u64 == 0
+                && length <= BLOCK_SIZE as u64
+            {
+                // 只打击流式块加载（BLOCK_SIZE 对齐且 ≤1MiB）：物化分块下载同为
+                // read_file(range)、chunk 0 的 offset 也是 0，但本 harness 文件尺寸
+                // 下物化是单 chunk 全量（length > 1MiB），由 ≤1MiB 上界排除——
+                // 不区分会把降级物化一并打断
+                return Err(MediaSourceError::Network(
+                    "mock 注入：该块 range 读持续网络失败".into(),
+                ));
             }
             let mut len = length;
             if *self.short_at_offset.lock().unwrap() == Some(offset) {
@@ -2924,6 +3007,69 @@ mod tests {
                 progress_key: Some(harness.expected_progress_key()),
             }
         );
+        assert_eq!(harness.origin.full_download_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn payload_read_network_failure_degrades_to_materialized_file() {
+        // 复审 P1-1 回归：catalog 成功后 payload read 持续 Network——stat/read 与
+        // probe/catalog 走同一降级协议（重试一次 → 物化 → Path 重跑），不得把 502
+        // 直接抛给 media 协议。
+        // 布局：pad1(2MiB-100) + page1(1MiB+128KiB)——page1 data 跨块 1 尾→块 2→
+        // 块 3 头；zip crate 打开只读 EOCD 的 64K 回读窗口 + central（同在尾块 3，
+        // 需尾块厚度 > 64K 才不会把窗口起点掉进块 2）。块 2 是 page1 data 的中段
+        // （无 header/central），probe 缓存覆盖不到，read data 时首次加载——注入
+        // 恰好只打击 read 路径
+        let page: Vec<u8> = (0..BLOCK_SIZE + 128 * 1024).map(|i| (i % 251) as u8).collect();
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            use std::io::Write;
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            zip.start_file("pad1.bin", options).unwrap();
+            zip.write_all(&vec![0x5Au8; 2 * BLOCK_SIZE - 100]).unwrap();
+            zip.start_file("page1.png", options).unwrap();
+            zip.write_all(&page).unwrap();
+            zip.finish().unwrap();
+        }
+        let harness = RemoteServiceHarness::build(
+            RemoteZipOrigin::new(buf.into_inner())
+                .with_network_fail_at(2 * BLOCK_SIZE as u64),
+            Duration::from_secs(2),
+            false,
+        );
+        let ready = harness.service.prepare(&harness.descriptor).await.unwrap();
+        assert!(
+            matches!(
+                ready,
+                ArchivePrepareResult::Ready { access_mode: ArchiveAccessMode::Streaming, .. }
+            ),
+            "probe 只读 header/尾部块，不应触发降级，实际 {ready:?}"
+        );
+        assert_eq!(harness.origin.full_download_count(), 0, "catalog 阶段零物化");
+        let bytes = harness
+            .service
+            .read(&harness.descriptor, "page1.png")
+            .await
+            .expect("payload read 应物化降级成功，而非 Network 错误上抛");
+        assert_eq!(bytes, page);
+        assert_eq!(harness.origin.full_download_count(), 1, "read 降级触发一次完整物化");
+    }
+
+    #[tokio::test]
+    async fn mid_session_stat_failure_degrades_and_path_rerun_serves_read() {
+        // 复审 P1-1 回归（stat 路径）：首个操作就是 stat（块缓存空）——尾部块
+        // （central directory 所在）流式加载持续 Network → stat 降级物化 → Path 重跑
+        let harness = RemoteServiceHarness::zip();
+        let tail_block = ((harness.origin.size() - 1) / BLOCK_SIZE as u64) * BLOCK_SIZE as u64;
+        *harness.origin.network_fail_at.lock().unwrap() = Some(tail_block);
+        let size = harness
+            .service
+            .stat_entry_size(&harness.descriptor, "page1.png")
+            .await
+            .expect("stat 网络失败应物化降级，而非错误上抛");
+        assert_eq!(size, PNG_BYTES.len() as u64);
         assert_eq!(harness.origin.full_download_count(), 1);
     }
 
