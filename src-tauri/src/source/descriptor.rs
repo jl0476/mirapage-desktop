@@ -13,6 +13,12 @@ pub enum ArchiveFormat {
     Cbr,   // RAR 容器
     Zip,   // 独立 ZIP
     Rar,   // 独立 RAR
+    // 契约对齐 TS `ArchiveFormat = ... | '7z'`（sourceDescriptor.ts，M1 既有字面量）：
+    // 容器级 rename_all="lowercase" 会把本变体写成 "sevenz"（lowercase 不折叠驼峰），
+    // 与前端 '7z' 不一致——7z descriptor 经 IPC 反序列化即 unknown variant 拒绝
+    // （实机验证 plain-sevenz.7z 打开 kind=io 抓到；ZIP/CBZ/RAR/CBR 无驼峰故未暴露）。
+    // 存量无影响：M3 只物化过 ZIP/CBZ descriptor，"sevenz" 形态从未落盘。
+    #[serde(rename = "7z")]
     SevenZ, // 7z
 }
 
@@ -197,6 +203,26 @@ mod tests {
             SourceDescriptor::Local { root_path } => assert_eq!(root_path, "C:/comics"),
             _ => panic!("应是 Local variant"),
         }
+    }
+
+    #[test]
+    fn archive_format_sevenz_wire_literal_is_7z() {
+        // 契约锁：TS `ArchiveFormat = ... | '7z'`（sourceDescriptor.ts）。容器级
+        // rename_all="lowercase" 对多驼峰变体 SevenZ 产出 "sevenz" ≠ '7z'——
+        // 7z descriptor 经 IPC 即 unknown variant 拒绝（实机 kind=io 抓到）。
+        // 往返双向锁定：序列化与反序列化都必须走 "7z" 字面量。
+        let json = r#"{"type":"archive","archivePath":"C:/x/a.7z","entryPrefix":"","format":"7z","origin":null,"originEntryPath":null,"archiveRelPath":null}"#;
+        let d: SourceDescriptor = serde_json::from_str(json).expect("TS '7z' 字面量必须可反序列化");
+        match &d {
+            SourceDescriptor::Archive { format, .. } => assert_eq!(*format, ArchiveFormat::SevenZ),
+            _ => panic!("应是 Archive variant"),
+        }
+        let back = serde_json::to_string(&d).unwrap();
+        assert!(back.contains("\"format\":\"7z\""), "序列化必须产出 7z: {back}");
+        assert!(!back.contains("sevenz"), "不应再有 sevenz: {back}");
+        // 反向兼容：旧的错误形态 "sevenz" 从未落盘/未发布，显式拒绝（防静默复活）
+        let stale = json.replace("\"format\":\"7z\"", "\"format\":\"sevenz\"");
+        assert!(serde_json::from_str::<SourceDescriptor>(&stale).is_err());
     }
 
     #[test]

@@ -44,8 +44,11 @@ pub(crate) const MAX_NEXT_HEADER_BYTES: u64 = 1024 * 1024; // 1 MiB
 /// encoded header 解码后（内层属性流）的 unpack 累加上限
 pub(crate) const MAX_ENCODED_HEADER_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
 /// encoded header 解码链 coder dictionary 上限（SevenZWriter 默认 header LZMA dict
-/// 恰为 8 MiB——判断必须用 `>` 而非 `>=`，否则合法 writer 产物被误拒）
-pub(crate) const MAX_HEADER_DICT_BYTES: u64 = 8 * 1024 * 1024; // 8 MiB
+/// 恰为 8 MiB——判断必须用 `>` 而非 `>=`，否则合法 writer 产物被误拒）。
+/// 32 MiB：实机验证（2026-08-26）py7zr 的 header 压缩流固定 16 MiB dict
+/// （filters 参数只控数据流）——8 MiB 会拒掉整个 Python 生态产物，按 spec
+/// 「真实样本证明不够再评估」条款放宽一档；仍防 GiB 级恶意声明。
+pub(crate) const MAX_HEADER_DICT_BYTES: u64 = 32 * 1024 * 1024; // 32 MiB
 /// encoded header 的 packed 输入总量上限（位于 32 + pack_pos 的独立 packed streams，
 /// 不是 next-header 描述块自身：COPY coder 的 packed 尺寸 = 解码后尺寸，8 MiB 级
 /// header 配 1 MiB 上限会把合法 encoded header 直接拒掉）
