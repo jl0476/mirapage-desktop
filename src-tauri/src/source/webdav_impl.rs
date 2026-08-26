@@ -73,6 +73,32 @@ impl WebDavMediaSource {
             .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))
     }
 
+    /// 发送 + 传输层失败重试一次（实机 2026-08-26：群晖偶发 error sending request
+    /// ——同路径 curl 0.4s 正常、应用内即时重试即成功，连接层抖动而非服务端问题）。
+    /// 重试换全新 client（新连接）。仅用于只读幂等方法（PROPFIND/GET/HEAD）。
+    /// Err 返回错误串，调用方补上下文（propfind:/get: 等）包 Network。
+    async fn send_retry_once<F>(bad_tls: bool, timeout: Duration, make: F) -> std::result::Result<reqwest::Response, String>
+    where
+        F: Fn(reqwest::Client) -> reqwest::RequestBuilder,
+    {
+        let mut last = String::new();
+        for attempt in 0..2 {
+            let client = Self::build_client(bad_tls, timeout)
+                .map_err(|e| e.to_string())?;
+            match make(client).send().await {
+                Ok(r) => return Ok(r),
+                Err(e) => {
+                    if attempt == 0 {
+                        last = e.to_string();
+                        continue;
+                    }
+                    return Err(e.to_string());
+                }
+            }
+        }
+        unreachable!()
+    }
+
     fn extract<'a>(&self, descriptor: &'a SourceDescriptor) -> Option<(i64, &'a str, &'a str)> {
         match descriptor {
             SourceDescriptor::WebDav {
@@ -332,19 +358,19 @@ impl MediaSource for WebDavMediaSource {
         let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
         let url = url.trim_end_matches('/');
-        let client = Self::build_client(bad_tls, Duration::from_secs(15))?;
-        let mut req = client
-            .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url)
-            .header(HeaderName::from_static("depth"), "1")
-            .header(header::CONTENT_TYPE, "application/xml")
-            .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>");
-        if let (Some(u), Some(p)) = (&user, &pass) {
-            req = req.basic_auth(u, Some(p));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| MediaSourceError::Network(format!("propfind: {e}")))?;
+        let resp = Self::send_retry_once(bad_tls, Duration::from_secs(15), |client| {
+            let mut req = client
+                .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url.clone())
+                .header(HeaderName::from_static("depth"), "1")
+                .header(header::CONTENT_TYPE, "application/xml")
+                .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>");
+            if let (Some(u), Some(p)) = (&user, &pass) {
+                req = req.basic_auth(u, Some(p));
+            }
+            req
+        })
+        .await
+        .map_err(|e| MediaSourceError::Network(format!("propfind: {e}")))?;
         if !resp.status().is_success() {
             return Err(MediaSourceError::Network(format!(
                 "PROPFIND status {}",
@@ -369,18 +395,18 @@ impl MediaSource for WebDavMediaSource {
         })?;
         let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
-        let client = Self::build_client(bad_tls, Duration::from_secs(30))?;
-        let mut req = client.get(&url);
-        if let Some(r) = range {
-            req = req.header(header::RANGE, format!("bytes={}-{}", r.offset, r.offset + r.length - 1));
-        }
-        if let (Some(u), Some(p)) = (&user, &pass) {
-            req = req.basic_auth(u, Some(p));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| MediaSourceError::Network(format!("get: {e}")))?;
+        let resp = Self::send_retry_once(bad_tls, Duration::from_secs(30), |client| {
+            let mut req = client.get(&url);
+            if let Some(r) = &range {
+                req = req.header(header::RANGE, format!("bytes={}-{}", r.offset, r.offset + r.length - 1));
+            }
+            if let (Some(u), Some(p)) = (&user, &pass) {
+                req = req.basic_auth(u, Some(p));
+            }
+            req
+        })
+        .await
+        .map_err(|e| MediaSourceError::Network(format!("get: {e}")))?;
         if resp.status() == StatusCode::NOT_FOUND {
             return Err(MediaSourceError::NotFound(path.to_string()));
         }
@@ -420,22 +446,22 @@ impl MediaSource for WebDavMediaSource {
         match descriptor {
             SourceDescriptor::WebDav { account_id, base_url, path } => {
                 let (user, pass, bad_tls) = self.credentials_for(*account_id)?;
-                let client = Self::build_client(bad_tls, Duration::from_secs(10))?;
                 let url = format!("{}/{}", base_url.trim_end_matches('/'), path);
                 // 2026-08-26 群晖实机：HEAD 对目录回 403 Forbidden——连接测试改
                 // PROPFIND Depth:0（WebDAV 必须支持的核心方法，对目录语义明确）
-                let mut req = client
-                    .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url.clone())
-                    .header(HeaderName::from_static("depth"), "0")
-                    .header(header::CONTENT_TYPE, "application/xml")
-                    .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>");
-                if let (Some(u), Some(p)) = (&user, &pass) {
-                    req = req.basic_auth(u, Some(p));
-                }
-                let resp = req
-                    .send()
-                    .await
-                    .map_err(|e| MediaSourceError::Network(format!("propfind: {e}")))?;
+                let resp = Self::send_retry_once(bad_tls, Duration::from_secs(10), |client| {
+                    let mut req = client
+                        .request(reqwest::Method::from_bytes(b"PROPFIND").unwrap(), url.clone())
+                        .header(HeaderName::from_static("depth"), "0")
+                        .header(header::CONTENT_TYPE, "application/xml")
+                        .body("<?xml version=\"1.0\" encoding=\"utf-8\" ?><propfind xmlns=\"DAV:\"><allprop/></propfind>");
+                    if let (Some(u), Some(p)) = (&user, &pass) {
+                        req = req.basic_auth(u, Some(p));
+                    }
+                    req
+                })
+                .await
+                .map_err(|e| MediaSourceError::Network(format!("propfind: {e}")))?;
                 if resp.status() == StatusCode::NOT_FOUND {
                     return Err(MediaSourceError::NotFound(url));
                 }
@@ -459,15 +485,15 @@ impl MediaSource for WebDavMediaSource {
         })?;
         let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
-        let client = Self::build_client(bad_tls, Duration::from_secs(10))?;
-        let mut req = client.head(&url);
-        if let (Some(u), Some(p)) = (&user, &pass) {
-            req = req.basic_auth(u, Some(p));
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| MediaSourceError::Network(format!("head: {e}")))?;
+        let resp = Self::send_retry_once(bad_tls, Duration::from_secs(10), |client| {
+            let mut req = client.head(&url);
+            if let (Some(u), Some(p)) = (&user, &pass) {
+                req = req.basic_auth(u, Some(p));
+            }
+            req
+        })
+        .await
+        .map_err(|e| MediaSourceError::Network(format!("head: {e}")))?;
         match resp.status() {
             StatusCode::NOT_FOUND => return Err(MediaSourceError::NotFound(url)),
             s if !s.is_success() => return Err(MediaSourceError::Network(format!("HEAD status {s}"))),
