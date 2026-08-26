@@ -245,9 +245,9 @@ mod tests {
     #[tokio::test]
     async fn list_maps_entries_with_archive_flag_and_sort() {
         let (src, mock) = make_source();
-        // rel 相对 share = initial_path("media") + 方法 path("v1")
+        // rel 相对 share = initial("media") 剥首段 + 方法 path("v1")
         mock.script_list(
-            "media/v1",
+            "v1",
             vec![
                 raw("page10.jpg", false, 5),
                 raw("page2.jpg", false, 4),
@@ -276,10 +276,10 @@ mod tests {
     async fn read_file_range_exact_or_error() {
         let (src, mock) = make_source();
         mock.script_bytes(b"0123456789");
-        // 无 range 分支先 stat 拿全量 size——脚本必须配（rel 相对 share 含 initial_path 前缀）
-        // 方法 path="f.bin" → rel = unc_rel("media","f.bin") = "media/f.bin"
+        // 无 range 分支先 stat 拿全量 size——脚本必须配（rel 相对 share，initial 首段已剥）
+        // 方法 path="f.bin" → rel = unc_rel("media","f.bin") = "f.bin"
         mock.script_stat(
-            "media/f.bin",
+            "f.bin",
             RawStat {
                 size: 10,
                 modified_unix_secs: None,
@@ -309,7 +309,7 @@ mod tests {
     async fn stat_maps_to_file_stat() {
         let (src, mock) = make_source();
         mock.script_stat(
-            "media/v1/f.bin",
+            "v1/f.bin",
             RawStat {
                 size: 42,
                 modified_unix_secs: Some(123),
@@ -320,13 +320,14 @@ mod tests {
         assert_eq!(st.modified_at, Some(123));
     }
 
-    // ─── P0 回归：initial_path 前缀必须进 transport rel（深层入口）───
+    // ─── P0 回归：initial_path 剥离 share 首段后的余段必须进 transport rel（深层入口）───
 
     #[tokio::test]
     async fn deep_initial_path_root_list_includes_prefix() {
         let (src, mock) = make_source();
-        // 账户 share=media、入口 media/comics：根目录列表（方法 path=""）→ rel="media/comics"
-        mock.script_list("media/comics", vec![raw("v1", true, 0)]);
+        // 账户 share=media、入口 media/comics：根目录列表（方法 path=""）→ rel="comics"
+        //（首段 share 剥离——tree 已在 share 内，拼 share 会产生镜像重复段）
+        mock.script_list("comics", vec![raw("v1", true, 0)]);
         let entries = src
             .list_directory(&smb_desc("media/comics", ""), "")
             .await
@@ -338,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn deep_initial_path_subdirectory_join() {
         let (src, mock) = make_source();
-        mock.script_list("media/comics/v1", vec![raw("001.jpg", false, 7)]);
+        mock.script_list("comics/v1", vec![raw("001.jpg", false, 7)]);
         let entries = src
             .list_directory(&smb_desc("media/comics", ""), "v1")
             .await
@@ -375,7 +376,7 @@ mod tests {
     #[tokio::test]
     async fn test_lists_root_and_requires_share() {
         let (src, mock) = make_source();
-        mock.script_list("media", vec![raw("comics", true, 0)]);
+        mock.script_list("", vec![raw("comics", true, 0)]);
         src.test(&smb_desc("media", "")).await.unwrap();
         // initial_path 首段 ≠ share → 配置错误
         assert!(src.test(&smb_desc("wrong", "")).await.is_err());

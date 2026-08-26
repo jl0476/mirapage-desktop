@@ -17,6 +17,7 @@ import { computed, ref, triggerRef } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import {
   listDirectory,
+  listAccounts,
   beginArchiveSession,
   prepareArchive,
   unlockArchive,
@@ -24,6 +25,7 @@ import {
   cancelArchivePrepare,
 } from '@/lib/tauri';
 import type {
+  AccountItem,
   ArchiveAccessError,
   ArchiveAccessMode,
   ArchiveRequestId,
@@ -144,6 +146,12 @@ function normalizeArchiveAccessError(cause: unknown): ArchiveAccessError {
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, ms));
 
+/** 远程相对路径拼接（module3.5.0 后续）：segments 归一（\ → /、去空段）后 '/' 连接。
+ *  供「将当前目录设为根目录」拼接 SMB initialPath / WebDAV path 用。 */
+function joinRemoteRel(base: string, rel: string): string {
+  return [...base.split(/[\\/]+/), ...rel.split(/[\\/]+/)].filter(Boolean).join('/');
+}
+
 export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
   const currentPath = ref<string>('');
@@ -213,6 +221,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     // 在此显式失效在途压缩包事务（Local 分支经 setRoot 守卫空过不双重取消）。
     invalidatePendingArchiveOnNavigate();
     currentDescriptor.value = descriptor;
+    clearSelection(); // 旧目录选区不带入新源（对齐 setRoot 语义）
     if (relCheck.normalized) {
       await navigate(relCheck.normalized);
     } else {
@@ -339,6 +348,45 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     if (normParent === null) return;
     currentPath.value = normParent;
     await fetch(normParent);
+  }
+
+  // ─── module3.5.0 后续: 远程会话「将当前目录设为根目录」───
+  // 选根菜单（PickRootMenu）在 SMB/WebDAV 会话进入子目录后提供把当前目录提升为
+  // 浏览根的入口——与本地选根同级语义（up() 作用域 / 跨重启记忆 / displayRoot 锚点）。
+  // 注意：提升改变 (descriptor, relPath) 身份拆分方式，同一物理目录经不同根浏览会
+  // 得到不同 library/progress 身份——与本地换根的既有语义一致（根 = 用户圈定作用域）。
+  const canSetRootHere = computed(() => {
+    const d = currentDescriptor.value;
+    return !!d && (d.type === 'smb' || d.type === 'webdav') && currentPath.value !== '';
+  });
+
+  /** 把当前目录提升为浏览根。SMB 空 initialPath（share 根形态）必须查账户表补
+   *  share 首段（契约：initialPath 首段 === share，直接拼 currentPath 会越权报错）；
+   *  WebDAV 无 share 契约，直接拼 path。成功后 currentPath 归零重新取数。
+   *  @returns 是否成功（账户已删 / 无 share / 非远程会话 / 停在根 = false） */
+  async function setCurrentDirAsRoot(): Promise<boolean> {
+    const d = currentDescriptor.value;
+    if (!d || currentPath.value === '') return false;
+    if (d.type === 'smb') {
+      let base = d.initialPath;
+      if (!base) {
+        const accts = await listAccounts().catch(() => [] as AccountItem[]);
+        const acct = accts.find((a) => a.id === d.accountId);
+        const share = acct?.share?.trim();
+        if (!share) {
+          log('[fileBrowser] setCurrentDirAsRoot: 账户缺失或无 share，无法提升', { accountId: d.accountId });
+          return false;
+        }
+        base = share;
+      }
+      await openDescriptorAt({ ...d, initialPath: joinRemoteRel(base, currentPath.value), path: '' }, '');
+      return true;
+    }
+    if (d.type === 'webdav') {
+      await openDescriptorAt({ ...d, path: joinRemoteRel(d.path, currentPath.value) }, '');
+      return true;
+    }
+    return false;
   }
 
   // ─── module3.2.0（spec §3.3）+ M3 任务 7 + 任务 12: 压缩包事务式进入/退出 ───
@@ -692,6 +740,11 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
   // restoreNavigationContext 把上下文还原. 返回 true = 成功恢复, false = 无上下文.
 
   function saveNavigationContext(): void {
+    // 远程/压缩包会话：rootPath 是陈旧 Local 值（openDescriptorAt 不动它），不能
+    // 作为恢复身份——跳过保存。远程浏览状态由 Pinia 会话内存保留（FileBrowser
+    // 重挂载 hasActiveSource 守卫不再重置）；压缩包条目视图由 archiveParent 恢复链负责。
+    const d = currentDescriptor.value;
+    if (d && d.type !== 'local') return;
     if (rootPath.value === null) return;
     savedNavigationContext.value = {
       rootPath: rootPath.value,
@@ -956,6 +1009,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     activeDescriptor,
     hasActiveSource,
     openDescriptorAt,
+    // module3.5.0 后续: 远程会话提升当前目录为根
+    canSetRootHere,
+    setCurrentDirAsRoot,
     // module3.2.0（spec §3.3）: ZIP 进入/退出
     openArchive,
     exitArchive,

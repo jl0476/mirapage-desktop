@@ -6,7 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setActivePinia, createPinia } from 'pinia';
 import { useFileBrowserStore, setScrollToIndexCallback } from './fileBrowser';
 import {
-  listDirectory, getSetting, setSetting,
+  listDirectory, getSetting, setSetting, listAccounts,
   beginArchiveSession, prepareArchive, unlockArchive, commitArchiveOpen, cancelArchivePrepare,
 } from '@/lib/tauri';
 import type { ArchivePrepareResult, ArchiveRequestId } from '@/lib/tauri';
@@ -38,6 +38,8 @@ vi.mock('@/lib/tauri', async () => {
   return {
     ...actual,
     listDirectory: vi.fn(),
+    // module3.5.0 后续: setCurrentDirAsRoot 查账户 share 用
+    listAccounts: vi.fn(async () => []),
     getSetting: vi.fn(async () => null),
     setSetting: vi.fn(async () => undefined),
     recordHistory: vi.fn(async () => undefined),
@@ -52,6 +54,7 @@ vi.mock('@/lib/tauri', async () => {
   };
 });
 const mockedList = vi.mocked(listDirectory);
+const mockedAccounts = vi.mocked(listAccounts);
 const mockedGet = vi.mocked(getSetting);
 const mockedSet = vi.mocked(setSetting);
 
@@ -1375,5 +1378,96 @@ describe('fileBrowser store — 事务式 archive 打开', () => {
     expect(d?.type).toBe('archive');
     if (d?.type !== 'archive') return;
     expect(d.format).toBe(fmt);
+  });
+});
+
+// ─── module3.5.0 后续: 远程会话「将当前目录设为根目录」───
+describe('fileBrowser store — setCurrentDirAsRoot / canSetRootHere', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue(makeEntries('vol1'));
+    mockedAccounts.mockResolvedValue([]);
+  });
+
+  it('canSetRootHere: 无源 / 本地 / 远程根 / 远程子目录 四态', async () => {
+    const store = useFileBrowserStore();
+    expect(store.canSetRootHere).toBe(false); // 无源
+    await store.setRoot('C:/comics');
+    expect(store.canSetRootHere).toBe(false); // 本地源不参与提升
+    await store.openDescriptorAt({ type: 'webdav', accountId: 3, baseUrl: 'https://dav.example', path: '' }, '');
+    expect(store.canSetRootHere).toBe(false); // 远程但停在根
+    await store.navigate('comics');
+    expect(store.canSetRootHere).toBe(true); // 远程子目录
+  });
+
+  it('SMB 空 initialPath（share 根）提升需查账户表补 share 首段', async () => {
+    mockedAccounts.mockResolvedValue([
+      { id: 7, name: 'NAS', type: 'smb', host: '192.168.50.168', port: 445, share: 'Other1' },
+    ]);
+    const store = useFileBrowserStore();
+    await store.openDescriptorAt({ type: 'smb', accountId: 7, initialPath: '', path: '', port: 445 }, '');
+    await store.navigate('wall');
+    const ok = await store.setCurrentDirAsRoot();
+    expect(ok).toBe(true);
+    expect(store.currentDescriptor).toEqual({
+      type: 'smb', accountId: 7, initialPath: 'Other1/wall', path: '', port: 445,
+    });
+    expect(store.currentPath).toBe('');
+    expect(mockedList).toHaveBeenLastCalledWith(
+      expect.objectContaining({ type: 'smb', initialPath: 'Other1/wall' }), '',
+    );
+  });
+
+  it('SMB 非空 initialPath 直接拼接（首段保持 = share，不再查账户表）', async () => {
+    const store = useFileBrowserStore();
+    await store.openDescriptorAt({ type: 'smb', accountId: 7, initialPath: 'Other1', path: '', port: 445 }, '');
+    await store.navigate('wall/vol1');
+    const ok = await store.setCurrentDirAsRoot();
+    expect(ok).toBe(true);
+    expect(store.currentDescriptor).toMatchObject({ type: 'smb', initialPath: 'Other1/wall/vol1' });
+    expect(mockedAccounts).not.toHaveBeenCalled();
+  });
+
+  it('SMB share 根提升但账户已删 → false 且状态不变', async () => {
+    mockedAccounts.mockResolvedValue([]);
+    const store = useFileBrowserStore();
+    await store.openDescriptorAt({ type: 'smb', accountId: 9, initialPath: '', path: '', port: 445 }, '');
+    await store.navigate('wall');
+    const ok = await store.setCurrentDirAsRoot();
+    expect(ok).toBe(false);
+    expect(store.currentDescriptor).toMatchObject({ type: 'smb', initialPath: '' });
+    expect(store.currentPath).toBe('wall');
+  });
+
+  it('WebDAV 提升拼 path 段', async () => {
+    const store = useFileBrowserStore();
+    await store.openDescriptorAt({ type: 'webdav', accountId: 3, baseUrl: 'https://dav.example', path: '' }, '');
+    await store.navigate('comics/manga');
+    const ok = await store.setCurrentDirAsRoot();
+    expect(ok).toBe(true);
+    expect(store.currentDescriptor).toEqual({
+      type: 'webdav', accountId: 3, baseUrl: 'https://dav.example', path: 'comics/manga',
+    });
+    expect(store.currentPath).toBe('');
+  });
+
+  it('远程 openDescriptorAt 清空旧选区（对齐 setRoot 语义）', async () => {
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    store.replaceSelection('a');
+    expect(store.selectedPaths.size).toBe(1);
+    await store.openDescriptorAt({ type: 'webdav', accountId: 3, baseUrl: 'https://dav.example', path: '' }, '');
+    expect(store.selectedPaths.size).toBe(0);
+  });
+
+  it('saveNavigationContext: 远程会话跳过保存（rootPath 是陈旧本地值不可作恢复身份）', async () => {
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics'); // rootPath 留存陈旧本地值
+    await store.openDescriptorAt({ type: 'smb', accountId: 7, initialPath: '', path: '', port: 445 }, '');
+    await store.navigate('wall');
+    store.saveNavigationContext();
+    // 未保存 → restore 返回 false（ref 未导出，用行为断言）
+    expect(await store.restoreNavigationContext()).toBe(false);
   });
 });

@@ -1,15 +1,30 @@
 //! UNC 路径拼接 + 根路径契约（母 spec §4.2 双侧校验的 source 侧）。
 
 /// descriptor 的 '/' 分隔 rel → UNC '\' 分隔（相对 share 的路径段拼接）。
+///
+/// 契约（§4.2）：initialPath 首段 === share。transport rel 语义是「相对 share 根」，
+/// 而 share 连接（tree）本身已定位在 share 内——**首段必须剥离**，否则拼出
+/// `\\host\share\share\...` 重复段（实机 2026-08-26「提升当前目录为根」暴露：
+/// initial `Other1/wall` 被整体拼到 share 后 → Object Path Not Found）。
+/// 空 initial = share 根（459bf78 实机修正），无段可剥。
 pub fn unc_rel(initial_path: &str, path: &str) -> String {
-    let a = initial_path.replace(['/', '\\'], "\\");
     let b = path.replace(['/', '\\'], "\\");
-    let a = a.trim_matches('\\');
     let b = b.trim_matches('\\');
-    match (a.is_empty(), b.is_empty()) {
+    let below_share = if initial_path.is_empty() {
+        String::new()
+    } else {
+        initial_path
+            .replace(['/', '\\'], "\\")
+            .trim_matches('\\')
+            .splitn(2, '\\')
+            .nth(1)
+            .unwrap_or("")
+            .to_string()
+    };
+    match (below_share.is_empty(), b.is_empty()) {
         (true, _) => b.to_string(),
-        (false, true) => a.to_string(),
-        (false, false) => format!("{a}\\{b}"),
+        (false, true) => below_share.to_string(),
+        (false, false) => format!("{below_share}\\{b}"),
     }
 }
 
@@ -20,7 +35,8 @@ pub fn share_root_matches(initial_path: &str, account_share: Option<&str>) -> Re
     };
     // 空 initial = share 根（实机修正 2026-08-26：原契约下 share 根不可达——
     // initial 非空时 unc_rel 会把它拼进相对路径，列「initial 自身」需 share 根下
-    // 存在同名子目录，M2 待实机标注期间从未暴露）
+    // 存在同名子目录，M2 待实机标注期间从未暴露。同日二次修正：unc_rel 现在
+    // 剥离首段，非空 initial 的「share/子路径」形态不再依赖镜像同名子目录）
     if initial_path.is_empty() {
         return Ok(());
     }
@@ -50,10 +66,13 @@ mod tests {
 
     #[test]
     fn unc_join_converts_slashes() {
-        // descriptor path 是 '/' 分隔的 source-relative；UNC 用 '\'
-        assert_eq!(unc_rel("comics/v1", "001.jpg"), r"comics\v1\001.jpg");
-        assert_eq!(unc_rel("", "001.jpg"), "001.jpg");
-        assert_eq!(unc_rel("comics", ""), "comics");
+        // descriptor path 是 '/' 分隔的 source-relative；UNC 用 '\'。
+        // 首段 = share，拼接时剥离（tree 已在 share 内）
+        assert_eq!(unc_rel("comics/v1", "001.jpg"), r"v1\001.jpg");
+        assert_eq!(unc_rel("", "001.jpg"), "001.jpg");       // 空 initial = share 根
+        assert_eq!(unc_rel("comics", ""), "");               // initial == share → share 根
+        assert_eq!(unc_rel("comics", "f.bin"), "f.bin");
+        assert_eq!(unc_rel("media/comics", "v1"), r"comics\v1");
     }
 
     #[test]

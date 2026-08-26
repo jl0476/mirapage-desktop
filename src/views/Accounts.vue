@@ -21,7 +21,7 @@ import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useFileBrowserStore } from '@/stores/fileBrowser';
-import type { SourceDescriptor } from '@/lib/sourceDescriptor';
+import { accountRootDescriptor } from '@/lib/sourceDescriptor';
 import {
   listAccounts,
   upsertAccount,
@@ -179,13 +179,11 @@ function hostLine(acct: AccountItem): string {
 
 /** 浏览入口（实机补全 2026-08-26：账户配置好后此前无任何 UI 入口可达其目录——
  *  FileBrowser 选根只有本地对话框，Shortcuts/Likes 的 openDescriptorAt 路径需要
- *  先有记录，鸡生蛋）。SMB 从 share 根（空 initial，M2 实机修正后的合法形态）；
- *  WebDAV 从 baseUrl 根。一次性意图经 requestOpenLocation，FileBrowser 消费。 */
+ *  先有记录，鸡生蛋）。descriptor 构造经 lib/sourceDescriptor.accountRootDescriptor
+ *  （与 FileBrowser 选根菜单共用；module3.5.0 后续提取）。一次性意图经
+ *  requestOpenLocation，FileBrowser 消费。 */
 function openInBrowser(acct: AccountItem): void {
-  const desc: SourceDescriptor = acct.type === 'smb'
-    ? { type: 'smb', accountId: acct.id, initialPath: '', path: '', port: acct.port ?? 445 }
-    : { type: 'webdav', accountId: acct.id, baseUrl: acct.host ?? '', path: '' };
-  fb.requestOpenLocation(desc, '');
+  fb.requestOpenLocation(accountRootDescriptor(acct), '');
   void router.push('/');
 }
 

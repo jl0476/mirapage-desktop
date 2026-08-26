@@ -42,6 +42,7 @@ import SearchInput from './SearchInput.vue';
 import StatusBar from './StatusBar.vue';
 import EntryDetailPanel from './EntryDetailPanel.vue';
 import MasonrySettingsPopup from './MasonrySettingsPopup.vue';
+import PickRootMenu from './PickRootMenu.vue';
 // v0.1.0-module3.0.7-masonry: 视图切换按钮用 SVG 资产 (v-html 渲染, 保留 fill +
 // viewBox 0 0 1024 1024 原貌). 资产文件位于 src/icons/, 与 src-tauri/icons/
 // 设计源镜像 (后者不进 IPC, 仅为 Tauri 打包资源).
@@ -418,8 +419,19 @@ const displayRoot = computed(() => {
   if (desc) {
     switch (desc.type) {
       case 'local': return desc.rootPath.replace(/\\/g, '/');
-      case 'webdav': return desc.baseUrl;
-      case 'smb': return desc.initialPath || `smb://account-${desc.accountId}`;
+      // module3.5.0 后续：带上 path 锚点段（提升当前目录为根后 path 非空，
+      // 只显示 baseUrl 会丢失位置感）
+      case 'webdav': {
+        const sub = desc.path.split(/[\\/]+/).filter(Boolean).join('/');
+        const root = desc.baseUrl.replace(/\/+$/, '');
+        return sub ? `${root}/${sub}` : root;
+      }
+      // module3.5.0 后续：非空 initialPath 也带 smb:// 前缀（裸相对段在状态栏/
+      // 面包屑里无来源感）；host 在账户表，沿用 account-N 形态
+      case 'smb': {
+        const init = desc.initialPath.split(/[\\/]+/).filter(Boolean).join('/');
+        return init ? `smb://account-${desc.accountId}/${init}` : `smb://account-${desc.accountId}`;
+      }
       case 'archive': return desc.archivePath.replace(/\\/g, '/');
     }
   }
@@ -433,6 +445,9 @@ const displayPath = computed(() => {
 });
 
 const LAST_ROOT_KEY = 'file_browser_last_root';
+// module3.5.0 后续: 远程根（SMB/WebDAV descriptor JSON）持久化 key，与 LAST_ROOT_KEY
+// 互斥清写（见下方 currentDescriptor watch），启动恢复二选一。
+const REMOTE_ROOT_KEY = 'file_browser_last_remote_descriptor';
 
 onMounted(async () => {
   // v0.1.0-module3.0.4-virtuallist Task 3.4: 注册 scrollToPath callback.
@@ -468,18 +483,34 @@ onMounted(async () => {
     log('[FileBrowser] restored navigation context, skip setRoot');
     return;
   }
-  // v0.1.0-module3.0.3-hotfix3 (Bug 4): 仅在 rootPath 为空时 (应用首次启动 / 刷新页面)
-  // 才从 settings 恢复. Pinia store 同一会话内 rootPath 持续保留, setRoot 会抹掉
-  // currentPath, 导致从 reader 退回时丢失滚动位置 — 哪怕 restoreNavigationContext 返回
-  // false (例如使用快捷入口进入 reader 没保存上下文), 保留当前 rootPath 也比无脑重置好.
-  if (fb.rootPath === null) {
+  // v0.1.0-module3.0.3-hotfix3 (Bug 4) + module3.5.0 后续: 仅在全新会话（无本地
+  // rootPath 且无在会话源）时恢复持久化根。远程根（SMB/WebDAV descriptor）优先于
+  // 本地 LAST_ROOT_KEY——两个 key 由 currentDescriptor watch 互斥清写，此处二选一。
+  // hasActiveSource 守卫顺带修复：远程会话中重挂载（rootPath 是陈旧本地值或 null）
+  // 不再被旧 LAST_ROOT_KEY 拽回本地根。
+  if (fb.rootPath === null && !fb.hasActiveSource) {
+    let restoredRemote = false;
     try {
-      const stored = await getSetting(LAST_ROOT_KEY);
-      if (stored && typeof stored === 'string' && stored.length > 0) {
-        await fb.setRoot(stored);
+      const remoteJson = await getSetting(REMOTE_ROOT_KEY);
+      if (typeof remoteJson === 'string' && remoteJson.length > 0) {
+        const desc = JSON.parse(remoteJson) as SourceDescriptor;
+        if (desc.type === 'smb' || desc.type === 'webdav') {
+          await fb.openDescriptorAt(desc, '');
+          restoredRemote = true;
+        }
       }
     } catch {
-      // 静默回退: 显示 empty state
+      // 静默：损坏的持久化 descriptor 回退本地
+    }
+    if (!restoredRemote) {
+      try {
+        const stored = await getSetting(LAST_ROOT_KEY);
+        if (stored && typeof stored === 'string' && stored.length > 0) {
+          await fb.setRoot(stored);
+        }
+      } catch {
+        // 静默回退: 显示 empty state
+      }
     }
   }
   // 路径身份修复 (2026-08-12): shortcut 收敛后, Shortcuts.vue onOpen 只 setActive + push('/').
@@ -519,6 +550,21 @@ watch(
       }
     } catch {
       // silent
+    }
+  },
+);
+
+// module3.5.0 后续: 远程根持久化——SMB/WebDAV 会话 descriptor 落 settings，与
+// LAST_ROOT_KEY 互斥清写（切远程清本地键 / 切本地清远程键），启动恢复据此二选一。
+// Archive 条目视图不动两个键（保留最近真实根记忆，重启回到压缩包所在目录的根）。
+watch(
+  () => fb.currentDescriptor,
+  (desc) => {
+    if (desc && (desc.type === 'smb' || desc.type === 'webdav')) {
+      void setSetting(REMOTE_ROOT_KEY, JSON.stringify(desc));
+      void setSetting(LAST_ROOT_KEY, '');
+    } else if (!desc || desc.type === 'local') {
+      void setSetting(REMOTE_ROOT_KEY, '');
     }
   },
 );
@@ -599,11 +645,26 @@ async function onPickRoot() {
     if (!mod?.open) return;
     const path = await mod.open({ directory: true });
     if (path && typeof path === 'string') {
+      shortcuts.clearActive(); // 显式换根取代旧 shortcut 重放意图（对齐 requestOpenLocation 清理面）
       await fb.setRoot(path);
     }
   } catch {
     // silent
   }
+}
+
+// module3.5.0 后续: 选根菜单——网络账户打开（SMB share 根 / WebDAV baseUrl 根）。
+// 与 pendingOpen 流程同款收尾（masonry + 无图守卫回落 details）。
+async function onOpenAccount(desc: SourceDescriptor) {
+  shortcuts.clearActive();
+  await fb.openDescriptorAt(desc, '');
+  fb.setViewMode('masonry');
+}
+
+// module3.5.0 后续: 把当前远程目录提升为浏览根（store 补 share 首段 / 拼 path）。
+async function onSetRootHere() {
+  shortcuts.clearActive();
+  await fb.setCurrentDirAsRoot();
 }
 
 function onSaveClick() {
@@ -808,7 +869,6 @@ const ICON_EYE = 'M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8zM12 15a3 3 0 1 0 0
 const ICON_EYE_OFF = 'M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24M1 1l22 22';
 const ICON_UP = 'M5 12l7-7 7 7M12 19V5';
 const ICON_REFRESH = 'M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5';
-const ICON_FOLDER = 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z';
 // v0.1.0-module3.0.5: PushPin 替代 STAR — 对齐 PV 教训 (Star 被多次误解为书签, 见 specs/2026-07-29-like-feature-design.md:301)
 const ICON_PIN = 'M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 z';
 const ICON_FOLDER_OPEN = 'M6 14l1.45-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.55 6a2 2 0 0 1-1.94 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.93a2 2 0 0 1 1.66.9l.82 1.2a2 2 0 0 0 1.66.9H18a2 2 0 0 1 2 2v2';
@@ -978,18 +1038,7 @@ function onReadNowFromCtx(entry: MediaEntry) {
         </svg>
       </div>
       <p class="text-text-muted text-sm m-0">{{ t('fileBrowser.noShortcut') }}</p>
-      <button
-        data-test="btn-pick"
-        class="flex items-center gap-2 px-5 py-2.5 bg-accent text-white border-0 rounded-md font-semibold cursor-pointer shadow-[0_0_12px_rgba(99,102,241,0.45)] transition-[background,transform,box-shadow] duration-100 hover:bg-accent-hover hover:shadow-[0_0_18px_rgba(99,102,241,0.65)] active:translate-y-px"
-        @click="onPickRoot"
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-             stroke="currentColor" stroke-width="2" stroke-linecap="round"
-             stroke-linejoin="round" aria-hidden="true">
-          <path :d="ICON_FOLDER" />
-        </svg>
-        {{ t('fileBrowser.pickRoot') }}
-      </button>
+      <PickRootMenu variant="cta" @pick-local="onPickRoot" @set-root-here="onSetRootHere" @open-account="onOpenAccount" />
       <RouterLink
         to="/shortcuts"
         class="text-accent no-underline text-sm transition-colors duration-100 hover:text-accent-hover hover:underline"
@@ -1024,14 +1073,12 @@ function onReadNowFromCtx(entry: MediaEntry) {
         </button>
         <span class="xp-divider-v shrink-0" aria-hidden="true" />
         <ShortcutDropdown />
-        <button data-test="btn-pick" class="tb-btn" @click="onPickRoot">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
-               stroke="currentColor" stroke-width="2" stroke-linecap="round"
-               stroke-linejoin="round" aria-hidden="true">
-            <path :d="ICON_FOLDER" />
-          </svg>
-          {{ t('fileBrowser.pickRoot') }}
-        </button>
+        <PickRootMenu
+          :can-set-root-here="fb.canSetRootHere"
+          @pick-local="onPickRoot"
+          @set-root-here="onSetRootHere"
+          @open-account="onOpenAccount"
+        />
         <button data-test="btn-save" class="tb-btn" :disabled="!canSave" @click="onSaveClick">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none"
                stroke="currentColor" stroke-width="2" stroke-linecap="round"

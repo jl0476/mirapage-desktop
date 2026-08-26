@@ -10,7 +10,7 @@ import { createI18n } from 'vue-i18n';
 import { nextTick } from 'vue';
 import FileBrowser from './FileBrowser.vue';
 import {
-  listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting, setFavorite, getBookStatus, notifyArchiveWindow,
+  listDirectory, listShortcuts, createShortcut, findNextVolume, createBook, getSetting, setSetting, setFavorite, getBookStatus, notifyArchiveWindow, listAccounts,
   beginArchiveSession, prepareArchive, unlockArchive, commitArchiveOpen, cancelArchivePrepare,
 } from '@/lib/tauri';
 import type { ArchivePrepareResult } from '@/lib/tauri';
@@ -45,6 +45,8 @@ vi.mock('@/lib/tauri', () => ({
   deleteShortcut: vi.fn(async () => undefined),
   getSetting: vi.fn(async () => null),
   setSetting: vi.fn(async () => undefined),
+  // module3.5.0 后续: PickRootMenu 账户列表
+  listAccounts: vi.fn(async () => []),
   listHistory: vi.fn(async () => []),
   listProgressFinished: vi.fn(async () => ({})),
   markFinished: vi.fn(async () => undefined),
@@ -81,6 +83,7 @@ const mockedShortcuts = vi.mocked(listShortcuts);
 const mockedCreate = vi.mocked(createShortcut);
 const mockedFindNextVolume = vi.mocked(findNextVolume);
 const mockedGet = vi.mocked(getSetting);
+const mockedAccounts = vi.mocked(listAccounts);
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
 // 审查修复 (2026-08-13): 跟踪 mountFileBrowser 挂载的 wrapper, 全局 afterEach 统一卸载.
@@ -2625,3 +2628,95 @@ describe('FileBrowser — 压缩包密码与事务 UI (任务 13)', () => {
   });
 });
 
+
+// ─── module3.5.0 后续: PickRootMenu 选根接线（网络账户 + 提升当前目录 + 远程根持久化）───
+describe('FileBrowser — PickRootMenu 选根', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedList.mockResolvedValue([]);
+    mockedShortcuts.mockResolvedValue([]);
+    mockedAccounts.mockResolvedValue([]);
+    mockedGet.mockImplementation(async () => null);
+  });
+
+  it('工具栏菜单: 打开列出账户, 点击 SMB 账户 → openDescriptorAt + masonry', async () => {
+    mockedAccounts.mockResolvedValue([
+      { id: 7, name: 'NAS', type: 'smb', host: '192.168.50.168', port: 445, share: 'Other1' },
+    ]);
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.setRoot('C:/comics');
+    await flushPromises();
+
+    await wrapper.find('[data-test="btn-pick"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.find('[data-test="pickroot-menu"]').exists()).toBe(true);
+    expect(wrapper.find('[data-test="pickroot-acct-7"]').exists()).toBe(true);
+    // 本地会话不显示「将当前目录设为根目录」
+    expect(wrapper.find('[data-test="pickroot-set-here"]').exists()).toBe(false);
+
+    mockedList.mockClear();
+    mockedList.mockResolvedValue(makeEntries('page1.jpg')); // 有图 → masonry 不被无图守卫回落
+    await wrapper.find('[data-test="pickroot-acct-7"]').trigger('click');
+    await flushPromises();
+    expect(fb.currentDescriptor).toEqual({ type: 'smb', accountId: 7, initialPath: '', path: '', port: 445 });
+    expect(fb.viewMode).toBe('masonry');
+    expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ type: 'smb' }), '');
+  });
+
+  it('远程会话进入子目录后菜单出现「设为根目录」，点击提升锚点并清空 currentPath', async () => {
+    mockedAccounts.mockResolvedValue([
+      { id: 7, name: 'NAS', type: 'smb', host: '192.168.50.168', port: 445, share: 'Other1' },
+    ]);
+    mockedList.mockResolvedValue(makeEntries('vol1'));
+    const wrapper = await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    await fb.openDescriptorAt({ type: 'smb', accountId: 7, initialPath: '', path: '', port: 445 }, '');
+    await fb.navigate('wall');
+    await flushPromises();
+
+    await wrapper.find('[data-test="btn-pick"]').trigger('click');
+    await flushPromises();
+    const setHere = wrapper.find('[data-test="pickroot-set-here"]');
+    expect(setHere.exists()).toBe(true);
+    await setHere.trigger('click');
+    await flushPromises();
+    expect(fb.currentDescriptor).toMatchObject({ type: 'smb', accountId: 7, initialPath: 'Other1/wall' });
+    expect(fb.currentPath).toBe('');
+  });
+
+  it('远程根持久化: openDescriptorAt 远程后写 REMOTE key + 清 LAST_ROOT_KEY', async () => {
+    await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    mockedList.mockResolvedValue([]);
+    await fb.openDescriptorAt({ type: 'webdav', accountId: 3, baseUrl: 'https://dav.example', path: '' }, '');
+    await flushPromises();
+    const setMock = vi.mocked(setSetting);
+    expect(setMock).toHaveBeenCalledWith(
+      'file_browser_last_remote_descriptor',
+      JSON.stringify({ type: 'webdav', accountId: 3, baseUrl: 'https://dav.example', path: '' }),
+    );
+    expect(setMock).toHaveBeenCalledWith('file_browser_last_root', '');
+  });
+
+  it('启动恢复: REMOTE key 有 descriptor → 打开远程根，不被旧本地 key 拽回', async () => {
+    mockedGet.mockImplementation(async (k: string) =>
+      k === 'file_browser_last_remote_descriptor'
+        ? JSON.stringify({ type: 'webdav', accountId: 3, baseUrl: 'https://dav.example', path: '' })
+        : k === 'file_browser_last_root' ? 'C:/old' : null);
+    await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    expect(fb.currentDescriptor).toMatchObject({ type: 'webdav', accountId: 3 });
+    expect(fb.rootPath).toBe(null); // 旧本地 key 不生效
+    expect(mockedList).toHaveBeenCalledWith(expect.objectContaining({ type: 'webdav' }), '');
+  });
+
+  it('启动恢复: 无 REMOTE key → 回退本地 LAST_ROOT_KEY（原行为）', async () => {
+    mockedGet.mockImplementation(async (k: string) =>
+      k === 'file_browser_last_root' ? 'C:/comics' : null);
+    await mountFileBrowser();
+    const fb = useFileBrowserStore();
+    expect(fb.rootPath).toBe('C:/comics');
+    expect(fb.currentDescriptor).toBeNull();
+  });
+});

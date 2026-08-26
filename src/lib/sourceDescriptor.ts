@@ -73,3 +73,17 @@ export function descriptorId(desc: SourceDescriptor): string {
       return `webdav://${desc.accountId}@${desc.baseUrl}${desc.path}`;
   }
 }
+
+/**
+ * 账户根 descriptor（module3.5.0 后续）：Accounts 页「浏览」与 FileBrowser
+ * 选根菜单共用的构造——SMB 空 initialPath = share 根（M2 实机修正后的合法形态，
+ * 后端 share_root_matches 放行空首段）；WebDAV 从 baseUrl 根。
+ * 参数用结构类型避免反向依赖 lib/tauri 的 AccountItem。
+ */
+export function accountRootDescriptor(
+  acct: { id: number; type: 'smb' | 'webdav'; host?: string; port?: number },
+): SourceDescriptor {
+  return acct.type === 'smb'
+    ? { type: 'smb', accountId: acct.id, initialPath: '', path: '', port: acct.port ?? 445 }
+    : { type: 'webdav', accountId: acct.id, baseUrl: acct.host ?? '', path: '' };
+}
