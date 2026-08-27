@@ -146,7 +146,7 @@ onUnmounted(() => {
  *  兜底使本地源 descriptor 逐渲染重建新引用），仅随源身份/目录字符串变化。
  *  watch 与回包守卫共用此函数，杜绝引用比较误杀。 */
 function guardKey(): string {
-  return `${props.descriptor ? descriptorId(props.descriptor) : ''}|${props.currentPath ?? ''}`;
+  return `${descriptorId(props.descriptor)}|${props.currentPath}`;
 }
 
 watch(
