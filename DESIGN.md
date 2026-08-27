@@ -1600,7 +1600,10 @@ export function useReaderInput() {
 
 ### 16.2 遗留打磨项（文档点名「留后续」）
 
-- **瀑布流打磨三件**（3.0.6；ease-out 已于 3.0.14 清理）：像素级 scrollTop 锚定补偿；resolve in-flight cancel；hasImages 搜索态副作用。
+- **瀑布流打磨收口**（module3.5.3）：in-flight 尺寸守卫 ✅、archiveOpenError 导航清空 ✅；hasImages 搜索态查明无缺口（守卫源头即全量集合）销账；像素级 scrollTop 锚定补偿保留（avgRatio 全局漂移并入考量，观察守卫效果后另立项）。
+- **loadingText en 全角括号**销账：不成立——en-US.ts 入库即半角，`git log -S` 无历史。
+- **嵌套压缩包双击禁用**销账：由构造消除——backend catalog 只列图片条目，内层包不可见（module3.5.3 任务 7 仅补防误开注释）。
+- **directory_sort / shortcut canonical 化迁移**销账：虚惊——key 由 Rust `location_key_of` 单侧拼装、写入边界经 `normalize_shortcut_input` 强制收敛，无双 writer 分叉；规范性欠账记一笔，不做 migration。
 
 ### 16.3 技术债
 
