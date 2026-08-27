@@ -698,6 +698,8 @@ MiraPage Android 工程（`F:\WorkSpaceCollection\git\perfect-viewer`）作为**
 | `data/remote/webdav/WebDavConnectionTester.kt:18-38` | 测试连接 | 同 SMB |
 | `data/source/WebDavRandomAccessReader.kt:23-84` | Range GET 实现 | 镜像 |
 
+**远程读取总闸门（2026-08，module 3.5.2）**：`source/remote_gate.rs` 全局 `RemoteGate` 经 factory 以 `Arc` 注入 WebDAV/SMB 两源，闸门下沉在 `read_file`/`stat` impl 内部——media:// GET、warm 预读、缩略图远取、materializer Range 块四条通道自动覆盖，零调用方改动。两阶段语义：发请求前拿并发 permit（8，含重试两 attempt"一个读取任务一个槽"）；WebDAV 收到响应头后按 `Content-Length` 拿字节 permit（预算 512 MiB，**载荷 ×2 保守记账口径**；无 CL 按整预算预留；CL 超 256 MiB 立即拒绝），SMB 无响应头概念则读前一次拿双闸；两类 permit 全 RAII 同释。stat 走 `enter_conn_only`（仅并发，无字节）；SMB read/stat 包 60s 项目级读超时，超时 `invalidate` 摘槽重建。WebDAV 按账户 TLS 配置复用两个共享 `reqwest::Client`（连接池 idle 300s + connect_timeout 10s），响应体流式累加上限（GET 256 MiB / PROPFIND 32 MiB，CL 预检 + 流式累计双保险）。media path 级 singleflight（`media_cache::fetch_remote_to_cache`，watch 值语义防丢唤醒）收敛 media:// miss 与 warm 的同图双下载，写入走 generation 守卫（`clear_all` 递增代，旧代在途结果丢弃——封死账户变更后旧内容写回窗口）。设计全文见 `docs/superpowers/specs/2026-08-26-remote-read-gate-design.md`。
+
 ### 7.9 Phase 9 —— 跨平台分发
 
 | 路径 | 用途 |
