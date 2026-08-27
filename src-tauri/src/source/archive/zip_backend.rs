@@ -438,6 +438,8 @@ fn catalog_zip(
         if !name.starts_with(prefix) {
             continue;
         }
+        // 单层约束的实现方式：嵌套压缩包不出现在条目视图（is_image 只放行图片），
+        // UI 无额外双击守卫——放行非图片条目前必须先给 openArchive 加层守卫（module3.5.3 spec §2.J）。
         if !is_image(&name) {
             continue;
         }

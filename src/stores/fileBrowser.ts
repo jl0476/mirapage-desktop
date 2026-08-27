@@ -458,6 +458,9 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       };
     }
     // 本地源（module3.2.0 现状，零回归）
+    // ⚠ 仅非 archive 会话可达：archive 条目视图内 currentPath 是包内相对路径，
+    // 拼 rootPath 会产出假绝对路径（目录列表由后端 catalog 只列图片，压着不可达）。
+    // 未来放行非图片条目时须改为 descriptor 感知的 rel 构造（module3.5.3 spec §2.H）。
     const root = rootPath.value ?? '';
     // entry.path 只是相对当前目录的文件名（local.rs:97），join root+dir+name 拼绝对路径
     const abs = [root, dir, entry.name]

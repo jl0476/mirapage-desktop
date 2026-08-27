@@ -433,6 +433,8 @@ fn catalog_sevenz(
     for (index, file) in archive.files.iter().enumerate() {
         let name = file.name.replace('\\', "/");
         check_raw_entry_limits(index, &name, file.size, limits)?;
+        // 单层约束的实现方式：嵌套压缩包不出现在条目视图（is_image 只放行图片），
+        // UI 无额外双击守卫——放行非图片条目前必须先给 openArchive 加层守卫（module3.5.3 spec §2.J）。
         if !name.starts_with(prefix) || !is_image(&name) {
             continue;
         }
