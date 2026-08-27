@@ -1377,7 +1377,7 @@ mod tests {
 
     #[test]
     fn migration_010_run_bumps_version_to_10() {
-        // 走完整 run()，验证版本号到最新且幂等（migration 016 后,完整 run 到 16）
+        // 走完整 run()，验证版本号到最新且幂等（当前最新为 18；新增迁移后随版本号同步更新）
         let conn = Connection::open_in_memory().unwrap();
         super::run(&conn).unwrap();
 

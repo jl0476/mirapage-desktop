@@ -21,7 +21,7 @@
 //!   active 且精确幂等（`sequence == last_committed` 才重试成功）。
 //! - **远程 ZIP/CBZ 流式首开（任务 10）**：`resolve` 先 `stat_origin` 建 identity
 //!   （origin 尺寸/mtime——物化/流式/重建同 identity，密码库与 catalog LRU 不换档），
-//!   再 `ready_path_if_fresh` 命中即 Path input（Materialized），未命中构造共享
+//!   再 `ready_path_if_fresh_with_stat` 命中即 Path input（Materialized），未命中构造共享
 //!   block cache 的 `RemoteZipReader` 工厂（Streaming）。probe/catalog 在流式输入
 //!   上遇 `RemoteRangeUnavailable/Network/Timeout` **原位重试一次**，第二次仍白名单
 //!   则 `ensure_cached` 完整物化后用 Path input 重跑（Materialized）；`Cancelled`、
@@ -418,7 +418,7 @@ impl ArchiveService {
     /// origin None 本地直开 / Some 按格式分派（任务 10）：ZIP/CBZ 先 `stat_origin`
     /// 建 identity（origin 尺寸/mtime——流式、ready 命中与物化降级共用同一 identity，
     /// 缓存文件重建/模式切换不换档，密码库与 catalog LRU 键稳定），再
-    /// `ready_path_if_fresh`（无下载，gate 语义在实现内）命中即 Path input
+    /// `ready_path_if_fresh_with_stat`（无下载，gate 语义在实现内）命中即 Path input
     /// （Materialized）；未命中构造共享 block cache 的 `RemoteZipReader` 工厂
     /// （Streaming，尾部 Range 优先）。Cbr/Rar/7z 与物化降级路径保持完整物化。
     /// Local identity = 规范化绝对路径 + fs metadata size/mtime；非 ZIP 远程

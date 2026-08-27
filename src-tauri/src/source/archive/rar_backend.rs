@@ -216,7 +216,7 @@ fn map_rar_code(code: c_int) -> ArchiveAccessError {
             ArchiveAccessError::ResourceLimitExceeded("unrar out of memory".into())
         }
         // EOPEN=容器物理打不开（不存在/权限/锁定），非档案头损坏——归 Io。
-        // media:// 层 Io 与 CorruptArchive 同映射 422，状态码零变化（lib.rs:551）。
+        // media:// 层 Archive(_) 兜底臂同样映射 422，状态码零变化。
         u::ERAR_EREAD | u::ERAR_EWRITE | u::ERAR_ECREATE | u::ERAR_ECLOSE | u::ERAR_EOPEN => {
             ArchiveAccessError::Io(format!("unrar error {code}"))
         }
@@ -962,7 +962,6 @@ mod tests {
     /// 密码类已被 typed callback 路径截胡，本表只见裸码兜底。
     #[test]
     fn map_rar_code_full_table_classification() {
-        use crate::source::archive::backend::ArchiveAccessError;
         let corrupt = [
             u::ERAR_BAD_DATA,
             u::ERAR_BAD_ARCHIVE,
@@ -1002,5 +1001,7 @@ mod tests {
             super::map_rar_code(u::ERAR_NO_MEMORY),
             ArchiveAccessError::ResourceLimitExceeded(_)
         ));
+        // 兜底 other 臂特征锁——full_table 名副其实
+        assert!(matches!(super::map_rar_code(9999), ArchiveAccessError::CorruptArchive(_)));
     }
 }

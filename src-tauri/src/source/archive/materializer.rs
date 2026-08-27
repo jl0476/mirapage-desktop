@@ -2362,7 +2362,7 @@ pub(crate) mod tests {
     }
 
     /// module3.5.3 任务 F 服务级锁：seeded ready-cache 下 stat_entry_size + read_file
-    /// 两连击（media:// handler 同款双 Service 调用，lib.rs:271/337）合计 origin stat
+    /// 两连击（media:// handler 的 stat+read 双 Service 调用形态）合计 origin stat
     /// 恰 2 次（每 resolve 1 次 identity stat）。修复前每 resolve 另发 1 次相同 fresh
     /// stat（合计 4）——漏接 service 分支、误删 trait 覆盖都会回红本用例。
     #[tokio::test]
