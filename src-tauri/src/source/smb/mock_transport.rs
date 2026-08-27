@@ -16,12 +16,18 @@ struct Inner {
     fail_once: Option<TransportError>,
     /// bytes 脚本：read_block_exact 从 offset 切片（不足即 Err——模拟短读/EOF 早到）
     bytes: Vec<u8>,
+    /// 远程读取闸门测试钩子（spec §11.6）：read 延迟 / read 挂起 / stat 挂起
+    read_delay_ms: Option<u64>,
+    hang_reads: bool,
+    hang_stats: bool,
 }
 
 pub struct MockSmbTransport {
     inner: Mutex<Inner>,
     connected: AtomicBool,
     disconnect_signals: AtomicU32,
+    read_inflight: AtomicU32,
+    max_read_inflight: AtomicU32,
 }
 
 impl MockSmbTransport {
@@ -30,6 +36,8 @@ impl MockSmbTransport {
             inner: Mutex::new(Inner::default()),
             connected: AtomicBool::new(false),
             disconnect_signals: AtomicU32::new(0),
+            read_inflight: AtomicU32::new(0),
+            max_read_inflight: AtomicU32::new(0),
         }
     }
 
@@ -67,6 +75,25 @@ impl MockSmbTransport {
 
     pub fn disconnect_signals(&self) -> u32 {
         self.disconnect_signals.load(Ordering::SeqCst)
+    }
+
+    // ─── 远程读取闸门测试钩子（spec §11.6）───
+
+    pub fn set_read_delay(&self, d: std::time::Duration) {
+        self.inner.lock().unwrap().read_delay_ms = Some(d.as_millis() as u64);
+    }
+
+    pub fn set_read_hang(&self, on: bool) {
+        self.inner.lock().unwrap().hang_reads = on;
+    }
+
+    /// stat 挂起独立标志（任务 6 stat 超时测试用；与 read 挂起分开，避免语义互扰）。
+    pub fn set_read_hang_stat(&self, on: bool) {
+        self.inner.lock().unwrap().hang_stats = on;
+    }
+
+    pub fn max_read_inflight(&self) -> u32 {
+        self.max_read_inflight.load(Ordering::SeqCst)
     }
 
     fn take_injected(&self) -> Option<TransportError> {
@@ -107,6 +134,41 @@ impl SmbTransport for MockSmbTransport {
             }
             return Err(e);
         }
+        // 挂起/延迟钩子（挂起仅靠外层 timeout 取消）：锁内只读决策，
+        // guard 生命周期封闭在无 await 块内（显式 drop 后跨 await 仍会被
+        // generator Send 分析保守判死——读出枚举再执行）
+        enum Throttle {
+            None,
+            Delay(u64),
+            Hang,
+        }
+        let throttle = {
+            let g = self.inner.lock().unwrap();
+            if g.hang_reads {
+                Throttle::Hang
+            } else if let Some(ms) = g.read_delay_ms {
+                Throttle::Delay(ms)
+            } else {
+                Throttle::None
+            }
+        };
+        match throttle {
+            Throttle::Hang => std::future::pending::<()>().await,
+            Throttle::Delay(ms) => {
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await
+            }
+            Throttle::None => {}
+        }
+        // 在途计数只包真实切片段：挂起的读占外层 gate permit，不计 inflight
+        let cur = self.read_inflight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_read_inflight.fetch_max(cur, Ordering::SeqCst);
+        struct InflightGuard<'a>(&'a AtomicU32);
+        impl Drop for InflightGuard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _guard = InflightGuard(&self.read_inflight);
         let g = self.inner.lock().unwrap();
         let start = offset as usize;
         let end = start.checked_add(buf.len()).ok_or_else(|| TransportError::InvalidPath("offset overflow".into()))?;
@@ -121,6 +183,9 @@ impl SmbTransport for MockSmbTransport {
     async fn stat(&self, rel: &str) -> Result<RawStat, TransportError> {
         if let Some(e) = self.take_injected() {
             return Err(e);
+        }
+        if self.inner.lock().unwrap().hang_stats {
+            std::future::pending::<()>().await;
         }
         let g = self.inner.lock().unwrap();
         g.stats.get(rel).cloned().ok_or_else(|| TransportError::FileNotFound(rel.to_string()))
@@ -169,5 +234,26 @@ mod tests {
         assert!(m.list("x").await.is_err());
         // 注入 Disconnected 后 list 触发 disconnect_signals+1（重连测试观察点）
         assert_eq!(m.disconnect_signals(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_delay_and_inflight_tracking() {
+        let m = MockSmbTransport::new();
+        m.script_bytes(&[0u8; 8]);
+        m.set_read_delay(std::time::Duration::from_millis(30));
+        let mut buf = vec![0u8; 8];
+        m.read_block_exact("f", 0, &mut buf).await.unwrap();
+        assert_eq!(m.max_read_inflight(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_hang_never_returns() {
+        let m = MockSmbTransport::new();
+        m.script_bytes(&[0u8; 8]);
+        m.set_read_hang(true);
+        let mut buf = vec![0u8; 8];
+        // 50ms 内必无返回（挂起）；不直接 await 到死，用 timeout 观察
+        let r = tokio::time::timeout(std::time::Duration::from_millis(50), m.read_block_exact("f", 0, &mut buf)).await;
+        assert!(r.is_err(), "挂起读应超时");
     }
 }

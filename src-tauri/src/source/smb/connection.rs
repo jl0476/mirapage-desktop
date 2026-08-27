@@ -163,6 +163,11 @@ impl SmbConnectionManager {
         self.slots.lock().unwrap().remove(&account_id);
     }
 
+    /// 对外摘槽（spec §7：source 层读超时后调用——transport 状态未知，下次重建）。
+    pub fn invalidate(&self, account_id: i64) {
+        self.evict(account_id);
+    }
+
     // ─── 对 source 层的操作面 ───
 
     pub async fn list(
@@ -396,5 +401,17 @@ mod tests {
         let (mgr, _) = manager_with_log(Duration::from_secs(300));
         let r = mgr.list(999, "media", "x").await;
         assert!(r.is_err());
+    }
+
+    /// invalidate（公开摘槽，spec §7）：行为断言——建连后 invalidate，
+    /// 下次操作走 factory 重建（created +1）。
+    #[tokio::test]
+    async fn invalidate_removes_slot_forcing_reconnect() {
+        let (mgr, log) = manager_with_log(Duration::from_secs(300));
+        mgr.list(1, "media", "comics").await.unwrap_err(); // 建连（FileNotFound 文件级）
+        assert_eq!(log.created.lock().unwrap().len(), 1);
+        mgr.invalidate(1);
+        mgr.list(1, "media", "comics").await.unwrap_err();
+        assert_eq!(log.created.lock().unwrap().len(), 2, "摘槽后下次操作重建连接");
     }
 }
