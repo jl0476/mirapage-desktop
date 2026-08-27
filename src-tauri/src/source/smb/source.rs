@@ -1,21 +1,37 @@
 //! `SmbMediaSource` —— SMB 协议层实装（module3.3.0，spec M2 §4）。
 
 use crate::source::descriptor::{ArchiveFormat, MediaEntry, SourceDescriptor};
+use crate::source::remote_gate::RemoteGate;
 use crate::source::smb::connection::SmbConnectionManager;
 use crate::source::trait_def::{ByteRange, FileStat, MediaSource, MediaSourceError, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 单次 read_file 全量上限（建议 3：异常 stat 防御，对齐 media LRU 256MB）
 const MAX_SMB_READ_BYTES: usize = 256 * 1024 * 1024;
+/// 项目级读取超时（spec §7：smb 库默认超时不可依赖；超时摘槽防脏连接）
+pub(crate) const SMB_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct SmbMediaSource {
     manager: Arc<SmbConnectionManager>,
+    gate: Arc<RemoteGate>,
+    read_timeout: Duration,
 }
 
 impl SmbMediaSource {
-    pub fn new(manager: Arc<SmbConnectionManager>) -> Self {
-        Self { manager }
+    pub fn new(manager: Arc<SmbConnectionManager>, gate: Arc<RemoteGate>) -> Self {
+        Self { manager, gate, read_timeout: SMB_READ_TIMEOUT }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_read_timeout(&mut self, d: Duration) {
+        self.read_timeout = d;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_for_test(&self) -> Arc<RemoteGate> {
+        self.gate.clone()
     }
 
     /// (account_id, initial_path)。descriptor.path 不参与路径拼接（P0：方法参数即完整路径）。
@@ -117,17 +133,22 @@ impl MediaSource for SmbMediaSource {
                 MAX_SMB_READ_BYTES
             )));
         }
+        // 两阶段闸（spec §7）：SMB 无"响应头"概念，双闸读前一次拿；total ×2 记账
+        let _conn = self.gate.enter().await?;
+        let _bytes = _conn.reserve_bytes(total as u32 * 2).await?;
         let mut buf = vec![0u8; total];
-        self.manager
-            .read_block_exact(
-                account_id,
-                initial_path,
-                &rel,
-                range.map(|r| r.offset).unwrap_or(0),
-                &mut buf,
-            )
-            .await
-            .map_err(Self::transport_err)?;
+        let offset = range.map(|r| r.offset).unwrap_or(0);
+        let fut = self
+            .manager
+            .read_block_exact(account_id, initial_path, &rel, offset, &mut buf);
+        match tokio::time::timeout(self.read_timeout, fut).await {
+            Ok(r) => r.map_err(Self::transport_err)?,
+            Err(_) => {
+                // transport 状态未知：摘槽，下次 get_or_connect 重建（对齐连接级错误恢复）
+                self.manager.invalidate(account_id);
+                return Err(MediaSourceError::Network("SMB 读取超时（已断开重连）".into()));
+            }
+        }
         Ok(buf)
     }
 
@@ -166,11 +187,17 @@ impl MediaSource for SmbMediaSource {
             MediaSourceError::NotImplemented("SmbMediaSource 仅处理 Smb descriptor".into())
         })?;
         let rel = validated_rel(initial_path, path)?;
-        let raw = self
-            .manager
-            .stat(account_id, initial_path, &rel)
-            .await
-            .map_err(Self::transport_err)?;
+        // spec §5 三审：get_or_connect 两阶段无锁建连，冷启动并发 stat 各自建 transport——
+        // stat 也过并发闸；并包读超时（挂起 stat 不得永久占 permit，§14 不变量）
+        let _conn = self.gate.enter_conn_only().await?;
+        let fut = self.manager.stat(account_id, initial_path, &rel);
+        let raw = match tokio::time::timeout(self.read_timeout, fut).await {
+            Ok(r) => r.map_err(Self::transport_err)?,
+            Err(_) => {
+                self.manager.invalidate(account_id);
+                return Err(MediaSourceError::Network("SMB stat 超时（已断开重连）".into()));
+            }
+        };
         Ok(FileStat {
             size: raw.size,
             modified_at: raw.modified_unix_secs,
@@ -202,6 +229,15 @@ mod tests {
     use std::time::Duration;
 
     fn make_source() -> (SmbMediaSource, Arc<MockSmbTransport>) {
+        make_gated_source(8, 2_000, SMB_READ_TIMEOUT)
+    }
+
+    /// 闸门注入版构造（spec §11.6/§11.7：测试一律 new 注入小闸值/小超时，不触全局单例）。
+    fn make_gated_source(
+        concurrency: usize,
+        acquire_ms: u64,
+        read_timeout: Duration,
+    ) -> (SmbMediaSource, Arc<MockSmbTransport>) {
         let db = crate::db::Db::open_in_memory().unwrap();
         let creds = Arc::new(MemoryStore::new());
         creds.set_password("smb-1", "p").unwrap();
@@ -221,7 +257,14 @@ mod tests {
             Box::pin(async move { m as Arc<dyn crate::source::smb::transport::SmbTransport> })
         });
         let mgr = SmbConnectionManager::new(db, creds, factory, Duration::from_secs(300));
-        (SmbMediaSource::new(Arc::new(mgr)), mock)
+        let gate = Arc::new(crate::source::remote_gate::RemoteGate::new(
+            concurrency,
+            usize::MAX >> 8, // 大预算：本组测试只关心并发
+            Duration::from_millis(acquire_ms),
+        ));
+        let mut src = SmbMediaSource::new(Arc::new(mgr), gate);
+        src.set_read_timeout(read_timeout);
+        (src, mock)
     }
 
     fn smb_desc(initial: &str, path: &str) -> SourceDescriptor {
@@ -391,5 +434,64 @@ mod tests {
         let r = src.list_directory(&smb_desc("media", ""), "").await;
         // IO 是连接级 → 外层重连一次（mock 仍失败）→ 顶层拿到 Network 文案
         assert!(matches!(r, Err(MediaSourceError::Network(_))));
+    }
+
+    // ─── spec §7/§11.6/§11.7：read/stat 接两阶段闸 + 读超时摘槽 ───
+
+    #[tokio::test]
+    async fn read_file_capped_by_gate_concurrency() {
+        let (src, mock) = make_gated_source(1, 2_000, Duration::from_secs(5));
+        // rel 契约：initial("media/f") 剥首段 share + path("a.jpg") → transport rel "f/a.jpg"
+        mock.script_stat("f/a.jpg", RawStat { size: 4096, modified_unix_secs: Some(1) });
+        mock.script_bytes(&vec![7u8; 4096]);
+        mock.set_read_delay(Duration::from_millis(120));
+        let src = std::sync::Arc::new(src);
+        let d = smb_desc("media/f", "a.jpg");
+        let d2 = d.clone();
+        let f = src.clone();
+        let a = tokio::spawn(async move { f.read_file(&d2, "a.jpg", None).await });
+        let g = src.clone();
+        let b = tokio::spawn(async move { g.read_file(&d, "a.jpg", None).await });
+        let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+        assert!(ra.is_ok() && rb.is_ok(), "{ra:?} {rb:?}");
+        assert_eq!(mock.max_read_inflight(), 1, "闸=1 时 transport 观测最大并发必须为 1");
+    }
+
+    #[tokio::test]
+    async fn read_timeout_invalidates_slot() {
+        let (src, mock) = make_gated_source(2, 500, Duration::from_millis(80));
+        mock.script_stat("f/a.jpg", RawStat { size: 64, modified_unix_secs: Some(1) });
+        mock.script_bytes(&vec![7u8; 64]);
+        mock.set_read_hang(true);
+        let d = smb_desc("media/f", "a.jpg");
+        let err = src.read_file(&d, "a.jpg", None).await.unwrap_err();
+        assert!(matches!(err, MediaSourceError::Network(ref m) if m.contains("读取超时")), "{err:?}");
+        mock.set_read_hang(false);
+        // 摘槽后下次读重建连接（connect_calls 增加）且成功
+        let calls_before = mock.connect_calls();
+        let ok = src.read_file(&d, "a.jpg", None).await;
+        assert!(ok.is_ok());
+        assert!(mock.connect_calls() > calls_before, "超时摘槽后应重连");
+    }
+
+    #[tokio::test]
+    async fn stat_busy_when_gate_exhausted() {
+        let (src, _mock) = make_gated_source(1, 50, Duration::from_secs(1));
+        let _hold = src.gate_for_test().enter().await.unwrap();
+        let d = smb_desc("media", "a.jpg");
+        let err = src.stat(&d, "a.jpg").await.unwrap_err();
+        assert!(matches!(err, MediaSourceError::Network(ref m) if m.contains("闸门繁忙")), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn stat_timeout_invalidates_slot() {
+        let (src, mock) = make_gated_source(2, 500, Duration::from_millis(80));
+        mock.set_read_hang_stat(true);
+        let d = smb_desc("media", "a.jpg");
+        let err = src.stat(&d, "a.jpg").await.unwrap_err();
+        assert!(matches!(err, MediaSourceError::Network(ref m) if m.contains("stat 超时")), "{err:?}");
+        mock.set_read_hang_stat(false);
+        mock.script_stat("a.jpg", RawStat { size: 1, modified_unix_secs: Some(1) });
+        assert!(src.stat(&d, "a.jpg").await.is_ok(), "摘槽重连后恢复");
     }
 }
