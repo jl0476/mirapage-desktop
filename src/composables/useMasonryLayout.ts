@@ -431,8 +431,9 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
    * avgRatio 估算 → 横向图被估算成纵向高度（如 447×760）→ 大片纵向空白。
    *
    * 新方案不依赖 measuredCount 连续前缀，直接读像素窗口——返回深处时第一批尺寸
-   * 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。配合 useMasonryLayout
-   * 的 resize viewport anchor，尺寸收敛期间的视觉跳动也被锚定恢复。
+   * 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。
+   * 尺寸收敛期间的视觉跳动不在锚定覆盖范围内（resize anchor 只挂在 ResizeObserver 上）；
+   * 测量批次到达的渐进收敛是预期表现，视口补偿属后续独立模块（DESIGN §16.2 G 项）。
    */
   // masonry 图片 path 集合（复审性能修订 2026-08-27）：仅 entries 变化时重建——
   // dimensionPrefetchPaths 随滚动高频重算，内联 filter→map→Set 是每帧 O(N) 分配

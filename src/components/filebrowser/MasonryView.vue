@@ -26,6 +26,7 @@ import { log } from '@/lib/logger';
 import { useSettingsStore } from '@/stores/settings';
 import MasonryRow from './MasonryRow.vue';
 import ThumbnailProgressPopover from './ThumbnailProgressPopover.vue';
+import { descriptorId } from '@/lib/sourceDescriptor';
 import type { MediaEntry, ReadStatusMap, SourceDescriptor } from '@/lib/sourceDescriptor';
 
 interface Props {
@@ -141,10 +142,21 @@ onUnmounted(() => {
 /** v0.1.0-module3.0.8 (任务 8): 目录切换时让 composable 重新初始化（spec §3.4 做法 A）。
  *  用 stop+start 模式：停止滚动监听 + 清理 lastWrittenPath，再 start 触发
  *  restoreAndScroll（查 progress + 可选自动滚）。 */
+/** module3.5.3 任务 A：稳定语义键——descriptorId 忽略对象引用（FileList:407 内联字面量
+ *  兜底使本地源 descriptor 逐渲染重建新引用），仅随源身份/目录字符串变化。
+ *  watch 与回包守卫共用此函数，杜绝引用比较误杀。 */
+function guardKey(): string {
+  return `${props.descriptor ? descriptorId(props.descriptor) : ''}|${props.currentPath ?? ''}`;
+}
+
 watch(
-  () => [props.descriptor, props.currentPath] as const,
+  guardKey,
   () => {
     closeProgressPopover(); // module3.0.11：切目录关 popover（spec §6.4）
+    // measuredMap 键是相对 currentPath 的 entry.path，不跨目录唯一；预读跳过已测
+    // 路径 + mergeMeasured 不覆盖 ⇒ 污染不可自愈，语义键变化即整体重置。
+    // 附带效应（无害偏好）：本地源重渲染不再重启 browsePosition。
+    measuredMap.value = new Map();
     browsePosition.stop();
     void browsePosition.start();
   },
@@ -409,6 +421,8 @@ const browsePosition = useMasonryBrowsePosition({
 // 注: 任务 8 起 atBottom 不再 defineExpose — 内部状态机已被 composable 接管,
 //  暴露给父级会让 FileBrowser 误以为可独立消费(实际只是 MasonryView 内部 layout 反应)。
 defineExpose({
+  // module3.5.3 任务 A：测试观测面（后续 scrollTop 锚定补偿立项也需直读此 map）
+  measuredMap,
   regenerate: regenerateThumbnail,
   regenerateBatch: regenerateBatchFn,
   retry: retryThumbnail,
@@ -436,6 +450,9 @@ function onRowMeasured(entry: MediaEntry, width: number, height: number): void {
 // (与 entries e.path 一致, useMasonryLayout.inputs 用 e.path 查 measuredMap)。
 async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
   if (relPaths.length === 0) return;
+  // module3.5.3 任务 A：语义键快照——切目录后迟到的回包按键身份已错位直接丢弃；
+  // 不用对象引用（FileList 兜底字面量引用不稳）、不用单调序号（同目录并发批次合法）。
+  const keyAtStart = guardKey();
   try {
     const fullByRel = new Map<string, string>();
     const fullPaths = relPaths.map((rp) => {
@@ -444,6 +461,7 @@ async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
       return fp;
     });
     const dims = await listImageDimensions(props.descriptor, fullPaths);
+    if (keyAtStart !== guardKey()) return; // 目录/源身份已变：陈旧回包丢弃
     const m = new Map(measuredMap.value);
     for (const d of dims) {
       const rel = fullByRel.get(d.path) ?? d.path;
@@ -456,8 +474,9 @@ async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
 }
 // v0.1.0-module3.0.8 fix: watch 像素窗口中心的 dimensionPrefetchPaths（替代 needPrefetch 翻转触发）。
 // immediate 挂载即触发首次预读；flush:'post' 确保 layout 重排后触发。返回深处时第一批
-// 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。尺寸收敛期间的视觉
-// 跳动由 useMasonryBrowsePosition.scrollToEntry 渐进校正（watch layout.top）覆盖。
+// 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。
+// 尺寸收敛期间的视觉跳动不在锚定覆盖范围内（resize anchor 只挂在 ResizeObserver 上）；
+// 测量批次到达的渐进收敛是预期表现，视口补偿属后续独立模块（DESIGN §16.2 G 项）。
 watch(
   dimensionPrefetchPaths,
   (paths) => {

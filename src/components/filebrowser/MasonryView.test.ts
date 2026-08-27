@@ -87,6 +87,7 @@ import type { MediaEntry } from '@/lib/sourceDescriptor';
 import type { MasonryItem } from '@/composables/useMasonryLayout';
 import type { UseMasonryBrowsePositionParams } from '@/composables/useMasonryBrowsePosition';
 import { useSettingsStore } from '@/stores/settings';
+import { listImageDimensions } from '@/lib/tauri';
 
 const browsePositionParams = vi.hoisted(() => ({
   current: null as UseMasonryBrowsePositionParams | null,
@@ -124,6 +125,10 @@ vi.mock('@/lib/tauri', async () => {
 /** 测试用 layout map：null 表示空（让 layout map 为空），Map 表示预填。 */
 const fakeLayoutMap = { current: new Map<string, MasonryItem>() };
 
+// module3.5.3 任务 A：dimensionPrefetchPaths 改 hoisted 可控——默认空数组保持既有
+// describe 行为不变，陈旧尺寸守卫用例按需注入 paths 触发真实 IPC 预读链。
+const prefetchPathsMock = vi.hoisted(() => ({ current: [] as string[] }));
+
 // module3.0.11：mock 缩略图 composable，stateMap/progressSnapshots 由测试注入
 const thumbnailsMock = vi.hoisted(() => ({
   stateMap: new Map<string, unknown>(),
@@ -157,7 +162,7 @@ vi.mock('@/composables/useMasonryLayout', async () => {
       return {
         layout: computed(() => ({ map: fakeLayoutMap.current, totalHeight: 1000 })),
         visibleRange: computed(() => ({ start: 0, end: 2 })),
-        dimensionPrefetchPaths: computed(() => []),
+        dimensionPrefetchPaths: computed(() => prefetchPathsMock.current),
         colWidth: computed(() => 200),
         thumbnailWindows: computed(() => ({ visible: [], ahead: [], behind: [], idle: [] })),
       };
@@ -762,6 +767,118 @@ describe('MasonryView 混排占位', () => {
     await nextTick();
     expect(w.find('[data-test="masonry-loading"]').exists()).toBe(false);
     expect(w.find('.masonry-placeholder').exists()).toBe(true);
+    w.unmount();
+  });
+});
+
+// ─── module3.5.3 任务 A：陈旧尺寸守卫 ────────────────────────────────
+// 关键事实：measuredMap 键是相对 currentPath 的 entry.path，跨目录同名键会互相污染，
+// 且不可自愈（预读跳过已测路径 + mergeMeasured 拒绝覆盖）。守卫 = 切目录重置 +
+// 回包 identity 快照比对。defineExpose(measuredMap) 是测试观测面。
+describe('MasonryView.measuredMap 陈旧尺寸守卫', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    fakeLayoutMap.current = new Map<string, MasonryItem>();
+    prefetchPathsMock.current = [];
+    vi.mocked(listImageDimensions).mockReset();
+    vi.mocked(listImageDimensions).mockResolvedValue([]);
+  });
+
+  function vmMap(w: { vm: unknown }): Map<string, { width: number; height: number }> {
+    return (w.vm as unknown as { measuredMap: Map<string, { width: number; height: number }> })
+      .measuredMap;
+  }
+
+  it('header 回包写入 measuredMap（键为相对 currentPath 的 entry.path）', async () => {
+    prefetchPathsMock.current = ['a.jpg'];
+    // echo 式回包：直接原样返回 IPC 收到的 fullPath——断言不依赖 toRootRelativePath
+    // 的具体产出形态，只要求 fullByRel 反查键值一致性（这正是组件实现的契约）。
+    vi.mocked(listImageDimensions).mockImplementationOnce(async (_d, paths) =>
+      paths.map((p) => ({ path: p, width: 300, height: 400 })),
+    );
+    const w = mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+    expect(vmMap(w).get('a.jpg')).toEqual({ width: 300, height: 400 });
+    w.unmount();
+  });
+
+  it('切目录重置 measuredMap（同名键不再跨目录残留）', async () => {
+    prefetchPathsMock.current = ['a.jpg'];
+    vi.mocked(listImageDimensions).mockImplementationOnce(async (_d, paths) =>
+      paths.map((p) => ({ path: p, width: 300, height: 400 })),
+    );
+    const w = mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    expect(vmMap(w).size).toBe(1);
+
+    await w.setProps({ currentPath: 'vol03' });
+    await flushPromises();
+    await nextTick();
+    expect(vmMap(w).size).toBe(0);
+    w.unmount();
+  });
+
+  it('旧目录迟到的 header 回包被丢弃（identity 变化后不写新目录同名键）', async () => {
+    let resolveStale!: (v: { path: string; width: number; height: number }[]) => void;
+    let seenPaths: string[] = [];
+    // 捕获真实发出的 fullPath 并原样回吐（echo）——形态无关，见用例一注释
+    vi.mocked(listImageDimensions).mockImplementationOnce(async (_d, paths) => {
+      seenPaths = [...paths];
+      return new Promise((res) => { resolveStale = res; }) as never;
+    });
+    prefetchPathsMock.current = ['a.jpg'];
+    const w = mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises(); // IPC 已发出但挂起
+    await w.setProps({ currentPath: 'vol03' }); // 触发守卫失效 + map 重置
+    await flushPromises();
+
+    resolveStale(seenPaths.map((p) => ({ path: p, width: 999, height: 999 })));
+    await flushPromises();
+    await nextTick();
+
+    expect(vmMap(w).has('a.jpg')).toBe(false);
+    w.unmount();
+  });
+
+  it('同内容重建 descriptor 引用：在途回包照常提交（FileList 内联兜底回归锚）', async () => {
+    // 审查 P0-1 修订：FileList.vue:407 用 `descriptor || { type:'local', rootPath }`
+    // 内联字面量兜底，本地源 descriptor 每次父渲染都是新对象引用——守卫必须比
+    // descriptorId 语义键。若误比引用，本用例最后一行断言失败（回包被当陈旧丢弃）。
+    prefetchPathsMock.current = ['a.jpg'];
+    let resolveBatch!: (v: { path: string; width: number; height: number }[]) => void;
+    let seenPaths: string[] = [];
+    vi.mocked(listImageDimensions).mockImplementationOnce(async (_d, paths) => {
+      seenPaths = [...paths];
+      return new Promise((res) => { resolveBatch = res; }) as never;
+    });
+    const w = mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises(); // IPC 已发出但挂起
+
+    await w.setProps({ descriptor: { type: 'local' as const, rootPath: '/root' } }); // 新引用、同内容
+    await flushPromises();
+
+    resolveBatch(seenPaths.map((p) => ({ path: p, width: 300, height: 400 })));
+    await flushPromises();
+    await nextTick();
+
+    expect(vmMap(w).get('a.jpg')).toEqual({ width: 300, height: 400 }); // 未被误判陈旧
     w.unmount();
   });
 });
