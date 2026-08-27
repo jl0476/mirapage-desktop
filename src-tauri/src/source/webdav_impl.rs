@@ -26,14 +26,21 @@ use std::time::Duration;
 pub struct WebDavMediaSource {
     db: crate::db::Db,
     creds: std::sync::Arc<dyn crate::credentials::CredentialStore>,
+    gate: std::sync::Arc<crate::source::remote_gate::RemoteGate>,
 }
 
 impl WebDavMediaSource {
     pub fn new(
         db: crate::db::Db,
         creds: std::sync::Arc<dyn crate::credentials::CredentialStore>,
+        gate: std::sync::Arc<crate::source::remote_gate::RemoteGate>,
     ) -> Self {
-        Self { db, creds }
+        Self { db, creds, gate }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gate_for_test(&self) -> std::sync::Arc<crate::source::remote_gate::RemoteGate> {
+        self.gate.clone()
     }
 
     /// 从 account 表 + keyring 取 (username, password, accept_invalid_tls)（spec §3.4
@@ -428,10 +435,11 @@ impl MediaSource for WebDavMediaSource {
                 resp.status()
             )));
         }
-        let body = resp
-            .text()
+        let body = read_body_capped(resp, PROPFIND_MAX_RESPONSE)
             .await
-            .map_err(|e| MediaSourceError::Network(format!("body: {e}")))?;
+            .map_err(|e| MediaSourceError::Network(e))?;
+        let body = String::from_utf8(body)
+            .map_err(|e| MediaSourceError::Network(format!("body utf8: {e}")))?;
         Self::parse_propfind(&body, &url)
     }
 
@@ -444,6 +452,8 @@ impl MediaSource for WebDavMediaSource {
         let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
         })?;
+        // 阶段①（spec §5）：发请求前拿并发 permit——含重试两 attempt，"一个读取任务一个槽"
+        let _conn = self.gate.enter().await?;
         let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
         let resp = Self::send_retry_once(bad_tls, Duration::from_secs(30), |client| {
@@ -470,15 +480,25 @@ impl MediaSource for WebDavMediaSource {
             .get(header::CONTENT_RANGE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
-        let bytes = resp
-            .bytes()
+        // 响应上限 + 阶段②（spec §6.2）：CL 超上限立即拒绝；×2 记账；无 CL 保守整预算
+        let cap = WEBDAV_MAX_RESPONSE;
+        let cl = resp.content_length();
+        if cl.is_some_and(|c| c as usize > cap) {
+            return Err(MediaSourceError::Network(format!(
+                "WebDAV 响应超过上限 {cap} 字节（声明 {}）",
+                cl.unwrap()
+            )));
+        }
+        let accounted = cl.map_or(cap * 2, |c| c as usize * 2);
+        let _bytes = _conn.reserve_bytes(accounted as u32).await?;
+        let bytes = read_body_capped(resp, cap)
             .await
-            .map_err(|e| MediaSourceError::Network(format!("read: {e}")))?;
+            .map_err(MediaSourceError::Network)?;
         // Range 强契约（spec rev3 §3.1）：请求区间时返回字节必须恰好等长
         if let Some(r) = range {
             verify_range_response(status, content_range.as_deref(), r.offset, bytes.len(), r.length)?;
         }
-        Ok(bytes.to_vec())
+        Ok(bytes)
     }
 
     async fn file_count(
@@ -534,6 +554,8 @@ impl MediaSource for WebDavMediaSource {
         let (account_id, base_url, _) = self.extract(descriptor).ok_or_else(|| {
             MediaSourceError::NotImplemented("WebDavMediaSource 仅处理 WebDav descriptor".into())
         })?;
+        // spec §5 复审 P1：media:// 先 stat 后 read，HEAD 也占并发（防多图 HEAD 无上限）
+        let _conn = self.gate.enter_conn_only().await?;
         let (user, pass, bad_tls) = self.credentials_for(account_id)?;
         let url = format!("{}/{}", base_url.trim_end_matches('/'), path.trim_start_matches('/'));
         let resp = Self::send_retry_once(bad_tls, Duration::from_secs(10), |client| {
@@ -774,5 +796,22 @@ mod tests {
             "capacity 应止步起步量（远小于 256MiB CL），capacity={}",
             v.capacity()
         );
+    }
+
+    #[tokio::test]
+    async fn stat_busy_when_gate_exhausted() {
+        use crate::source::remote_gate::RemoteGate;
+        let gate = std::sync::Arc::new(RemoteGate::new(1, 1 << 30, std::time::Duration::from_millis(50)));
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let creds = std::sync::Arc::new(crate::credentials::MemoryStore::new());
+        let src = super::WebDavMediaSource::new(db, creds, gate.clone());
+        let _hold = src.gate_for_test().enter().await.unwrap();
+        let desc = SourceDescriptor::WebDav {
+            account_id: 1,
+            base_url: "http://127.0.0.1:1/".into(),
+            path: String::new(),
+        };
+        let err = src.stat(&desc, "a.jpg").await.unwrap_err();
+        assert!(matches!(err, crate::source::trait_def::MediaSourceError::Network(ref m) if m.contains("闸门繁忙")), "{err:?}");
     }
 }

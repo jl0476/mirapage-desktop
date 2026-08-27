@@ -42,10 +42,12 @@ impl MediaSourceFactory {
         creds: std::sync::Arc<dyn crate::credentials::CredentialStore>,
     ) -> Self {
         let local = Arc::new(LocalMediaSource::new());
+        // 远程读取总闸门（spec 2026-08-26 §5）：webdav/smb 两源共享同一全局实例
+        let gate = crate::source::remote_gate::RemoteGate::global_arc();
         let smb = Arc::new(SmbMediaSource::new(Arc::new(
             SmbConnectionManager::new_production(db.clone(), creds.clone()),
         )));
-        let webdav = Arc::new(WebDavMediaSource::new(db.clone(), creds));
+        let webdav = Arc::new(WebDavMediaSource::new(db.clone(), creds, gate));
         // 构造顺序（任务 7 固定）：具体远程源 → ArchiveCacheCoordinator →
         // Materializer（任务 8 起注入同一 coordinator——ensure/ready 查询/物理下载
         // 共用单一 admission 闸门）→ ArchiveService → ArchiveMediaSource。
