@@ -4,9 +4,11 @@
 // 事件签名与 VirtualRow 一致（复用 FileList 的事件转发逻辑）。
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
+import { isMasonryImage } from '@/lib/mime';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
 import type { ThumbnailState } from '@/lib/thumbnail';
 import MasonryThumbnail from './MasonryThumbnail.vue';
+import FileIcon from './FileIcon.vue';
 
 type RowMark = 'reading' | 'finished' | 'none';
 
@@ -45,6 +47,19 @@ const classes = computed(() => ({
   'is-reading': props.mark === 'reading',
 }));
 
+type PlaceholderType = 'folder' | 'archive' | 'file';
+/** 非图片占位类型（isMasonryImage 先行排除图片卡；目录 > 归档 > 杂文件，
+ *  对齐 VirtualRow.iconType 判定顺序——cover.jpg 目录归 folder 不归 spinner）。 */
+const placeholderType = computed<PlaceholderType | null>(() => {
+  if (isMasonryImage(props.entry)) return null;
+  if (props.entry.isDirectory) return 'folder';
+  if (props.entry.isArchive) return 'archive';
+  return 'file';
+});
+const placeholderClass = computed(() =>
+  placeholderType.value ? `ph-${placeholderType.value}` : '',
+);
+
 const style = computed(() => ({
   position: 'absolute' as const,
   top: props.top + 'px',
@@ -73,6 +88,7 @@ function statusLabel(m: RowMark): string {
     tabindex="-1"
   >
     <MasonryThumbnail
+      v-if="placeholderType === null"
       :state="thumbState"
       :alt="entry.name"
       :badge-interactive="badgeInteractive"
@@ -80,6 +96,10 @@ function statusLabel(m: RowMark): string {
       @show-progress="(el) => $emit('show-progress', entry, el)"
       @measured="(w, h) => $emit('row-measured', entry, w, h)"
     />
+    <div v-else class="masonry-placeholder" :class="placeholderClass">
+      <FileIcon :type="placeholderType" :size="28" />
+      <span class="placeholder-name">{{ entry.name }}</span>
+    </div>
     <span v-if="mark !== 'none'" class="masonry-badge" :class="mark">{{ statusLabel(mark) }}</span>
   </div>
 </template>
@@ -107,6 +127,28 @@ function statusLabel(m: RowMark): string {
 .masonry-row.is-selected::after { opacity: 1; }
 /* 已读完卡片半透明（作用到子组件 MasonryThumbnail 的 img） */
 .masonry-row.is-finished :deep(.thumbnail-image) { opacity: 0.55; }
+/* 混排占位卡（2026-08-27 方案 B）：非图片条目 FileIcon + 名称居中 */
+.masonry-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--color-surface-1);
+}
+.masonry-placeholder.ph-folder { color: var(--color-file-folder); }
+.masonry-placeholder.ph-archive { color: var(--color-file-archive); }
+.masonry-placeholder.ph-file { color: var(--color-file-default); }
+.placeholder-name {
+  max-width: 90%;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .masonry-badge {
   position: absolute;
   top: 4px;

@@ -10,14 +10,15 @@
  */
 type FileIconType = 'folder' | 'image' | 'archive' | 'file';
 
-const props = defineProps<{ type: FileIconType }>();
+// size 可选（2026-08-27 masonry 占位卡用 28；默认 16 向后兼容 VirtualRow）
+const props = withDefaults(defineProps<{ type: FileIconType; size?: number }>(), { size: 16 });
 </script>
 
 <template>
   <svg
     class="file-icon"
-    width="16"
-    height="16"
+    :width="props.size"
+    :height="props.size"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"

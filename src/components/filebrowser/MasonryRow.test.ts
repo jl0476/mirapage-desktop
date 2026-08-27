@@ -161,3 +161,73 @@ describe('MasonryRow.measured 转发', () => {
     expect(emitted![0][2]).toBe(288);
   });
 });
+
+// ─── 混排占位卡（2026-08-27 方案 B）：非图片渲染 FileIcon + 名称 ─────────────
+describe('MasonryRow 混排占位卡', () => {
+  function phProps(e: MediaEntry) {
+    return {
+      entry: e,
+      width: 251, height: 141, top: 0, left: 0, mark: 'none' as const, selected: false,
+    } as never;
+  }
+
+  it('目录条目：placeholder + folder 图标 + 名称，无 img 无 spinner', () => {
+    const w = mount(MasonryRow, {
+      props: phProps({ name: 'sub', path: 'sub', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 }),
+      global: { plugins: [createPinia(), i18n] },
+    });
+    expect(w.find('.masonry-placeholder').exists()).toBe(true);
+    expect(w.find('.masonry-placeholder .placeholder-name').text()).toBe('sub');
+    expect(w.findComponent({ name: 'FileIcon' }).props('type')).toBe('folder');
+    expect(w.find('img').exists()).toBe(false);
+    expect(w.find('.thumb-spinner').exists()).toBe(false);
+  });
+
+  it('目录命名为 cover.jpg：仍是 folder 占位（isMasonryImage 类型标记优先，审查 P1）', () => {
+    const w = mount(MasonryRow, {
+      props: phProps({ name: 'cover.jpg', path: 'cover.jpg', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 }),
+      global: { plugins: [createPinia(), i18n] },
+    });
+    expect(w.find('.masonry-placeholder').exists()).toBe(true);
+    expect(w.findComponent({ name: 'FileIcon' }).props('type')).toBe('folder');
+    expect(w.find('.thumb-spinner').exists()).toBe(false);
+  });
+
+  it('归档条目：archive 图标', () => {
+    const w = mount(MasonryRow, {
+      props: phProps({ name: 'book.cbz', path: 'book.cbz', isDirectory: false, isArchive: true, size: 0, modifiedAt: 0 }),
+      global: { plugins: [createPinia(), i18n] },
+    });
+    expect(w.findComponent({ name: 'FileIcon' }).props('type')).toBe('archive');
+  });
+
+  it('杂文件（Thumbs.db）：file 图标', () => {
+    const w = mount(MasonryRow, {
+      props: phProps({ name: 'Thumbs.db', path: 'Thumbs.db', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 }),
+      global: { plugins: [createPinia(), i18n] },
+    });
+    expect(w.findComponent({ name: 'FileIcon' }).props('type')).toBe('file');
+  });
+
+  it('图片条目仍走 MasonryThumbnail（无 placeholder）', () => {
+    const w = mount(MasonryRow, {
+      props: {
+        entry: entry('page-001.jpg'),
+        thumbState: { kind: 'cached', cacheKey: 'k', path: 'asset://c.webp', width: 512, height: 288 },
+        width: 251, height: 141, top: 0, left: 0, mark: 'none', selected: false,
+      } as never,
+      global: { plugins: [createPinia(), i18n] },
+    });
+    expect(w.find('.masonry-placeholder').exists()).toBe(false);
+    expect(w.find('img').exists()).toBe(true);
+  });
+
+  it('占位卡双击仍 emit row-dblclick（复用 open 链路）', async () => {
+    const w = mount(MasonryRow, {
+      props: phProps({ name: 'sub', path: 'sub', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 }),
+      global: { plugins: [createPinia(), i18n] },
+    });
+    await w.find('.masonry-row').trigger('dblclick');
+    expect(w.emitted('row-dblclick')).toBeTruthy();
+  });
+});
