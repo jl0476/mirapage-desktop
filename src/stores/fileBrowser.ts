@@ -507,6 +507,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     archiveOpening.value = false;
     archiveProgress.value = null;
     archiveProgressKey.value = null;
+    archiveOpenError.value = null; // module3.5.3 任务 B：exitArchive/导航取消路径同步清残留错误
     if (requestId) {
       void cancelArchivePrepare(requestId).catch((cause) =>
         recordArchiveDiagnostic(scope, cause));
@@ -518,6 +519,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
    *  防迟到 ready 无条件 commitArchive 覆写 currentDescriptor/currentPath（导航劫持）。
    *  无在途事务时空过；exitArchive 先清空再走 navigate/openDescriptorAt，路径天然空过。 */
   function invalidatePendingArchiveOnNavigate(): void {
+    archiveOpenError.value = null; // module3.5.3 任务 B：上次打开失败的横幅不得跨导航残留
     if (
       pendingArchiveOpen.value === null
       && pendingArchivePassword.value === null

@@ -1158,6 +1158,58 @@ describe('fileBrowser store — 事务式 archive 打开', () => {
     expect(fb.archiveOpening).toBe(false);
   });
 
+  // module3.5.3 任务 B：打开失败横幅不得跨导航残留（导航=显式离开意图）。
+  // 复现病理：损坏包报错 → 进任意子目录 → 横幅仍在（旧实现清空点只有 openArchive 入口）。
+  it('打开失败后 navigate / setRoot / up 清除 archiveOpenError', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.navigate('sub');
+    vi.mocked(prepareArchive).mockRejectedValueOnce({ kind: 'corruptArchive' });
+    await fb.openArchive(makeEntry('broken.cbz', { isArchive: true }));
+    expect(fb.archiveOpenError).toMatchObject({ kind: 'corruptArchive' });
+
+    await fb.navigate('deeper');
+    expect(fb.archiveOpenError).toBeNull();
+  });
+
+  it('打开失败后 setRoot 清除 archiveOpenError', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    vi.mocked(prepareArchive).mockRejectedValueOnce({ kind: 'network' });
+    await fb.openArchive(makeEntry('broken.cbz', { isArchive: true }));
+    expect(fb.archiveOpenError).not.toBeNull();
+
+    await fb.setRoot('G:/other');
+    expect(fb.archiveOpenError).toBeNull();
+  });
+
+  it('打开失败后 up() 清除 archiveOpenError', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.navigate('sub');
+    vi.mocked(prepareArchive).mockRejectedValueOnce({ kind: 'io' });
+    await fb.openArchive(makeEntry('broken.cbz', { isArchive: true }));
+    expect(fb.archiveOpenError).not.toBeNull();
+
+    await fb.up();
+    expect(fb.archiveOpenError).toBeNull();
+  });
+
+  // 审查建议项：openDescriptorAt 与三导航共用 invalidatePendingArchiveOnNavigate 失效
+  // 入口——补一例跨源跳转防未来调用链分叉（锚定既有 openDescriptorAt(webdav) 用例
+  // 形态，本文件 :887 起）。
+  it('打开失败后 openDescriptorAt 跨源跳转清除 archiveOpenError', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    vi.mocked(prepareArchive).mockRejectedValueOnce({ kind: 'corruptArchive' });
+    await fb.openArchive(makeEntry('broken.cbz', { isArchive: true }));
+    expect(fb.archiveOpenError).not.toBeNull();
+
+    const desc = { type: 'webdav', accountId: 7, baseUrl: 'https://nas:5006/home', path: '' } as const;
+    await fb.openDescriptorAt(desc, 'comics/v1');
+    expect(fb.archiveOpenError).toBeNull();
+  });
+
   it('错误密码保留请求，正确密码提交候选导航', async () => {
     const fb = useFileBrowserStore();
     await fb.setRoot('F:/comics');
