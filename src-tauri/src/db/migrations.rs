@@ -158,6 +158,14 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
         )?;
     }
 
+    if current < 18 {
+        apply_018_drop_orphan_archive_cache_size_key(conn)?;
+        conn.execute(
+            "INSERT INTO _migrations (version, applied_at) VALUES (18, ?1)",
+            [chrono_now()],
+        )?;
+    }
+
     Ok(())
 }
 
@@ -680,6 +688,13 @@ fn apply_017_account_accept_invalid_tls(conn: &Connection) -> anyhow::Result<()>
         "ALTER TABLE account ADD COLUMN accept_invalid_tls INTEGER NOT NULL DEFAULT 0",
         [],
     )?;
+    Ok(())
+}
+
+/// Migration 018 —— 清理 migration 001 遗留孤儿设置键 archive_cache_size_mb
+/// （M3 实际使用 archive_cache_max_mb；全仓无读取方，纯死数据。module3.5.3 任务 E）
+fn apply_018_drop_orphan_archive_cache_size_key(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = 'archive_cache_size_mb'", [])?;
     Ok(())
 }
 
@@ -1369,7 +1384,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 17, "完整 run 后版本号应为 17");
+        assert_eq!(v, 18, "完整 run 后版本号应为 18");
 
         // image_name 列存在
         let cols: Vec<String> = conn
@@ -1718,7 +1733,7 @@ mod tests {
         let v: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v, 17, "完整 run 后版本号应为 17");
+        assert_eq!(v, 18, "完整 run 后版本号应为 18");
 
         // 幂等：run() 的 current<12 守卫使重复调用不再执行 012
         super::run(&conn).expect("重复 run 应幂等无错");
@@ -1727,7 +1742,7 @@ mod tests {
         let v2: i32 = conn
             .query_row("SELECT MAX(version) FROM _migrations", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(v2, 17, "重复 run 不应再升版本号");
+        assert_eq!(v2, 18, "重复 run 不应再升版本号");
     }
 
     /// 任务 7：EXPLAIN QUERY PLAN 手动验证（`--ignored --nocapture` 跑，输出写入报告）。
@@ -2052,5 +2067,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(other, 1, "非 touch key 不受影响");
+    }
+
+    #[test]
+    fn migration_018_removes_orphan_archive_cache_size_mb_key_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        super::run(&conn).unwrap(); // 001 seed 先写入孤儿键，随后 018 删除
+        let n: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM settings WHERE key = 'archive_cache_size_mb'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "孤儿设置键 archive_cache_size_mb 应被 018 删除");
+        super::run(&conn).expect("重复 run 幂等");
     }
 }
