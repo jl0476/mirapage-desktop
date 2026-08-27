@@ -21,11 +21,14 @@ pub struct MediaLru {
     map: HashMap<String, Entry>,
     head: Option<String>, // 最新
     tail: Option<String>, // 最旧
+    /// 代际（spec §8.1）：clear_all 递增；在途下载按下载前捕获的代写入，
+    /// 旧代结果丢弃——封死"账户变更 clear 后，旧请求完成又把旧内容写回"的窗口。
+    generation: u64,
 }
 
 impl MediaLru {
     pub fn new(cap_bytes: usize) -> Self {
-        Self { cap: cap_bytes, bytes: 0, map: HashMap::new(), head: None, tail: None }
+        Self { cap: cap_bytes, bytes: 0, map: HashMap::new(), head: None, tail: None, generation: 0 }
     }
 
     pub fn get(&mut self, key: &str) -> Option<std::sync::Arc<CachedMedia>> {
@@ -67,6 +70,26 @@ impl MediaLru {
 
     pub fn clear(&mut self) {
         self.bytes = 0; self.map.clear(); self.head = None; self.tail = None;
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 同一临界区内比较并插入（spec §8.1）：与 clear 的递增互斥，
+    /// 封死"检查后、写入前被 clear"窗口。返回是否真正写入。
+    pub fn put_if_generation(&mut self, key: String, media: CachedMedia, expected: u64) -> bool {
+        if self.generation != expected {
+            return false;
+        }
+        self.put(key, media);
+        true
+    }
+
+    /// 清空并递增代（clear_all 的实现细节；表级 clear 语义同旧 clear + 失效在途写入）。
+    pub fn clear_and_bump(&mut self) {
+        self.clear();
+        self.generation += 1;
     }
 
     pub fn current_bytes(&self) -> usize { self.bytes }
@@ -111,7 +134,7 @@ pub fn global() -> &'static Mutex<MediaLru> {
 }
 
 pub fn clear_all() {
-    global().lock().unwrap().clear();
+    global().lock().unwrap().clear_and_bump();
 }
 
 #[cfg(test)]
@@ -169,5 +192,32 @@ mod tests {
         let mut c = MediaLru::new(4);
         c.put("big".into(), CachedMedia { bytes: vec![0; 8], mime: "m".into() });
         assert!(c.get("big").is_none());
+    }
+
+    #[test]
+    fn put_if_generation_matches_only() {
+        let mut c = MediaLru::new(1 << 20);
+        let g0 = c.generation();
+        assert!(c.put_if_generation(
+            "a".into(),
+            CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() },
+            g0,
+        ));
+        assert!(c.get("a").is_some());
+
+        c.clear_and_bump(); // 模拟 clear_all 的清空+递增
+        let g1 = c.generation();
+        assert_ne!(g0, g1);
+        assert!(!c.put_if_generation(
+            "b".into(),
+            CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() },
+            g0, // 旧代：必须拒绝
+        ));
+        assert!(c.get("b").is_none(), "旧代写入不得落表");
+        assert!(c.put_if_generation(
+            "b".into(),
+            CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() },
+            g1,
+        ));
     }
 }
