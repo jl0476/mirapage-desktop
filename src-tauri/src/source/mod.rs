@@ -14,6 +14,7 @@ pub mod archive_impl;
 pub mod descriptor;
 pub mod factory;
 pub mod local;
+pub mod remote_gate;
 pub mod smb;
 pub mod trait_def;
 pub mod webdav_impl;
