@@ -21,6 +21,14 @@ export function isArchive(name: string): boolean {
   return ext !== null && ARCHIVE_EXTS.has(ext);
 }
 
+/** masonry 图片卡统一判定（2026-08-27 混排占位，审查 P1）：类型标记优先于扩展名。
+ *  目录可合法命名为 cover.jpg——仅按扩展名会把它送进尺寸/缩略图队列并渲染 spinner。
+ *  对齐 useMasonryBrowsePosition/useReaderActions 的 !isDirectory && isImage 既有语义，
+ *  补 !isArchive 防御（结构上可能存在图片扩展名 + isArchive 的条目）。 */
+export function isMasonryImage(e: { name: string; isDirectory: boolean; isArchive: boolean }): boolean {
+  return !e.isDirectory && !e.isArchive && isImage(e.name);
+}
+
 export function mimeFromName(name: string): string | null {
   const ext = extensionOf(name);
   if (!ext) return null;
