@@ -8,6 +8,8 @@ import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
 import zhCN from '@/locales/zh-CN';
 import ReaderOverlay from './ReaderOverlay.vue';
+import { useSettingsStore } from '@/stores/settings';
+import { setSetting } from '@/lib/tauri';
 
 vi.mock('@/stores/slideshow', async () => {
   const actual = await vi.importActual<typeof import('@/stores/slideshow')>('@/stores/slideshow');
@@ -24,6 +26,10 @@ vi.mock('@/stores/slideshow', async () => {
   };
 });
 
+vi.mock('@/lib/tauri', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/tauri')>();
+  return { ...actual, setSetting: vi.fn(async () => {}) };
+});
 const i18n = createI18n({ legacy: false, locale: 'zh-CN', messages: { 'zh-CN': zhCN } });
 
 function makeWrapper(propsOverride: Record<string, unknown> = {}) {
@@ -93,8 +99,10 @@ describe('ReaderOverlay.vue', () => {
     const w = makeWrapper({ mode: 'webtoon', hovered: true });
     expect(w.find('[data-test="btn-mode"]').text()).toContain('竖条漫');
     expect(w.find('[data-test="scale-trigger"]').attributes('disabled')).toBeDefined();
-    expect(w.find('[data-test="slideshow-interval"]').attributes('disabled')).toBeDefined();
-    expect(w.find('[data-test="slideshow-direction"]').attributes('disabled')).toBeDefined();
+    // module3.5.4: 间隔控件在 webtoon 下替换为滚动速度（不再禁用）；方向按钮隐藏（垂直滚动无意义）
+    expect(w.find('[data-test="slideshow-interval"]').exists()).toBe(false);
+    expect(w.find('[data-test="webtoon-speed"]').attributes('disabled')).toBeUndefined();
+    expect(w.find('[data-test="slideshow-direction"]').exists()).toBe(false);
   });
 
 
@@ -267,5 +275,64 @@ describe('ReaderOverlay 返回按钮（需求5）', () => {
     expect(wrapper.emitted('open-main-menu')).toBeTruthy();
     await btn.trigger('click');
     expect(wrapper.emitted('back-to-list')).toBeTruthy();
+  });
+});
+// ─── module3.5.4: 间隔直接输入 + webtoon 滚动速度替换禁用 ───
+describe('module3.5.4 间隔/速度控件', () => {
+  type SlideshowMock = { updateIntervalMs: ReturnType<typeof vi.fn> };
+  function getSlideshow(w: { vm: unknown }): SlideshowMock {
+    return (w.vm as unknown as { slideshow: SlideshowMock }).slideshow;
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.mocked(setSetting).mockClear();
+  });
+
+  it('分页模式：输入框提交有效秒数 → updateIntervalMs(秒×1000)', async () => {
+    const w = makeWrapper({ hovered: true });
+    const input = w.find('[data-test="slideshow-interval-input"]');
+    expect(input.exists()).toBe(true);
+    await input.setValue('8');
+    expect(getSlideshow(w).updateIntervalMs).toHaveBeenCalledWith(8000);
+  });
+
+  it('分页模式：越界输入钳位 1-30（99 → 30000ms）', async () => {
+    const w = makeWrapper({ hovered: true });
+    await w.find('[data-test="slideshow-interval-input"]').setValue('99');
+    expect(getSlideshow(w).updateIntervalMs).toHaveBeenCalledWith(30000);
+  });
+
+  it('分页模式：非法输入回退当前值且不发起写入', async () => {
+    const w = makeWrapper({ hovered: true });
+    const input = w.find('[data-test="slideshow-interval-input"]');
+    await input.setValue('');
+    expect(getSlideshow(w).updateIntervalMs).not.toHaveBeenCalled();
+    expect((input.element as HTMLInputElement).value).toBe('3');
+  });
+
+  it('webtoon 模式：间隔控件隐藏，显示滚动速度滑条+输入且可用，方向隐藏', async () => {
+    const w = makeWrapper({ mode: 'webtoon', hovered: true });
+    expect(w.find('[data-test="slideshow-interval"]').exists()).toBe(false);
+    expect(w.find('[data-test="slideshow-interval-input"]').exists()).toBe(false);
+    expect(w.find('[data-test="slideshow-direction"]').exists()).toBe(false);
+    const slider = w.find('[data-test="webtoon-speed"]');
+    expect(slider.exists()).toBe(true);
+    expect(slider.attributes('disabled')).toBeUndefined();
+    expect(w.find('[data-test="webtoon-speed-input"]').exists()).toBe(true);
+  });
+
+  it('webtoon 模式：速度输入提交 150 → 持久化 webtoon_scroll_speed', async () => {
+    const w = makeWrapper({ mode: 'webtoon', hovered: true });
+    await w.find('[data-test="webtoon-speed-input"]').setValue('150');
+    const settings = useSettingsStore();
+    expect(settings.webtoonScrollSpeed).toBe(150);
+    expect(setSetting).toHaveBeenCalledWith('webtoon_scroll_speed', '150');
+  });
+
+  it('webtoon 模式：速度越界钳位 10-300（999 → 300）', async () => {
+    const w = makeWrapper({ mode: 'webtoon', hovered: true });
+    await w.find('[data-test="webtoon-speed-input"]').setValue('999');
+    expect(useSettingsStore().webtoonScrollSpeed).toBe(300);
   });
 });

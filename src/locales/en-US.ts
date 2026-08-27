@@ -106,6 +106,7 @@ export default {
     toggle: 'Toggle slideshow',
     statusStarted: 'Slideshow started',
     statusPaused: 'Slideshow paused',
+    scrollSpeed: 'Scroll speed',
   },
   fileBrowser: {
     title: 'File Browser',

@@ -58,6 +58,9 @@ describe('Settings.vue', () => {
     const store = useSettingsStore();
     store.readerDefaultMode = 'webtoon';
     await flushPromises();
+    // module3.5.4: 默认 webtoon 下间隔仍可直接输入调整
+    await wrapper.find('[data-test="section-slideshow"] input[type="number"]').setValue('12');
+    expect(store.slideshowIntervalMs).toBe(12000);
     const modeOptions = wrapper.find('[data-test="section-reader"] [data-test="enum-select"] select').findAll('option');
     expect(modeOptions.map((option) => option.text())).toEqual([
       i18n.global.t('reader.mode.single'),
@@ -65,15 +68,16 @@ describe('Settings.vue', () => {
       i18n.global.t('reader.mode.webtoon'),
     ]);
     expect(wrapper.find('[data-test="section-masonry"] [data-test="enum-select"]').exists()).toBe(false);
-    // webtoon 下无效控件禁用：阅读方向 + 幻灯片方向 + 幻灯片间隔
+    // module3.5.4: 幻灯片方向/间隔不再按默认模式禁用（设置无副作用，仅对 webtoon 卷无效）；
+    // 阅读方向维持禁用（分页阅读特有设置）
     // section-reader 内 4 个 select 依次为 模式/缩放/方向/继续阅读，方向是第 3 个（index 2）
     const readerSelects = wrapper.findAll('[data-test="section-reader"] select');
     const readerDir = readerSelects[2].element as HTMLSelectElement;
     const slideshowDir = wrapper.find('[data-test="section-slideshow"] [data-test="enum-select"] select').element as HTMLSelectElement;
     const intervalInput = wrapper.find('[data-test="section-slideshow"] input[type="number"]').element as HTMLInputElement;
     expect(readerDir.disabled).toBe(true);
-    expect(slideshowDir.disabled).toBe(true);
-    expect(intervalInput.disabled).toBe(true);
+    expect(slideshowDir.disabled).toBe(false);
+    expect(intervalInput.disabled).toBe(false);
     // 切回 single 恢复可用
     store.readerDefaultMode = 'single';
     await flushPromises();

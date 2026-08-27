@@ -31,6 +31,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useSlideshowStore } from '@/stores/slideshow';
+import { useSettingsStore } from '@/stores/settings';
 import type { ScaleMode } from '@/lib/readerSettings';
 
 interface Props {
@@ -92,6 +93,9 @@ function onScalePointerDown(e: PointerEvent): void {
 
 const { t } = useI18n();
 const slideshow = useSlideshowStore();
+const settings = useSettingsStore();
+/** module3.5.4: webtoon 下胶囊栏的间隔控件替换为滚动速度（px/s），方向按钮隐藏 */
+const isWebtoon = computed(() => props.mode === 'webtoon');
 
 const jumpValue = ref<number>(0);
 
@@ -108,6 +112,33 @@ async function onIntervalChange(ev: Event) {
   // 每次 IPC 是简单的 setSetting('slideshow_interval_ms') + DB UPDATE, 桌面端可接受.
   const ms = Number((ev.target as HTMLInputElement).value) * 1000;
   await slideshow.updateIntervalMs(ms);
+}
+
+/** module3.5.4: 间隔直接输入（秒）——Enter/失焦提交，钳 1-30；非法输入回退当前值 */
+async function commitIntervalInput(ev: Event): Promise<void> {
+  const el = ev.target as HTMLInputElement;
+  const n = Number(el.value);
+  if (el.value === '' || !Number.isFinite(n)) {
+    el.value = String(intervalSeconds.value);
+    return;
+  }
+  await slideshow.updateIntervalMs(Math.max(1, Math.min(30, Math.round(n))) * 1000);
+}
+
+/** module3.5.4: webtoon 滚动速度（px/s，写持久化设置；滚轮临时倍率独立不碰） */
+async function onSpeedChange(ev: Event): Promise<void> {
+  await settings.setWebtoonScrollSpeed(Number((ev.target as HTMLInputElement).value));
+}
+
+/** module3.5.4: 速度直接输入——Enter/失焦提交；非法回退（store 内钳 10-300） */
+async function commitSpeedInput(ev: Event): Promise<void> {
+  const el = ev.target as HTMLInputElement;
+  const n = Number(el.value);
+  if (el.value === '' || !Number.isFinite(n)) {
+    el.value = String(settings.webtoonScrollSpeed);
+    return;
+  }
+  await settings.setWebtoonScrollSpeed(n);
 }
 
 async function onDirectionToggle() {
@@ -243,29 +274,65 @@ onUnmounted(() => window.removeEventListener('pointerdown', onScalePointerDown, 
 
       <span class="xp-divider-v shrink-0" aria-hidden="true" />
 
-      <span>{{ t('slideshow.interval') }}</span>
-      <input
-        type="range"
-        class="w-20 accent-accent cursor-pointer"
-        min="1"
-        max="30"
-        step="1"
-        :value="intervalSeconds"
-        data-test="slideshow-interval"
-        :aria-label="t('slideshow.interval')"
-        :disabled="mode === 'webtoon'"
-        @input="onIntervalChange"
-      />
-      <span class="font-mono tabular-nums w-8 text-right">{{ intervalSeconds }}s</span>
+      <template v-if="!isWebtoon">
+        <span>{{ t('slideshow.interval') }}</span>
+        <input
+          type="range"
+          class="w-20 accent-accent cursor-pointer"
+          min="1"
+          max="30"
+          step="1"
+          :value="intervalSeconds"
+          data-test="slideshow-interval"
+          :aria-label="t('slideshow.interval')"
+          @input="onIntervalChange"
+        />
+        <input
+          type="number"
+          min="1"
+          max="30"
+          class="w-12 px-1.5 py-0.5 rounded bg-surface-1 xp-bd text-text-primary text-xs text-center focus:outline-none focus:border-accent"
+          data-test="slideshow-interval-input"
+          :aria-label="t('slideshow.interval')"
+          :value="intervalSeconds"
+          @change="commitIntervalInput"
+        />
+        <span class="font-mono tabular-nums w-4 text-right">s</span>
+      </template>
+      <template v-else>
+        <span>{{ t('slideshow.scrollSpeed') }}</span>
+        <input
+          type="range"
+          class="w-20 accent-accent cursor-pointer"
+          min="10"
+          max="300"
+          step="10"
+          :value="settings.webtoonScrollSpeed"
+          data-test="webtoon-speed"
+          :aria-label="t('slideshow.scrollSpeed')"
+          @input="onSpeedChange"
+        />
+        <input
+          type="number"
+          min="10"
+          max="300"
+          class="w-14 px-1.5 py-0.5 rounded bg-surface-1 xp-bd text-text-primary text-xs text-center focus:outline-none focus:border-accent"
+          data-test="webtoon-speed-input"
+          :aria-label="t('slideshow.scrollSpeed')"
+          :value="settings.webtoonScrollSpeed"
+          @change="commitSpeedInput"
+        />
+        <span class="font-mono tabular-nums text-xs">px/s</span>
+      </template>
 
       <span class="xp-divider-v shrink-0" aria-hidden="true" />
 
       <button
         type="button"
         class="px-2 py-1 rounded hover:bg-surface-light hover:text-text-primary transition-colors"
+        v-if="!isWebtoon"
         data-test="slideshow-direction"
         :aria-label="t('slideshow.direction')"
-        :disabled="mode === 'webtoon'"
         @click="onDirectionToggle"
       >
         <svg v-if="slideshow.direction === 'forward'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">

@@ -453,7 +453,6 @@ async function setThumbnailDetailPopover(v: boolean) {
             <NumberRow
               :label="t('settings.slideshow.interval')"
               :value="Math.round(settings.slideshowIntervalMs / 1000)"
-              :disabled="settings.readerDefaultMode === 'webtoon'"
               :min="1"
               :max="30"
               :suffix="t('settings.slideshow.intervalLabel', { seconds: Math.round(settings.slideshowIntervalMs / 1000) })"
@@ -463,7 +462,6 @@ async function setThumbnailDetailPopover(v: boolean) {
               :label="t('settings.slideshow.direction')"
               :value="settings.slideshowDirection"
               :options="slideshowDirs"
-              :disabled="settings.readerDefaultMode === 'webtoon'"
               @change="setSlideshowDirection"
             />
             <BooleanRow
