@@ -10,8 +10,7 @@
 //! - 读文件:GET with Range 字节
 //! - 写文件:PUT(DESIGN Phase 4 未涉及,留作后续扩展)
 //!
-//! 设计取舍:每次 list/read 都创建 reqwest Client(WebDAV 通常需要 basic auth),
-//! 复用 client 性能更佳但当前账户切换频率低;Phase 7+ 优化路径用 OnceCell 缓存。
+//! 设计取舍:共享 client 按账户 TLS 配置复用两实例(见 shared_client),连接池 idle 300s。
 
 use crate::source::descriptor::{MediaEntry, SourceDescriptor};
 use crate::source::trait_def::{ByteRange, FileStat, MediaSource, MediaSourceError, Result};
@@ -64,32 +63,21 @@ impl WebDavMediaSource {
         Ok((username, password, accept_invalid_tls))
     }
 
-    /// 统一 client 构建：超时 + 可选自签证书豁免（四调用点共享，配置随账户行走）。
-    fn build_client(accept_invalid_tls: bool, timeout: Duration) -> Result<Client> {
-        Client::builder()
-            .timeout(timeout)
-            .danger_accept_invalid_certs(accept_invalid_tls)
-            .build()
-            .map_err(|e| MediaSourceError::Other(format!("reqwest: {e}")))
-    }
-
     /// 发送 + 传输层失败重试一次（实机 2026-08-26：群晖偶发 error sending request
     /// ——同路径 curl 0.4s 正常、应用内即时重试即成功，连接层抖动而非服务端问题）。
-    /// 重试换全新 client（新连接）。仅用于只读幂等方法（PROPFIND/GET/HEAD）。
+    /// 两次 attempt 用同一 pooled client（hyper 对报错连接自动摘池，"换新连接重试"
+    /// 的意图保留，还省一次握手）。仅用于只读幂等方法（PROPFIND/GET/HEAD）。
     /// Err 返回错误串，调用方补上下文（propfind:/get: 等）包 Network。
     async fn send_retry_once<F>(bad_tls: bool, timeout: Duration, make: F) -> std::result::Result<reqwest::Response, String>
     where
         F: Fn(reqwest::Client) -> reqwest::RequestBuilder,
     {
-        let mut last = String::new();
         for attempt in 0..2 {
-            let client = Self::build_client(bad_tls, timeout)
-                .map_err(|e| e.to_string())?;
-            match make(client).send().await {
+            let client = shared_client(bad_tls);
+            match make(client.clone()).timeout(timeout).send().await {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     if attempt == 0 {
-                        last = e.to_string();
                         continue;
                     }
                     return Err(e.to_string());
@@ -197,6 +185,24 @@ impl WebDavMediaSource {
         entries.sort_by(|a, b| crate::algorithm::natural_compare(&a.name, &b.name));
         Ok(entries)
     }
+}
+
+/// 共享 client（spec §6.1）：按 accept_invalid_tls 两实例，OnceLock 全局。
+/// client 只依赖 bad_tls + 连接层参数；basic_auth 是 per-request header，
+/// 凭据/账户编辑不影响 client——无需账户失效钩子。10/15/30s 总超时由
+/// send_retry_once 在 RequestBuilder 上 per-request 设置。
+fn shared_client(bad_tls: bool) -> &'static Client {
+    static STRICT: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    static BAD_TLS: std::sync::OnceLock<Client> = std::sync::OnceLock::new();
+    let cell = if bad_tls { &BAD_TLS } else { &STRICT };
+    cell.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(300))
+            .danger_accept_invalid_certs(bad_tls)
+            .build()
+            .expect("reqwest client 构造（纯配置，无环境依赖，不会失败）")
+    })
 }
 
 /// 取标签 local name（剥命名空间前缀，`d:response` → `response`；无前缀原样返回）。
@@ -670,5 +676,14 @@ mod tests {
         let entries = WebDavMediaSource::parse_propfind(body, "https://dav.example/dav/").unwrap();
         assert!(entries[0].is_archive, ".cbz 按扩展名标记");
         assert!(!entries[1].is_archive, "普通文件不标记");
+    }
+
+    #[test]
+    fn shared_client_reuses_instances_per_tls_variant() {
+        let a = shared_client(false);
+        let b = shared_client(false);
+        assert!(std::ptr::eq(a, b), "同 bad_tls 应复用同一实例");
+        let c = shared_client(true);
+        assert!(!std::ptr::eq(a, c), "strict 与 bad_tls 是两实例");
     }
 }
