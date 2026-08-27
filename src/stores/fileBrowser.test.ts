@@ -1210,6 +1210,21 @@ describe('fileBrowser store — 事务式 archive 打开', () => {
     expect(fb.archiveOpenError).toBeNull();
   });
 
+  // 锚定 takeAndCancel 内清空行（exitArchive 直达该函数，不经 invalidate）——
+  // 上面 4 例全走 invalidatePendingArchiveOnNavigate 的顶层清空，删 takeAndCancel
+  // 内的清空行它们不会红；本例堵住该盲区。
+  it('打开失败后 exitArchive 清除 archiveOpenError', async () => {
+    const fb = useFileBrowserStore();
+    await fb.setRoot('F:/comics');
+    await fb.navigate('sub');
+    vi.mocked(prepareArchive).mockRejectedValueOnce({ kind: 'io' });
+    await fb.openArchive(makeEntry('broken.cbz', { isArchive: true }));
+    expect(fb.archiveOpenError).not.toBeNull();
+
+    await fb.exitArchive();
+    expect(fb.archiveOpenError).toBeNull();
+  });
+
   it('错误密码保留请求，正确密码提交候选导航', async () => {
     const fb = useFileBrowserStore();
     await fb.setRoot('F:/comics');

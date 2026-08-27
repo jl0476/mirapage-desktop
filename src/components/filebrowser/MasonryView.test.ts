@@ -790,6 +790,8 @@ describe('MasonryView.measuredMap 陈旧尺寸守卫', () => {
   }
 
   it('header 回包写入 measuredMap（键为相对 currentPath 的 entry.path）', async () => {
+    // 用例性质：VTU 可直读 script setup 内部状态（不经 defineExpose），故本用例
+    // 在无 expose 基线也绿——它是行为回归锚而非 RED 锚。
     prefetchPathsMock.current = ['a.jpg'];
     // echo 式回包：直接原样返回 IPC 收到的 fullPath——断言不依赖 toRootRelativePath
     // 的具体产出形态，只要求 fullByRel 反查键值一致性（这正是组件实现的契约）。
@@ -857,6 +859,7 @@ describe('MasonryView.measuredMap 陈旧尺寸守卫', () => {
     // 审查 P0-1 修订：FileList.vue:407 用 `descriptor || { type:'local', rootPath }`
     // 内联字面量兜底，本地源 descriptor 每次父渲染都是新对象引用——守卫必须比
     // descriptorId 语义键。若误比引用，本用例最后一行断言失败（回包被当陈旧丢弃）。
+    // 用例性质：对「误比对象引用」的错误实现必红——它防的是错误实现而非缺失实现（设计锚）。
     prefetchPathsMock.current = ['a.jpg'];
     let resolveBatch!: (v: { path: string; width: number; height: number }[]) => void;
     let seenPaths: string[] = [];

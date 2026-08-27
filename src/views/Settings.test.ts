@@ -301,6 +301,7 @@ describe('Settings.vue remote section (M3 任务 9)', () => {
     releaseFail();                // 第 1 次此刻才失败——用户最新意图已是 8192
     await flushPromises();
     // 串行链此刻才发第 2 笔（简报原断言置于 releaseFail 前，与「#2 不早发」矛盾，已按目标语义后移）
+    // 存在性断言；笔序由前方 toHaveBeenCalledTimes(1) + 首笔 4096 + 串行化链共同钉死
     expect(store.update).toHaveBeenCalledWith('archive_cache_max_mb', 8192);
     expect((input.element as HTMLInputElement).value).toBe('8192'); // 不回滚到旧值
     expect(alertSpy).not.toHaveBeenCalled();                        // 被顶替的失败静默
@@ -309,6 +310,8 @@ describe('Settings.vue remote section (M3 任务 9)', () => {
 
   // 审查 P0-1（第二轮）核心场景：A→B→A 后首个 A 晚败——按「显示值==尝试值」判据
   // 会误认为自己仍是最新请求而回滚到 B 并误告警；revision 判定下 id1≠latest(3) 静默。
+  // 用例性质：静默/稳定类断言在无实现基线上天然绿（计划测试设计固有），防回归价值
+  // 在实现落地后生效；RED 信号当时由全局 unhandled rejection 承担。
   it('上限 ABA 序列且首请求晚败：终值与持久化均为最后一次的 4096，零告警', async () => {
     const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
     const wrapper = mountSettings();
@@ -421,31 +424,35 @@ describe('Settings.vue remote section (M3 任务 9)', () => {
     });
     vi.mocked(setSetting).mockClear();
 
-    const wrapper = mountSettings(); // onMounted → loadRemoteSection 挂在 deferred 上
+    // 断言区放 try / mock 恢复放 finally——用例中途失败时 deferred 补丁若不恢复，
+    // 会连挂后续所有用例（RED 阶段实证过的泄漏路径）。
+    try {
+      const wrapper = mountSettings(); // onMounted → loadRemoteSection 挂在 deferred 上
 
-    const { getActivePinia } = await import('pinia');
-    const { useSettingsStore } = await import('@/stores/settings');
-    const store = useSettingsStore(getActivePinia()!);
-    vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('db down'));
+      const { getActivePinia } = await import('pinia');
+      const { useSettingsStore } = await import('@/stores/settings');
+      const store = useSettingsStore(getActivePinia()!);
+      vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('db down'));
 
-    const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
-    expect((input.element as HTMLInputElement).value).toBe('2048'); // 初载中仍显默认
-    await input.setValue('8192');                                   // 写意图挂 ready 门
-    await flushPromises();
-    // 挂门期判据（简报原断言读 DOM，但 VTU setValue 直写 element.value 且 ref 未翻转
-    // 无 re-render，DOM 必然残留 '8192'——改为 prop 层「不乐观翻转」+「写未发起」：
-    expect(wrapper.find('[data-test="archive-cache-limit"]').findComponent(NumberRow).props('value')).toBe(2048);
-    expect(store.update).not.toHaveBeenCalled();
+      const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
+      expect((input.element as HTMLInputElement).value).toBe('2048'); // 初载中仍显默认
+      await input.setValue('8192');                                   // 写意图挂 ready 门
+      await flushPromises();
+      // 挂门期判据（简报原断言读 DOM，但 VTU setValue 直写 element.value 且 ref 未翻转
+      // 无 re-render，DOM 必然残留 '8192'——改为 prop 层「不乐观翻转」+「写未发起」：
+      expect(wrapper.find('[data-test="archive-cache-limit"]').findComponent(NumberRow).props('value')).toBe(2048);
+      expect(store.update).not.toHaveBeenCalled();
 
-    resolveMax();                 // 回填 4096（display+confirmed 双写）→ 放门
-    await flushPromises();
+      resolveMax();                 // 回填 4096（display+confirmed 双写）→ 放门
+      await flushPromises();
 
-    expect(alertSpy).toHaveBeenCalledTimes(1);                      // 失败告警恰一次
-    expect((input.element as HTMLInputElement).value).toBe('4096'); // 回滚到 DB 真值非 2048
-    expect(setSetting).not.toHaveBeenCalled();                      // 零成功写＝DB 保持 4096
-
-    alertSpy.mockRestore();
-    if (origGetSetting) vi.mocked(getSetting).mockImplementation(origGetSetting);
+      expect(alertSpy).toHaveBeenCalledTimes(1);                      // 失败告警恰一次
+      expect((input.element as HTMLInputElement).value).toBe('4096'); // 回滚到 DB 真值非 2048
+      expect(setSetting).not.toHaveBeenCalled();                      // 零成功写＝DB 保持 4096
+    } finally {
+      alertSpy.mockRestore();
+      if (origGetSetting) vi.mocked(getSetting).mockImplementation(origGetSetting);
+    }
   });
 
   it('上限输入越界值 100 → 钳 512 → settings.update 持久化 archive_cache_max_mb', async () => {
