@@ -40,7 +40,8 @@ import { useMasonryThumbnails, mergeWindowsToPriorities } from './useMasonryThum
 const localDesc: SourceDescriptor = { type: 'local', rootPath: 'D:/x' };
 
 function mkEntry(path: string, size = 1000): MediaEntry {
-  return { name: path, path, isDirectory: false, isArchive: false, size, modifiedAt: 100 };
+  // name 借 .jpg 后缀过 isMasonryImage 判定（2026-08-27 混排过滤）；path 保持裸名供断言
+  return { name: `${path}.jpg`, path, isDirectory: false, isArchive: false, size, modifiedAt: 100 };
 }
 
 function fireState(payload: ThumbnailStateEvent) {
@@ -427,4 +428,37 @@ it('连续窗口变化（模拟快速滚动）每 500ms 保底发一次请求', 
   }
   // 500ms 保底：1.2s 连续变化至少再发 2 条（纯 debounce = 0 条）
   expect(requestSpy.mock.calls.length).toBeGreaterThanOrEqual(3);
+});
+
+// ─── 混排（2026-08-27 方案 B）：非图片不进缩略图请求 batch ──────────────────
+// cover.jpg 目录也不进（isMasonryImage 类型标记优先）；归档/杂文件无缩略图语义。
+describe('useMasonryThumbnails 混排过滤', () => {
+  it('窗口含目录/归档/杂文件时只请求图片（items 严格等于图片集）', async () => {
+    const { entries, windowsRef, unmount } = setup({
+      windows: { visible: [], ahead: [], behind: [], idle: [] },
+    });
+    // 清前序用例泄漏的 pending request timer（mockReset 后到点仍会向新 spy 记账串台：
+    // 实测 calls[0] 混入前序用例的 ["a1150"] 请求）
+    vi.clearAllTimers();
+    entries.value = [
+      mkEntry('a.jpg'),
+      { name: 'cover.jpg', path: 'cover.jpg', isDirectory: true, isArchive: false, size: 0, modifiedAt: 100 },
+      { name: 'book.cbz', path: 'book.cbz', isDirectory: false, isArchive: true, size: 0, modifiedAt: 100 },
+      { name: 'Thumbs.db', path: 'Thumbs.db', isDirectory: false, isArchive: false, size: 0, modifiedAt: 100 },
+    ];
+    // 四组窗口均含全部 path（最严苛：非图片混进每一组都要被滤掉）
+    windowsRef.value = {
+      visible: ['a.jpg', 'cover.jpg'],
+      ahead: ['book.cbz'],
+      behind: ['Thumbs.db'],
+      idle: ['cover.jpg'],
+    };
+    requestSpy.mockResolvedValue([]);
+    await vi.advanceTimersByTimeAsync(90);
+
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    const items = requestSpy.mock.calls[0][1] as Array<{ path: string }>;
+    expect(items.map((i) => i.path)).toEqual(['a.jpg']);
+    unmount();
+  });
 });

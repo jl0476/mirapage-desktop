@@ -28,6 +28,7 @@ import {
 } from '@/lib/thumbnail';
 import type { ThumbnailWindows } from './useMasonryLayout';
 import { toRootRelativePath } from './useMasonryLayout';
+import { isMasonryImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import { validateSourceRelativePath } from '@/lib/relativePath';
 
@@ -197,6 +198,9 @@ export function useMasonryThumbnails(
       if (fastScrolling && prio === 'idle') continue;
       const entry = entriesByPath.get(path);
       if (!entry) continue;
+      // 非图片不进缩略图请求（isMasonryImage：目录/归档/杂文件无缩略图语义，占位卡由
+      // MasonryRow 直接渲染；cover.jpg 目录不得因扩展名混入）
+      if (!isMasonryImage(entry)) continue;
       const m = measured.get(path);
       // 路径身份修复 (2026-08-12): sourceRelPath 必须 source-relative。
       // params.currentPath 若被污染（绝对路径），toRootRelativePath 会拼出绝对

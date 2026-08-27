@@ -3,6 +3,7 @@
 // 设计文档 §5。
 
 import type { MediaEntry } from '@/lib/sourceDescriptor';
+import { isMasonryImage } from '@/lib/mime';
 import { computed, type ComputedRef, type Ref } from 'vue';
 
 export interface MasonryInput {
@@ -105,6 +106,10 @@ export function layoutMasonry(
 
 /** 默认宽高比（宽/高），漫画常见竖长 3:4 */
 export const DEFAULT_ASPECT_RATIO = 3 / 4;
+
+/** 非图片条目（目录/归档/杂文件）占位卡固定宽高比（宽/高，2026-08-27 方案 B）。
+ *  16:9 与壁纸类目录主流比例一致，占位卡与图片卡节奏整齐；不参与测量/估算。 */
+export const PLACEHOLDER_ASPECT_RATIO = 16 / 9;
 
 /** 未测量 item 的估算高度 = colWidth / aspectRatio（aspectRatio 是 w/h） */
 export function estimateHeight(colWidth: number, aspectRatio: number): number {
@@ -346,6 +351,11 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
     for (const v of measured.values()) { sumW += v.width; sumH += v.height; }
     const avgRatio = measured.size > 0 && sumH > 0 ? sumW / sumH : DEFAULT_ASPECT_RATIO;
     return params.entries.value.map((e) => {
+      // 非图片（目录/归档/杂文件，isMasonryImage 类型标记优先）固定 16:9 占位高——
+      // 不查 measuredMap（无测量语义）
+      if (!isMasonryImage(e)) {
+        return { path: e.path, width: cw, height: estimateHeight(cw, PLACEHOLDER_ASPECT_RATIO) };
+      }
       const m = measured.get(e.path);
       // 已测量: 按 colWidth 等比缩放真实高度 (m.height/m.width 是原始像素, 须缩到卡片宽度)。
       // 不能直接用 m.height -- 否则卡片 180px 宽 × 1280px 高 (极长), cover 裁左右。
@@ -426,7 +436,10 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
    */
   const dimensionPrefetchPaths = computed<string[]>(() => {
     const w = thumbnailWindows.value;
-    const candidates = [...w.visible, ...w.ahead, ...w.behind];
+    // listImageDimensions 只对 masonry 图片有意义（isMasonryImage——cover.jpg 目录不算）；
+    // 目录/归档/杂文件固定占位高无需测量
+    const imagePaths = new Set(params.entries.value.filter((e) => isMasonryImage(e)).map((e) => e.path));
+    const candidates = [...w.visible, ...w.ahead, ...w.behind].filter((p) => imagePaths.has(p));
     const measured = params.measuredMap.value;
     const seen = new Set<string>();
     const out: string[] = [];

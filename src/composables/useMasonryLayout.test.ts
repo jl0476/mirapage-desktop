@@ -263,7 +263,8 @@ describe('captureMasonryViewportAnchor / restoreMasonryViewportAnchor (resize �
 
 describe('useMasonryLayout composable (smoke)', () => {
   function mkEntry(path: string): MediaEntry {
-    return { name: path, path, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 };
+    // name 借 .jpg 后缀过 isMasonryImage 判定（2026-08-27 混排布局）；path 保持裸名供断言
+    return { name: `${path}.jpg`, path, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 };
   }
 
   it('colWidth + layout 响应式计算', () => {
@@ -536,7 +537,8 @@ describe('dimensionPrefetchPaths (像素窗口中心预读 — 修返回深处�
   // 新 dimensionPrefetchPaths 以 thumbnailWindows（visible+ahead+behind）为中心，
   // 过滤已测量，不依赖 measuredCount 连续前缀。
   function mkEntry(path: string): MediaEntry {
-    return { name: path, path, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 };
+    // name 借 .jpg 后缀过 isMasonryImage 判定（2026-08-27 混排布局）；path 保持裸名供断言
+    return { name: `${path}.jpg`, path, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 };
   }
 
   it('scrollTop 在深处 + measuredMap 空 → 返回视口附近 paths（不是开头 p0）', () => {
@@ -660,5 +662,79 @@ describe('mergeMeasured', () => {
     const next = mergeMeasured(existing, 'a.jpg', { width: 512, height: 288 });
     expect(next.get('b.jpg')).toEqual({ width: 100, height: 50 });
     expect(next.get('a.jpg')).toEqual({ width: 512, height: 288 });
+  });
+});
+
+// ─── 混排占位（2026-08-27 方案 B）：非图片条目固定 16:9 高占位 ──────────────
+// 布局含全部 entries（占位卡参与瀑布流），非图片不查 measuredMap（固定高），
+// dimensionPrefetchPaths 只喂 masonry 图片（isMasonryImage——cover.jpg 目录不算）。
+// 自建 factory（现有 mkEntry 是其他 describe 局部函数且固定 isDirectory:false）。
+describe('useMasonryLayout 混排占位', () => {
+  function mkMix(
+    path: string,
+    over: Partial<{ isDirectory: boolean; isArchive: boolean }> = {},
+  ): MediaEntry {
+    return { name: path, path, isDirectory: false, isArchive: false, size: 0, modifiedAt: 0, ...over };
+  }
+
+  const MIX = (): Ref<readonly MediaEntry[]> => ref([
+    mkMix('Thumbs.db'),               // 非图片文件（自然排序最前——实机空洞元凶）
+    mkMix('cover.jpg', { isDirectory: true }),  // 目录命名像图片（审查 P1：类型标记优先）
+    mkMix('sub', { isDirectory: true }),        // 子目录
+    mkMix('book.cbz', { isArchive: true }),     // 归档
+    mkMix('a.jpg'),                   // 真图片
+  ]);
+
+  function mountLayout(entries: Ref<readonly MediaEntry[]>, measured: Map<string, { width: number; height: number }>) {
+    return useMasonryLayout({
+      entries,
+      containerWidth: ref(1000),
+      containerHeight: ref(800),
+      colCount: ref(4),
+      hGap: ref(0),
+      vGap: ref(0),
+      scrollTop: ref(0),
+      measuredMap: ref(measured),
+    });
+  }
+
+  it('布局 map 含全部 entries（非图片占位卡参与瀑布流，无空洞）', () => {
+    const { layout } = mountLayout(MIX(), new Map([['a.jpg', { width: 3840, height: 2160 }]]));
+    expect(layout.value.map.size).toBe(5);
+    expect(layout.value.map.get('Thumbs.db')).toBeTruthy();
+    expect(layout.value.map.get('cover.jpg')).toBeTruthy();
+    expect(layout.value.map.get('sub')).toBeTruthy();
+    expect(layout.value.map.get('book.cbz')).toBeTruthy();
+  });
+
+  it('非图片固定 16:9 高（colWidth×9/16），不查 measuredMap；图片用测量高', () => {
+    // measured 故意放 3:4 竖图：avgRatio 被拉向 0.75 → 估算高 333，
+    // 与占位高 141 拉开差距——证明非图片不参与 avgRatio 估算（撞值假绿防线）
+    const measured = new Map([['a.jpg', { width: 1000, height: 1333 }]]);
+    const { layout, colWidth } = mountLayout(MIX(), measured);
+    const cw = colWidth.value; // (1000 - 0) / 4 = 250
+    const ph = Math.round((cw * 9) / 16); // ≈141
+    expect(layout.value.map.get('Thumbs.db')!.height).toBe(ph);
+    expect(layout.value.map.get('cover.jpg')!.height).toBe(ph);
+    expect(layout.value.map.get('sub')!.height).toBe(ph);
+    expect(layout.value.map.get('book.cbz')!.height).toBe(ph);
+    // 图片：250 × 1333/1000 = 333.25 → round 333
+    expect(layout.value.map.get('a.jpg')!.height).toBe(Math.round((cw * 1333) / 1000));
+  });
+
+  it('dimensionPrefetchPaths 不含非图片（cover.jpg 目录也不含——isMasonryImage）', () => {
+    const { dimensionPrefetchPaths } = mountLayout(MIX(), new Map());
+    const paths = dimensionPrefetchPaths.value;
+    expect(paths).toContain('a.jpg');
+    expect(paths).not.toContain('Thumbs.db');
+    expect(paths).not.toContain('cover.jpg');
+    expect(paths).not.toContain('sub');
+    expect(paths).not.toContain('book.cbz');
+  });
+
+  it('thumbnailWindows 保持含非图片（useArchiveWindowPrefetch 靠它拿 is_archive 条目）', () => {
+    const { thumbnailWindows } = mountLayout(MIX(), new Map());
+    const all = [...thumbnailWindows.value.visible, ...thumbnailWindows.value.ahead, ...thumbnailWindows.value.behind, ...thumbnailWindows.value.idle];
+    expect(all).toContain('book.cbz');
   });
 });
