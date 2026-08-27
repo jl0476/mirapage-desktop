@@ -1,8 +1,11 @@
 //! media:// 进程内 LRU（spec rev5 §3.6）——预读预载的载体。
 //! Local 源不进缓存；命中只回 200 全量（Range 走源）；账户变更整表清空。
+//! 2026-08 spec §8：media path singleflight（watch 单飞）+ generation 守卫
+//! 收敛 media:// miss 与 warm 两条路径的同图重复下载。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
+use tokio::sync::watch;
 
 pub struct CachedMedia {
     pub bytes: Vec<u8>,
@@ -137,6 +140,106 @@ pub fn clear_all() {
     global().lock().unwrap().clear_and_bump();
 }
 
+// ─── singleflight（spec §8）───
+
+/// singleflight 终态（spec §8：watch 值语义，防 Notify 丢唤醒）。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FetchOutcome {
+    Pending,
+    Done,
+    Failed,
+}
+
+fn inflight_registry() -> &'static Mutex<HashMap<String, Arc<watch::Sender<FetchOutcome>>>> {
+    static REG: OnceLock<Mutex<HashMap<String, Arc<watch::Sender<FetchOutcome>>>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 生产入口：经 MediaSource::read_file 下载并写入 LRU（generation 守卫 + 同路径单飞）。
+/// true = 该路径现可在 LRU 命中；false = 失败/旧代丢弃（media:// 回 502，warm 静默）。
+pub async fn fetch_remote_to_cache(
+    media_path: &str,
+    src: Arc<dyn crate::source::trait_def::MediaSource>,
+    descriptor: &crate::source::descriptor::SourceDescriptor,
+    file_path: &str,
+) -> bool {
+    fetch_remote_to_cache_with(
+        media_path,
+        move |fp| {
+            let src = src.clone();
+            let d = descriptor.clone();
+            async move { src.read_file(&d, &fp, None).await.map_err(|e| e.to_string()) }
+        },
+        file_path,
+    )
+    .await
+}
+
+/// 可测参数化版本（测试注入计数闭包）。注册表锁内定角色：
+/// 有在途 → waiter（锁内 subscribe，watch 值语义保证 owner 先 send 也读得到终态）；
+/// 无 → owner（下载 → generation 守卫入 LRU → send 终态 → 摘条目）。
+pub async fn fetch_remote_to_cache_with<F, Fut>(media_path: &str, fetch: F, file_path: &str) -> bool
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<Vec<u8>, String>>,
+{
+    enum Role {
+        Waiter(watch::Receiver<FetchOutcome>),
+        Owner(Arc<watch::Sender<FetchOutcome>>),
+    }
+    let role = {
+        let mut m = inflight_registry().lock().unwrap();
+        match m.get(media_path) {
+            Some(tx) => Role::Waiter(tx.subscribe()),
+            None => {
+                let (tx, _rx) = watch::channel(FetchOutcome::Pending);
+                let tx = Arc::new(tx);
+                m.insert(media_path.to_string(), tx.clone());
+                Role::Owner(tx)
+            }
+        }
+    };
+    match role {
+        Role::Waiter(mut rx) => {
+            // 等终态（owner send 先于摘条目；防御 sender 提前 drop）
+            loop {
+                if *rx.borrow() != FetchOutcome::Pending {
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+            if *rx.borrow() == FetchOutcome::Done {
+                return global().lock().unwrap().get(media_path).is_some();
+            }
+            false
+        }
+        Role::Owner(tx) => {
+            // 代捕获在下载启动前（spec §8.1）
+            let expected = global().lock().unwrap().generation();
+            let res = fetch(file_path.to_string()).await;
+            let ok = match res {
+                Ok(bytes) => {
+                    let name = file_path.rsplit('/').next().unwrap_or(file_path);
+                    let mime = crate::algorithm::mime_from_name(name)
+                        .unwrap_or("application/octet-stream")
+                        .to_string();
+                    global().lock().unwrap().put_if_generation(
+                        media_path.to_string(),
+                        CachedMedia { bytes, mime },
+                        expected,
+                    )
+                }
+                Err(_) => false,
+            };
+            let _ = tx.send(if ok { FetchOutcome::Done } else { FetchOutcome::Failed });
+            inflight_registry().lock().unwrap().remove(media_path);
+            ok
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +322,77 @@ mod tests {
             CachedMedia { bytes: vec![0; 4], mime: "image/jpeg".into() },
             g1,
         ));
+    }
+
+    // ─── singleflight（spec §8/§11.3）：三测试共享全局 LRU + 注册表 + clear_all，
+    // cargo 并行执行下 clear_all 会丢弃他测在途 owner 的结果——测试锁串行化本组 ───
+
+    fn singleflight_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        // poison 恢复：一个测试 panic 不连锁死锁余下测试
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[tokio::test]
+    async fn singleflight_dedups_concurrent_same_path() {
+        let _g = singleflight_test_lock();
+        crate::media_cache::clear_all();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let c2 = calls.clone();
+        let fetch = move |_fp: String| {
+            let c = c2.clone();
+            async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                Ok(vec![1u8, 2, 3])
+            }
+        };
+        let a = tokio::spawn(crate::media_cache::fetch_remote_to_cache_with("/m/x", fetch, "p/x.jpg"));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await; // 让 owner 就位
+        let c2b = calls.clone();
+        let fetch2 = move |_fp: String| {
+            let c = c2b.clone();
+            async move {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(vec![9u8])
+            }
+        };
+        let b = tokio::spawn(crate::media_cache::fetch_remote_to_cache_with("/m/x", fetch2, "p/x.jpg"));
+        let (ra, rb) = (a.await.unwrap(), b.await.unwrap());
+        assert!(ra, "owner 成功");
+        assert!(rb, "waiter 经 LRU 命中成功");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1, "同 path 并发只下载一份");
+        assert!(crate::media_cache::global().lock().unwrap().get("/m/x").is_some());
+    }
+
+    #[tokio::test]
+    async fn owner_failure_wakes_waiter_err() {
+        let _g = singleflight_test_lock();
+        crate::media_cache::clear_all();
+        let fetch = move |_fp: String| async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Err::<Vec<u8>, String>("boom".into())
+        };
+        let a = tokio::spawn(crate::media_cache::fetch_remote_to_cache_with("/m/y", fetch, "p/y.jpg"));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let fetch2 = move |_fp: String| async { Ok::<Vec<u8>, String>(vec![9]) };
+        let b = tokio::spawn(crate::media_cache::fetch_remote_to_cache_with("/m/y", fetch2, "p/y.jpg"));
+        assert!(!a.await.unwrap(), "owner 失败");
+        assert!(!b.await.unwrap(), "waiter 查 LRU miss → false");
+    }
+
+    #[tokio::test]
+    async fn generation_change_discards_owner_result() {
+        let _g = singleflight_test_lock();
+        crate::media_cache::clear_all();
+        let fetch = move |_fp: String| async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(vec![1u8, 2, 3])
+        };
+        let a = tokio::spawn(crate::media_cache::fetch_remote_to_cache_with("/m/z", fetch, "p/z.jpg"));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await; // owner 在途
+        crate::media_cache::clear_all(); // 账户变更模拟：代已变
+        assert!(!a.await.unwrap(), "旧代结果必须丢弃");
+        assert!(crate::media_cache::global().lock().unwrap().get("/m/z").is_none());
     }
 }

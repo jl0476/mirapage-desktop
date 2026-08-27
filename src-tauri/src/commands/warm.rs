@@ -51,7 +51,8 @@ fn media_path_of(url: &str) -> Option<String> {
 }
 
 /// 读单个远程媒体并填充 LRU。失败静默（预读是优化不是承诺，调用方忽略错误）。
-/// 写缓存前做会话检查——切书后的陈旧预热不进缓存。
+/// 2026-08 spec §8.2：写 LRU 前的会话双检查取消——由 media_cache generation 守卫
+/// 承担（防的是账户变更的同路径异内容，非换书）；保留启动前检查。
 async fn read_and_cache_media(
     app: &tauri::AppHandle,
     media_path: &str,
@@ -65,35 +66,26 @@ async fn read_and_cache_media(
     if matches!(target, crate::media_protocol::MediaTarget::Local { .. }) {
         return; // Local 形态不产生 IO（文件系统页缓存已够）
     }
+    if !warm_session_matches(session_id, generation) {
+        return; // 启动前检查（rev8 前半保留）
+    }
     let (descriptor, file_path) = match crate::rebuild_descriptor(app, &target) {
         Ok(v) => v,
         Err(_) => return,
     };
     let factory = app.state::<crate::source::MediaSourceFactory>();
     let src = factory.resolve(&descriptor);
-    let Ok(bytes) = src.read_file(&descriptor, &file_path, None).await else {
-        return;
-    };
-    if !warm_session_matches(session_id, generation) {
-        return; // 读源完成、写 LRU 前双检查（rev8）
-    }
-    let name = file_path.rsplit('/').next().unwrap_or(&file_path).to_string();
-    let mime = crate::algorithm::mime_from_name(&name)
-        .unwrap_or("application/octet-stream")
-        .to_string();
-    crate::media_cache::global().lock().unwrap().put(
-        media_path.to_string(),
-        crate::media_cache::CachedMedia { bytes, mime },
-    );
+    let _ = crate::media_cache::fetch_remote_to_cache(media_path, src, &descriptor, &file_path).await;
 }
 
-/// 图片预读。契约（rev8）：
+/// 图片预读。契约（rev8 + 2026-08 spec §8.2）：
 /// - 每次调用最多取前 WARM_MAX（=4）个 URL，超出静默截断——单次调用的资源边界
 /// - 去重（保持顺序）
 /// - 只接受本应用 media 协议 URL：复用 parse_media_path/rebuild_descriptor 完整
 ///   解析/校验/DB 重建路径，任何一步失败跳过该条（静默）
-/// - 并发上限 = WARM_MAX（组内全并发，组间天然受限）
-/// - 会话取消：任务启动前 + 读源完成后双检查 warm_session_matches
+/// - 并发上限 = WARM_MAX（组内全并发，组间天然受限；同路径并发经 media_cache
+///   singleflight 收敛——叠加批次的重复下载消除）
+/// - 会话取消：任务启动前检查 warm_session_matches；完成后写缓存由 generation 守卫把关
 #[tauri::command]
 pub async fn warm_media_urls(
     app: tauri::AppHandle,

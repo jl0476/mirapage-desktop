@@ -318,15 +318,24 @@ async fn handle_media_request(
                 hit.bytes.to_vec(),
             );
         }
+        // singleflight miss 分支（spec §8）：与 warm 共享同路径单飞 + generation 守卫
+        if media_cache::fetch_remote_to_cache(&path, src.clone(), &descriptor, &file_path).await {
+            if let Some(hit) = media_cache::global().lock().unwrap().get(&path) {
+                return finish(
+                    Response::builder()
+                        .status(200)
+                        .header("Content-Type", hit.mime.clone())
+                        .header("Content-Length", hit.bytes.len().to_string())
+                        .header("Accept-Ranges", "bytes")
+                        .header("Cache-Control", "no-store"),
+                    hit.bytes.to_vec(),
+                );
+            }
+        }
+        return err_response(StatusCode::BAD_GATEWAY, "remote media fetch failed");
     }
     match src.read_file(&descriptor, &file_path, range).await {
         Ok(bytes) => {
-            if cacheable {
-                media_cache::global().lock().unwrap().put(
-                    path,
-                    media_cache::CachedMedia { bytes: bytes.clone(), mime: mime.clone() },
-                );
-            }
             let b = if let Some(r) = range {
                 Response::builder()
                     .status(206)
