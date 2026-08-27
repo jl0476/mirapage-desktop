@@ -206,7 +206,7 @@ fn map_rar_code(code: c_int) -> ArchiveAccessError {
     match code {
         u::ERAR_MISSING_PASSWORD => ArchiveAccessError::PasswordRequired,
         u::ERAR_BAD_PASSWORD => ArchiveAccessError::WrongPassword,
-        u::ERAR_BAD_DATA | u::ERAR_BAD_ARCHIVE | u::ERAR_UNKNOWN_FORMAT | u::ERAR_EOPEN => {
+        u::ERAR_BAD_DATA | u::ERAR_BAD_ARCHIVE | u::ERAR_UNKNOWN_FORMAT => {
             ArchiveAccessError::CorruptArchive(format!("unrar error {code}"))
         }
         u::ERAR_EREFERENCE | u::ERAR_SMALL_BUF | u::ERAR_UNKNOWN => {
@@ -215,7 +215,9 @@ fn map_rar_code(code: c_int) -> ArchiveAccessError {
         u::ERAR_NO_MEMORY => {
             ArchiveAccessError::ResourceLimitExceeded("unrar out of memory".into())
         }
-        u::ERAR_EREAD | u::ERAR_EWRITE | u::ERAR_ECREATE | u::ERAR_ECLOSE => {
+        // EOPEN=容器物理打不开（不存在/权限/锁定），非档案头损坏——归 Io。
+        // media:// 层 Io 与 CorruptArchive 同映射 422，状态码零变化（lib.rs:551）。
+        u::ERAR_EREAD | u::ERAR_EWRITE | u::ERAR_ECREATE | u::ERAR_ECLOSE | u::ERAR_EOPEN => {
             ArchiveAccessError::Io(format!("unrar error {code}"))
         }
         other => ArchiveAccessError::CorruptArchive(format!("unrar error {other}")),
@@ -590,6 +592,7 @@ mod tests {
     use super::*;
     use crate::source::archive::backend::ReaderFactory;
     use std::sync::Arc;
+    use unrar_sys as u;
 
     /// fixture 生成脚本 `tests/fixtures/archive/generate.py::make_png(1)` 的确定性输出
     /// （1244 bytes；与 zip_backend 测试共用同一真值——README「内容锁定」承诺）。
@@ -949,6 +952,53 @@ mod tests {
         assert!(matches!(
             RarBackend.probe(&ArchiveInput::Reader(factory), "", None),
             Err(ArchiveAccessError::RemoteRangeUnavailable(_))
+        ));
+    }
+
+    /// module3.5.3 任务 D：map_rar_code 整表特征锁——分类漂移在此红灯而非生产环境。
+    /// EOPEN=容器打不开（unrar dll.cpp FMF_OPENSHARED 失败：不存在/权限/锁定），归 Io；
+    /// 密码类已被 typed callback 路径截胡，本表只见裸码兜底。
+    #[test]
+    fn map_rar_code_full_table_classification() {
+        use crate::source::archive::backend::ArchiveAccessError;
+        let corrupt = [
+            u::ERAR_BAD_DATA,
+            u::ERAR_BAD_ARCHIVE,
+            u::ERAR_UNKNOWN_FORMAT,
+            u::ERAR_EREFERENCE,
+            u::ERAR_SMALL_BUF,
+            u::ERAR_UNKNOWN,
+        ];
+        for c in corrupt {
+            assert!(
+                matches!(super::map_rar_code(c), ArchiveAccessError::CorruptArchive(_)),
+                "code {c} 应归 CorruptArchive",
+            );
+        }
+        let io = [
+            u::ERAR_EREAD,
+            u::ERAR_EWRITE,
+            u::ERAR_ECREATE,
+            u::ERAR_ECLOSE,
+            u::ERAR_EOPEN,
+        ];
+        for c in io {
+            assert!(
+                matches!(super::map_rar_code(c), ArchiveAccessError::Io(_)),
+                "code {c} 应归 Io",
+            );
+        }
+        assert!(matches!(
+            super::map_rar_code(u::ERAR_MISSING_PASSWORD),
+            ArchiveAccessError::PasswordRequired
+        ));
+        assert!(matches!(
+            super::map_rar_code(u::ERAR_BAD_PASSWORD),
+            ArchiveAccessError::WrongPassword
+        ));
+        assert!(matches!(
+            super::map_rar_code(u::ERAR_NO_MEMORY),
+            ArchiveAccessError::ResourceLimitExceeded(_)
         ));
     }
 }
