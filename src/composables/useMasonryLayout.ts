@@ -112,6 +112,24 @@ export function estimateHeight(colWidth: number, aspectRatio: number): number {
   return colWidth / aspectRatio;
 }
 
+/**
+ * 合并一条测量结果进 measuredMap（2026-08-27 实机诊断修复）：缩略图保比例生成，
+ * img onload 的 naturalWidth/Height 即真实宽高比——已加载图直接喂布局，免去
+ * 再等远程 header 请求（WebDAV 目录下 3:4 估算期长达数秒，框内大片空白）。
+ * 已有条目不覆盖（header 真值/先到者获胜，比例等价覆盖无视觉差异但省 layout 重算）；
+ * 无变化返回原引用，新增返回新 Map 引用（ref 替换触发响应式）。
+ */
+export function mergeMeasured(
+  existing: ReadonlyMap<string, { width: number; height: number }>,
+  path: string,
+  dims: { width: number; height: number },
+): ReadonlyMap<string, { width: number; height: number }> {
+  if (existing.has(path)) return existing;
+  const next = new Map(existing);
+  next.set(path, dims);
+  return next;
+}
+
 export interface AnchorParams {
   oldLayout: Map<string, MasonryItem>;
   scrollTop: number;

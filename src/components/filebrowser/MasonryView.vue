@@ -12,6 +12,7 @@ import {
   captureMasonryViewportAnchor,
   restoreMasonryViewportAnchor,
   computeAtBottom,
+  mergeMeasured,
   type MasonryItem,
   type MasonryViewportAnchor,
 } from '@/composables/useMasonryLayout';
@@ -419,8 +420,18 @@ defineExpose({
   flushBrowsePosition: () => browsePosition.flushNow(),
 });
 
-// 预读 header（v0.1.0-module3.0.8 fix: 接收明确 paths，不再读 needPrefetch/nextBatchPaths）
-// F1: entry.path 相对 currentPath(=lastFetchedPath); Rust read_file 期望相对 rootPath 的完整路径。
+/** 缩略图 natural 尺寸喂布局（2026-08-27 实机诊断修复）：缩略图保比例生成，
+ *  img 已加载 = naturalWidth/Height 就是真实宽高比——直接写 measuredMap，免去
+ *  已加载图再等远程 header 测量（WebDAV 目录 3:4 估算期框内大片空白的根因）。
+ *  已测量不覆盖（mergeMeasured：header 真值/先到者获胜）。 */
+function onRowMeasured(entry: MediaEntry, width: number, height: number): void {
+  const next = mergeMeasured(measuredMap.value, entry.path, { width, height });
+  if (next !== measuredMap.value) {
+    measuredMap.value = next as Map<string, { width: number; height: number }>;
+  }
+}
+
+// 预读 header（v0.1.0-module3.0.8 fix: 接收明确 paths，不再读 needPrefetch/nextBatchPaths）// F1: entry.path 相对 currentPath(=lastFetchedPath); Rust read_file 期望相对 rootPath 的完整路径。
 // 拼 currentPath 前缀调 IPC; 返回的 dims.path 是 fullPath, 反查 relPath 作 measuredMap key
 // (与 entries e.path 一致, useMasonryLayout.inputs 用 e.path 查 measuredMap)。
 async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
@@ -513,41 +524,49 @@ const loading = computed(() => {
 </script>
 
 <template>
-  <div ref="containerRef" class="masonry-container" role="grid" tabindex="0">
-    <div class="masonry-content" :style="{ height: layout.totalHeight + 'px', position: 'relative' }">
-      <MasonryRow
-        v-for="v in visibleItems"
-        :key="v.entry.path"
-        :entry="v.entry"
-        :thumb-state="v.thumbState"
-        :width="v.item.width"
-        :height="v.item.height"
-        :top="v.item.top"
-        :left="v.item.left"
-        :mark="v.mark"
-        :selected="v.selected"
-        :badge-interactive="settingsStore.thumbnailDetailPopover"
-        @row-click="(e, ev) => emit('row-click', e, ev)"
-        @row-dblclick="(e, ev) => emit('row-dblclick', e, ev)"
-        @row-contextmenu="(e, ev) => emit('row-contextmenu', e, ev)"
-        @row-retry="(e) => retryThumbnail(e.path)"
-        @show-progress="(entry, el) => openProgressPopover(entry, el)"
+  <div class="masonry-frame">
+    <!-- 2026-08-27：外层 frame 与滚动层分离——loading 指示器必须锚定视口。
+         旧实现 loading 是滚动容器的 absolute 子元素，跟随内容滚走：滚到未测量
+         区域 loading=true 但 spinner 在视口外数千 px（实机 CDP 实测 top=-2560）。
+         注释放根 div 内部：顶层注释会使模板变 Fragment，w.element 断言破。 -->
+    <div ref="containerRef" class="masonry-container" role="grid" tabindex="0">
+      <div class="masonry-content" :style="{ height: layout.totalHeight + 'px', position: 'relative' }">
+        <MasonryRow
+          v-for="v in visibleItems"
+          :key="v.entry.path"
+          :entry="v.entry"
+          :thumb-state="v.thumbState"
+          :width="v.item.width"
+          :height="v.item.height"
+          :top="v.item.top"
+          :left="v.item.left"
+          :mark="v.mark"
+          :selected="v.selected"
+          :badge-interactive="settingsStore.thumbnailDetailPopover"
+          @row-click="(e, ev) => emit('row-click', e, ev)"
+          @row-dblclick="(e, ev) => emit('row-dblclick', e, ev)"
+          @row-contextmenu="(e, ev) => emit('row-contextmenu', e, ev)"
+          @row-retry="(e) => retryThumbnail(e.path)"
+          @show-progress="(entry, el) => openProgressPopover(entry, el)"
+          @row-measured="onRowMeasured"
+        />
+      </div>
+      <!-- module3.0.11：单张生成详情浮层（anchorEl 直传定位，无 querySelector） -->
+      <ThumbnailProgressPopover
+        v-if="popoverState"
+        :state="popoverState.state"
+        :snapshot="progressSnapshots.get(popoverState.path)"
+        :file-name="entriesByPath(popoverState.path)?.name ?? popoverState.path"
+        :source-width="measuredMap.get(popoverState.path)?.width ?? 0"
+        :source-height="measuredMap.get(popoverState.path)?.height ?? 0"
+        :source-bytes="entriesByPath(popoverState.path)?.size ?? 0"
+        :anchor-rect="popoverState.rect"
+        @close="closeProgressPopover"
+        @retry="retryThumbnail(popoverState.path); closeProgressPopover()"
       />
     </div>
-    <!-- module3.0.11：单张生成详情浮层（anchorEl 直传定位，无 querySelector） -->
-    <ThumbnailProgressPopover
-      v-if="popoverState"
-      :state="popoverState.state"
-      :snapshot="progressSnapshots.get(popoverState.path)"
-      :file-name="entriesByPath(popoverState.path)?.name ?? popoverState.path"
-      :source-width="measuredMap.get(popoverState.path)?.width ?? 0"
-      :source-height="measuredMap.get(popoverState.path)?.height ?? 0"
-      :source-bytes="entriesByPath(popoverState.path)?.size ?? 0"
-      :anchor-rect="popoverState.rect"
-      @close="closeProgressPopover"
-      @retry="retryThumbnail(popoverState.path); closeProgressPopover()"
-    />
-    <!-- 加载提示: 首屏图片测量/字节未就绪时显示, 完成后自动隐藏 -->
+    <!-- 加载提示: 首屏图片测量/字节未就绪时显示, 完成后自动隐藏。
+         frame 层 absolute（相对视口区），滚动后仍在视口中心。 -->
     <div
       v-if="loading"
       class="masonry-loading"
@@ -570,6 +589,11 @@ const loading = computed(() => {
 </template>
 
 <style scoped>
+.masonry-frame {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
 .masonry-container {
   position: relative;
   overflow: auto;

@@ -21,6 +21,9 @@ const emit = defineEmits<{
   (e: 'retry'): void;
   (e: 'load-error'): void;
   (e: 'show-progress', el: HTMLElement): void;
+  /** img 加载完成且 natural 尺寸有效（缩略图保比例 → 即真实宽高比）。
+   *  MasonryView 拿它喂 measuredMap，免掉已加载图再等远程 header 测量。 */
+  (e: 'measured', width: number, height: number): void;
 }>();
 
 const loaded = ref(false);
@@ -79,8 +82,13 @@ function onRetry(e: MouseEvent) {
   emit('retry');
 }
 
-function onLoad() {
+function onLoad(e: Event) {
   loaded.value = true;
+  // 2026-08-27：上报 natural 尺寸（布局层只用比例）。0 = 解码失败/未真解码，不上报。
+  const el = e.target;
+  if (el instanceof HTMLImageElement && el.naturalWidth > 0 && el.naturalHeight > 0) {
+    emit('measured', el.naturalWidth, el.naturalHeight);
+  }
 }
 
 function onError() {

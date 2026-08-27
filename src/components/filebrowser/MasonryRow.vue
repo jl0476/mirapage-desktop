@@ -32,6 +32,8 @@ defineEmits<{
   (e: 'row-contextmenu', entry: MediaEntry, event: MouseEvent): void;
   (e: 'row-retry', entry: MediaEntry): void;
   (e: 'show-progress', entry: MediaEntry, el: HTMLElement): void;
+  /** 缩略图 natural 尺寸（真实宽高比）转发——MasonryView 写 measuredMap。 */
+  (e: 'row-measured', entry: MediaEntry, width: number, height: number): void;
 }>();
 
 const { t } = useI18n();
@@ -76,6 +78,7 @@ function statusLabel(m: RowMark): string {
       :badge-interactive="badgeInteractive"
       @retry="$emit('row-retry', entry)"
       @show-progress="(el) => $emit('show-progress', entry, el)"
+      @measured="(w, h) => $emit('row-measured', entry, w, h)"
     />
     <span v-if="mark !== 'none'" class="masonry-badge" :class="mark">{{ statusLabel(mark) }}</span>
   </div>

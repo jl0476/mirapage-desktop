@@ -170,3 +170,25 @@ describe('MasonryThumbnail phase badge (module3.0.11)', () => {
     expect(w.emitted('show-progress')).toBeUndefined();
   });
 });
+
+// ─── measured emit（缩略图 natural 尺寸喂布局，2026-08-27 实机诊断修复）───────
+// 缩略图保比例生成：img naturalWidth/Height 即真实宽高比。load 时上报给
+// MasonryRow → MasonryView 写 measuredMap，免去已加载图再等远程 header 测量。
+
+describe('MasonryThumbnail.measured emit', () => {
+  it('img load 且 natural 尺寸有效 → emit measured(w, h)', async () => {
+    const w = mountThumb({ kind: 'cached', cacheKey: 'k', path: 'asset://c.webp', width: 512, height: 288 });
+    const img = w.find('img');
+    // happy-dom 不解码图片：naturalWidth 默认 0，实例级覆盖模拟真实浏览器
+    Object.defineProperty(img.element, 'naturalWidth', { configurable: true, value: 512 });
+    Object.defineProperty(img.element, 'naturalHeight', { configurable: true, value: 288 });
+    await img.trigger('load');
+    expect(w.emitted('measured')).toEqual([[512, 288]]);
+  });
+
+  it('natural 尺寸无效（0）→ 不 emit（防御解码失败/happy-dom 默认值）', async () => {
+    const w = mountThumb({ kind: 'cached', cacheKey: 'k', path: 'asset://c.webp', width: 512, height: 288 });
+    await w.find('img').trigger('load');
+    expect(w.emitted('measured')).toBeUndefined();
+  });
+});

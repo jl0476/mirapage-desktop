@@ -7,6 +7,7 @@ import {
   DEFAULT_ASPECT_RATIO,
   estimateHeight,
   layoutMasonry,
+  mergeMeasured,
   restoreMasonryViewportAnchor,
   toRootRelativePath,
   useMasonryLayout,
@@ -628,5 +629,36 @@ describe('dimensionPrefetchPaths (像素窗口中心预读 — 修返回深处�
     });
     // batch 上限存在（具体值由实现定，测试只验有上限，不超过 120）
     expect(dimensionPrefetchPaths.value.length).toBeLessThanOrEqual(120);
+  });
+});
+
+// ─── mergeMeasured（缩略图 natural 尺寸喂布局，2026-08-27 实机诊断修复）───────
+// 场景：WebDAV 远程目录缩略图缓存命中本地秒出，但真实尺寸要远程 header 请求——
+// img 已加载（naturalWidth/Height 就是真实比例，缩略图保比例）却还在按 3:4 估算。
+// img onload 把 natural 尺寸写入 measuredMap：已测量（header 真值/先到者）不覆盖。
+
+describe('mergeMeasured', () => {
+  it('空 map 新增条目，返回新 Map 引用（响应式替换）', () => {
+    const existing = new Map<string, { width: number; height: number }>();
+    const next = mergeMeasured(existing, 'a.jpg', { width: 512, height: 288 });
+    expect(next.get('a.jpg')).toEqual({ width: 512, height: 288 });
+    // 必须返回新引用触发 ref 更新；原 map 不被突变
+    expect(next).not.toBe(existing);
+    expect(existing.has('a.jpg')).toBe(false);
+  });
+
+  it('已有条目不覆盖（header 真值/先到者获胜），返回原引用', () => {
+    const existing = new Map([['a.jpg', { width: 3840, height: 2160 }]]);
+    const next = mergeMeasured(existing, 'a.jpg', { width: 512, height: 288 });
+    // 保持先到值；无变化返回原引用，避免无谓 layout 重算
+    expect(next.get('a.jpg')).toEqual({ width: 3840, height: 2160 });
+    expect(next).toBe(existing);
+  });
+
+  it('其他条目保留', () => {
+    const existing = new Map([['b.jpg', { width: 100, height: 50 }]]);
+    const next = mergeMeasured(existing, 'a.jpg', { width: 512, height: 288 });
+    expect(next.get('b.jpg')).toEqual({ width: 100, height: 50 });
+    expect(next.get('a.jpg')).toEqual({ width: 512, height: 288 });
   });
 });

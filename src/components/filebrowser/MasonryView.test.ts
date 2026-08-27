@@ -307,8 +307,9 @@ describe('MasonryView.atBottom 响应式 (bugfix 2026-08-15)', () => {
 
     // happy-dom 不算布局，stub 容器几何：sh=2000, ch=800 → 档3 长目录
     // 贴底阈值 64px：scrollTop>=1136 即 nearBottom
-    const containerEl = w.element as HTMLElement;
-    expect(containerEl.classList.contains('masonry-container')).toBe(true);
+    // 2026-08-27 frame 重构后根节点是 .masonry-frame，滚动容器是其子元素
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    expect(containerEl).toBeTruthy();
     Object.defineProperty(containerEl, 'scrollHeight', { configurable: true, value: 2000 });
     Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
 
@@ -336,7 +337,7 @@ describe('MasonryView.atBottom 响应式 (bugfix 2026-08-15)', () => {
     await flushPromises();
     await nextTick();
 
-    const containerEl = w.element as HTMLElement;
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
     Object.defineProperty(containerEl, 'scrollHeight', { configurable: true, value: 2000 });
     Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
 
@@ -412,7 +413,9 @@ describe('MasonryView.resize viewport anchor (task-21)', () => {
     await nextTick();
 
     // 模拟容器宽度变化（happy-dom 默认 0）
-    const containerEl = w.element as HTMLElement;
+    // 2026-08-27 frame 重构：滚动容器是根节点的子元素（containerRef 指向它）
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    expect(containerEl).toBeTruthy();
     Object.defineProperty(containerEl, 'clientWidth', { configurable: true, value: 800 });
     // 初始已 observe 一次 clientWidth=0；改宽度后再 fire
     containerEl.style.width = '800px';
@@ -436,8 +439,6 @@ describe('MasonryView.resize viewport anchor (task-21)', () => {
     // 所以此处主要验证 captureMasonryViewportAnchor 被调用且不抛错 + ResizeObserver 集成路径走通
     // 真正数值验证交给 useMasonryLayout.test.ts 的纯函数单测。
     // 这里只验证：fireResize 后，ResizeObserver 链路无异常；scrollTop 已被设值（不会崩溃）。
-    // 根节点本身就是 .masonry-container（template 第一个 <div ref="containerRef" class="masonry-container">）
-    expect(containerEl.classList.contains('masonry-container')).toBe(true);
     const finalScrollTop = Number((containerEl as unknown as { scrollTop?: number }).scrollTop ?? 0);
     expect(Number.isFinite(finalScrollTop)).toBe(true);
 
@@ -606,6 +607,68 @@ describe('MasonryView.popover (module3.0.11)', () => {
     await flushPromises();
     expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
     expect(w.find('.err-msg').exists()).toBe(true); // 失败详情渲染
+    w.unmount();
+  });
+});
+
+// ─── 缩略图 natural 尺寸喂布局 + loading 指示器视口锚定（2026-08-27 实机诊断）──
+// 根因 A（P1）：WebDAV 远程目录缩略图缓存命中秒出，但真实尺寸要远程 header——
+// img 已加载（natural 即真实比例）却按 3:4 估算 → 334 高竖框装 16:9 图 → 框内
+// 大片空白 + 尺寸错。修复：row-measured → mergeMeasured 写 measuredMap（不覆盖）。
+// 根因 B（P0）：.masonry-loading absolute 定位在滚动容器内 → 跟内容滚走，
+// 滚到未测量区域 loading=true 但 spinner 在视口外。修复：移到滚动层外的
+// .masonry-frame（absolute 相对视口区）。
+
+describe('MasonryView row-measured 接线 + loading 视口锚定 (2026-08-27)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    fakeLayoutMap.current = new Map<string, MasonryItem>();
+    browsePositionParams.current = null;
+  });
+
+  function mountView() {
+    return mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+  }
+
+  it('loading 初始 true（visibleRange 无测量）→ row-measured 后翻 false', async () => {
+    // 预填 layout：visibleItems 需要 layout map 里有 item 才渲染 MasonryRow
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['a.jpg', { path: 'a.jpg', width: 200, height: 150, top: 0, left: 0, col: 0 }],
+      ['b.jpg', { path: 'b.jpg', width: 200, height: 150, top: 0, left: 200, col: 1 }],
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    // visibleRange mock 为 0-2；measuredMap 空 → loading=true
+    expect(w.find('[data-test="masonry-loading"]').exists()).toBe(true);
+
+    // MasonryRow emit row-measured → mergeMeasured 写入 → loading 翻 false
+    const row = w.findComponent({ name: 'MasonryRow' });
+    expect(row.exists()).toBe(true);
+    row.vm.$emit('row-measured', baseProps.entries[0], 512, 288);
+    await nextTick();
+    expect(w.find('[data-test="masonry-loading"]').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('loading 指示器在滚动容器外（不随内容滚走）', async () => {
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    // 根节点是 frame；滚动容器是其子；loading 是 frame 的子但不是容器的子
+    const root = w.element as HTMLElement;
+    expect(root.classList.contains('masonry-frame')).toBe(true);
+    const container = root.querySelector('.masonry-container');
+    expect(container).toBeTruthy();
+    const loading = root.querySelector('[data-test="masonry-loading"]');
+    expect(loading).toBeTruthy();
+    // loading 不得在滚动容器内（会被内容滚走）；应在 frame 层锚定视口
+    expect(container!.contains(loading!)).toBe(false);
+    expect(root.contains(loading!)).toBe(true);
     w.unmount();
   });
 });
