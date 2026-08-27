@@ -205,6 +205,51 @@ fn shared_client(bad_tls: bool) -> &'static Client {
     })
 }
 
+/// 单响应上限（spec §9，对齐 MAX_SMB_READ_BYTES 与 media LRU）。
+pub(crate) const WEBDAV_MAX_RESPONSE: usize = 256 * 1024 * 1024;
+/// PROPFIND 目录 XML 聚合上限（spec §6.3）。
+pub(crate) const PROPFIND_MAX_RESPONSE: usize = 32 * 1024 * 1024;
+/// 流式累加初始容量：min(CL, 1MiB)，不按声明 CL 预分配（复审 P2）。
+pub(crate) const BODY_INITIAL_CAPACITY: usize = 1024 * 1024;
+
+/// 流式累加核心（纯函数，测试用 stream::iter 注入；生产走 read_body_capped）。
+/// 双保险：即使 CL 说谎（声明小实际大），累计超 cap 立即断开。
+pub(crate) async fn accumulate_capped<S, B, E>(
+    stream: S,
+    initial_capacity: usize,
+    cap: usize,
+) -> std::result::Result<Vec<u8>, String>
+where
+    S: futures_util::Stream<Item = std::result::Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut body = Vec::with_capacity(initial_capacity);
+    use futures_util::StreamExt;
+    futures_util::pin_mut!(stream);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("read: {e}"))?;
+        body.extend_from_slice(chunk.as_ref());
+        if body.len() > cap {
+            return Err(format!("read: 响应体超过上限 {cap} 字节"));
+        }
+    }
+    Ok(body)
+}
+
+/// 响应体流式读取（reqwest "stream" feature 的 bytes_stream）。替换
+/// resp.bytes() + to_vec() 双缓冲；初始容量 min(CL, BODY_INITIAL_CAPACITY)。
+pub(crate) async fn read_body_capped(
+    resp: reqwest::Response,
+    cap: usize,
+) -> std::result::Result<Vec<u8>, String> {
+    let initial = resp
+        .content_length()
+        .unwrap_or(0)
+        .min(BODY_INITIAL_CAPACITY as u64) as usize;
+    accumulate_capped(resp.bytes_stream(), initial, cap).await
+}
+
 /// 取标签 local name（剥命名空间前缀，`d:response` → `response`；无前缀原样返回）。
 fn local_name(name: &[u8]) -> &str {
     let s = std::str::from_utf8(name).unwrap_or("");
@@ -685,5 +730,49 @@ mod tests {
         assert!(std::ptr::eq(a, b), "同 bad_tls 应复用同一实例");
         let c = shared_client(true);
         assert!(!std::ptr::eq(a, c), "strict 与 bad_tls 是两实例");
+    }
+
+    #[tokio::test]
+    async fn accumulate_empty_and_exact_cap() {
+        use futures_util::stream::{self, StreamExt};
+        let empty: futures_util::stream::Iter<std::vec::IntoIter<std::result::Result<Vec<u8>, std::io::Error>>> =
+            stream::iter(vec![]);
+        let v = accumulate_capped(empty, 16, 1024).await.unwrap();
+        assert!(v.is_empty());
+
+        let s = stream::iter(vec![
+            Ok::<Vec<u8>, std::io::Error>(vec![0u8; 600]),
+            Ok(vec![0u8; 400]),
+        ]);
+        let v = accumulate_capped(s, 16, 1024).await.unwrap();
+        assert_eq!(v.len(), 1000, "恰好等长不触发上限");
+    }
+
+    #[tokio::test]
+    async fn accumulate_breaks_mid_stream_over_cap() {
+        use futures_util::stream::{self, StreamExt};
+        let s = stream::iter(vec![
+            Ok::<Vec<u8>, std::io::Error>(vec![0u8; 600]),
+            Ok(vec![0u8; 600]), // 累计 1200 > 1024
+            Ok(vec![0u8; 1]),
+        ]);
+        let err = accumulate_capped(s, 16, 1024).await.unwrap_err();
+        assert!(err.contains("超过上限"), "错误串：{err}");
+    }
+
+    #[tokio::test]
+    async fn accumulate_does_not_preallocate_cap() {
+        use futures_util::stream::{self, StreamExt};
+        // 声明大 CL 场景：initial_capacity = min(CL, 1MiB)，流只发 3 字节
+        let s = stream::iter(vec![Ok::<Vec<u8>, std::io::Error>(vec![1u8, 2, 3])]);
+        let v = accumulate_capped(s, BODY_INITIAL_CAPACITY, WEBDAV_MAX_RESPONSE).await.unwrap();
+        assert_eq!(v.len(), 3);
+        // spec §11.1：声明 256MiB CL 只发 3 字节——capacity 止步 1MiB 起步量，
+        // 远小于 CL 即证明未按声明预分配（计划初稿 <64KiB 与 1MiB 起步实现矛盾，按 spec 原意修正）
+        assert!(
+            v.capacity() <= BODY_INITIAL_CAPACITY && v.capacity() < WEBDAV_MAX_RESPONSE / 64,
+            "capacity 应止步起步量（远小于 256MiB CL），capacity={}",
+            v.capacity()
+        );
     }
 }
