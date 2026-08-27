@@ -434,11 +434,21 @@ export function useMasonryLayout(params: MasonryLayoutParams): MasonryLayoutOutp
    * 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。配合 useMasonryLayout
    * 的 resize viewport anchor，尺寸收敛期间的视觉跳动也被锚定恢复。
    */
+  // masonry 图片 path 集合（复审性能修订 2026-08-27）：仅 entries 变化时重建——
+  // dimensionPrefetchPaths 随滚动高频重算，内联 filter→map→Set 是每帧 O(N) 分配
+  const masonryImagePaths = computed(() => {
+    const s = new Set<string>();
+    for (const e of params.entries.value) {
+      if (isMasonryImage(e)) s.add(e.path);
+    }
+    return s;
+  });
+
   const dimensionPrefetchPaths = computed<string[]>(() => {
     const w = thumbnailWindows.value;
     // listImageDimensions 只对 masonry 图片有意义（isMasonryImage——cover.jpg 目录不算）；
-    // 目录/归档/杂文件固定占位高无需测量
-    const imagePaths = new Set(params.entries.value.filter((e) => isMasonryImage(e)).map((e) => e.path));
+    // 目录/归档/杂文件固定占位高无需测量。集合查 O(1)，构建见上方 masonryImagePaths。
+    const imagePaths = masonryImagePaths.value;
     const candidates = [...w.visible, ...w.ahead, ...w.behind].filter((p) => imagePaths.has(p));
     const measured = params.measuredMap.value;
     const seen = new Set<string>();
