@@ -141,19 +141,27 @@ vi.mock('@/composables/useMasonryThumbnails', () => ({
   }),
 }));
 
+/** 测试捕获 useMasonryLayout 收到的 params（断言布局输入契约）。 */
+const layoutParams = vi.hoisted(() => ({
+  current: null as { entries: { value: readonly unknown[] } } | null,
+}));
+
 vi.mock('@/composables/useMasonryLayout', async () => {
   const actual = await vi.importActual<typeof import('@/composables/useMasonryLayout')>(
     '@/composables/useMasonryLayout',
   );
   return {
     ...actual,
-    useMasonryLayout: () => ({
-      layout: computed(() => ({ map: fakeLayoutMap.current, totalHeight: 1000 })),
-      visibleRange: computed(() => ({ start: 0, end: 2 })),
-      dimensionPrefetchPaths: computed(() => []),
-      colWidth: computed(() => 200),
-      thumbnailWindows: computed(() => ({ visible: [], ahead: [], behind: [], idle: [] })),
-    }),
+    useMasonryLayout: (params: { entries: { value: readonly unknown[] } }) => {
+      layoutParams.current = params;
+      return {
+        layout: computed(() => ({ map: fakeLayoutMap.current, totalHeight: 1000 })),
+        visibleRange: computed(() => ({ start: 0, end: 2 })),
+        dimensionPrefetchPaths: computed(() => []),
+        colWidth: computed(() => 200),
+        thumbnailWindows: computed(() => ({ visible: [], ahead: [], behind: [], idle: [] })),
+      };
+    },
   };
 });
 
@@ -669,6 +677,91 @@ describe('MasonryView row-measured 接线 + loading 视口锚定 (2026-08-27)', 
     // loading 不得在滚动容器内（会被内容滚走）；应在 frame 层锚定视口
     expect(container!.contains(loading!)).toBe(false);
     expect(root.contains(loading!)).toBe(true);
+    w.unmount();
+  });
+});
+
+// ─── 混排占位（2026-08-27 方案 B）：非图片条目渲染占位卡 ─────────────────────
+describe('MasonryView 混排占位', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    fakeLayoutMap.current = new Map<string, MasonryItem>();
+    browsePositionParams.current = null;
+    layoutParams.current = null;
+  });
+
+  const mixedProps = {
+    ...baseProps,
+    entries: [
+      { name: 'Thumbs.db', path: 'Thumbs.db', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'cover.jpg', path: 'cover.jpg', isDirectory: true, isArchive: false, size: 0, modifiedAt: 0 },
+      { name: 'a.jpg', path: 'a.jpg', isDirectory: false, isArchive: false, size: 0, modifiedAt: 0 },
+    ],
+    canonicalImageNames: ['a.jpg'],
+  };
+
+  it('非图片条目渲染占位卡（visibleRange mock 为 0-2：2 条目形态，无空洞）', async () => {
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['Thumbs.db', { path: 'Thumbs.db', width: 200, height: 112, top: 0, left: 0, col: 0 }],
+      ['a.jpg', { path: 'a.jpg', width: 200, height: 112, top: 0, left: 200, col: 1 }],
+    ]);
+    const w = mount(MasonryView, {
+      props: {
+        ...mixedProps,
+        entries: [mixedProps.entries[0], mixedProps.entries[2]],
+      },
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+    expect(w.findAll('.masonry-row').length).toBe(2);
+    expect(w.find('.masonry-row[data-path="Thumbs.db"] .masonry-placeholder').exists()).toBe(true);
+    expect(w.find('.masonry-row[data-path="a.jpg"] .masonry-placeholder').exists()).toBe(false);
+    w.unmount();
+  });
+
+  it('布局输入含全部 entries（不因 isImage 截断——占位参与瀑布流）', async () => {
+    mount(MasonryView, {
+      props: mixedProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+    expect(layoutParams.current).not.toBeNull();
+    expect(layoutParams.current!.entries.value.length).toBe(3);
+  });
+
+  it('窗口全为非图片时 loading 不永挂（占位卡即内容，无需测量）', async () => {
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['Thumbs.db', { path: 'Thumbs.db', width: 200, height: 112, top: 0, left: 0, col: 0 }],
+    ]);
+    const w = mount(MasonryView, {
+      props: { ...mixedProps, entries: [mixedProps.entries[0]], canonicalImageNames: [] },
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+    expect(w.find('[data-test="masonry-loading"]').exists()).toBe(false);
+    expect(w.find('.masonry-placeholder').exists()).toBe(true);
+    w.unmount();
+  });
+
+  it('窗口全为 cover.jpg 目录时 loading 同样不永挂（isMasonryImage 判定）', async () => {
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['cover.jpg', { path: 'cover.jpg', width: 200, height: 112, top: 0, left: 0, col: 0 }],
+    ]);
+    const w = mount(MasonryView, {
+      props: { ...mixedProps, entries: [mixedProps.entries[1]], canonicalImageNames: [] },
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+    await flushPromises();
+    await nextTick();
+    expect(w.find('[data-test="masonry-loading"]').exists()).toBe(false);
+    expect(w.find('.masonry-placeholder').exists()).toBe(true);
     w.unmount();
   });
 });

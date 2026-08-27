@@ -21,7 +21,7 @@ import { useArchiveWindowPrefetch } from '@/composables/useArchiveWindowPrefetch
 import type { ThumbnailState } from '@/lib/thumbnail';
 import { useMasonryBrowsePosition } from '@/composables/useMasonryBrowsePosition';
 import { listImageDimensions } from '@/lib/tauri';
-import { isImage } from '@/lib/mime';
+import { isMasonryImage } from '@/lib/mime';
 import { log } from '@/lib/logger';
 import { useSettingsStore } from '@/stores/settings';
 import MasonryRow from './MasonryRow.vue';
@@ -482,14 +482,13 @@ function getMark(entry: MediaEntry): 'reading' | 'finished' | 'none' {
   return 'none';
 }
 
-// 可见区 items（含缩略图状态）
+// 可见区 items（含缩略图状态；非图片占位卡 thumbState 置 undefined——占位分支不消费）
 const visibleItems = computed(() => {
   const { start, end } = visibleRange.value;
   const map = layout.value.map;
   const tmap = thumbStateMap.value;
   return props.entries
     .slice(start, end)
-    .filter((e) => isImage(e.name))
     .map((e) => {
       const item = map.get(e.path);
       if (!item) return null;
@@ -498,7 +497,8 @@ const visibleItems = computed(() => {
         item,
         mark: getMark(e),
         selected: props.selectedPaths.has(e.path),
-        thumbState: tmap.get(e.path),
+        // 非图片占位卡不消费缩略图状态（MasonryRow 占位分支不渲染 MasonryThumbnail）
+        thumbState: isMasonryImage(e) ? tmap.get(e.path) : undefined,
       };
     })
     .filter((x): x is NonNullable<typeof x> => x !== null);
@@ -515,11 +515,17 @@ const loading = computed(() => {
   if (r.end === 0) return true;
   const mm = measuredMap.value;
   if (!(mm instanceof Map)) return true;
+  // 混排占位（2026-08-27）：可见区全是非图片（含 cover.jpg 目录，isMasonryImage 判定）
+  // 时占位卡即内容（无需测量），不得永挂 spinner——只对图片条目判测量就绪
+  let hasImageInRange = false;
   for (let i = r.start; i < r.end; i++) {
     const e = props.entries[i];
-    if (e && mm.has(e.path)) return false; // 有任意 measured 即加载完成
+    if (!e) continue;
+    if (!isMasonryImage(e)) continue;
+    hasImageInRange = true;
+    if (mm.has(e.path)) return false; // 有任意 measured 即加载完成
   }
-  return true;
+  return hasImageInRange; // 窗口有图片且全未测量 → loading；窗口无图片 → false
 });
 </script>
 
