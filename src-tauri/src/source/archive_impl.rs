@@ -65,6 +65,17 @@ pub trait Materialize: Send + Sync {
         ))
     }
 
+    /// module3.5.3 任务 F：带已知 origin stat 的 ready 查询——实现方可复用调用方
+    /// 本轮 resolve 已取的 stat，免第二次相同远端往返。默认退化为无-stat 版本，
+    /// 其余物化 mock 实现零适配。
+    async fn ready_path_if_fresh_with_stat(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+        known_stat: Option<&crate::source::trait_def::FileStat>,
+    ) -> std::result::Result<Option<PathBuf>, crate::source::archive::materializer::MaterializeError> {
+        let _ = known_stat;
+        self.ready_path_if_fresh(origin, archive_rel_path, format).await
+    }
+
     /// commit-gated 后台物化（任务 10：opaque progress_key 承载全部进度事件）
     async fn ensure_cached_background(
         &self, origin: &SourceDescriptor, archive_rel_path: &str, expected_epoch: u64,

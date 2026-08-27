@@ -466,7 +466,7 @@ impl ArchiveService {
                         let progress_key = cache_key(origin_desc, rel);
                         return match self
                             .materializer
-                            .ready_path_if_fresh(origin_desc, rel, *format)
+                            .ready_path_if_fresh_with_stat(origin_desc, rel, *format, Some(&stat))
                             .await
                             .map_err(map_materialize_error)?
                         {

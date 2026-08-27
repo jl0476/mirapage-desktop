@@ -601,6 +601,15 @@ impl Materializer {
     pub async fn ready_path_if_fresh(
         &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
     ) -> Result<Option<PathBuf>, MaterializeError> {
+        self.ready_path_if_fresh_with_stat(origin, archive_rel_path, format, None).await
+    }
+
+    /// module3.5.3 任务 F：调用方已持有本轮 resolve 的 origin stat 时直传复用，
+    /// 免内部第二次相同远端 HEAD。`None` 行为与本重构前完全一致。
+    pub async fn ready_path_if_fresh_with_stat(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+        known_stat: Option<&FileStat>,
+    ) -> Result<Option<PathBuf>, MaterializeError> {
         let _ext = validated_archive_extension(format, archive_rel_path)?;
         let _admission = self.coordinator.admit().map_err(|_| MaterializeError::Cancelled)?;
         let key = cache_key(origin, archive_rel_path);
@@ -609,8 +618,13 @@ impl Materializer {
             super::dao::get(&conn, &key).map_err(|e| MaterializeError::Other(e.to_string()))?
         };
         let Some(row) = row else { return Ok(None) };
-        let src = self.origin_source(origin)?;
-        let cur = src.stat(origin, archive_rel_path).await?;
+        let cur = match known_stat {
+            Some(s) => *s,
+            None => {
+                let src = self.origin_source(origin)?;
+                src.stat(origin, archive_rel_path).await?
+            }
+        };
         if is_stale(row.origin_size, row.origin_mtime, &cur) { return Ok(None); }
         if !cache_file_matches(&row) { return Ok(None); }
         {
@@ -1199,6 +1213,14 @@ impl crate::source::archive_impl::Materialize for Materializer {
         &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
     ) -> std::result::Result<Option<PathBuf>, MaterializeError> {
         Materializer::ready_path_if_fresh(self, origin, archive_rel_path, format).await
+    }
+
+    async fn ready_path_if_fresh_with_stat(
+        &self, origin: &SourceDescriptor, archive_rel_path: &str, format: ArchiveFormat,
+        known_stat: Option<&crate::source::trait_def::FileStat>,
+    ) -> Result<Option<PathBuf>, MaterializeError> {
+        Materializer::ready_path_if_fresh_with_stat(self, origin, archive_rel_path, format, known_stat)
+            .await
     }
 
     async fn ensure_cached_background(
@@ -2339,6 +2361,60 @@ pub(crate) mod tests {
         e2e_list_read_stat(crate::source::descriptor::ArchiveFormat::Zip, "book.zip").await;
     }
 
+    /// module3.5.3 任务 F 服务级锁：seeded ready-cache 下 stat_entry_size + read_file
+    /// 两连击（media:// handler 同款双 Service 调用，lib.rs:271/337）合计 origin stat
+    /// 恰 2 次（每 resolve 1 次 identity stat）。修复前每 resolve 另发 1 次相同 fresh
+    /// stat（合计 4）——漏接 service 分支、误删 trait 覆盖都会回红本用例。
+    #[tokio::test]
+    async fn ready_hit_service_level_costs_single_origin_stat_per_call() {
+        let zip_bytes = build_zip_bytes(&["p10.png", "p1.png", "p2.png"]);
+        let mock = StdArc::new(MockOrigin::new(zip_bytes.len() as u64));
+        *mock.bytes.lock().unwrap() = zip_bytes;
+        let (m, _dir, _db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        // 预物化造 ready 行 + final 文件；本轮下载自身的统计随后清零
+        m.ensure_cached(&origin, "book.cbz", crate::source::descriptor::ArchiveFormat::Cbz)
+            .await
+            .unwrap();
+        mock.stat_calls.store(0, Ordering::SeqCst);
+        mock.read_calls.store(0, Ordering::SeqCst);
+
+        let descriptor = SourceDescriptor::Archive {
+            archive_path: "https://d/x/book.cbz".into(),
+            entry_prefix: String::new(),
+            format: crate::source::descriptor::ArchiveFormat::Cbz,
+            origin: Some(Box::new(webdav(""))),
+            origin_entry_path: Some("book.cbz".into()),
+            archive_rel_path: Some("book.cbz".into()),
+        };
+        // 先取 coordinator 再移动 m（args 自左向右求值，借用后移会 E0382）
+        let coordinator = m.coordinator();
+        let materializer = StdArc::new(m)
+            as StdArc<dyn crate::source::archive_impl::Materialize>;
+        let svc = crate::source::archive::service::ArchiveService::new(
+            materializer,
+            coordinator, // 与 materializer 同一 coordinator：gate/generation 单闸语义
+        );
+
+        let size = svc.stat_entry_size(&descriptor, "p1.png").await.unwrap();
+        assert_eq!(size, PNG_MAGIC.len() as u64, "条目声明 size=PNG 头长");
+        assert_eq!(
+            mock.stat_calls.load(Ordering::SeqCst), 1,
+            "stat_entry_size：resolve 内恰 1 次 origin stat（修复前为 2）",
+        );
+
+        let bytes = svc.read(&descriptor, "p1.png").await.unwrap();
+        assert_eq!(&bytes[..], &PNG_MAGIC[..], "entry 字节解压无损");
+        assert_eq!(
+            mock.stat_calls.load(Ordering::SeqCst), 2,
+            "read 的第二次 resolve 同样仅 1 次（两连击合计 2，修复前 4）",
+        );
+        assert_eq!(
+            mock.read_calls.load(Ordering::SeqCst), 0,
+            "ready 命中零远程 read（既有 e2e 事实保持）",
+        );
+    }
+
     // ─── 任务 8：五格式扩展物化 / FormatMismatch 双重校验 / legacy .zip 行 / subscriber ───
 
     use crate::source::archive::cache_coordinator::ArchiveCacheCoordinator;
@@ -2503,6 +2579,78 @@ pub(crate) mod tests {
         // 闸门复位后恢复
         drop(_clear_guard);
         assert!(m.ready_path_if_fresh(&origin, "a.cbz", ArchiveFormat::Cbz).await.unwrap().is_some());
+    }
+
+    /// module3.5.3 任务 F：known_stat 直传时不得再发 origin stat（ready GET 全程 4→2 HEAD）。
+    /// 行为矩阵与不带 stat 版本逐字节一致：fresh→Some(path)，stale→None。
+    #[tokio::test]
+    async fn ready_path_if_fresh_with_stat_reuses_known_stat_without_remote_roundtrip() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, dir, db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        let key = cache_key(&origin, "a.cbz");
+        let final_path = dir.path().join(format!("{key}.cbz"));
+        std::fs::write(&final_path, vec![7u8; 10]).unwrap();
+        {
+            let conn = db.conn();
+            crate::source::archive::dao::upsert(&conn, &crate::source::archive::dao::NewCacheRow {
+                cache_key: key.clone(),
+                origin_kind: "webdav".into(),
+                archive_rel_path: "a.cbz".into(),
+                origin_size: 10,
+                origin_mtime: Some(1000),
+                cache_abs_path: final_path.display().to_string(),
+                byte_size: 10,
+            }).unwrap();
+        }
+
+        // fresh known_stat → Some(path)，且 stat_calls == 0（完全零网络）
+        let hit = m
+            .ready_path_if_fresh_with_stat(
+                &origin, "a.cbz", ArchiveFormat::Cbz,
+                Some(&crate::source::trait_def::FileStat { size: 10, modified_at: Some(1000) }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(hit, Some(final_path.clone()), "fresh 行命中返回记录路径");
+        assert_eq!(mock.stat_calls.load(Ordering::SeqCst), 0, "known_stat 复用不得触发 origin stat");
+
+        // 陈旧 known_stat → None（stale 语义保持），依旧零网络
+        let miss = m
+            .ready_path_if_fresh_with_stat(
+                &origin, "a.cbz", ArchiveFormat::Cbz,
+                Some(&crate::source::trait_def::FileStat { size: 99, modified_at: Some(2000) }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(miss, None, "provided stat 的 is_stale 判定必须照常生效");
+        assert_eq!(mock.stat_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// 委托版（None）语义回归：原签名行为不变，走一次 origin stat。
+    #[tokio::test]
+    async fn ready_path_if_fresh_none_delegates_and_stats_once() {
+        let mock = StdArc::new(MockOrigin::new(10));
+        let (m, dir, db) = temp_materializer(mock.clone());
+        let origin = webdav("");
+        let key = cache_key(&origin, "a.cbz");
+        let final_path = dir.path().join(format!("{key}.cbz"));
+        std::fs::write(&final_path, vec![7u8; 10]).unwrap();
+        {
+            let conn = db.conn();
+            crate::source::archive::dao::upsert(&conn, &crate::source::archive::dao::NewCacheRow {
+                cache_key: key.clone(),
+                origin_kind: "webdav".into(),
+                archive_rel_path: "a.cbz".into(),
+                origin_size: 10,
+                origin_mtime: Some(1000),
+                cache_abs_path: final_path.display().to_string(),
+                byte_size: 10,
+            }).unwrap();
+        }
+        let hit = m.ready_path_if_fresh(&origin, "a.cbz", ArchiveFormat::Cbz).await.unwrap();
+        assert_eq!(hit, Some(final_path.clone()));
+        assert_eq!(mock.stat_calls.load(Ordering::SeqCst), 1, "委托版应保留内部 stat");
     }
 
     // ─── subscriber 测试 harness：read 阻塞源 + 进度捕获 + 门闩 ───
