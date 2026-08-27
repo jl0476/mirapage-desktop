@@ -34,6 +34,7 @@ vi.mock('@/lib/tauri', () => ({
 }));
 
 import Settings from './Settings.vue';
+import NumberRow from '@/components/settings/NumberRow.vue';
 import { useSettingsStore } from '@/stores/settings';
 import { i18n } from '@/locales';
 
@@ -241,6 +242,210 @@ describe('Settings.vue remote section (M3 任务 9)', () => {
     await flushPromises();
     const { setArchivePrefetchEnabled } = await import('@/lib/tauri');
     expect(setArchivePrefetchEnabled).toHaveBeenCalledWith(false);
+  });
+
+  // module3.5.3 任务 C：IPC reject 时 UI 必须回滚假成功（alert 直呈与清空缓存按钮同款范式）。
+  // 判据链：click#1 注入 reject → 回滚后 UI 停在初值 true → click#2 必然再次发起 false。
+  it('预载开关 invoke reject → ref 回滚初值 + alert 提示', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const wrapper = mountSettings();
+    await flushPromises();
+    const btn = wrapper.find('[data-test="remote-archive-prefetch"]').find('button');
+
+    const { setArchivePrefetchEnabled } = await import('@/lib/tauri');
+    vi.mocked(setArchivePrefetchEnabled).mockRejectedValueOnce(new Error('ipc down'));
+    await btn.trigger('click'); // true→false 翻转发起 IPC，reject
+    await flushPromises();
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(setArchivePrefetchEnabled).toHaveBeenCalledWith(false);
+
+    // 回滚自证：若假成功未回滚（现缺陷行为），UI 已是 false，本次点击会发 true；
+    // 回滚正确时初值 true 保持，第二次点击仍发 false
+    vi.mocked(setArchivePrefetchEnabled).mockClear();
+    await btn.trigger('click'); // 默认 mock resolve
+    await flushPromises();
+    expect(setArchivePrefetchEnabled).toHaveBeenLastCalledWith(false);
+
+    alertSpy.mockRestore();
+  });
+
+  // 审查 P0-2 核心场景：旧请求晚于新请求 settle 时，不得覆盖新值/误告警；
+  // writeTail 串行化保证 #2 在 #1 settle 前根本不发——后端完成顺序==操作顺序。
+  it('上限双 deferred 交错：头请求晚败被顶替静默，最终值=第 2 次选择', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const wrapper = mountSettings();
+    await flushPromises();
+
+    // Pinia 由组件 setup 首次 useSettingsStore() 自动激活；只钉本键两笔调用，
+    // 其余转发真实实现
+    const { getActivePinia } = await import('pinia');
+    const { useSettingsStore } = await import('@/stores/settings');
+    const store = useSettingsStore(getActivePinia()!);
+    const realUpdate = store.update.bind(store);
+    let releaseFail!: () => void;
+    vi.spyOn(store, 'update')
+      .mockImplementationOnce(
+        () => new Promise<void>((_, rej) => { releaseFail = () => rej(new Error('db down')); }),
+      )
+      .mockImplementationOnce(realUpdate);
+
+    const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
+    await input.setValue('4096'); // 写 #1 排入 tail 后挂起
+    await input.setValue('8192'); // 写 #2 排队
+    await flushPromises();
+    // 串行化自证：#1 挂起期间 #2 根本未发起（后端完成顺序==操作顺序）
+    expect(store.update).toHaveBeenCalledTimes(1);
+    expect(store.update).toHaveBeenCalledWith('archive_cache_max_mb', 4096);
+    expect((input.element as HTMLInputElement).value).toBe('8192'); // 显示值乐观即时
+
+    releaseFail();                // 第 1 次此刻才失败——用户最新意图已是 8192
+    await flushPromises();
+    // 串行链此刻才发第 2 笔（简报原断言置于 releaseFail 前，与「#2 不早发」矛盾，已按目标语义后移）
+    expect(store.update).toHaveBeenCalledWith('archive_cache_max_mb', 8192);
+    expect((input.element as HTMLInputElement).value).toBe('8192'); // 不回滚到旧值
+    expect(alertSpy).not.toHaveBeenCalled();                        // 被顶替的失败静默
+    alertSpy.mockRestore();
+  });
+
+  // 审查 P0-1（第二轮）核心场景：A→B→A 后首个 A 晚败——按「显示值==尝试值」判据
+  // 会误认为自己仍是最新请求而回滚到 B 并误告警；revision 判定下 id1≠latest(3) 静默。
+  it('上限 ABA 序列且首请求晚败：终值与持久化均为最后一次的 4096，零告警', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const wrapper = mountSettings();
+    await flushPromises();
+
+    const { getActivePinia } = await import('pinia');
+    const { useSettingsStore } = await import('@/stores/settings');
+    const store = useSettingsStore(getActivePinia()!);
+    const realUpdate = store.update.bind(store);
+    let failFirst!: () => void;
+    vi.spyOn(store, 'update')
+      .mockImplementationOnce(() => new Promise<void>((_, rej) => { failFirst = () => rej(new Error('db down')); }))
+      .mockImplementationOnce(realUpdate)   // #2 → 8192
+      .mockImplementationOnce(realUpdate);  // #3 → 4096
+
+    const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
+    await input.setValue('4096'); // #1 排入 tail 挂起
+    await input.setValue('8192'); // #2 排队
+    await input.setValue('4096'); // #3 排队——显示值回到与 #1 尝试值相同（ABA 靶心）
+    expect((input.element as HTMLInputElement).value).toBe('4096');
+
+    failFirst();                  // #1 此刻才失败
+    await flushPromises();
+
+    expect(store.update).toHaveBeenCalledTimes(3);
+    expect((input.element as HTMLInputElement).value).toBe('4096'); // 不得回滚成 8192（等值判据的病灶）
+    expect(alertSpy).not.toHaveBeenCalled();                        // #1 已非最新请求，静默
+
+    // 最终持久化核对：#2/#3 转发真实 update，底层 setSetting(key, String(value))
+    // （stores/settings.ts:129-130）尾笔应恰为最后一次选择的 '4096'
+    const { setSetting } = await import('@/lib/tauri');
+    expect(setSetting).toHaveBeenLastCalledWith('archive_cache_max_mb', '4096');
+
+    alertSpy.mockRestore();
+  });
+
+  // 第三轮审查核心场景：连环失败时乐观 prev 被前序失败翻转污染——
+  // 2048→4096(#1败)→8192(#2败)，回滚目标必须是 confirmed=2048 而非 prev₂=4096。
+  it('连续两笔均失败（4096 败→8192 败）：UI 与持久化均保持已确认的 2048，仅最新失败告警一次', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const wrapper = mountSettings();
+    await flushPromises();
+    // 本用例要求零成功写；按该文件既有 beforeEach 惯例清计数（无全局重置则手动 mockClear）
+    const { setSetting } = await import('@/lib/tauri');
+    vi.mocked(setSetting).mockClear();
+
+    const { getActivePinia } = await import('pinia');
+    const { useSettingsStore } = await import('@/stores/settings');
+    const store = useSettingsStore(getActivePinia()!);
+    let fail1!: () => void;
+    let fail2!: () => void;
+    vi.spyOn(store, 'update')
+      .mockImplementationOnce(() => new Promise<void>((_, rej) => { fail1 = () => rej(new Error('db down')); }))
+      .mockImplementationOnce(() => new Promise<void>((_, rej) => { fail2 = () => rej(new Error('db down')); }));
+
+    const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
+    await input.setValue('4096'); // #1 排入 tail 挂起（display 4096）
+    await input.setValue('8192'); // #2 排队（display 8192；confirmed 仍 2048）
+    await flushPromises();
+
+    fail1();                      // #1 失败——已被 #2 顶替，静默且 confirmed 不动
+    await flushPromises();
+    expect((input.element as HTMLInputElement).value).toBe('8192');
+    expect(alertSpy).not.toHaveBeenCalled();
+
+    fail2();                      // #2 失败——最新请求：回滚到 confirmed=2048（非乐观 prev₂=4096）
+    await flushPromises();
+    expect((input.element as HTMLInputElement).value).toBe('2048');
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect(setSetting).not.toHaveBeenCalled(); // 零成功写＝存储从未离开 2048
+
+    alertSpy.mockRestore();
+  });
+
+  it('上限尾请求失败且未被顶替：回滚显示值 + alert 恰一次', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const wrapper = mountSettings();
+    await flushPromises();
+
+    const { getActivePinia } = await import('pinia');
+    const { useSettingsStore } = await import('@/stores/settings');
+    const store = useSettingsStore(getActivePinia()!);
+    vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('db down'));
+
+    const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
+    const initial = (input.element as HTMLInputElement).value;
+
+    await input.setValue('8192'); // 组件内钳位后发起 update → reject
+    await flushPromises();
+    expect(store.update).toHaveBeenCalledWith('archive_cache_max_mb', 8192);
+    expect(alertSpy).toHaveBeenCalledTimes(1);
+    expect((input.element as HTMLInputElement).value).toBe(initial); // 回滚显示值
+
+    alertSpy.mockRestore();
+  });
+
+  // 第四轮审查核心场景：初载回填（deferred getSetting）未决时用户写入——无门时写意图
+  // 抢跑，回滚基准停在种子默认 2048 而 DB 实为 4096。有门时写意图挂起→回填 4096→
+  // 门开→写继续→失败→回滚到 confirmed=4096（DB 真值）。
+  it('初载未完成时写入挂就绪门：失败后 UI 回滚到真实 DB 值 4096 而非种子默认', async () => {
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const { getSetting, setSetting } = await import('@/lib/tauri');
+    // 只钉 maxMb 为 deferred；prefetch 键与后续调用走既有默认 mock（返回 null 不回填）
+    const origGetSetting = vi.mocked(getSetting).getMockImplementation();
+    let resolveMax!: () => void;
+    vi.mocked(getSetting).mockImplementation(async (key: string) => {
+      if (key !== 'archive_cache_max_mb') return null as never;
+      await new Promise<void>((r) => { resolveMax = r; });
+      return '4096';
+    });
+    vi.mocked(setSetting).mockClear();
+
+    const wrapper = mountSettings(); // onMounted → loadRemoteSection 挂在 deferred 上
+
+    const { getActivePinia } = await import('pinia');
+    const { useSettingsStore } = await import('@/stores/settings');
+    const store = useSettingsStore(getActivePinia()!);
+    vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('db down'));
+
+    const input = wrapper.find('[data-test="archive-cache-limit"]').find('input');
+    expect((input.element as HTMLInputElement).value).toBe('2048'); // 初载中仍显默认
+    await input.setValue('8192');                                   // 写意图挂 ready 门
+    await flushPromises();
+    // 挂门期判据（简报原断言读 DOM，但 VTU setValue 直写 element.value 且 ref 未翻转
+    // 无 re-render，DOM 必然残留 '8192'——改为 prop 层「不乐观翻转」+「写未发起」：
+    expect(wrapper.find('[data-test="archive-cache-limit"]').findComponent(NumberRow).props('value')).toBe(2048);
+    expect(store.update).not.toHaveBeenCalled();
+
+    resolveMax();                 // 回填 4096（display+confirmed 双写）→ 放门
+    await flushPromises();
+
+    expect(alertSpy).toHaveBeenCalledTimes(1);                      // 失败告警恰一次
+    expect((input.element as HTMLInputElement).value).toBe('4096'); // 回滚到 DB 真值非 2048
+    expect(setSetting).not.toHaveBeenCalled();                      // 零成功写＝DB 保持 4096
+
+    alertSpy.mockRestore();
+    if (origGetSetting) vi.mocked(getSetting).mockImplementation(origGetSetting);
   });
 
   it('上限输入越界值 100 → 钳 512 → settings.update 持久化 archive_cache_max_mb', async () => {

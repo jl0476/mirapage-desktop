@@ -57,21 +57,45 @@ async function doRun() {
 // 开关/上限初值从 settings 表读（Rust 侧默认 true / 2048，"仅 'false' 关闭"语义对齐）。
 // 上限写 DB：下次物化成功/失败退出或下次启动清理时生效。
 const remotePrefetchEnabled = ref(true);
+const remotePrefetchConfirmed = ref(true); // 回滚基准＝最后一次确认成功的值（不随失败翻转）
 const archiveCacheMaxMb = ref(2048);
+const archiveCacheConfirmedMb = ref(2048);
+
+// module3.5.3 任务 C 第四轮：初载期间的用户写入挂在本门上——保证 DB 回填先于
+// 任何本地写意图生效。回填决策恒在放门前完成 ⇒ 无需单独的"写意图已开始"标志
+// （过门者其意图必不被覆盖；未过门者尚未触碰任何状态）。门只开一次；
+// 加载失败也放行（confirmed 退化回种子默认，属可接受的静默错位面——页面重进即自愈）。
+let fireRemoteSectionReady!: () => void;
+const remoteSectionReady = new Promise<void>((resolve) => { fireRemoteSectionReady = resolve; });
+
 const archiveCacheUsage = ref<ArchiveCacheInfo | null>(null);
 const clearingArchiveCache = ref(false);
 
 async function loadRemoteSection() {
-  const [prefetch, maxMb] = await Promise.all([
-    getSetting('remote_archive_prefetch_enabled'),
-    getSetting('archive_cache_max_mb'),
-  ]);
-  if (prefetch !== null) remotePrefetchEnabled.value = prefetch !== 'false';
-  if (maxMb !== null) {
-    const n = Number(maxMb);
-    if (Number.isFinite(n)) archiveCacheMaxMb.value = n;
+  try {
+    const [prefetch, maxMb] = await Promise.all([
+      getSetting('remote_archive_prefetch_enabled'),
+      getSetting('archive_cache_max_mb'),
+    ]);
+    if (prefetch !== null) {
+      const on = prefetch !== 'false';
+      remotePrefetchEnabled.value = on;
+      remotePrefetchConfirmed.value = on;
+    }
+    if (maxMb !== null) {
+      const n = Number(maxMb);
+      if (Number.isFinite(n)) {
+        archiveCacheMaxMb.value = n;
+        archiveCacheConfirmedMb.value = n;
+      }
+    }
+    // 先放行写入协议，再 await 用量刷新（网络型调用不得拖延 ready 门）
+    fireRemoteSectionReady();
+    await refreshArchiveCacheUsage();
+  } catch (e) {
+    log('[settings] loadRemoteSection failed', e);
+    fireRemoteSectionReady(); // 加载失败也必须开门：挂死比回滚基准退化更糟
   }
-  await refreshArchiveCacheUsage();
 }
 
 async function refreshArchiveCacheUsage() {
@@ -96,17 +120,52 @@ const archiveCacheUsageText = computed(() => {
     : t('settings.remote.archiveCacheUsage', { count: u.count, size });
 });
 
-/** 预载开关：走任务 8 命令（写 settings + 运行时推送 Prefetcher），不重复造。 */
+// module3.5.3 任务 C（三轮审查修订 + 第四轮补门）：writeTail 串行化 + revision 判定
+// 最新 + confirmed 确认基准回滚。第四轮：入口 await remoteSectionReady——初载期间的
+// 写意图不抢跑，防 confirmed 以默认值为基准回滚错值、防迟到回填覆盖已开始的本地写。
+let prefetchWriteTail: Promise<void> = Promise.resolve();
+let prefetchLatestReqId = 0;
+let cacheLimitWriteTail: Promise<void> = Promise.resolve();
+let cacheLimitLatestReqId = 0;
+
+/** 预载开关：走任务 8 命令（写 settings + 运行时推送 Prefetcher）。 */
 async function setRemotePrefetch(v: boolean) {
+  await remoteSectionReady;            // 第四轮：初载期间挂队，回填先于本写意图生效
+  const reqId = ++prefetchLatestReqId;
   remotePrefetchEnabled.value = v;
-  await setArchivePrefetchEnabled(v);
+  const call = prefetchWriteTail.then(() => setArchivePrefetchEnabled(v));
+  prefetchWriteTail = call.then(() => undefined, () => undefined);
+  try {
+    await call;
+    remotePrefetchConfirmed.value = v; // 成功才推进确认基准
+  } catch (e) {
+    if (reqId === prefetchLatestReqId) { // 仅最新请求回滚，目标是 confirmed
+      remotePrefetchEnabled.value = remotePrefetchConfirmed.value;
+      window.alert(String(e));
+    }
+  }
 }
 
-/** 缓存上限：前端钳 512–32768 后持久化。 */
+/** 缓存上限：前端钳 512–32768 后持久化；同款协议。 */
 async function setArchiveCacheLimit(v: number) {
+  await remoteSectionReady;            // 第四轮：同上
   const n = Math.min(32768, Math.max(512, Math.round(Number(v) || 2048)));
+  // 同值早退放在过门后：迟到回填可能恰好把显示值改成本输入值，此时冗余写自然消解；
+  // 不发起请求也不推进 revision/confirmed
+  if (n === archiveCacheMaxMb.value) return;
+  const reqId = ++cacheLimitLatestReqId;
   archiveCacheMaxMb.value = n;
-  await settings.update('archive_cache_max_mb', n);
+  const call = cacheLimitWriteTail.then(() => settings.update('archive_cache_max_mb', n));
+  cacheLimitWriteTail = call.then(() => undefined, () => undefined);
+  try {
+    await call;
+    archiveCacheConfirmedMb.value = n;
+  } catch (e) {
+    if (reqId === cacheLimitLatestReqId) {
+      archiveCacheMaxMb.value = archiveCacheConfirmedMb.value;
+      window.alert(String(e));
+    }
+  }
 }
 
 async function clearArchiveCacheClicked() {
