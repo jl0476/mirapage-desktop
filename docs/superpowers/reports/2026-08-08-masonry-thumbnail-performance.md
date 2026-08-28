@@ -98,6 +98,29 @@ migration 009：`thumbnail_cache` 表（16 列）+ `idx_thumbnail_cache_lru`。
 | 热缓存主要帧时间 | < 33ms | n/a | _待测_ |
 | 冷缓存首张缩略图出现 | ≤ 500ms | n/a | _待测_ |
 
+### 4.1 2026-08-28 实测补录（module3.5.3 后实机批，CDP 采样，normal 224 张 4K 图）
+
+| 指标 | 目标 | 改造前 | **改造后实测** |
+|---|---:|---:|---:|
+| 可见 DOM 图片数 | ≤ 40 | ~18 | **18** ✅ |
+| 瀑布流直接加载超阈值 4K 原图 | 0 | 18+ | **0**（18/18 全部 `masonry-thumbnails` 缓存 URL）✅ |
+| 滚动最大单帧 | < 50ms | 313ms | **33.3ms**（含缩略图生成/解码全管线首滚；9.4×）✅ |
+| >100ms 严重掉帧 | 0 | 5 | **0**（longtask 0）✅ |
+| 热缓存主要帧时间 | < 33ms | n/a | **max 17ms，p50/p90/p99 = 16.7/16.8/16.8ms**（60fps 满帧，>33ms 帧 = 0）✅ |
+| 冷缓存首张缩略图出现 | ≤ 500ms | n/a | **dev 环境未判定**（见下方口径注记） |
+
+**采样方法**：`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222` +
+`docs/tauri-devtools-debugging.md` 流程，CDP `evaluate_script` 注入 rAF delta 采样 +
+`PerformanceObserver('longtask')` + 程序化分步滚动（600px/110ms），两遍取数。
+
+**口径注记（重要）**：
+1. 本表帧率类指标为浏览器渲染侧，dev/debug 环境有效；**缩略图"生成"吞吐是 Rust 侧，
+   debug build 比 release 慢 10-50×**（实测单张 4K jpg decode 5.1s + resize 5.8s，
+   release 应为亚秒级）。"冷缓存首张 ≤500ms" 必须以 release portable 实测为准。
+2. 实测发现一个**预存在前端缺口**：带浏览位置恢复的目录（`scrollToEntry` restore 路径）
+   进入 masonry 后缩略图请求链不发出（epoch bump 正常、`classify`/`ENQUEUE` 零日志），
+   无恢复路径目录正常——待专项排查，与 §5 待跑项一并跟踪。
+
 **复现命令**：
 ```bash
 npm run tauri:dev

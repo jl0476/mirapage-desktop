@@ -152,6 +152,11 @@ pub enum ThumbnailError {
     Io(#[from] std::io::Error),
     #[error("invalid input: {0}")]
     Invalid(String),
+    /// 协作式取消（实机批热修）：目录切换/清空缓存使任务变 stale，生成器在阶段
+    /// 边界检查 abort 标志提前退出。该错误只在调度器内部消化——旧 epoch 的
+    /// Completed 一律映射 Outcome::Stale，不会以 Failed 形态抵达前端。
+    #[error("cancelled")]
+    Cancelled,
 }
 
 #[cfg(test)]

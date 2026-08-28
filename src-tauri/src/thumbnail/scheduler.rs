@@ -11,14 +11,18 @@
 //!
 //! - 优先级 visible > ahead > behind > idle；同级按提交顺序。
 //! - 同 cache_key 只跑一次，多订阅者收同一结果（in-flight 去重）。
-//! - 新 epoch 到达：旧 epoch 未开始任务标 stale（订阅者收 Stale）；已开始任务允许完成
-//!   并写缓存，但其订阅者收 Stale（不发 Cached UI 更新）。
+//! - 新 epoch 到达：旧 epoch 未开始任务标 stale（订阅者收 Stale）；已开始任务
+//!   【协作式取消】——epoch 标志置位后生成器在阶段边界提前退出（错误映射回
+//!   Stale，不写缓存），worker 立即转投新 epoch 任务。最大浪费 = 一个已进入
+//!   的阶段（实机批热修：此前 in-flight 跑完整管线，2 worker × 慢任务会 stall
+//!   新目录数十秒）。
 //! - 快速滚动期间不启动 idle。
 //! - 老化：等待超过阈值的任务优先级提升，避免被连续高优先级任务永久饥饿。
 //! - 设置变更只影响下一次调度，不中断正在编码的任务。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +60,10 @@ pub struct GenerationJob {
     /// cache_key/ui_path/epoch/AppHandle 并 `let _ = app.emit(EVENT_PROGRESS, ...)`，
     /// 禁止同步 IO / Db 锁（emit 非阻塞）。
     pub on_progress: Option<Arc<dyn Fn(GenPhase, u64) + Send + Sync>>,
+    /// 协作式取消标志（实机批热修）：new_epoch / cancel_all 对 stale in-flight
+    /// 置位，generate_thumbnail 在阶段边界检查。由首次 ENQUEUE 的调度器路径
+    /// 持有同一 Arc（InFlight.abort），去重订阅共享原任务标志。
+    pub abort: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for GenerationJob {
@@ -69,6 +77,7 @@ impl std::fmt::Debug for GenerationJob {
             .field("webp_quality", &self.webp_quality)
             .field("cache_path", &self.cache_path)
             .field("on_progress", &self.on_progress.is_some())
+            .field("abort", &self.abort.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -150,6 +159,10 @@ struct Pending {
 
 struct InFlight {
     subscribers: Vec<oneshot::Sender<Outcome>>,
+    /// 任务自身的 epoch：new_epoch 时对 epoch 落后的 in-flight 置位 abort 标志
+    /// （协作式取消，实机批热修）。
+    epoch: u64,
+    abort: Arc<AtomicBool>,
 }
 
 /// 调度器句柄。drop 时发送 Shutdown。
@@ -364,15 +377,30 @@ impl Actor {
                 i += 1;
             }
         }
+        // 协作式取消（实机批热修）：epoch 落后的 in-flight 置位 abort 标志，
+        // 生成器在阶段边界提前退出，worker 立即转投新 epoch 任务——不再让
+        // 旧目录的慢任务霸占 worker 拖住新目录首屏。
+        let mut aborted_inflight = 0usize;
+        for inf in self.inflight.values_mut() {
+            if inf.epoch < epoch {
+                inf.abort.store(true, Ordering::Relaxed);
+                aborted_inflight += 1;
+            }
+        }
         log::write_log(
             "INFO",
             "thumbnail",
             &format!(
-                "scheduler new_epoch old={} new={} stalePending={} inflightSurvivors={}",
-                prev, epoch, stale_n, self.inflight.len()
+                "scheduler new_epoch old={} new={} stalePending={} inflightAborted={} inflightSurvivors={}",
+                prev,
+                epoch,
+                stale_n,
+                aborted_inflight,
+                self.inflight.len() - aborted_inflight
             ),
         );
-        // in-flight 保留（让其完成写缓存）；完成时按 epoch 决定是否发 Cached。
+        // 幸存的 in-flight（epoch >= new 的同 epoch 任务）继续完成写缓存；
+        // 被中止的任务经 handle_completed 按 epoch 映射 Stale（不写索引）。
     }
 
     /// P2-2: 清空缓存/维护用。bump 内部 epoch 使所有现存任务（pending + in-flight）
@@ -389,12 +417,18 @@ impl Actor {
                 let _ = s.send(Outcome::Stale);
             }
         }
+        // 协作式取消：全部 in-flight 置位 abort（epoch 已全部落后于新 current）。
+        let mut aborted_inflight = 0usize;
+        for inf in self.inflight.values_mut() {
+            inf.abort.store(true, Ordering::Relaxed);
+            aborted_inflight += 1;
+        }
         log::write_log(
             "INFO",
             "thumbnail",
             &format!(
-                "scheduler cancel_all prevEpoch={} newEpoch={} drainedPending={} inflightWillStale={}",
-                prev, self.current_epoch, drained_n, self.inflight.len()
+                "scheduler cancel_all prevEpoch={} newEpoch={} drainedPending={} inflightAborted={}",
+                prev, self.current_epoch, drained_n, aborted_inflight
             ),
         );
     }
@@ -449,13 +483,19 @@ impl Actor {
             let cache_key = pending.task.cache_key.clone();
             let epoch = pending.task.epoch;
             let est_mb = pending.task.estimated_memory_mb;
+            // 先克隆 abort 标志再 move job（避免部分移动）——InFlight 与 job 共享同一 Arc
+            let abort = pending.task.job.abort.clone();
             let job = pending.task.job;
             let subscribers = pending.subscribers;
             let worker_id = self.running_count;
 
             self.inflight.insert(
                 cache_key.clone(),
-                InFlight { subscribers },
+                InFlight {
+                    subscribers,
+                    epoch,
+                    abort,
+                },
             );
             self.running_count += 1;
             self.running_memory += est_mb as u64;
@@ -510,6 +550,14 @@ impl Actor {
                         "thumbnail",
                         &format!(
                             "scheduler worker DONE worker={} cacheKey={} result=cached durationMs={}",
+                            worker_id, ck, elapsed_ms
+                        ),
+                    ),
+                    Err(ThumbnailError::Cancelled) => log::write_log(
+                        "INFO",
+                        "thumbnail",
+                        &format!(
+                            "scheduler worker DONE worker={} cacheKey={} result=cancelled(stale-abort) durationMs={}",
                             worker_id, ck, elapsed_ms
                         ),
                     ),
@@ -613,6 +661,7 @@ mod tests {
             webp_quality: 82.0,
             cache_path: PathBuf::from(format!("/tmp/{key}.webp")),
             on_progress: None,
+            abort: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -752,6 +801,61 @@ mod tests {
         let o2 = r2.await.unwrap();
         assert!(matches!(o1, Outcome::Cached(_)));
         assert!(matches!(o2, Outcome::Cached(_)));
+    }
+
+    /// 实机批热修：new_epoch 对 epoch 落后的 in-flight 置位 abort 标志（协作式
+    /// 取消）——worker 端生成器在阶段边界看到标志即提前退出，不再霸占 worker。
+    #[tokio::test]
+    async fn new_epoch_sets_abort_flag_on_stale_inflight() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 2,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        let r_old = handle.submit(task("old", Priority::Visible, 1, 10));
+        let (job, reply) = recv_job(&mut rx).await;
+        assert!(!job.abort.load(Ordering::Relaxed), "启动时标志应为 false");
+
+        handle.new_epoch(2);
+        // 邮箱有序：探针任务被启动 ⇒ NewEpoch 必已处理（消除异步竞态）
+        let r_probe = handle.submit(task("probe", Priority::Visible, 2, 10));
+        let (_jprobe, preply) = recv_job(&mut rx).await;
+        assert!(
+            job.abort.load(Ordering::Relaxed),
+            "new_epoch 应置位 stale in-flight 的 abort 标志"
+        );
+
+        // 旧 epoch 完成路径：订阅者收 Stale（existing 语义保持）
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(r_old.await.unwrap(), Outcome::Stale));
+        let _ = preply.send(Ok(ok_thumb()));
+        assert!(matches!(r_probe.await.unwrap(), Outcome::Cached(_)));
+    }
+
+    /// 实机批热修：cancel_all 对全部 in-flight 置位 abort（清空缓存不再等慢任务跑完）。
+    #[tokio::test]
+    async fn cancel_all_sets_abort_flag_on_inflight() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 2,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        let r = handle.submit(task("k", Priority::Visible, 1, 10));
+        let (job, reply) = recv_job(&mut rx).await;
+
+        handle.cancel_all();
+        // 邮箱有序探针（同上）
+        let r_probe = handle.submit(task("probe", Priority::Visible, 1, 10));
+        let (_jprobe, preply) = recv_job(&mut rx).await;
+        assert!(
+            job.abort.load(Ordering::Relaxed),
+            "cancel_all 应置位 in-flight 的 abort 标志"
+        );
+
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(r.await.unwrap(), Outcome::Stale));
+        let _ = preply.send(Ok(ok_thumb()));
+        assert!(matches!(r_probe.await.unwrap(), Outcome::Stale));
     }
 
     #[tokio::test]

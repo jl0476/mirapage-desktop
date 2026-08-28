@@ -219,6 +219,9 @@ pub fn classify_item(
         cache_path: cache_abs.clone(),
         // module3.0.11：request/resubmit 提交循环注入 progress 闭包（任务 4）
         on_progress: None,
+        // 实机批热修：协作式取消标志——new_epoch/cancel_all 置位后生成器在阶段
+        // 边界提前退出（初始恒 false；Arc 由调度器 InFlight 共享）
+        abort: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let task = QueuedTask {
         cache_key: cache_key.clone(),
@@ -378,9 +381,11 @@ fn production_generate_fn() -> GenerateFn {
         };
         // module3.0.11：透传阶段进度回调。job 存 `Arc<dyn Fn + Send + Sync>`，
         // generator 参数是裸 `&dyn Fn`——unsized 协变去 Send/Sync 界。
+        // 实机批热修：透传协作式取消标志（阶段边界提前退出）。
         let result = generate_thumbnail(
             req,
             job.on_progress.as_deref().map(|cb| cb as &dyn Fn(GenPhase, u64)),
+            Some(&job.abort),
         );
         let duration_ms = t0.elapsed().as_millis();
         match &result {

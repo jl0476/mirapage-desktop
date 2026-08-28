@@ -14,6 +14,7 @@ use image::{DynamicImage, ImageFormat};
 use super::orientation::{apply_orientation, read_orientation};
 use super::{GenPhase, ThumbnailError};
 use crate::log;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// 一次缩略图生成请求。
 pub struct GenerateRequest<'a> {
@@ -42,10 +43,22 @@ pub struct GeneratedThumbnail {
 /// 生成缩略图并原子写入 `cache_path`。
 /// `on_progress`：阶段边界回调（module3.0.11）；None 时静默。第二参 =
 /// generate 开始到本阶段开始的累计毫秒（t0 相对时间，不含排队等待）。
+/// `abort`：协作式取消标志（实机批热修）——调度器在目录切换/清空缓存时对
+/// stale in-flight 置位，本函数在入口与每个阶段边界检查，命中即返回
+/// `Err(Cancelled)`（此时尚未执行 write_atomic，磁盘零残留）。None = 不可取消。
 pub fn generate_thumbnail(
     req: GenerateRequest,
     on_progress: Option<&dyn Fn(GenPhase, u64)>,
+    abort: Option<&AtomicBool>,
 ) -> Result<GeneratedThumbnail, ThumbnailError> {
+    let check_abort = || -> Result<(), ThumbnailError> {
+        if abort.is_some_and(|a| a.load(Ordering::Relaxed)) {
+            Err(ThumbnailError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    check_abort()?;
     let t0 = Instant::now();
     log::write_log(
         "INFO",
@@ -85,6 +98,8 @@ pub fn generate_thumbnail(
             orientation
         ),
     );
+    // 阶段守卫：在「宣告下一阶段」之前检查——绝不宣告不会执行的阶段。
+    check_abort()?;
     if let Some(cb) = on_progress {
         cb(GenPhase::Resizing, t0.elapsed().as_millis() as u64);
     }
@@ -121,6 +136,7 @@ pub fn generate_thumbnail(
             display_w, display_h, out_w, out_h
         ),
     );
+    check_abort()?;
     if let Some(cb) = on_progress {
         cb(GenPhase::Encoding, t0.elapsed().as_millis() as u64);
     }
@@ -142,6 +158,7 @@ pub fn generate_thumbnail(
         "thumbnail",
         &format!("generator ENCODE done bytes={}", webp_bytes.len()),
     );
+    check_abort()?;
     if let Some(cb) = on_progress {
         cb(GenPhase::Writing, t0.elapsed().as_millis() as u64);
     }
@@ -284,9 +301,13 @@ mod tests {
             webp_quality: 82.0,
             cache_path: &cache_path,
         };
-        let result = generate_thumbnail(req, Some(&|phase, elapsed_ms| {
-            phases.lock().unwrap().push((phase, elapsed_ms));
-        }));
+        let result = generate_thumbnail(
+            req,
+            Some(&|phase, elapsed_ms| {
+                phases.lock().unwrap().push((phase, elapsed_ms));
+            }),
+            None,
+        );
         assert!(result.is_ok(), "generate should succeed: {:?}", result.err());
         let got = phases.lock().unwrap().clone();
         let kinds: Vec<GenPhase> = got.iter().map(|(p, _)| *p).collect();
@@ -303,6 +324,88 @@ mod tests {
         for w in got.windows(2) {
             assert!(w[1].1 >= w[0].1, "elapsed must be monotonic: {:?}", w);
         }
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    /// 实机批热修：入口 abort 置位 → 立即 Err(Cancelled)，零阶段事件、零磁盘写入。
+    #[test]
+    fn generate_aborts_at_entry_when_flag_set() {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 255]));
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .expect("encode png failed");
+        let out_dir = std::env::temp_dir().join("mira-thumb-abort-entry");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let cache_path = out_dir.join("out.webp");
+        let flag = AtomicBool::new(true);
+        let req = GenerateRequest {
+            source_bytes: &png_bytes,
+            target_width: 512,
+            pixel_budget: 3_000_000,
+            clarity_floor_width: 0,
+            webp_quality: 82.0,
+            cache_path: &cache_path,
+        };
+        let phases: std::sync::Mutex<Vec<GenPhase>> = std::sync::Mutex::new(Vec::new());
+        let result = generate_thumbnail(
+            req,
+            Some(&|phase, _| phases.lock().unwrap().push(phase)),
+            Some(&flag),
+        );
+        assert!(
+            matches!(result, Err(ThumbnailError::Cancelled)),
+            "应返回 Cancelled: {:?}",
+            result.err()
+        );
+        assert!(phases.lock().unwrap().is_empty(), "不应有任何阶段事件");
+        assert!(!cache_path.exists(), "不应写缓存文件");
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+
+    /// 实机批热修：Decoding 阶段回调里置位 → 下个阶段边界中止，无 RESIZE/写盘。
+    #[test]
+    fn generate_aborts_at_phase_boundary_midway() {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 100, 50, 255]));
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+            .expect("encode png failed");
+        let out_dir = std::env::temp_dir().join("mira-thumb-abort-midway");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let cache_path = out_dir.join("out.webp");
+        let flag = AtomicBool::new(false);
+        let req = GenerateRequest {
+            source_bytes: &png_bytes,
+            target_width: 512,
+            pixel_budget: 3_000_000,
+            clarity_floor_width: 0,
+            webp_quality: 82.0,
+            cache_path: &cache_path,
+        };
+        let phases: std::sync::Mutex<Vec<GenPhase>> = std::sync::Mutex::new(Vec::new());
+        let result = generate_thumbnail(
+            req,
+            Some(&|phase, _| {
+                phases.lock().unwrap().push(phase);
+                if phase == GenPhase::Decoding {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            }),
+            Some(&flag),
+        );
+        assert!(
+            matches!(result, Err(ThumbnailError::Cancelled)),
+            "应返回 Cancelled: {:?}",
+            result.err()
+        );
+        let got = phases.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![GenPhase::Decoding],
+            "Decoding 后应中止，不再有后续阶段"
+        );
+        assert!(!cache_path.exists(), "不应写缓存文件");
         let _ = std::fs::remove_dir_all(&out_dir);
     }
 

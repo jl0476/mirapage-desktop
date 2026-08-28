@@ -203,6 +203,7 @@ mod tests {
                         webp_quality: 80.0,
                         cache_path: PathBuf::from(format!("C:/cache/{key}.webp")),
                         on_progress: None,
+                        abort: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     },
                 },
             },
