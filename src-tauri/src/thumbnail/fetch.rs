@@ -58,6 +58,8 @@ pub struct FetchActorConfig {
     pub on_failed: OnFailed,
 }
 
+/// 2026-08-28 bug⑤：ThumbnailService 加 Clone 传导（tx 句柄 + Arc，浅克隆共享 actor）。
+#[derive(Clone)]
 pub struct RemoteFetchActor {
     tx: tokio::sync::mpsc::UnboundedSender<RemoteFetchRequest>,
     epoch: Arc<AtomicU64>,

@@ -453,6 +453,9 @@ pub struct ProgressEvent {
     pub elapsed_ms: u64,
 }
 
+/// 2026-08-28 bug⑤：commands 侧 spawn_blocking 需要 'static——加 Clone
+/// （字段全为 AppHandle/actor 句柄/Arc，浅克隆共享同一底层）。
+#[derive(Clone)]
 pub struct ThumbnailService {
     app: AppHandle,
     scheduler: SchedulerHandle,

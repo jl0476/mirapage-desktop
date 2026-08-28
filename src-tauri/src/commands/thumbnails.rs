@@ -35,7 +35,17 @@ pub async fn request_thumbnails(
             vis_count,
         ),
     );
-    let results = service.request(&descriptor, &items, epoch, &visible_cache_keys);
+    // 2026-08-28 bug⑤ 修复：service.request 是同步批量 classify（持 Db Mutex 跑
+    // 数十条 SQL + 文件 stat），大目录一次几百条会吃住 async worker 数百毫秒到数秒；
+    // 与 clear/多窗口并发时把 worker 耗尽，IO driver 无线程推进 → await 命令睡死
+    // （list_directory 回包悬挂，dump 实证）。搬 spawn_blocking：Sqlite 同步 IO
+    // 本就属 blocking 语义，worker 归还 runtime。
+    let svc = service.inner().clone();
+    let results = tokio::task::spawn_blocking(move || {
+        svc.request(&descriptor, &items, epoch, &visible_cache_keys)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     // 分类统计 + duration
     let mut stats = std::collections::HashMap::<&str, usize>::new();
     for r in &results {
@@ -123,9 +133,17 @@ pub async fn get_thumbnail_cache_info(
 }
 
 /// 清空缓存（删文件 + 索引，保留根目录）。
+/// 2026-08-28 bug⑤ 修复：service.clear() 含同步 Db 锁 + 数百文件删除，
+/// 在 async worker 线程直接执行会吃住 worker，叠加缩略图风暴时把 IO driver
+/// 的推进线程耗尽——list_directory 等 await 命令的回包永不就绪（mio poll 睡死，
+/// dump 符号化实证）。整体搬 spawn_blocking（教科书 blocking 场景）。
 #[tauri::command]
 pub async fn clear_thumbnail_cache(service: State<'_, ThumbnailService>) -> Result<(), String> {
-    service.clear();
+    // Clone 拿 'static（共享同一底层状态），spawn_blocking 内执行同步 clear。
+    let svc = service.inner().clone();
+    tokio::task::spawn_blocking(move || svc.clear())
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
