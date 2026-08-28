@@ -685,8 +685,19 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     archiveAccessMode.value = null;
     const parent = archiveParent.value;
     archiveParent.value = null;
+    if (!parent) {
+      // 实机批热修：未 commit 的 exit（prepare 阶段取消，极速 open→exit 序列）
+      // 没有 parent 可恢复，此刻 currentDescriptor 仍是进入前的源（smb/webdav/
+      // local 或 null）——绝不能无条件清 null：清了会让 activeDescriptor() 回退
+      // 到陈旧本地 rootPath 兜底，下一次 openArchive 走 Local 分支拼出假绝对
+      // 路径（实机 SMB 复现 4/4 entryNotFound，原 25s 挂死同根因）。仅当它确实
+      // 是 archive descriptor 时才清（回 rootPath 兜底的原语义）。
+      if (currentDescriptor.value?.type === 'archive') {
+        currentDescriptor.value = null;
+      }
+      return;
+    }
     currentDescriptor.value = null; // 回 activeDescriptor 的 rootPath 兜底（Local）
-    if (!parent) return;
     if (parent.descriptor.type === 'local') {
       rootPath.value = parent.descriptor.rootPath;
       await navigate(parent.relPath);

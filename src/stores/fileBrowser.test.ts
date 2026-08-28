@@ -894,6 +894,36 @@ describe('fileBrowser store — pendingOpenLocation（likes 浏览跳转意图�
     expect(store.currentDescriptor).toEqual(desc);
   });
 
+  // 实机批热修（原 25s 挂死 / entryNotFound 假本地路径的根因）：prepare 未 commit
+  // 阶段 exitArchive——archiveParent 为 null 走提前 return，但 currentDescriptor
+  // （进入前的远程源）被无条件置 null → activeDescriptor() 回退到陈旧本地 rootPath
+  // → 下一次 openArchive 在 Local 分支拼出假绝对路径（entryNotFound）。语义：未
+  // commit 时 currentDescriptor 根本不是 archive descriptor，exit 不得清它。
+  it('prepare 未 commit 阶段 exitArchive：远程 currentDescriptor 保留，重开不落陈旧本地根', async () => {
+    mockedList.mockResolvedValue(makeEntries('a.jpg'));
+    const store = useFileBrowserStore();
+    const desc = { type: 'smb', accountId: 2, initialPath: 'share', path: '' } as const;
+    await store.openDescriptorAt(desc, 'mirapage');
+    expect(store.currentDescriptor).toEqual(desc);
+
+    // prepare 永不 resolve（挂起 = 极速序列中 exit 抢在 commit 前）
+    vi.mocked(prepareArchive).mockImplementationOnce(() => new Promise(() => {}));
+    // 不 await——真实 UI 为 fire-and-forget；等 opening 标志置位即可
+    void store.openArchive(makeEntry('book.rar', { isArchive: true }));
+    await vi.waitFor(() => expect(store.archiveOpening).toBe(true));
+
+    await store.exitArchive();
+    // 核心断言：远程源身份不被清掉
+    expect(store.currentDescriptor).toEqual(desc);
+    expect(store.archiveOpening).toBe(false);
+
+    // 重开同一包：candidate 在 openArchive 同步段注册——archivePath 直接暴露分支
+    // 决策（远程=smb://2/...，缺陷形态=陈旧本地根拼路径）。零定时器零异步。
+    void store.openArchive(makeEntry('book.rar', { isArchive: true }));
+    expect(store.pendingArchiveOpen?.descriptor.archivePath).toContain('smb://2/share/mirapage/');
+    expect(store.pendingArchiveOpen?.descriptor.archivePath).not.toContain('cold-test');
+  });
+
   it('openDescriptorAt 后 navigate 仍走 currentDescriptor（非 Local 持续生效）', async () => {
     mockedList.mockClear();
     mockedList.mockResolvedValue(makeEntries('b.jpg'));
