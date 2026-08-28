@@ -368,15 +368,24 @@ export function useMasonryThumbnails(
       '[thumbnail] applyResults transitions (first ' + Math.min(BATCH_LOG_PATH_LIMIT, results.length) + ') ' +
         transitions.join(' '),
     );
+    // 实机批 bug⑤ 削峰（一）：单批事务化——原实现循环内逐条 setState（每次克隆
+    // 整个 Map 替换 ref），N 条结果 = N 次 Map 克隆 + N 次响应式触发（O(n²)），
+    // 大目录 224 张时与 CPU 合成风暴叠加把渲染线程打爆。改为：一次克隆，循环内
+    // 直接写 next，尾部一次赋值。raced 守卫读 state.value（本批旧值）——同 path
+    // 不会在一批内出现两次，语义等价。
+    const nextStates = new Map(state.value);
+    const nextKeys = new Map(pathToCacheKey.value);
+    let keysDirty = false;
+    const bufferedToApply: ThumbnailProgressEvent[] = [];
     for (const r of results) {
       const entry = entriesByPath.get(r.path);
       switch (r.status) {
         case 'original':
-          if (entry) setState(r.path, { kind: 'original', url: params.originalUrlFor(entry) });
+          if (entry) nextStates.set(r.path, { kind: 'original', url: params.originalUrlFor(entry) });
           break;
         case 'cached':
           if (r.cachePath && r.width && r.height) {
-            setState(r.path, {
+            nextStates.set(r.path, {
               kind: 'cached',
               cacheKey: r.cacheKey ?? '',
               path: thumbnailCacheUrl(r.cachePath),
@@ -386,14 +395,14 @@ export function useMasonryThumbnails(
           }
           break;
         case 'queued': {
-          const prev = state.value.get(r.path);
+          const prev = nextStates.get(r.path);
           // round-1 P1-3 顺序守卫：Tauri 事件与 invoke 回包无先后保证。同 cacheKey 的
           // progress/完成事件先到时保留事件写入的状态——否则 cached/failed 被降级回
           // generating（永久 spinner）或 phase 被重置回 queued。cacheKey 不同
           // （列宽/质量变化后的重请求）正常覆盖。
           const raced = prev && 'cacheKey' in prev && prev.cacheKey === (r.cacheKey ?? '');
           if (!raced) {
-            setState(r.path, {
+            nextStates.set(r.path, {
               kind: 'generating',
               cacheKey: r.cacheKey ?? '',
               phase: 'queued',
@@ -401,21 +410,23 @@ export function useMasonryThumbnails(
               timings: {},
             });
           }
-          // 消费先于回包缓冲的 progress 事件（decoding 等已到但状态尚未建立）
+          // 消费先于回包缓冲的 progress 事件（decoding 等已到但状态尚未建立）——
+          // P2 修复：记录待消费，挪到尾部赋值之后执行。原位置 applyProgressEvent
+          // 写 state.value（旧 Map），会被循环尾 state.value = nextStates 整体
+          // 覆盖（raced 项 phase 停在较早阶段/新项缓冲完全丢失）。
           const buffered = pendingProgress.get(r.path);
           if (buffered && buffered.cacheKey === (r.cacheKey ?? '')) {
             pendingProgress.delete(r.path);
-            applyProgressEvent(buffered);
+            bufferedToApply.push(buffered);
           }
           if (r.cacheKey) {
-            const next = new Map(pathToCacheKey.value);
-            next.set(r.path, r.cacheKey);
-            pathToCacheKey.value = next;
+            nextKeys.set(r.path, r.cacheKey);
+            keysDirty = true;
           }
           break;
         }
         case 'failed':
-          setState(r.path, {
+          nextStates.set(r.path, {
             kind: 'failed',
             cacheKey: r.cacheKey ?? '',
             retryable: true,
@@ -425,6 +436,12 @@ export function useMasonryThumbnails(
         default:
           break;
       }
+    }
+    if (keysDirty) pathToCacheKey.value = nextKeys;
+    state.value = nextStates;
+    // 尾部赋值后消费缓冲：applyProgressEvent 读到的已是本批最终状态
+    for (const buffered of bufferedToApply) {
+      applyProgressEvent(buffered);
     }
   };
 

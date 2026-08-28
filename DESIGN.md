@@ -1615,7 +1615,7 @@ export function useReaderInput() {
 | navigate() 失败不回滚 | 小 | `fileBrowser.navigate` 请求失败（路径不存在/网络断）后 `currentPath` 停留在坏路径、entries 残留旧目录列表——面包屑与列表不一致。修法：失败时回滚 currentPath（或成功后才提交路径），补失败回滚测试 |
 | retryLoadFailed catch 后 spinner 卡死 | 小（一行） | `retryLoadFailed` 先置 generating/queued 再 invoke；IPC 层 reject 时 catch 只 log → 卡片永久 spinner（任务未创建，永远无事件终结）。修法：catch 内置回 failed 态 |
 | MasonryView 三处接线无组件级测试 | 小 | `@row-load-error → markLoadFailed` / `@row-retry → retryLoadFailed` / popover `@retry` 仅 composable 层覆盖；事件改名不会红。修法：补一行挂载断言 |
-| 用户 WIP（applyResults 事务化）内 P2 | 小（随削峰系列） | `'queued'` 分支消费竞态缓冲时 `applyProgressEvent(buffered)` 写 `state.value`（旧 Map），循环尾 `state.value = nextStates` 整体替换会覆盖循环内应用的 progress（raced 项 phase 角标停在较早阶段）。修法：调用挪到尾部赋值之后。**归用户削峰系列，不入 3.5.6** |
+| 用户 WIP（applyResults 事务化）内 P2 | 小（随削峰系列） | ✅ 已销账（随 WIP 收编 commit 落地）：`'queued'` 分支消费竞态缓冲的 `applyProgressEvent` 原写 `state.value`（旧 Map）被循环尾整体替换覆盖——缓冲事件收集至 `bufferedToApply`、尾部赋值后统一应用；既有用例「progress 事件先于 queued 回包 → phase 不丢」实为该 bug 的锁定测试 |
 
 ### 16.3 技术债
 
