@@ -1605,6 +1605,18 @@ export function useReaderInput() {
 - **嵌套压缩包双击禁用**销账：由构造消除——backend catalog 只列图片条目，内层包不可见（module3.5.3 任务 7 仅补防误开注释）。
 - **directory_sort / shortcut canonical 化迁移**销账：虚惊——key 由 Rust `location_key_of` 单侧拼装、写入边界经 `normalize_shortcut_input` 强制收敛，无双 writer 分叉；规范性欠账记一笔，不做 migration。
 
+### 16.2.1 module3.5.5 实机批遗留（2026-08-28 深夜会话，建议打包 3.5.6 小件）
+
+> 来源：module3.5.5（`749277a`，SMB mediaUrl 403 / load-error 兜底 / 出队统一 / epoch 单调）实机 CDP 验证与 SDD 审查过程顺带发现，全部预存在、未随该模块修复。详见 AGENTS.md 3.5.5 行与 `.superpowers/sdd/progress.md`。
+
+| 项 | 量级 | 说明与修法方向 |
+|---|---|---|
+| measuredMap 维度污染 | 中（判定输入失真） | `MasonryThumbnail.onLoad` 把 img 的 `naturalWidth/Height` 上报进 `measuredMap`（`MasonryThumbnail.vue:85-92`），缓存命中后 img 是 512 宽缩略图——**源图真实维度被缩略图尺寸覆盖**；`flushRequest` 又把它当 `sourceWidth` 喂 classify → USE_ORIGINAL 判定输入失真（853px 图被判"小图"直显，渲染无大碍但绕过缓存且语义错；RDP 会话白屏批的间接诱因）。修法：onLoad 尺寸只用于布局比例不回写 classify 输入，或上报带来源标记、flushRequest 只采信 header 维度 |
+| navigate() 失败不回滚 | 小 | `fileBrowser.navigate` 请求失败（路径不存在/网络断）后 `currentPath` 停留在坏路径、entries 残留旧目录列表——面包屑与列表不一致。修法：失败时回滚 currentPath（或成功后才提交路径），补失败回滚测试 |
+| retryLoadFailed catch 后 spinner 卡死 | 小（一行） | `retryLoadFailed` 先置 generating/queued 再 invoke；IPC 层 reject 时 catch 只 log → 卡片永久 spinner（任务未创建，永远无事件终结）。修法：catch 内置回 failed 态 |
+| MasonryView 三处接线无组件级测试 | 小 | `@row-load-error → markLoadFailed` / `@row-retry → retryLoadFailed` / popover `@retry` 仅 composable 层覆盖；事件改名不会红。修法：补一行挂载断言 |
+| 用户 WIP（applyResults 事务化）内 P2 | 小（随削峰系列） | `'queued'` 分支消费竞态缓冲时 `applyProgressEvent(buffered)` 写 `state.value`（旧 Map），循环尾 `state.value = nextStates` 整体替换会覆盖循环内应用的 progress（raced 项 phase 角标停在较早阶段）。修法：调用挪到尾部赋值之后。**归用户削峰系列，不入 3.5.6** |
+
 ### 16.3 技术债
 
 （2026-08-16 3.0.14 清空：cargo test 进 CI、webdav parse_propfind 修复、useCrossVolume flag 竞态均已落地。）
