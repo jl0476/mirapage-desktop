@@ -204,6 +204,7 @@ let creds = std::sync::Arc::new(credentials::KeyringStore)
             commands::thumbnails::update_thumbnail_cache_limit,
             commands::thumbnails::get_thumbnail_cache_info,
             commands::thumbnails::clear_thumbnail_cache,
+            commands::thumbnails::invalidate_thumbnail_cache_keys,
             commands::thumbnails::notify_thumbnail_epoch,
             commands::thumbnails::notify_thumbnail_fast_scrolling,
             // 缓存位置迁移 (§11)
@@ -252,13 +253,22 @@ async fn handle_media_request(
     let path = request.uri().path().to_string();
     let target = match parse_media_path(&path) {
         Ok(t) => t,
-        Err(ProtocolError::BadShape(_)) => return err_response(StatusCode::NOT_FOUND, "not found"),
-        Err(_) => return err_response(StatusCode::FORBIDDEN, "forbidden"),
+        Err(ProtocolError::BadShape(reason)) => {
+            warn_reject(StatusCode::NOT_FOUND, &path, reason);
+            return err_response(StatusCode::NOT_FOUND, "not found");
+        }
+        Err(e) => {
+            warn_reject(StatusCode::FORBIDDEN, &path, &format!("{e:?}"));
+            return err_response(StatusCode::FORBIDDEN, "forbidden");
+        }
     };
     let factory = app.state::<source::MediaSourceFactory>();
     let (descriptor, file_path) = match rebuild_descriptor(app, &target) {
         Ok(v) => v,
-        Err((code, msg)) => return err_response(code, &msg),
+        Err((code, msg)) => {
+            warn_reject(code, &path, &msg);
+            return err_response(code, &msg);
+        }
     };
     let src = factory.resolve(&descriptor);
     let name = file_path.rsplit('/').next().unwrap_or(&file_path).to_string();
@@ -270,7 +280,7 @@ async fn handle_media_request(
     // stat（HEAD / Range 判定需要 total）
     let stat = match src.stat(&descriptor, &file_path).await {
         Ok(s) => s,
-        Err(e) => return error_to_status(e),
+        Err(e) => return error_to_status(e, &path),
     };
     let has_range_header = request.headers().contains_key("range");
     let range = match parse_range_header(
@@ -332,6 +342,7 @@ async fn handle_media_request(
                 );
             }
         }
+        warn_reject(StatusCode::BAD_GATEWAY, &path, "remote media fetch failed");
         return err_response(StatusCode::BAD_GATEWAY, "remote media fetch failed");
     }
     match src.read_file(&descriptor, &file_path, range).await {
@@ -354,7 +365,7 @@ async fn handle_media_request(
             };
             finish(b, bytes)
         }
-        Err(e) => error_to_status(e),
+        Err(e) => error_to_status(e, &path),
     }
 }
 
@@ -525,6 +536,33 @@ fn err_response(status: tauri::http::StatusCode, msg: &str) -> tauri::http::Resp
         .unwrap()
 }
 
+/// 2026-08-28 任务 2：media handler 对 403/404/502 拒绝留 WARN 日志（status + 请求
+/// path + 原因）——SMB 空段 403 白屏那类缺陷此前完全无痕。其余状态（416/422/423/
+/// 413/501）属预期控制流或专项语义，不记录防刷屏。reason 只进本地 main.log，
+/// 响应体仍是固定短语（3.5.0 任务 14「零细节」契约不破坏）。
+fn warn_reject(status: tauri::http::StatusCode, path: &str, reason: &str) {
+    if let Some(line) = reject_log_line(status, path, reason) {
+        log::write_log("WARN", "media", &line);
+    }
+}
+
+/// 纯函数：生成 reject 日志行（仅 403/404/502），供 warn_reject 与单测共用。
+fn reject_log_line(
+    status: tauri::http::StatusCode,
+    path: &str,
+    reason: &str,
+) -> Option<String> {
+    use tauri::http::StatusCode;
+    if matches!(
+        status,
+        StatusCode::FORBIDDEN | StatusCode::NOT_FOUND | StatusCode::BAD_GATEWAY
+    ) {
+        Some(format!("reject {} {} reason={}", status.as_u16(), path, reason))
+    } else {
+        None
+    }
+}
+
 fn finish(
     b: tauri::http::response::Builder,
     body: Vec<u8>,
@@ -532,42 +570,48 @@ fn finish(
     b.body(body).unwrap()
 }
 
-fn error_to_status(e: crate::source::trait_def::MediaSourceError) -> tauri::http::Response<Vec<u8>> {
+fn error_to_status(
+    e: crate::source::trait_def::MediaSourceError,
+    path: &str,
+) -> tauri::http::Response<Vec<u8>> {
     use crate::source::archive::backend::ArchiveAccessError;
     use crate::source::trait_def::MediaSourceError;
     use tauri::http::StatusCode;
-    match e {
-        MediaSourceError::NotFound(_) => err_response(StatusCode::NOT_FOUND, "not found"),
+    // 单一映射表：先出 (status, phrase)，统一走 warn_reject 留日志 + err_response 固定短语
+    let (status, phrase) = match &e {
+        MediaSourceError::NotFound(_) => (StatusCode::NOT_FOUND, "not found"),
         MediaSourceError::PermissionDenied(_) | MediaSourceError::PathEscape(_) => {
-            err_response(StatusCode::FORBIDDEN, "forbidden")
+            (StatusCode::FORBIDDEN, "forbidden")
         }
         MediaSourceError::Network(_) | MediaSourceError::Timeout(_) => {
-            err_response(StatusCode::BAD_GATEWAY, "bad gateway")
+            (StatusCode::BAD_GATEWAY, "bad gateway")
         }
         MediaSourceError::NotImplemented(_) => {
-            err_response(StatusCode::NOT_IMPLEMENTED, "not implemented")
+            (StatusCode::NOT_IMPLEMENTED, "not implemented")
         }
         // Archive 专项映射（任务 14）：响应体是固定短语，不含第三方错误文本与密码信息。
         // 注意：容器本身不可读（如权限拒绝）在 service 层归 Io（ArchiveAccessError 无
         // PermissionDenied 变体，任务 7 收口），落入末尾 Archive(_) => 422。
         MediaSourceError::Archive(ArchiveAccessError::PasswordRequired)
         | MediaSourceError::Archive(ArchiveAccessError::WrongPassword) => {
-            err_response(StatusCode::LOCKED, "archive locked")
+            (StatusCode::LOCKED, "archive locked")
         }
         MediaSourceError::Archive(ArchiveAccessError::EntryNotFound(_)) => {
-            err_response(StatusCode::NOT_FOUND, "not found")
+            (StatusCode::NOT_FOUND, "not found")
         }
         MediaSourceError::Archive(ArchiveAccessError::ResourceLimitExceeded(_)) => {
-            err_response(StatusCode::PAYLOAD_TOO_LARGE, "archive resource limit")
+            (StatusCode::PAYLOAD_TOO_LARGE, "archive resource limit")
         }
         MediaSourceError::Archive(ArchiveAccessError::Network(_)) => {
-            err_response(StatusCode::BAD_GATEWAY, "bad gateway")
+            (StatusCode::BAD_GATEWAY, "bad gateway")
         }
         MediaSourceError::Archive(_) => {
-            err_response(StatusCode::UNPROCESSABLE_ENTITY, "archive error")
+            (StatusCode::UNPROCESSABLE_ENTITY, "archive error")
         }
-        _ => err_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-    }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    };
+    warn_reject(status, path, &e.to_string());
+    err_response(status, phrase)
 }
 
 /// 初始化缩略图缓存服务：解析 cache 目录（支持自定义位置）、读 settings、建 ThumbnailService。
@@ -724,26 +768,35 @@ mod tests {
 
     #[test]
     fn archive_password_error_maps_to_locked_response_without_detail() {
-        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
-            crate::source::archive::backend::ArchiveAccessError::PasswordRequired,
-        ));
+        let response = error_to_status(
+            crate::source::trait_def::MediaSourceError::Archive(
+                crate::source::archive::backend::ArchiveAccessError::PasswordRequired,
+            ),
+            "media-test/archive/locked",
+        );
         assert_eq!(response.status(), tauri::http::StatusCode::LOCKED);
         assert_eq!(response.body().as_slice(), b"archive locked");
 
-        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
-            crate::source::archive::backend::ArchiveAccessError::WrongPassword,
-        ));
+        let response = error_to_status(
+            crate::source::trait_def::MediaSourceError::Archive(
+                crate::source::archive::backend::ArchiveAccessError::WrongPassword,
+            ),
+            "media-test/archive/locked",
+        );
         assert_eq!(response.status(), tauri::http::StatusCode::LOCKED);
         assert_eq!(response.body().as_slice(), b"archive locked");
     }
 
     #[test]
     fn archive_resource_limit_maps_to_payload_too_large() {
-        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
-            crate::source::archive::backend::ArchiveAccessError::ResourceLimitExceeded(
-                "entry > 512 MiB".into(),
+        let response = error_to_status(
+            crate::source::trait_def::MediaSourceError::Archive(
+                crate::source::archive::backend::ArchiveAccessError::ResourceLimitExceeded(
+                    "entry > 512 MiB".into(),
+                ),
             ),
-        ));
+            "media-test/archive/limit",
+        );
         assert_eq!(response.status(), tauri::http::StatusCode::PAYLOAD_TOO_LARGE);
         // 携带细节的源错误只决定状态码，不进响应体
         assert!(!response.body().as_slice().windows(11).any(|w| w == b"512 MiB"));
@@ -752,15 +805,21 @@ mod tests {
 
     #[test]
     fn archive_entry_not_found_and_network_map_to_404_and_502() {
-        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
-            crate::source::archive::backend::ArchiveAccessError::EntryNotFound("page.png".into()),
-        ));
+        let response = error_to_status(
+            crate::source::trait_def::MediaSourceError::Archive(
+                crate::source::archive::backend::ArchiveAccessError::EntryNotFound("page.png".into()),
+            ),
+            "media-test/archive/404",
+        );
         assert_eq!(response.status(), tauri::http::StatusCode::NOT_FOUND);
         assert_eq!(response.body().as_slice(), b"not found");
 
-        let response = error_to_status(crate::source::trait_def::MediaSourceError::Archive(
-            crate::source::archive::backend::ArchiveAccessError::Network("tcp reset".into()),
-        ));
+        let response = error_to_status(
+            crate::source::trait_def::MediaSourceError::Archive(
+                crate::source::archive::backend::ArchiveAccessError::Network("tcp reset".into()),
+            ),
+            "media-test/archive/502",
+        );
         assert_eq!(response.status(), tauri::http::StatusCode::BAD_GATEWAY);
         assert_eq!(response.body().as_slice(), b"bad gateway");
     }
@@ -778,10 +837,58 @@ mod tests {
             ),
             crate::source::archive::backend::ArchiveAccessError::UnsupportedCodec("BCJ2".into()),
         ] {
-            let response =
-                error_to_status(crate::source::trait_def::MediaSourceError::Archive(err));
+            let response = error_to_status(
+                crate::source::trait_def::MediaSourceError::Archive(err),
+                "media-test/archive/422",
+            );
             assert_eq!(response.status(), tauri::http::StatusCode::UNPROCESSABLE_ENTITY);
             assert_eq!(response.body().as_slice(), b"archive error");
         }
+    }
+
+    // =========================================================================
+    // 任务 2（2026-08-28）：media handler 403/404/502 拒绝日志调用点
+    // =========================================================================
+
+    #[test]
+    fn reject_log_line_covers_403_404_502_with_status_path_reason() {
+        use tauri::http::StatusCode;
+        // 三个目标状态各出一行：status + 请求 path + reason
+        assert_eq!(
+            reject_log_line(StatusCode::FORBIDDEN, "/smb/2/x%2Fy.jpg", "InvalidPath(\"rel 为空\")")
+                .as_deref(),
+            Some("reject 403 /smb/2/x%2Fy.jpg reason=InvalidPath(\"rel 为空\")")
+        );
+        assert_eq!(
+            reject_log_line(StatusCode::NOT_FOUND, "/local/missing.jpg", "not found").as_deref(),
+            Some("reject 404 /local/missing.jpg reason=not found")
+        );
+        assert_eq!(
+            reject_log_line(StatusCode::BAD_GATEWAY, "/webdav/7/a.jpg", "tcp reset").as_deref(),
+            Some("reject 502 /webdav/7/a.jpg reason=tcp reset")
+        );
+        // 其余状态（416/422/423/413/501）不记录，防刷屏
+        for s in [
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            StatusCode::LOCKED,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            StatusCode::NOT_IMPLEMENTED,
+        ] {
+            assert_eq!(reject_log_line(s, "/x", "r"), None, "{s:?} 不应产生日志行");
+        }
+    }
+
+    #[test]
+    fn error_to_status_logs_reason_via_display_not_response_body() {
+        // 404 路径：日志 reason 走 Display（含源细节），响应体仍是固定短语
+        // （断言映射不回归即可；日志行内容已由 reject_log_line 用例锁定）
+        let response = error_to_status(
+            crate::source::trait_def::MediaSourceError::NotFound("smb entry gone".into()),
+            "media-test/smb/2/share%2Fmissing.jpg",
+        );
+        assert_eq!(response.status(), tauri::http::StatusCode::NOT_FOUND);
+        assert_eq!(response.body().as_slice(), b"not found");
+        assert!(!String::from_utf8_lossy(response.body().as_slice()).contains("smb entry gone"));
     }
 }

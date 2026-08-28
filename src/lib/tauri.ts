@@ -382,6 +382,12 @@ export async function clearThumbnailCache(): Promise<void> {
   await invoke<void>('clear_thumbnail_cache');
 }
 
+/** 按 cache key 失效缓存（删文件 + 索引行，幂等）。
+ *  任务 3（load-error 重试分流）：cached 来源的损坏文件先失效再 re-request。 */
+export async function invalidateThumbnailCacheKeys(keys: string[]): Promise<void> {
+  await invoke<void>('invalidate_thumbnail_cache_keys', { keys });
+}
+
 export async function notifyThumbnailEpoch(epoch: number): Promise<void> {
   await invoke<void>('notify_thumbnail_epoch', { epoch });
 }

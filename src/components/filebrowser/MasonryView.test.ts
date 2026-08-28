@@ -140,6 +140,8 @@ vi.mock('@/composables/useMasonryThumbnails', () => ({
     stateMap: computed(() => thumbnailsMock.stateMap),
     progressSnapshots: computed(() => thumbnailsMock.progressSnapshots),
     retry: vi.fn(),
+    markLoadFailed: vi.fn(),
+    retryLoadFailed: vi.fn(),
     regenerate: vi.fn(),
     regenerateBatch: vi.fn(),
     epoch: { value: 0 },

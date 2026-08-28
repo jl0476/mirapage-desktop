@@ -193,7 +193,7 @@ const archivePrefetch = useArchiveWindowPrefetch({
   windows: thumbnailWindows,
 });
 
-const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, regenerate: regenerateThumbnail, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
+const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, markLoadFailed, retryLoadFailed, regenerate: regenerateThumbnail, regenerateBatch: regenerateBatchFn } = useMasonryThumbnails({
   descriptor: toRef(props, 'descriptor'),
   currentPath: toRef(props, 'currentPath'),
   entries: entriesRef,
@@ -571,7 +571,8 @@ const loading = computed(() => {
           @row-click="(e, ev) => emit('row-click', e, ev)"
           @row-dblclick="(e, ev) => emit('row-dblclick', e, ev)"
           @row-contextmenu="(e, ev) => emit('row-contextmenu', e, ev)"
-          @row-retry="(e) => retryThumbnail(e.path)"
+          @row-retry="(e) => retryLoadFailed(e.path)"
+          @row-load-error="(e) => markLoadFailed(e.path)"
           @show-progress="(entry, el) => openProgressPopover(entry, el)"
           @row-measured="onRowMeasured"
         />
@@ -587,7 +588,7 @@ const loading = computed(() => {
         :source-bytes="entriesByPath(popoverState.path)?.size ?? 0"
         :anchor-rect="popoverState.rect"
         @close="closeProgressPopover"
-        @retry="retryThumbnail(popoverState.path); closeProgressPopover()"
+        @retry="retryLoadFailed(popoverState.path); closeProgressPopover()"
       />
     </div>
     <!-- 加载提示: 首屏图片测量/字节未就绪时显示, 完成后自动隐藏。

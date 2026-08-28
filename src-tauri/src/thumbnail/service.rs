@@ -87,7 +87,10 @@ pub fn local_abs_path(root_path: &str, rel_path: &str) -> std::result::Result<Pa
 #[derive(Debug, Clone)]
 pub enum ItemClass {
     Unsupported,
-    UseOriginal,
+    /// 直用原图。`cache_key`：该 item 若按 GENERATE 提交时的键（与 GENERATE 分支
+    /// 同一计算，任务 4——UseOriginal 判定翻转后 request 按它取消仍在飞的旧
+    /// GENERATE/取源任务）。
+    UseOriginal { cache_key: String },
     Cached {
         cache_key: String,
         cache_abs: PathBuf,
@@ -185,11 +188,11 @@ pub fn classify_item(
             "DEBUG",
             "thumbnail",
             &format!(
-                "classify path={} priority={:?} sourceSize={} decision=USE_ORIGINAL",
-                item.path, item.priority, item.file_size
+                "classify path={} priority={:?} sourceSize={} decision=USE_ORIGINAL cacheKey={}",
+                item.path, item.priority, item.file_size, cache_key
             ),
         );
-        return Ok(ItemClass::UseOriginal);
+        return Ok(ItemClass::UseOriginal { cache_key });
     }
 
     // 生成
@@ -244,7 +247,9 @@ pub fn classify_item(
 
 /// 远程分类结果（spec rev3 §3.5）。
 pub enum RemoteClass {
-    UseOriginal,
+    /// 直用原图。`cache_key` 语义同 `ItemClass::UseOriginal`（任务 4 取消回收用）；
+    /// Unsupported 映射时为空串（取消 no-op）。
+    UseOriginal { cache_key: String },
     Cached {
         cache_key: String,
         cache_abs: PathBuf,
@@ -267,7 +272,7 @@ pub fn classify_remote(
     quality: Quality,
 ) -> rusqlite::Result<RemoteClass> {
     match classify_item(conn, cache_root, descriptor_json, PathBuf::new(), item, epoch, quality)? {
-        ItemClass::UseOriginal => Ok(RemoteClass::UseOriginal),
+        ItemClass::UseOriginal { cache_key } => Ok(RemoteClass::UseOriginal { cache_key }),
         ItemClass::Cached { cache_key, cache_abs, width, height } => Ok(RemoteClass::Cached {
             cache_key, cache_abs, width, height,
         }),
@@ -285,7 +290,7 @@ pub fn classify_remote(
             };
             Ok(RemoteClass::Fetch(prepared))
         }
-        ItemClass::Unsupported => Ok(RemoteClass::UseOriginal),
+        ItemClass::Unsupported => Ok(RemoteClass::UseOriginal { cache_key: String::new() }),
     }
 }
 
@@ -333,6 +338,40 @@ pub fn evict_to_limit(
         }
     }
     Ok((freed_total, files_to_delete))
+}
+
+/// 按 cache key 失效缓存（删缓存文件 + 索引行；幂等——key 不存在 no-op）。
+/// 任务 3（load-error 重试分流）：cached 来源的损坏 WebP（非空但解码失败）若不
+/// 失效，re-request 的 CACHED 命中校验只查「文件存在且非空」，会再次返回同一
+/// URL → 失败→重试→失败死循环。先删行删文件强制走 GENERATE 重新生成。
+/// 返回实际失效（索引行存在）的条数。
+///
+/// 注：调用方（load-error 重试）每次仅 1 个 key，持锁期间的文件删除为单文件
+/// 量级——与 clear（数千文件、锁外分段删，spec §5.5）不同，无需分段。
+pub fn invalidate_cache_keys(conn: &Connection, cache_root: &Path, keys: &[String]) -> usize {
+    if keys.is_empty() {
+        return 0;
+    }
+    // 去重（同 key 重复传入只失效一次）
+    let mut seen = HashSet::with_capacity(keys.len());
+    let uniq: Vec<String> = keys
+        .iter()
+        .filter(|k| seen.insert((*k).clone()))
+        .cloned()
+        .collect();
+    // 存在的行 → rel_path（key 不存在 → None，静默跳过）
+    let rels: Vec<String> = uniq
+        .iter()
+        .filter_map(|k| index::get(conn, k).ok().flatten())
+        .map(|row| row.cache_rel_path)
+        .collect();
+    // 删文件（文件已不在 = no-op）
+    for rel in &rels {
+        let _ = std::fs::remove_file(cache_root.join(rel));
+    }
+    // 删索引行（remove_batch 幂等，同步扣减 total_bytes 计数）
+    let _ = index::remove_batch(conn, &uniq);
+    rels.len()
 }
 
 /// 生产用生成函数：读 Local 文件（blocking 线程内）-> generate_thumbnail。
@@ -673,6 +712,9 @@ impl ThumbnailService {
         // 收集需要生成的任务（先全部分类，再统一提交，避免持锁跨 await）
         // (task, cache_abs, item) —— item 携带完整源元数据供 CompletionMeta/build_row
         let mut to_submit: Vec<(QueuedTask, PathBuf, ThumbnailRequestItem)> = Vec::new();
+        // 任务 4：本轮判 UseOriginal 的 cache_key——判定翻转后取消仍在飞的旧
+        // GENERATE/取源任务（回收浪费），循环后双发 scheduler + remote_fetch。
+        let mut use_original_keys: Vec<String> = Vec::new();
 
         {
             let db = self.app.state::<Db>();
@@ -712,11 +754,16 @@ impl ThumbnailService {
                                 error_kind: None,
                             });
                         }
-                        Ok(RemoteClass::UseOriginal) => results.push(RequestResult {
-                            path: item.path.clone(),
-                            status: "original".into(),
-                            ..unset(&item.path)
-                        }),
+                        Ok(RemoteClass::UseOriginal { cache_key }) => {
+                            if !cache_key.is_empty() {
+                                use_original_keys.push(cache_key);
+                            }
+                            results.push(RequestResult {
+                                path: item.path.clone(),
+                                status: "original".into(),
+                                ..unset(&item.path)
+                            })
+                        }
                         Ok(RemoteClass::Fetch(prepared)) => {
                             let ck = prepared.cache_key.clone();
                             // in-flight key 加入保护集合，避免取源+生成期间被 LRU 清理
@@ -761,11 +808,14 @@ impl ThumbnailService {
                         status: "unsupported".into(),
                         ..unset(&item.path)
                     }),
-                    Ok(ItemClass::UseOriginal) => results.push(RequestResult {
-                        path: item.path.clone(),
-                        status: "original".into(),
-                        ..unset(&item.path)
-                    }),
+                    Ok(ItemClass::UseOriginal { cache_key }) => {
+                        use_original_keys.push(cache_key);
+                        results.push(RequestResult {
+                            path: item.path.clone(),
+                            status: "original".into(),
+                            ..unset(&item.path)
+                        })
+                    }
                     Ok(ItemClass::Cached {
                         cache_key,
                         cache_abs,
@@ -801,6 +851,29 @@ impl ThumbnailService {
                     Err(e) => results.push(err_result(&item.path, &e.to_string())),
                 }
             }
+        }
+
+        // 任务 4（UseOriginal 判定翻转回收）：本轮判直用原图的 item——若同参数
+        // （同 cache_key）的 GENERATE 任务仍在飞（pending / 解码 in-flight / 取源
+        // in-flight），双发取消回收，避免浪费 worker/带宽。同 epoch in-flight 完成
+        // 映射 Stale（不发 failed 事件反向覆盖 original 态，R3 P0）。
+        // 幂等：从未提交过则无匹配 no-op。
+        if !use_original_keys.is_empty() {
+            log::write_log(
+                "INFO",
+                "thumbnail",
+                &format!(
+                    "request use_original cancel_keys count={} epoch={}",
+                    use_original_keys.len(),
+                    epoch
+                ),
+            );
+            let fetch_pairs: Vec<(String, u64)> = use_original_keys
+                .iter()
+                .map(|k| (k.clone(), epoch))
+                .collect();
+            self.scheduler.cancel_keys(use_original_keys.clone());
+            self.remote_fetch.cancel_keys(fetch_pairs);
         }
 
         // 提交生成任务 + 挂完成回调
@@ -1119,6 +1192,15 @@ impl ThumbnailService {
             let _ = index::clear_all(&conn);
         }
         let _ = self.app.emit(EVENT_CACHE_INFO, serde_json::json!({"bytes":0,"count":0}));
+    }
+
+    /// 按 cache key 失效缓存（删文件 + 索引行，幂等）。
+    /// 任务 3：load-error 重试链路——cached 损坏文件先失效再 re-request。
+    pub fn invalidate_cache_keys(&self, keys: &[String]) -> usize {
+        let root = self.cache_root();
+        let db = self.app.state::<Db>();
+        let conn = db.conn();
+        invalidate_cache_keys(&conn, &root, keys)
     }
 
     // ─── 缓存位置迁移（§11）──────────────────────────────────────────────
@@ -1456,7 +1538,48 @@ mod tests {
             Quality::High,
         )
         .unwrap();
-        assert!(matches!(cls, ItemClass::UseOriginal));
+        assert!(matches!(cls, ItemClass::UseOriginal { .. }));
+    }
+
+    /// 任务 4（UseOriginal 判定翻转回收）：UseOriginal 必须携带与 GENERATE 路径
+    /// 完全一致的 cache_key——request 循环按它取消仍在飞的旧 GENERATE/取源任务，
+    /// 键不一致则取消落空。cache_key 不含源宽高（判定输入），同 item 参数下两判定键相同。
+    #[test]
+    fn classify_use_original_carries_same_cache_key_as_generate() {
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        let sd = r#"{"type":"local","rootPath":"D:/x"}"#;
+        // 小图（800x600/500KB/required 1024）→ UseOriginal
+        let small = classify_item(
+            &conn,
+            dir.path(),
+            sd,
+            PathBuf::from("D:/x/a.jpg"),
+            &item("a.jpg", 800, 600, 500_000, 1024),
+            1,
+            Quality::High,
+        )
+        .unwrap();
+        // 同参数大图（4000x3000，宽超 bucket 1.5 倍）→ Generate
+        let big = classify_item(
+            &conn,
+            dir.path(),
+            sd,
+            PathBuf::from("D:/x/a.jpg"),
+            &item("a.jpg", 4000, 3000, 500_000, 1024),
+            1,
+            Quality::High,
+        )
+        .unwrap();
+        match (small, big) {
+            (ItemClass::UseOriginal { cache_key: uo_key }, ItemClass::Generate { task, .. }) => {
+                assert_eq!(
+                    uo_key, task.cache_key,
+                    "UseOriginal 携带的 cache_key 必须与 GENERATE 路径完全一致"
+                );
+            }
+            other => panic!("expected (UseOriginal, Generate), got {other:?}"),
+        }
     }
 
     /// module3.0.11：progress 闭包产生的 ProgressEvent 序列化字段名与 phase_str 映射
@@ -1997,5 +2120,61 @@ mod tests {
         // 必须与 key::cache_rel_path 一致
         assert_eq!(row.cache_rel_path, key::cache_rel_path(&meta.cache_key));
         assert_eq!(row.cache_rel_path, format!("v1/ab/{cache_key}.webp"));
+    }
+
+    /// 任务 3（load-error 重试分流）：按 key 失效缓存——删文件 + 删索引行，幂等。
+    fn seed_cache_row(conn: &Connection, root: &Path, k: &str) -> PathBuf {
+        let rel = key::cache_rel_path(k);
+        let abs = root.join(&rel);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, b"webp").unwrap();
+        let row = ThumbnailCacheRow {
+            cache_key: k.into(),
+            source_key: "s".into(),
+            rel_path: "a.jpg".into(),
+            source_size: None,
+            source_modified_at: None,
+            source_width: None,
+            source_height: None,
+            orientation: None,
+            target_bucket: 512,
+            quality: "high".into(),
+            cache_rel_path: rel,
+            output_width: 512,
+            output_height: 512,
+            byte_size: 100,
+            created_at: 1,
+            last_accessed_at: 1,
+        };
+        index::upsert(conn, &row).unwrap();
+        abs
+    }
+
+    #[test]
+    fn invalidate_cache_keys_deletes_file_and_row_idempotent() {
+        let conn = open();
+        let dir = tempfile::tempdir().unwrap();
+        let abs_a = seed_cache_row(&conn, dir.path(), "aa00");
+        let abs_b = seed_cache_row(&conn, dir.path(), "bb00"); // 旁观者：不在 keys 内必须保留
+        assert_eq!(index::total_bytes(&conn).unwrap(), 200);
+
+        let removed = invalidate_cache_keys(
+            &conn,
+            dir.path(),
+            &["aa00".to_string(), "missing".to_string()],
+        );
+        // 存在 1 个 key → 删 1；missing 静默跳过（幂等）
+        assert_eq!(removed, 1);
+        assert!(!abs_a.exists(), "缓存文件应被删除");
+        assert!(index::get(&conn, "aa00").unwrap().is_none(), "索引行应被删除");
+        assert_eq!(index::total_bytes(&conn).unwrap(), 100, "total_bytes 计数应扣减");
+        // 旁观者不受影响
+        assert!(abs_b.exists());
+        assert!(index::get(&conn, "bb00").unwrap().is_some());
+
+        // 幂等重调：key 已不存在 → no-op，不报错
+        let removed2 = invalidate_cache_keys(&conn, dir.path(), &["aa00".to_string()]);
+        assert_eq!(removed2, 0);
+        assert_eq!(index::total_bytes(&conn).unwrap(), 100);
     }
 }

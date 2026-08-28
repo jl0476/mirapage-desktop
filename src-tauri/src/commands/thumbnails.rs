@@ -147,6 +147,22 @@ pub async fn clear_thumbnail_cache(service: State<'_, ThumbnailService>) -> Resu
     Ok(())
 }
 
+/// 按 cache key 失效缓存（删文件 + 索引行，幂等——key 不存在 no-op）。
+/// 任务 3（load-error 重试分流）：cached 来源的损坏文件先失效再 re-request，
+/// 否则 CACHED 命中校验（存在且非空）返回同一 URL 死循环。
+/// spawn_blocking 约束同 clear_thumbnail_cache（同步 Db 锁 + 文件删除）。
+#[tauri::command]
+pub async fn invalidate_thumbnail_cache_keys(
+    service: State<'_, ThumbnailService>,
+    keys: Vec<String>,
+) -> Result<(), String> {
+    let svc = service.inner().clone();
+    tokio::task::spawn_blocking(move || svc.invalidate_cache_keys(&keys))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// 通知新 epoch（切目录 / 切源）。
 #[tauri::command]
 pub async fn notify_thumbnail_epoch(

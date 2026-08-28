@@ -140,6 +140,26 @@ describe('选中描边环源码守卫（module3.0.14）', () => {
 });
 
 
+// ─── load-error 上抛（任务 3：img 加载失败 UI 兜底——403/缓存损坏）──────────
+describe('MasonryRow.load-error 上抛（任务 3）', () => {
+  it('MasonryThumbnail emit load-error → row emit row-load-error(entry)', () => {
+    const w = mount(MasonryRow, {
+      props: {
+        entry: entry('page-001.jpg'),
+        thumbState: { kind: 'cached', cacheKey: 'k', path: 'asset://c.webp', width: 512, height: 288 },
+        width: 200, height: 280, top: 0, left: 0, mark: 'none', selected: false,
+      } as never,
+      global: { plugins: [createPinia(), i18n] },
+    });
+    const thumb = w.findComponent({ name: 'MasonryThumbnail' });
+    expect(thumb.exists()).toBe(true);
+    thumb.vm.$emit('load-error');
+    const emitted = w.emitted('row-load-error');
+    expect(emitted).toBeTruthy();
+    expect(emitted![0][0]).toEqual(entry('page-001.jpg'));
+  });
+});
+
 // ─── row-measured 转发（缩略图 natural 尺寸喂布局，2026-08-27 实机诊断修复）───
 describe('MasonryRow.measured 转发', () => {
   it('MasonryThumbnail emit measured → row emit row-measured(entry, w, h)', async () => {

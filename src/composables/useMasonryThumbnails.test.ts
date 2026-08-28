@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { computed, defineComponent, h, nextTick, ref } from 'vue';
 import { mount } from '@vue/test-utils';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { ThumbnailProgressEvent, ThumbnailStateEvent } from '@/lib/tauri';
+import { notifyThumbnailEpoch, type ThumbnailProgressEvent, type ThumbnailStateEvent } from '@/lib/tauri';
 import type { MediaEntry, SourceDescriptor } from '@/lib/sourceDescriptor';
 import type { ThumbnailWindows } from './useMasonryLayout';
 
@@ -13,6 +13,7 @@ const unlistenSpy = vi.fn();
 const requestSpy = vi.fn();
 const retrySpy = vi.fn();
 const regenSpy = vi.fn();
+const invalidateSpy = vi.fn();
 const notifyEpochSpy = vi.fn();
 const notifyFastSpy = vi.fn();
 
@@ -28,7 +29,12 @@ vi.mock('@/lib/tauri', async () => {
     requestThumbnails: vi.fn((...args: unknown[]) => requestSpy(...args)),
     retryThumbnail: vi.fn((...args: unknown[]) => retrySpy(...args)),
     regenerateThumbnail: vi.fn((...args: unknown[]) => regenSpy(...args)),
-    notifyThumbnailEpoch: vi.fn(async () => undefined),
+    invalidateThumbnailCacheKeys: vi.fn((...args: unknown[]) => invalidateSpy(...args)),
+    // 任务 5：notify 接入 spy（默认 resolved；屏障测试用 mockImplementationOnce 覆盖）
+    notifyThumbnailEpoch: vi.fn((e: number) => {
+      notifyEpochSpy(e);
+      return Promise.resolve();
+    }),
     notifyThumbnailFastScrolling: vi.fn(async () => undefined),
     thumbnailCacheUrl: (p: string) => `asset://${p}`,
   };
@@ -56,6 +62,7 @@ function fireProgress(payload: ThumbnailProgressEvent) {
 function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { width: number; height: number }>; entries?: MediaEntry[] }) {
   const windows = opts?.windows ?? { visible: [], ahead: [], behind: [], idle: [] };
   const descriptor = ref<SourceDescriptor>(localDesc);
+  const currentPath = ref(''); // 任务 5：目录身份 watch 测试需要外部驱动
   const entries = ref<readonly MediaEntry[]>(opts?.entries ?? []);
   const windowsRef = ref<ThumbnailWindows>(windows);
   const measuredMap = ref<Map<string, { width: number; height: number }>>(
@@ -72,7 +79,7 @@ function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { wid
     setup() {
       result = useMasonryThumbnails({
         descriptor,
-        currentPath: ref(''),
+        currentPath,
         entries,
         thumbnailWindows: computed(() => windowsRef.value),
         measuredMap,
@@ -87,7 +94,7 @@ function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { wid
   });
   const wrapper = mount(Host);
   return {
-    result, descriptor, entries, windowsRef, measuredMap, colWidthRef, dpr, quality, scrollTop,
+    result, descriptor, currentPath, entries, windowsRef, measuredMap, colWidthRef, dpr, quality, scrollTop,
     unmount: () => wrapper.unmount(),
   };
 }
@@ -99,6 +106,7 @@ beforeEach(() => {
   requestSpy.mockReset();
   retrySpy.mockReset();
   regenSpy.mockReset();
+  invalidateSpy.mockReset();
   notifyEpochSpy.mockClear();
   notifyFastSpy.mockClear();
 });
@@ -316,7 +324,7 @@ describe('useMasonryThumbnails progress (module3.0.11)', () => {
     windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
     requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
     await vi.runOnlyPendingTimersAsync();
-    const ev: ThumbnailProgressEvent = { epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 2 };
+    const ev: ThumbnailProgressEvent = { epoch: result.epoch.value, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 2 };
     fireProgress(ev);
     let s = result.stateMap.value.get('a');
     expect(s!.kind).toBe('generating');
@@ -353,7 +361,7 @@ describe('useMasonryThumbnails progress (module3.0.11)', () => {
     requestSpy.mockResolvedValue([{ path: 'a', status: 'cached', cacheKey: 'ckA', cachePath: '/c/a.webp', width: 100, height: 100 }]);
     await vi.runOnlyPendingTimersAsync();
     expect(result.stateMap.value.get('a')!.kind).toBe('cached');
-    fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 2 });
+    fireProgress({ epoch: result.epoch.value, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 2 });
     expect(result.stateMap.value.get('a')!.kind).toBe('cached');
   });
 
@@ -363,7 +371,7 @@ describe('useMasonryThumbnails progress (module3.0.11)', () => {
     entries.value = [mkEntry('a')];
     windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
     requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
-    fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 1 });
+    fireProgress({ epoch: result.epoch.value, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 1 });
     await vi.runOnlyPendingTimersAsync();
     const s = result.stateMap.value.get('a');
     expect(s?.kind).toBe('generating');
@@ -380,7 +388,7 @@ describe('useMasonryThumbnails progress (module3.0.11)', () => {
     entries.value = [mkEntry('a')];
     windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
     requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
-    fireState({ epoch: 0, state: 'cached', path: 'a', cacheKey: 'ckA', cachePath: '/c/a.webp', outputWidth: 100, outputHeight: 100, message: null });
+    fireState({ epoch: result.epoch.value, state: 'cached', path: 'a', cacheKey: 'ckA', cachePath: '/c/a.webp', outputWidth: 100, outputHeight: 100, message: null });
     await vi.runOnlyPendingTimersAsync();
     expect(result.stateMap.value.get('a')?.kind).toBe('cached');
   });
@@ -392,8 +400,8 @@ describe('useMasonryThumbnails progress (module3.0.11)', () => {
     windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
     requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
     await vi.runOnlyPendingTimersAsync();
-    fireProgress({ epoch: 0, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 5 });
-    fireState({ epoch: 0, state: 'failed', path: 'a', cacheKey: 'ckA', cachePath: null, outputWidth: null, outputHeight: null, message: 'boom' });
+    fireProgress({ epoch: result.epoch.value, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 5 });
+    fireState({ epoch: result.epoch.value, state: 'failed', path: 'a', cacheKey: 'ckA', cachePath: null, outputWidth: null, outputHeight: null, message: 'boom' });
     expect(result.stateMap.value.get('a')?.kind).toBe('failed');
     const snap = result.progressSnapshots.value.get('a');
     expect(snap?.phase).toBe('decoding');
@@ -480,6 +488,198 @@ describe('useMasonryThumbnails 混排过滤', () => {
     expect(requestSpy).toHaveBeenCalledTimes(1);
     const items = requestSpy.mock.calls[0][1] as Array<{ path: string }>;
     expect(items.map((i) => i.path)).toEqual(['a.jpg']);
+    unmount();
+  });
+});
+
+// ─── 任务 5：epoch 出队四件套（目录身份出队 / 布局参数只 bump / 卸载出队 /
+// 跨实例全局单调 + 挂载即 notify / notify 完成屏障） ────────────────────────
+describe('useMasonryThumbnails epoch 出队四件套（任务 5）', () => {
+  it('currentPath 变化 → bump + notify（出队）且 stateMap 清空', async () => {
+    vi.clearAllTimers();
+    const { result, currentPath, unmount } = setup();
+    const e0 = result.epoch.value;
+    // 预置 cached 态（旧目录状态）
+    fireState({ epoch: e0, cacheKey: 'k', path: 'a', state: 'cached', cachePath: '/c.webp', outputWidth: 1, outputHeight: 1, message: null });
+    expect(result.stateMap.value.get('a')?.kind).toBe('cached');
+    currentPath.value = 'sub';
+    await nextTick();
+    expect(result.epoch.value).toBeGreaterThan(e0);
+    expect(notifyEpochSpy).toHaveBeenLastCalledWith(result.epoch.value);
+    expect(result.stateMap.value.size).toBe(0);
+    unmount();
+  });
+
+  it('colWidth 变化 → bump + notify 但 stateMap / 失败快照不清（只 bump）', async () => {
+    vi.clearAllTimers();
+    const { result, colWidthRef, unmount } = setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    const e0 = result.epoch.value;
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    await vi.runOnlyPendingTimersAsync();
+    fireProgress({ epoch: result.epoch.value, cacheKey: 'ckA', path: 'a', phase: 'decoding', elapsedMs: 3 });
+    expect(result.stateMap.value.get('a')?.kind).toBe('generating');
+    expect(result.progressSnapshots.value.get('a')).toBeDefined();
+    colWidthRef.value = 456;
+    await nextTick();
+    expect(result.epoch.value).toBeGreaterThan(e0);
+    expect(notifyEpochSpy).toHaveBeenLastCalledWith(result.epoch.value);
+    // 只 bump：目录状态与失败快照保留
+    expect(result.stateMap.value.get('a')?.kind).toBe('generating');
+    expect(result.progressSnapshots.value.get('a')).toBeDefined();
+    unmount();
+  });
+
+  it('组件卸载 → bump + notify（卸载出队，Rust 端清残留任务）', async () => {
+    vi.clearAllTimers();
+    const { result, unmount } = setup();
+    const e0 = result.epoch.value;
+    unmount();
+    expect(result.epoch.value).toBeGreaterThan(e0);
+    expect(notifyEpochSpy).toHaveBeenLastCalledWith(result.epoch.value);
+  });
+
+  it('同一毫秒跨实例单调：A 卸载 bump 后 B 挂载 epoch ≥ e+2，且 B 挂载即 notify 初始 epoch', async () => {
+    vi.clearAllTimers();
+    vi.setSystemTime(1700000000000); // 固定毫秒：Date.now() 恒定，逼出同毫秒分配
+    const a = setup();
+    const e = a.result.epoch.value;
+    a.unmount(); // 卸载 bump：e → e+1（每实例独立 Date.now() 播种会与 B 撞号）
+    const b = setup();
+    expect(b.result.epoch.value).toBeGreaterThanOrEqual(e + 2);
+    expect(notifyEpochSpy).toHaveBeenLastCalledWith(b.result.epoch.value); // 挂载即 notify
+    b.unmount();
+  });
+
+  it('notify 完成屏障：requestThumbnails 不早于 notify resolve（挂载首批与 bump 后两段）', async () => {
+    vi.clearAllTimers();
+    const order: string[] = [];
+    let resolveNotify1!: () => void;
+    let resolveNotify2!: () => void;
+    vi.mocked(notifyThumbnailEpoch)
+      .mockImplementationOnce(() => new Promise<void>((res) => { resolveNotify1 = res; }))
+      .mockImplementationOnce(() => new Promise<void>((res) => { resolveNotify2 = res; }));
+    requestSpy.mockImplementation(async () => {
+      order.push('request');
+      return [];
+    });
+    const { colWidthRef, windowsRef, unmount } = setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    // 第一段：挂载首批（immediate watch → 80ms debounce → flushRequest）
+    await vi.advanceTimersByTimeAsync(80);
+    expect(requestSpy).not.toHaveBeenCalled(); // 挂在屏障上（notify 未 resolve）
+    order.push('notify1');
+    resolveNotify1();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(order.slice(0, 2)).toEqual(['notify1', 'request']);
+    // 第二段：colWidth bump → notify2 pending → 窗口变化触发新一轮 flush
+    colWidthRef.value = 456;
+    await nextTick();
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    await vi.advanceTimersByTimeAsync(80);
+    expect(requestSpy).toHaveBeenCalledTimes(1); // 仍挂屏障
+    order.push('notify2');
+    resolveNotify2();
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(requestSpy).toHaveBeenCalledTimes(2);
+    expect(order).toEqual(['notify1', 'request', 'notify2', 'request']);
+    unmount();
+  });
+});
+
+// ─── 任务 3：load-error 接线与重试分流（cached 先失效再请求 / original 直请求）───
+describe('useMasonryThumbnails load-error（任务 3）', () => {
+  it('markLoadFailed 保留原 state 的 cacheKey 并转 failed(load-error)', () => {
+    const { result, unmount } = setup();
+    // 预置 cached 态（带 cacheKey ckA）
+    fireState({ epoch: result.epoch.value, cacheKey: 'ckA', path: 'a', state: 'cached', cachePath: '/c/a.webp', outputWidth: 100, outputHeight: 80, message: null });
+    expect(result.stateMap.value.get('a')?.kind).toBe('cached');
+
+    result.markLoadFailed('a');
+    const s = result.stateMap.value.get('a');
+    // cacheKey 必须保留（失效目标，R2：清空即丢失）
+    expect(s).toEqual({ kind: 'failed', cacheKey: 'ckA', retryable: true, message: 'load-error' });
+    unmount();
+  });
+
+  it('markLoadFailed 对 original 态（无 cacheKey）→ cacheKey 空串', async () => {
+    vi.clearAllTimers();
+    const { result, unmount } = setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    requestSpy.mockResolvedValueOnce([{ path: 'a', status: 'original' }]);
+    await vi.runOnlyPendingTimersAsync();
+    expect(result.stateMap.value.get('a')?.kind).toBe('original');
+
+    result.markLoadFailed('a');
+    const s = result.stateMap.value.get('a');
+    expect(s).toEqual({ kind: 'failed', cacheKey: '', retryable: true, message: 'load-error' });
+    unmount();
+  });
+
+  it('retryLoadFailed cached 来源：先失效缓存（带 cacheKey）再请求（顺序断言）', async () => {
+    vi.clearAllTimers();
+    const { result, entries, unmount } = setup();
+    entries.value = [mkEntry('a')];
+    fireState({ epoch: result.epoch.value, cacheKey: 'ckA', path: 'a', state: 'cached', cachePath: '/c/a.webp', outputWidth: 100, outputHeight: 80, message: null });
+    invalidateSpy.mockResolvedValue(undefined);
+    let resolveReq!: (v: unknown[]) => void;
+    requestSpy.mockReturnValueOnce(new Promise((res) => { resolveReq = res; }));
+
+    const done = result.retryLoadFailed('a');
+    // invalidate 的 microtask 链走完后：预置 generating/queued（spinner 反馈）+ 请求已发
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    const s = result.stateMap.value.get('a');
+    expect(s?.kind).toBe('generating');
+    if (s?.kind === 'generating') expect(s.phase).toBe('queued');
+
+    // 顺序：invalidate 先于 requestThumbnails；参数 [cacheKey]
+    expect(invalidateSpy).toHaveBeenCalledTimes(1);
+    expect(invalidateSpy.mock.calls[0][0]).toEqual(['ckA']);
+    expect(invalidateSpy.mock.invocationCallOrder[0]).toBeLessThan(
+      requestSpy.mock.invocationCallOrder[0],
+    );
+
+    resolveReq([{ path: 'a', status: 'queued', cacheKey: 'ckA' }]);
+    await done;
+    unmount();
+  });
+
+  it('retryLoadFailed original 来源：无失效调用，直接 re-request', async () => {
+    vi.clearAllTimers();
+    const { result, unmount } = setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    // 种 original 态（无 cacheKey）
+    requestSpy.mockResolvedValueOnce([{ path: 'a', status: 'original' }]);
+    await vi.runOnlyPendingTimersAsync();
+    expect(result.stateMap.value.get('a')?.kind).toBe('original');
+
+    invalidateSpy.mockResolvedValue(undefined);
+    requestSpy.mockResolvedValueOnce([{ path: 'a', status: 'queued', cacheKey: 'kb' }]);
+    await result.retryLoadFailed('a');
+
+    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(requestSpy).toHaveBeenCalledTimes(2);
+    const args = requestSpy.mock.calls[1];
+    // 单 item（visible 优先级）+ 空 visibleKeys
+    const items = args[1] as Array<{ path: string; priority: string }>;
+    expect(items.map((i) => i.path)).toEqual(['a']);
+    expect(items[0].priority).toBe('visible');
+    expect(args[3]).toEqual([]);
     unmount();
   });
 });

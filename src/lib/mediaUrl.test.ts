@@ -77,3 +77,52 @@ describe('mediaUrl', () => {
     expect(joinRel('a', '')).toBe('a');
   });
 });
+
+describe('mediaUrl smb 分支换算', () => {
+  // 空 initialPath + share 前缀 relPath（实机 403 形态）→ 首段补位
+  it('initialPath 空时取 relPath 首段作 initial、剩余作 rel', () => {
+    const url = mediaUrl(
+      { type: 'smb', accountId: 2, initialPath: '', path: '', port: 445 },
+      'H/00down/2504/1 (31).jpg',
+    );
+    expect(url).toBe('http://media.localhost/smb/2/H/' + encodeURIComponent('00down/2504/1 (31).jpg'));
+  });
+  // initialPath 非空 → relPath 剥前缀
+  it('initialPath 非空时 relPath 剥离 initialPath 前缀', () => {
+    const url = mediaUrl(
+      { type: 'smb', accountId: 3, initialPath: 'share/comics', path: '', port: 445 },
+      'share/comics/v1/001.jpg',
+    );
+    expect(url).toBe('http://media.localhost/smb/3/' + encodeURIComponent('share/comics') + '/' + encodeURIComponent('v1/001.jpg'));
+  });
+  // 前缀不匹配 → 不剥（防御：返回原样，让 Rust 403 并留日志）
+  it('relPath 不以 initialPath 开头时不剥离', () => {
+    const url = mediaUrl(
+      { type: 'smb', accountId: 3, initialPath: 'share/comics', path: '', port: 445 },
+      'other/dir/1.jpg',
+    );
+    expect(url.endsWith('/' + encodeURIComponent('other/dir/1.jpg'))).toBe(true);
+  });
+  // R1 P0-1：archive-SMB share 根（origin.initialPath 空 + archiveRelPath 带前缀）同款换算
+  it('archive smb 分支：origin.initialPath 空时 archiveRelPath 首段补位、entry 原样', () => {
+    const url = mediaUrl(
+      { type: 'archive', archivePath: '', entryPrefix: '', format: 'cbz', origin: { type: 'smb', accountId: 2, initialPath: '', path: '', port: 445 }, archiveRelPath: 'H/books/a.cbz' },
+      'p1.jpg',
+    );
+    expect(url).toBe('http://media.localhost/archive/smb/2/H/' + encodeURIComponent('books/a.cbz') + '/' + encodeURIComponent('p1.jpg'));
+  });
+  it('archive smb 分支：origin.initialPath 非空时剥前缀', () => {
+    const url = mediaUrl(
+      { type: 'archive', archivePath: '', entryPrefix: '', format: 'cbz', origin: { type: 'smb', accountId: 2, initialPath: 'H/books', path: '', port: 445 }, archiveRelPath: 'H/books/a.cbz' },
+      'p1.jpg',
+    );
+    expect(url).toBe('http://media.localhost/archive/smb/2/' + encodeURIComponent('H/books') + '/' + encodeURIComponent('a.cbz') + '/' + encodeURIComponent('p1.jpg'));
+  });
+  // local/webdav 分支回归不受影响
+  it('local 与 webdav 分支不受影响', () => {
+    expect(mediaUrl({ type: 'local', rootPath: 'D:/x' }, 'D:/comics/1.jpg'))
+      .toBe('http://media.localhost/local/' + encodeURIComponent('D:/comics/1.jpg'));
+    expect(mediaUrl({ type: 'webdav', accountId: 7, baseUrl: 'https://h:5006/home', path: '' }, 'sub/1.jpg'))
+      .toBe('http://media.localhost/webdav/7/' + encodeURIComponent('sub/1.jpg'));
+  });
+});

@@ -26,6 +26,23 @@ function mediaSrc(encodedPath: string): string {
     : `media://localhost/${encodedPath}`;
 }
 
+/** 2026-08-28 缺陷 A（R1 P0-1）：SMB URL 契约要求 initial 段非空（首段=share）、
+ * rel 相对 initial。浏览态 descriptor 可能 initialPath=""（share 根）且调用方传
+ * share 前缀 UI 路径——直拼产生空段被 Rust validate_rel_path 拒绝（403）。
+ * 统一换算：空 initial 取 fullPath 首段（share 名）；非空时剥前缀（不匹配不剥，
+ * 留给 Rust 403 + 日志暴露调用方数据错误）。 */
+export function smbUrlParts(initialPath: string, fullPath: string): { initial: string; rel: string } {
+  if (!initialPath) {
+    const parts = fullPath.split('/').filter(Boolean);
+    const initial = parts.shift() ?? '';
+    return { initial, rel: parts.join('/') };
+  }
+  const rel = fullPath.startsWith(initialPath + '/')
+    ? fullPath.slice(initialPath.length + 1)
+    : fullPath;
+  return { initial: initialPath, rel };
+}
+
 export function mediaUrl(descriptor: SourceDescriptor, relPath: string): string {
   switch (descriptor.type) {
     case 'local':
@@ -33,8 +50,10 @@ export function mediaUrl(descriptor: SourceDescriptor, relPath: string): string 
       return mediaSrc(`local/${seg(relPath)}`);
     case 'webdav':
       return mediaSrc(`webdav/${descriptor.accountId}/${seg(relPath)}`);
-    case 'smb':
-      return mediaSrc(`smb/${descriptor.accountId}/${seg(descriptor.initialPath)}/${seg(relPath)}`);
+    case 'smb': {
+      const { initial, rel } = smbUrlParts(descriptor.initialPath, relPath);
+      return mediaSrc(`smb/${descriptor.accountId}/${seg(initial)}/${seg(rel)}`);
+    }
     case 'archive': {
       const origin = descriptor.origin;
       // rev4：origin 缺省 与 origin=local 同形态（既有契约变体——本地 ZIP 无论 origin 字段如何，
@@ -46,8 +65,9 @@ export function mediaUrl(descriptor: SourceDescriptor, relPath: string): string 
         return mediaSrc(`archive/webdav/${origin.accountId}/${seg(descriptor.archiveRelPath ?? '')}/${seg(relPath)}`);
       }
       if (origin.type === 'smb') {
+        const { initial, rel } = smbUrlParts(origin.initialPath, descriptor.archiveRelPath ?? '');
         return mediaSrc(
-          `archive/smb/${origin.accountId}/${seg(origin.initialPath)}/${seg(descriptor.archiveRelPath ?? '')}/${seg(relPath)}`,
+          `archive/smb/${origin.accountId}/${seg(initial)}/${seg(rel)}/${seg(relPath)}`,
         );
       }
       // TS 穷尽检查兜底（契约加新源时编译期暴露，不静默走错分支）

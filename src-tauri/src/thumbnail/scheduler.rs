@@ -141,6 +141,14 @@ enum Command {
     /// 取消全部未开始任务（清空缓存/维护用）：bump epoch，drain pending 发 Stale；
     /// in-flight 任务完成时因 epoch < current 自动变 Stale（不写索引）。
     CancelAll,
+    /// 任务 4（C 细粒度取消）：按 cache_key 取消——pending 匹配 drain 发 Stale；
+    /// in-flight 匹配置位 abort（协作取消）+ `stale_on_completion`（完成回包映射
+    /// Stale 而非 Failed，R3 P0——按 key 取消不推进 epoch，同 epoch in-flight 的
+    /// Cancelled 错误若映射 Failed 会以 failed 事件反向覆盖 UseOriginal 已建立的
+    /// original 态）。幂等：无匹配 no-op。
+    CancelKeys {
+        keys: Vec<String>,
+    },
     Completed {
         cache_key: String,
         epoch: u64,
@@ -162,6 +170,11 @@ struct InFlight {
     /// （协作式取消，实机批热修）。
     epoch: u64,
     abort: Arc<AtomicBool>,
+    /// 任务 4 R3 P0：cancel_keys 命中的 in-flight 完成时强制映射 Stale。按 key 取消
+    /// 不推进 epoch（同 epoch 的取消-完成交错），单靠 epoch 判定会把协作取消返回的
+    /// `Err(Cancelled)` 映射成 Failed → failed 事件反向覆盖 original 态。
+    /// epoch 级取消（new_epoch/cancel_all）无需此标志——epoch 判定已覆盖。
+    stale_on_completion: bool,
 }
 
 /// 调度器句柄。可自由 Clone（浅克隆共享同一 actor 与 channel）；actor 生命周期与
@@ -235,6 +248,16 @@ impl SchedulerHandle {
     pub fn cancel_all(&self) {
         let _ = self.tx.send(Command::CancelAll);
     }
+
+    /// 任务 4（C 细粒度取消）：按 cache_key 取消（UseOriginal 判定翻转后回收旧
+    /// GENERATE 任务）。pending 订阅者收 Stale；in-flight 协作取消且完成映射 Stale
+    /// （不发 failed 事件）。幂等：无匹配 no-op。
+    pub fn cancel_keys(&self, keys: Vec<String>) {
+        if keys.is_empty() {
+            return;
+        }
+        let _ = self.tx.send(Command::CancelKeys { keys });
+    }
 }
 
 pub struct Actor {
@@ -271,6 +294,7 @@ impl Actor {
                 Command::SetFastScrolling { fast } => self.fast_scrolling = fast,
                 Command::Pump => {}
                 Command::CancelAll => self.handle_cancel_all(),
+                Command::CancelKeys { keys } => self.handle_cancel_keys(&keys),
                 Command::Completed {
                     cache_key,
                     epoch,
@@ -355,6 +379,20 @@ impl Actor {
     }
 
     fn handle_new_epoch(&mut self, epoch: u64) {
+        // 任务 5（D / R1 P0-2）：单调守卫——≤ current 的通知（乱序 IPC 旧通知 / 同值
+        // 重发）直接忽略：不回退 current、不 drain。若被接受，回退的 current 会误
+        // drain 旧 epoch 的 pending 任务（前端全局分配器保证严格递增，此处只防乱序）。
+        if epoch <= self.current_epoch {
+            log::write_log(
+                "WARN",
+                "thumbnail",
+                &format!(
+                    "scheduler ignore regressed epoch current={} incoming={}",
+                    self.current_epoch, epoch
+                ),
+            );
+            return;
+        }
         let prev = self.current_epoch;
         self.current_epoch = epoch;
         // 旧 epoch 未开始任务标 stale，移除并通知订阅者
@@ -427,6 +465,46 @@ impl Actor {
         );
     }
 
+    /// 任务 4（C 细粒度取消）：按 cache_key 取消——pending 匹配 drain 发 Stale；
+    /// in-flight 匹配置位 abort（协作取消）+ stale_on_completion（完成映射 Stale）。
+    /// 幂等：无匹配 no-op。
+    fn handle_cancel_keys(&mut self, keys: &[String]) {
+        // pending：匹配 drain 发 Stale（保留未命中者）
+        let mut drained_n = 0usize;
+        while let Some(idx) = self
+            .pending
+            .iter()
+            .position(|p| keys.contains(&p.task.cache_key))
+        {
+            let p = self.pending.remove(idx);
+            drained_n += 1;
+            for s in p.subscribers {
+                let _ = s.send(Outcome::Stale);
+            }
+        }
+        // in-flight：置位 abort + stale_on_completion（不推进 epoch）
+        let mut aborted_n = 0usize;
+        for key in keys {
+            if let Some(inf) = self.inflight.get_mut(key) {
+                inf.abort.store(true, Ordering::Relaxed);
+                inf.stale_on_completion = true;
+                aborted_n += 1;
+            }
+        }
+        log::write_log(
+            "INFO",
+            "thumbnail",
+            &format!(
+                "scheduler cancel_keys keys={} drainedPending={} inflightAborted={} pendingRemain={} inflight={}",
+                keys.len(),
+                drained_n,
+                aborted_n,
+                self.pending.len(),
+                self.inflight.len()
+            ),
+        );
+    }
+
     fn handle_completed(
         &mut self,
         cache_key: String,
@@ -442,10 +520,13 @@ impl Actor {
                 Err(e) => Outcome::Failed(e.to_string()),
             };
             // 旧 epoch 已开始任务：完成写缓存，但不发 Cached（发 Stale）。
-            let effective = if epoch >= self.current_epoch {
-                outcome
-            } else {
+            // 任务 4 R3 P0：cancel_keys 命中的 in-flight（stale_on_completion）同样
+            // 强制 Stale——按 key 取消不推进 epoch，否则协作取消返回的 Cancelled
+            // 会被映射成 Failed（failed 事件反向覆盖 original 态）。
+            let effective = if inf.stale_on_completion || epoch < self.current_epoch {
                 Outcome::Stale
+            } else {
+                outcome
             };
             log::write_log(
                 "DEBUG",
@@ -489,6 +570,7 @@ impl Actor {
                     subscribers,
                     epoch,
                     abort,
+                    stale_on_completion: false,
                 },
             );
             self.running_count += 1;
@@ -1049,6 +1131,115 @@ mod tests {
         assert!(matches!(r_q.await.unwrap(), Outcome::Stale));
         // holder 完成后也 Stale（epoch 已 bump，不再发 Cached）
         let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(r_holder.await.unwrap(), Outcome::Stale));
+    }
+
+    /// 任务 4（C 细粒度取消）：cancel_keys 按键取消——pending 匹配 drain 发 Stale；
+    /// in-flight 匹配置位 abort（协作取消）；未命中的旁观任务不受影响。
+    #[tokio::test]
+    async fn cancel_keys_drains_pending_and_aborts_inflight() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        // holder 占住唯一 worker
+        let _holder = handle.submit(task("holder", Priority::Visible, 1, 10));
+        let (holder_job, holder_reply) = recv_job(&mut rx).await;
+        // k1 排队（未开始）；keep 是旁观者（不在取消列表）
+        let r1 = handle.submit(task("k1", Priority::Visible, 1, 10));
+        let r_keep = handle.submit(task("keep", Priority::Visible, 1, 10));
+        handle.cancel_keys(vec!["k1".to_string(), "holder".to_string()]);
+        // pending 被 drain：订阅者收 Stale（收到回包也证明 CancelKeys 已被 actor 处理）
+        assert!(matches!(r1.await.unwrap(), Outcome::Stale));
+        // in-flight abort：holder 的 job.abort 已置位（recv_job 回传的 job 与 InFlight 共享同一 Arc）
+        assert!(
+            holder_job.abort.load(Ordering::Relaxed),
+            "cancel_keys 应置位 in-flight 的 abort 标志"
+        );
+        // 旁观者不受影响：holder（被取消，完成即 Stale）释放 worker 后 keep 正常调度
+        let _ = holder_reply.send(Err(ThumbnailError::Cancelled));
+        let (_keep_job, keep_reply) = recv_job(&mut rx).await;
+        let _ = keep_reply.send(Ok(ok_thumb()));
+        assert!(matches!(r_keep.await.unwrap(), Outcome::Cached(_)));
+    }
+
+    /// 任务 4 R3 P0：按 key 取消不推进 epoch——同 epoch in-flight 被取消后完成回包
+    /// （Cancelled 错误或成功）必须映射 Stale 而非 Failed/Cached，否则 failed 事件
+    /// 会反向覆盖 UseOriginal 已建立的 original 态（卡片倒退成 failed）。
+    #[tokio::test]
+    async fn cancel_keys_inflight_completes_as_stale_not_failed() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        // 协作取消路径：gen 返回 Err(Cancelled)
+        let rh = handle.submit(task("h", Priority::Visible, 1, 10));
+        let (_hj, hreply) = recv_job(&mut rx).await;
+        handle.cancel_keys(vec!["h".to_string()]);
+        let _ = hreply.send(Err(ThumbnailError::Cancelled));
+        let o = rh.await.unwrap();
+        assert!(matches!(o, Outcome::Stale), "Cancelled 完成必须是 Stale，got {o:?}");
+        // 成功路径同样 Stale（跨阶段边界未检查 abort 时任务跑完写缓存，但订阅者不发 Cached）
+        let r2 = handle.submit(task("h2", Priority::Visible, 1, 10));
+        let (_hj2, h2reply) = recv_job(&mut rx).await;
+        handle.cancel_keys(vec!["h2".to_string()]);
+        let _ = h2reply.send(Ok(ok_thumb()));
+        let o2 = r2.await.unwrap();
+        assert!(matches!(o2, Outcome::Stale), "成功完成必须是 Stale，got {o2:?}");
+    }
+
+    /// 任务 4：cancel_keys 幂等——未知 key 无匹配 no-op，不误伤无关任务；
+    /// 重复取消已完成 key 也是 no-op。
+    #[tokio::test]
+    async fn cancel_keys_unknown_key_is_noop() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        let r = handle.submit(task("a", Priority::Visible, 1, 10));
+        let (_job, reply) = recv_job(&mut rx).await;
+        handle.cancel_keys(vec!["unknown".to_string()]);
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(r.await.unwrap(), Outcome::Cached(_)), "未知 key 不得误伤无关任务");
+        // 重复取消已完成 key：no-op，后续任务正常
+        let r2 = handle.submit(task("b", Priority::Visible, 1, 10));
+        handle.cancel_keys(vec!["a".to_string()]);
+        let (_j2, r2reply) = recv_job(&mut rx).await;
+        let _ = r2reply.send(Ok(ok_thumb()));
+        assert!(matches!(r2.await.unwrap(), Outcome::Cached(_)));
+    }
+
+    /// 任务 5（D / R1 P0-2）：new_epoch 单调守卫——传入 ≤ current 的 epoch（乱序 IPC
+    /// 旧通知 / 同值重发）必须拒绝：current 不变、不 drain。若被接受，回退的
+    /// current 会误 drain 掉旧 epoch 的 pending 任务（前端全局分配器保证递增，此处防乱序）。
+    #[tokio::test]
+    async fn new_epoch_rejects_regressed_epoch() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        // current 推进到 5
+        handle.new_epoch(5);
+        // holder(epoch 5) 占住唯一 worker
+        let r_holder = handle.submit(task("holder", Priority::Visible, 5, 10));
+        let (_hj, hreply) = recv_job(&mut rx).await;
+        // pend(epoch 2) 排队未开始：submit 不做 epoch 检查，只有 new_epoch 会 drain 它
+        let mut r_pend = handle.submit(task("pend", Priority::Visible, 2, 10));
+        assert_no_job(&mut rx).await;
+        // 同值 + 回退两条通知：都 ≤ current(5) → 必须拒绝（不 drain pend）
+        handle.new_epoch(5);
+        handle.new_epoch(3);
+        let drained = tokio::time::timeout(Duration::from_millis(60), &mut r_pend).await;
+        assert!(drained.is_err(), "回退/同值 epoch 不得 drain pending（current 不变）");
+        // 前向推进仍生效（actor 未 wedge）：new_epoch(6) drain pend(2) → Stale
+        handle.new_epoch(6);
+        assert!(matches!(r_pend.await.unwrap(), Outcome::Stale));
+        // holder(5) 完成于 current=6 → Stale（既有语义）
+        let _ = hreply.send(Ok(ok_thumb()));
         assert!(matches!(r_holder.await.unwrap(), Outcome::Stale));
     }
 

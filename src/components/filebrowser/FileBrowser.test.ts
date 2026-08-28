@@ -63,6 +63,11 @@ vi.mock('@/lib/tauri', () => ({
   getBookStatus: vi.fn(async () => null),
   // M3 任务 8 复审修复: useArchiveWindowPrefetch dispose 现在恒发一次空窗口取消
   notifyArchiveWindow: vi.fn(async () => undefined),
+  // 任务 5（epoch 出队四件套）: useMasonryThumbnails 挂载即 notify 初始 epoch、
+  // flush 走 fastScrolling + request——mock 需覆盖，否则 MasonryView setup 崩溃
+  notifyThumbnailEpoch: vi.fn(async () => undefined),
+  notifyThumbnailFastScrolling: vi.fn(async () => undefined),
+  requestThumbnails: vi.fn(async () => []),
   // 任务 13: 事务式 archive IPC 五命令（begin 数字返回契约 = 返回自身 boot）
   beginArchiveSession: vi.fn((_sessionId: string, bootMs: number) => Promise.resolve(bootMs)),
   prepareArchive: vi.fn(async () => ({ status: 'ready', accessMode: 'local' as const, progressKey: null })),

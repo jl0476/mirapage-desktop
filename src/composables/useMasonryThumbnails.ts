@@ -7,6 +7,7 @@
 import { computed, onBeforeUnmount, ref, shallowRef, watch, type ComputedRef, type Ref } from 'vue';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
+  invalidateThumbnailCacheKeys,
   notifyThumbnailEpoch,
   notifyThumbnailFastScrolling,
   regenerateThumbnail,
@@ -52,6 +53,17 @@ function isTauriEnv(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
 
+// ─── 任务 5（D / R1 P0-2）：模块级全局 epoch 分配器 ─────────────────────────
+// 每实例独立 Date.now() 播种仍可倒退：同毫秒内「实例 A 卸载 bump 至 e+1 / 实例 B
+// 初始化取 e」会让 B 的 epoch ≤ Rust current_epoch，新任务被 epoch 检查丢弃。
+// 全局单调分配：同毫秒内多次分配按 +1 递增，跨实例保证新挂载实例的 epoch 严格
+// 大于所有已分配值（含前实例卸载时的出队 bump）。
+let lastThumbnailEpoch = 0;
+function nextThumbnailEpoch(): number {
+  lastThumbnailEpoch = Math.max(Date.now(), lastThumbnailEpoch + 1);
+  return lastThumbnailEpoch;
+}
+
 export interface UseMasonryThumbnailsParams {
   descriptor: Ref<SourceDescriptor>;
   /** 当前目录相对 source root 的路径（如 `normal`），拼 sourceRelPath 用。 */
@@ -72,6 +84,11 @@ export interface UseMasonryThumbnailsReturn {
   /** module3.0.11：失败态时间线快照（failed 事件覆盖 generating 态后明细已丢）。 */
   progressSnapshots: ComputedRef<Map<string, ThumbnailProgressSnapshot>>;
   retry: (path: string) => void;
+  /** 任务 3：img load-error → failed 态（保留 cacheKey 供失效重试）。 */
+  markLoadFailed: (path: string) => void;
+  /** 任务 3：failed 卡片 ↻ 统一重试——cached 来源先失效缓存再 re-request，
+   *  original 来源直接 re-request（Rust resubmit 对远程源返回 unsupported）。 */
+  retryLoadFailed: (path: string) => Promise<void>;
   regenerate: (path: string) => void;
   regenerateBatch: (paths: string[]) => void;
   epoch: Ref<number>;
@@ -97,7 +114,18 @@ export function useMasonryThumbnails(
   params: UseMasonryThumbnailsParams,
 ): UseMasonryThumbnailsReturn {
   const state = shallowRef<Map<string, ThumbnailState>>(new Map());
-  const epoch = ref(0);
+  // 任务 5（D）：全局分配器播种——与 Rust current_epoch 的单调契约从此处开始
+  const epoch = ref(nextThumbnailEpoch());
+  /** notify 完成屏障（任务 5 / R2 P0-1）：request 先于 new_epoch 到达后端会被
+   * fetch actor 的 prepared.epoch != current 检查丢弃（IPC 到达顺序无契约）——
+   * flushRequest 发请求前 await 当时快照。初始化与每次 bump 都替换；catch 吞错
+   * （屏障只保证顺序，不因 IPC 失败卡死请求）。Promise.resolve 包裹防 mock 返回
+   * 非 promise（vi.fn() 返回 undefined）时 .catch 抛 TypeError。 */
+  let epochReady: Promise<void> = Promise.resolve();
+  const pushEpochNotify = () => {
+    epochReady = Promise.resolve(notifyThumbnailEpoch(epoch.value)).catch(() => {}) as Promise<void>;
+  };
+  pushEpochNotify(); // 新实例挂载即 notify：防上一实例卸载 bump 后 current 更高
   const pathToCacheKey = ref<Map<string, string>>(new Map());
   let lastScrollAt = 0;
   let unlisten: UnlistenFn | null = null;
@@ -128,19 +156,31 @@ export function useMasonryThumbnails(
     state.value = next;
   };
 
-  // epoch 递增：切目录/列宽/DPR/质量变化
+  // epoch 递增（任务 5：全局单调分配）：目录身份/布局参数变化 + 卸载出队共用
   const bumpEpoch = () => {
     const old = epoch.value;
-    epoch.value += 1;
-    // 旧目录的竞态缓冲/进度快照不再有效（round-1 P1-3/P1-6）
-    pendingProgress.clear();
-    progressSnapshots.value = new Map();
-    void notifyThumbnailEpoch(epoch.value);
+    epoch.value = nextThumbnailEpoch();
+    pushEpochNotify();
     log('[thumbnail] epoch changed old=' + old + ' new=' + epoch.value);
   };
 
+  // 任务 5（C）：watch 拆两组——
+  // ① 目录身份（descriptor / currentPath）变化：bump 出队 + 清目录级状态
+  //   （stateMap / cacheKey 索引 / round-1 P1-3 竞态缓冲 / P1-6 失败快照）
   watch(
-    () => [params.descriptor.value, params.colWidth.value, params.dpr.value, params.quality.value] as const,
+    () => [params.descriptor.value, params.currentPath.value] as const,
+    () => {
+      bumpEpoch();
+      state.value = new Map();
+      pathToCacheKey.value = new Map();
+      pendingProgress.clear();
+      progressSnapshots.value = new Map();
+    },
+  );
+
+  // ② 布局参数（列宽/DPR/质量）变化：只 bump（重生成尺寸档位），不清目录状态
+  watch(
+    () => [params.colWidth.value, params.dpr.value, params.quality.value] as const,
     () => bumpEpoch(),
   );
 
@@ -181,6 +221,7 @@ export function useMasonryThumbnails(
     debounceTimer = null;
     lastFlushAt = Date.now(); // 保底节流基准（hotfix）
     const reqEpoch = epoch.value;
+    const ready = epochReady; // 任务 5：屏障快照——await 前捕获，bump 后不等旧通知
     const w = params.thumbnailWindows.value;
     const prioMap = mergeWindowsToPriorities(w);
     if (prioMap.size === 0) return;
@@ -245,6 +286,18 @@ export function useMasonryThumbnails(
     );
 
     void notifyThumbnailFastScrolling(fastScrolling);
+
+    // 任务 5（R2 P0-1）：notify 完成屏障——request 先于 new_epoch 到达后端会被
+    // fetch actor 的 prepared.epoch != current 检查直接丢弃。await 快照后再发请求；
+    // 屏障期间 bump 则丢弃（请求侧对称防线，响应侧守卫见下方 epoch re-check）。
+    await ready;
+    if (epoch.value !== reqEpoch) {
+      log(
+        '[thumbnail] flushRequest reqid=' + reqid +
+          ' epoch changed during notify barrier (now=' + epoch.value + '), dropping',
+      );
+      return;
+    }
 
     let results;
     try {
@@ -520,6 +573,45 @@ export function useMasonryThumbnails(
     });
   };
 
+  // ─── 任务 3：load-error 接线与重试分流 ────────────────────────────────────
+
+  /** img load-error（403 / 缓存损坏）→ failed 态。保留原 state 的 cacheKey
+   *  （cached 来源的失效目标——清空即丢失，R2）；message 固定 'load-error'
+   *  区别于 Rust failed 事件的 errorKind。 */
+  const markLoadFailed = (path: string) => {
+    const prev = state.value.get(path);
+    const cacheKey = prev && 'cacheKey' in prev ? prev.cacheKey : '';
+    setState(path, { kind: 'failed', cacheKey, retryable: true, message: 'load-error' });
+  };
+
+  /** failed 卡片 ↻ 统一重试（load-error 与生成失败共用）：
+   *  - cached 来源（有 cacheKey）：先失效缓存（删文件 + 索引行）再 re-request——
+   *    CACHED 命中校验只查「文件存在且非空」，损坏 WebP 不失效会拿到同一 URL 死循环；
+   *  - original 来源（无 cacheKey）：直接 re-request（网络失败重拉）。
+   *  不走 Rust resubmit——其对非 Local descriptor 返回 unsupported（service.rs）。 */
+  const retryLoadFailed = async (path: string) => {
+    const found = findEntry(path);
+    if (!found) return;
+    const prev = state.value.get(path);
+    const cacheKey = prev && 'cacheKey' in prev ? prev.cacheKey : '';
+    if (cacheKey) {
+      try {
+        await invalidateThumbnailCacheKeys([cacheKey]);
+      } catch (err) {
+        // 失效失败不阻断重试（退化为可能再命中损坏缓存，log 留诊断线索）
+        log('[thumbnail] retryLoadFailed invalidate failed path=' + path + ' err=' + String(err));
+      }
+    }
+    deleteSnapshot(path);
+    setState(path, { kind: 'generating', cacheKey, phase: 'queued', startedAt: Date.now(), timings: {} });
+    try {
+      const results = await requestThumbnails(params.descriptor.value, [found.item], epoch.value, []);
+      applyResults(results, new Map([[path, found.entry]]));
+    } catch (err) {
+      log('[thumbnail] retryLoadFailed IPC error path=' + path + ' err=' + String(err));
+    }
+  };
+
 
   const regenerate = (path: string) => {
     const found = findEntry(path);
@@ -541,12 +633,15 @@ export function useMasonryThumbnails(
     if (debounceTimer) clearTimeout(debounceTimer);
     if (unlisten) unlisten();
     if (progressUnlisten) progressUnlisten(); // round-1 P1-5：防监听器累积
+    bumpEpoch(); // 任务 5：卸载出队——Rust 端据此清本实例残留的 pending/in-flight
   });
 
   return {
     stateMap: computed(() => state.value),
     progressSnapshots: computed(() => progressSnapshots.value),
     retry,
+    markLoadFailed,
+    retryLoadFailed,
     regenerate,
     regenerateBatch,
     epoch,
