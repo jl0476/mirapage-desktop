@@ -171,11 +171,11 @@ export function useMasonryThumbnails(
     debounceTimer = setTimeout(flushRequest, REQUEST_DEBOUNCE_MS);
   };
 
-  watch(
-    () => params.thumbnailWindows.value,
-    () => scheduleRequest(),
-    { deep: false },
-  );
+  // 实机批热修：immediate——挂载时 windows 已非空（估算比例窗口）也立即发首批，
+  // 不再串行化等待"维度预取完成 → windows 重算"。空窗口在 flushRequest 内
+  // prioMap.size === 0 自然消化，无副作用。注意必须注册在 flushRequest 定义之后
+  //（immediate 回包同步走 scheduleRequest → 引用 flushRequest，置于其前即 TDZ）。
+
 
   const flushRequest = async () => {
     debounceTimer = null;
@@ -275,6 +275,16 @@ export function useMasonryThumbnails(
     );
     applyResults(results, entriesByPath);
   };
+
+  // 实机批热修：immediate——挂载时 windows 已非空（估算比例窗口）也立即发首批，
+  // 不再串行化等待"维度预取完成 → windows 重算"。空窗口在 flushRequest 内
+  // prioMap.size === 0 自然消化，无副作用。注册位置必须在 flushRequest 定义之后
+  //（immediate 回调同步进 scheduleRequest，引用其上未初始化的 const 即 TDZ）。
+  watch(
+    () => params.thumbnailWindows.value,
+    () => scheduleRequest(),
+    { deep: false, immediate: true },
+  );
 
   const applyResults = (
     results: Awaited<ReturnType<typeof requestThumbnails>>,

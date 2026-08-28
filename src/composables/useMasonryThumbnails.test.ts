@@ -53,10 +53,10 @@ function fireProgress(payload: ThumbnailProgressEvent) {
   if (h) h({ payload });
 }
 
-function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { width: number; height: number }> }) {
+function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { width: number; height: number }>; entries?: MediaEntry[] }) {
   const windows = opts?.windows ?? { visible: [], ahead: [], behind: [], idle: [] };
   const descriptor = ref<SourceDescriptor>(localDesc);
-  const entries = ref<readonly MediaEntry[]>([]);
+  const entries = ref<readonly MediaEntry[]>(opts?.entries ?? []);
   const windowsRef = ref<ThumbnailWindows>(windows);
   const measuredMap = ref<Map<string, { width: number; height: number }>>(
     opts?.measured ?? new Map(),
@@ -101,6 +101,27 @@ beforeEach(() => {
   regenSpy.mockReset();
   notifyEpochSpy.mockClear();
   notifyFastSpy.mockClear();
+});
+
+describe('挂载即发首批（immediate watch，实机批热修）', () => {
+  it('挂载时 windows 已非空且 entries 就绪 → 不等窗口变化立即 flush', async () => {
+    requestSpy.mockResolvedValue([{ path: 'a', status: 'queued', cacheKey: 'ka' }]);
+    setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    await vi.advanceTimersByTimeAsync(80);
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    expect(requestSpy.mock.calls[0][1]).toMatchObject([
+      { path: 'a', sourceRelPath: 'a', priority: 'visible' },
+    ]);
+  });
+
+  it('挂载时 windows 为空 → 静默跳过，不误发空请求', async () => {
+    setup({ entries: [mkEntry('a')] });
+    await vi.advanceTimersByTimeAsync(80);
+    expect(requestSpy).not.toHaveBeenCalled();
+  });
 });
 
 describe('mergeWindowsToPriorities', () => {
