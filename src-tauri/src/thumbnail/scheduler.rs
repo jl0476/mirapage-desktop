@@ -147,7 +147,6 @@ enum Command {
         est_memory_mb: u32,
         result: Result<GeneratedThumbnail, ThumbnailError>,
     },
-    Shutdown,
 }
 
 struct Pending {
@@ -165,7 +164,9 @@ struct InFlight {
     abort: Arc<AtomicBool>,
 }
 
-/// 调度器句柄。drop 时发送 Shutdown。
+/// 调度器句柄。可自由 Clone（浅克隆共享同一 actor 与 channel）；actor 生命周期与
+/// 进程一致（自持 tx，recv 永不返回 None）。禁止再加"drop 时关闭 actor"语义——
+/// 2026-08-28 实机事故：命令侧临时 clone 析构误发 Shutdown 杀死 actor。
 #[derive(Clone)]
 pub struct SchedulerHandle {
     tx: mpsc::UnboundedSender<Command>,
@@ -236,12 +237,6 @@ impl SchedulerHandle {
     }
 }
 
-impl Drop for SchedulerHandle {
-    fn drop(&mut self) {
-        let _ = self.tx.send(Command::Shutdown);
-    }
-}
-
 pub struct Actor {
     rx: mpsc::UnboundedReceiver<Command>,
     tx: mpsc::UnboundedSender<Command>,
@@ -264,7 +259,6 @@ impl Actor {
     pub async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
             match cmd {
-                Command::Shutdown => break,
                 Command::Submit { task, reply } => self.handle_submit(task, reply),
                 Command::NewEpoch { epoch } => self.handle_new_epoch(epoch),
                 Command::SetConfig {
@@ -712,6 +706,26 @@ mod tests {
             cb(GenPhase::Decoding, 0);
         }
         assert_eq!(phase_log.lock().unwrap().len(), 1);
+        let _ = reply.send(Ok(ok_thumb()));
+        assert!(matches!(r.await.unwrap(), Outcome::Cached(_)));
+    }
+
+    /// 2026-08-28 实机 bug 回归守卫：request_thumbnails / clear_thumbnail_cache 命令尾的
+    /// 临时 service clone 析构，曾通过 SchedulerHandle::Drop 发 Shutdown 误杀调度器 actor
+    /// （72 任务 channel closed 风暴，前端瀑布流全部卡片永久卡 generating）。
+    /// 句柄必须可自由 Clone：任意 clone 的丢弃不得影响 actor 存活与后续调度。
+    #[tokio::test]
+    async fn clone_handle_drop_does_not_shutdown_actor() {
+        let (handle, mut rx) = setup(SchedulerConfig {
+            worker_limit: 1,
+            memory_budget_mb: 1024,
+            starvation_threshold: Duration::from_secs(60),
+        });
+        // 模拟 commands/thumbnails.rs:43 的 `let svc = service.inner().clone();` + 命令结束析构
+        drop(handle.clone());
+        // actor 必须存活：提交的任务仍要被调度到 generate 闭包
+        let r = handle.submit(task("survivor", Priority::Visible, 1, 10));
+        let (_job, reply) = recv_job(&mut rx).await;
         let _ = reply.send(Ok(ok_thumb()));
         assert!(matches!(r.await.unwrap(), Outcome::Cached(_)));
     }
