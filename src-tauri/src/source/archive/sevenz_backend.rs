@@ -643,6 +643,39 @@ pub(crate) mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
+    // ─── py7zr 兼容性回归（2026-08-29）───────────────────────────────────────
+    // 背景：3.5.1 实机验证暴露 py7zr 产物兼容缺口，分两步收口——
+    // ① f90078a：MAX_HEADER_DICT_BYTES 8→32 MiB（py7zr header 压缩流固定 16 MiB dict）；
+    // ② 本批：AES-CBC 块填充截断——py7zr header 加密不解压缩（单 AES coder），
+    //    声明 unpack 189 / 密文 192，受限 decoder 原把超出声明值判 CorruptArchive，
+    //    改为按 7z 语义以声明值截断（真伪由 folder CRC 兜底）。
+    // 两个 py7zr 1.1.3 产物 fixture（py7zr-plain.7z / py7zr-header-encrypted.7z）
+    // 由 gen_py7zr.py 生成，是「16 MiB header dict」与「块填充截断」两条路径的
+    // 真实回归载体——SevenZWriter 产物不产生该形态。
+
+    fn py7zr_probe(name: &str, password: Option<&[u8]>) -> Result<crate::source::archive::backend::ArchiveProbe, ArchiveAccessError> {
+        SevenZBackend.probe(&fixture_input(name), "", password)
+    }
+
+    #[test]
+    fn py7zr_明文_16MiB_header_dict_放行() {
+        let p = py7zr_probe("py7zr-plain.7z", None).expect("probe ok");
+        assert_eq!(p.image_count, 2, "{p:?}");
+        // header coder 的 16 MiB dict 如实入表（恰为 32 MiB 上限的一半）
+        let dicts: Vec<u64> = p.entry_dictionaries.values().copied().collect();
+        assert!(dicts.iter().all(|d| *d == 16 * 1024 * 1024), "{p:?}");
+    }
+
+    #[test]
+    fn py7zr_header加密_无密码要密码_正确密码截断块填充后可读() {
+        // 无密码：header 自身 AES 加密 → PasswordRequired
+        let err = py7zr_probe("py7zr-header-encrypted.7z", None).unwrap_err();
+        assert!(matches!(err, ArchiveAccessError::PasswordRequired), "{err:?}");
+        // 正确密码：189 字节 header 从 192 字节密文截断解码 → 完整 catalog
+        let p = py7zr_probe("py7zr-header-encrypted.7z", Some("test-pass-中文".as_bytes())).expect("probe ok");
+        assert_eq!(p.image_count, 2, "{p:?}");
+    }
+
     /// fixture 生成脚本 `tests/fixtures/archive/generate.py::make_png(1)` 的确定性输出
     /// （1244 bytes；与 zip/rar backend 测试共用同一真值——README「内容锁定」承诺）。
     const PNG_BYTES: &[u8] = &[

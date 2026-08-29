@@ -1,6 +1,6 @@
 # 归档读取器测试 fixture（RAR/7z 密码 + 远程 ZIP 流式读取模块）
 
-本目录 24 个归档 fixture 是「RAR/7z 密码 + 远程 ZIP 流式读取」模块（任务 3-14）的
+本目录 26 个归档 fixture：24 个为「RAR/7z 密码 + 远程 ZIP 流式读取」模块（任务 3-14）的
 确定性测试基线。全部输入（PNG/padding/note.txt）由脚本生成，不含第三方版权内容。
 
 **可复现承诺为「内容锁定」**：下表 SHA-256 清单为真值；不承诺跨机器字节级再生成
@@ -19,8 +19,9 @@
 | generate.py SHA-256 | `adfa0d9890a04680a66f90b30cb2c41e66769bfed25fbdb3727130640c638c0e`（2026-08-25 终审修复版：RAR_COMMANDS 帮助文本删两条不可行的 empty-rar5「先加后删」命令） |
 | gen_declared_dict.py SHA-256 | `c4968d98b68843fc1eba23b29b4c78be2ac4bb8f58b4ba60f7d97b2dfe210aab`（2026-08-25 任务 6 对齐版：合法 encoded 变体 payload 改 Python `lzma` FORMAT_RAW 真实压缩，重生成环境 Python 3.11.4） |
 | requirements.in SHA-256 | `b03a883ff2d38595950cce563d3e572aadfb82c892cc8d0d9af506d4f84f12b8` |
+| `pip show py7zr`（2026-08-29 追加） | Name: py7zr / Version: 1.1.3（gen_py7zr.py 外部工具，不进 requirements.in，与 WinRAR/7-Zip CLI 同类） |
 
-## 二十四 fixture 清单（SHA-256 为真值）
+## 二十六 fixture 清单（SHA-256 为真值）
 
 统一密码（凡「密码」列非空）：`test-pass-中文`。密码字节语义：ZIP 族产物一律按
 UTF-8 编码派生密钥（与 AE-1/AE-2 的 pyzipper 默认及上层应用 `String::as_bytes()`
@@ -52,8 +53,10 @@ UTF-8 编码派生密钥（与 AE-1/AE-2 的 pyzipper 默认及上层应用 `Str
 | 22 | header-bcj-x86-lzma2.7z | 构造性 7z | 无 | encoded header 外层 [LZMA2, BCJ-x86] 链（对照） | gen_declared_dict.py |
 | 23 | header-kdf-over.7z | 构造性 7z | 无 | encoded header AES props=[0x20]（cycles=32>24） | gen_declared_dict.py |
 | 24 | content-kdf-over.7z | 构造性 7z | 无 | 主 streams AES props=[0x20]（folder 级 KDF 防线） | gen_declared_dict.py |
+| 25 | py7zr-plain.7z | 7z（py7zr 1.1.3） | 无 | src/page1.png, src/page2.png；header 压缩流固定 16 MiB dict（MAX_HEADER_DICT_BYTES 32 MiB 合法对照） | gen_py7zr.py |
+| 26 | py7zr-header-encrypted.7z | 7z（py7zr 1.1.3） | 有 | src/page1.png, src/page2.png；header 不解压缩（单 AES256SHA256 coder），声明 unpack 189 / 块填充密文 192——AES-CBC 块填充截断回归载体 | gen_py7zr.py |
 
-`kat_vectors.json` 为 11 个构造性 7z 的已知答案（KAT）元数据，不计入 24 计数。
+`kat_vectors.json` 为 11 个构造性 7z 的已知答案（KAT）元数据，不计入 26 计数（24 为模块 3.5.0 基线 + 2 为 2026-08-29 py7zr 回归）。
 
 ### SHA-256 清单（`Get-FileHash -Algorithm SHA256`，2026-08-25）
 
@@ -126,13 +129,15 @@ python src-tauri/tests/fixtures/archive/generate.py --verify
 python src-tauri/tests/fixtures/archive/gen_declared_dict.py
 python src-tauri/tests/fixtures/archive/gen_declared_dict.py --verify-kat
 if ($LASTEXITCODE -ne 0) { throw "KAT verification failed" }
+# py7zr 兼容性回归 fixture（#25/#26，2026-08-29 追加；--verify 打印已提交哈希供比对）
+python src-tauri/tests/fixtures/archive/gen_py7zr.py --verify
 if (-not (Test-Path 'src-tauri/tests/fixtures/archive/kat_vectors.json')) { throw "kat_vectors.json missing" }
 # multipart 附属卷（part2 起）仅 --verify 运行期使用；哈希前删除，不入仓（见下节）
 Get-ChildItem 'src-tauri/tests/fixtures/archive/multipart.part*.rar' |
   Where-Object { $_.Name -ne 'multipart.part1.rar' } | Remove-Item
-$fixtures = @('plain-rar4.rar','password-rar4.rar','plain-rar5.rar','password-rar5.rar','encrypted-headers-rar5.rar','password-nonimage-rar4.rar','empty-rar5.rar','mixed-dirs-rar5.rar','multipart.part1.rar','password-zipcrypto.zip','password-ae1.zip','password-ae2.zip','multidisk.zip','dict-oversize-lzma.7z','dict-oversize-lzma2.7z','dict-budget-oversum.7z','header-encoded-oversize.7z','header-numfiles-over.7z','header-copy.7z','header-lzma.7z','header-delta-lzma2.7z','header-bcj-x86-lzma2.7z','header-kdf-over.7z','content-kdf-over.7z')
+$fixtures = @('plain-rar4.rar','password-rar4.rar','plain-rar5.rar','password-rar5.rar','encrypted-headers-rar5.rar','password-nonimage-rar4.rar','empty-rar5.rar','mixed-dirs-rar5.rar','multipart.part1.rar','password-zipcrypto.zip','password-ae1.zip','password-ae2.zip','multidisk.zip','dict-oversize-lzma.7z','dict-oversize-lzma2.7z','dict-budget-oversum.7z','header-encoded-oversize.7z','header-numfiles-over.7z','header-copy.7z','header-lzma.7z','header-delta-lzma2.7z','header-bcj-x86-lzma2.7z','header-kdf-over.7z','content-kdf-over.7z','py7zr-plain.7z','py7zr-header-encrypted.7z')
 $hashes = $fixtures | ForEach-Object { Get-FileHash -LiteralPath (Join-Path 'src-tauri/tests/fixtures/archive' $_) -Algorithm SHA256 }
-if ($hashes.Count -ne 24) { throw "expected exactly 24 fixture hashes" }
+if ($hashes.Count -ne 26) { throw "expected exactly 26 fixture hashes" }
 $hashes
 ```
 

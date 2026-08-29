@@ -1231,10 +1231,17 @@ fn decode_encoded_header(
         if n == 0 {
             break;
         }
-        if decoded.len() as u64 + n as u64 > final_size {
-            return Err(corrupt("decoded header 超出声明 unpack size"));
+        // 7z 语义：声明 unpack size 是权威输出长度，达到即停。AES-CBC 等块对齐
+        // coder 的密文含尾部填充，解密输出可多于声明值（py7zr header 加密实测：
+        // 声明 189、块填充后密文/解密输出 192）——上游 sevenz-rust/7-Zip 均按
+        // 声明值 take 截断而非报错。截断后内容真伪由下方 folder CRC 兜底；
+        // 缓冲仍以 final_size 为硬上限（危险分配防线不变）。
+        let remaining = final_size - decoded.len() as u64;
+        if remaining == 0 {
+            break;
         }
-        decoded.extend_from_slice(&chunk[..n]);
+        let take = (n as u64).min(remaining) as usize;
+        decoded.extend_from_slice(&chunk[..take]);
     }
     if folder.has_crc && crc32(&decoded) != folder.crc {
         return Err(corrupt("encoded header folder CRC 不匹配"));
