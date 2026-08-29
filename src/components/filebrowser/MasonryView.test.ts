@@ -135,15 +135,24 @@ const thumbnailsMock = vi.hoisted(() => ({
   progressSnapshots: new Map<string, unknown>(),
 }));
 
+// §16.2.1 ④：接线断言用的 spy（事件改名不再静默漏接）
+const thumbSpies = vi.hoisted(() => ({
+  retry: vi.fn(),
+  markLoadFailed: vi.fn(),
+  retryLoadFailed: vi.fn(),
+  regenerate: vi.fn(),
+  regenerateBatch: vi.fn(),
+}));
+
 vi.mock('@/composables/useMasonryThumbnails', () => ({
   useMasonryThumbnails: () => ({
     stateMap: computed(() => thumbnailsMock.stateMap),
     progressSnapshots: computed(() => thumbnailsMock.progressSnapshots),
-    retry: vi.fn(),
-    markLoadFailed: vi.fn(),
-    retryLoadFailed: vi.fn(),
-    regenerate: vi.fn(),
-    regenerateBatch: vi.fn(),
+    retry: thumbSpies.retry,
+    markLoadFailed: thumbSpies.markLoadFailed,
+    retryLoadFailed: thumbSpies.retryLoadFailed,
+    regenerate: thumbSpies.regenerate,
+    regenerateBatch: thumbSpies.regenerateBatch,
     epoch: { value: 0 },
   }),
 }));
@@ -884,6 +893,74 @@ describe('MasonryView.measuredMap 陈旧尺寸守卫', () => {
     await nextTick();
 
     expect(vmMap(w).get('a.jpg')).toEqual({ width: 300, height: 400 }); // 未被误判陈旧
+    w.unmount();
+  });
+});
+
+// ─── §16.2.1 ④：load-error / retry / popover retry 三处接线组件级断言（2026-08-29）──
+// 事件改名不再静默漏接：@row-load-error → markLoadFailed、@row-retry → retryLoadFailed、
+// popover @retry → retryLoadFailed(popoverPath)。
+import MasonryRow from './MasonryRow.vue';
+
+describe('MasonryView load-error/retry 接线（§16.2.1 ④）', () => {
+  function stubBadgeRect(el: Element) {
+    el.getBoundingClientRect = () => ({
+      left: 100, top: 50, width: 18, height: 14,
+      x: 100, y: 50, right: 118, bottom: 64, toJSON: () => ({}),
+    } as DOMRect);
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    // visibleItems 依赖 layout map（mock 注入）——预填让两条 entry 都渲染出 MasonryRow
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['a.jpg', { path: 'a.jpg', width: 100, height: 100, top: 0, left: 0, col: 0 }],
+      ['b.jpg', { path: 'b.jpg', width: 100, height: 100, top: 100, left: 0, col: 0 }],
+    ]);
+    thumbSpies.markLoadFailed.mockClear();
+    thumbSpies.retryLoadFailed.mockClear();
+    thumbSpies.retry.mockClear();
+    thumbSpies.regenerate.mockClear();
+  });
+
+  it('@row-load-error → markLoadFailed(entry)', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] } });
+    await flushPromises(); await nextTick();
+    const row = w.findComponent(MasonryRow);
+    expect(row.exists()).toBe(true);
+    row.vm.$emit('row-load-error', baseProps.entries[0]);
+    await nextTick();
+    expect(thumbSpies.markLoadFailed).toHaveBeenCalledWith(baseProps.entries[0].path);
+    w.unmount();
+  });
+
+  it('@row-retry → retryLoadFailed(entry.path)', async () => {
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] } });
+    await flushPromises(); await nextTick();
+    const row = w.findComponent(MasonryRow);
+    row.vm.$emit('row-retry', baseProps.entries[0]);
+    await nextTick();
+    expect(thumbSpies.retryLoadFailed).toHaveBeenCalledWith(baseProps.entries[0].path);
+    w.unmount();
+  });
+
+  it('popover @retry → retryLoadFailed(popover path)', async () => {
+    thumbnailsMock.stateMap = new Map([
+      ['a.jpg', { kind: 'failed', cacheKey: 'ck', retryable: true, message: 'boom' }],
+    ]);
+    thumbnailsMock.progressSnapshots = new Map();
+    const w = mount(MasonryView, { props: baseProps, global: { plugins: [createPinia(), i18n] }, attachTo: document.body });
+    await flushPromises(); await nextTick();
+    const badge = w.find('.phase-badge.fail');
+    expect(badge.exists()).toBe(true);
+    stubBadgeRect(badge.element);
+    await badge.trigger('click');
+    await flushPromises();
+    expect(w.find('[data-test="thumb-popover"]').exists()).toBe(true);
+
+    await w.find('[data-test="thumb-popover"] .retry-btn').trigger('click');
+    await flushPromises();
+    expect(thumbSpies.retryLoadFailed).toHaveBeenCalledWith('a.jpg');
     w.unmount();
   });
 });

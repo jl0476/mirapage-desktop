@@ -152,6 +152,10 @@ function joinRemoteRel(base: string, rel: string): string {
   return [...base.split(/[\\/]+/), ...rel.split(/[\\/]+/)].filter(Boolean).join('/');
 }
 
+/** fetch 结果分类（§16.2.1 ② navigate 失败回滚用）：'ok' 成功回写 /
+ *  'stale' 被更新请求取代未回写 / 'error' 失败且仍是最新，调用方需回滚乐观更新。 */
+type FetchOutcome = 'ok' | 'stale' | 'error';
+
 export const useFileBrowserStore = defineStore('fileBrowser', () => {
   const rootPath = ref<string | null>(null);
   const currentPath = ref<string>('');
@@ -247,12 +251,16 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     return null;
   }
 
-  async function fetch(path: string): Promise<void> {
+  /** fetch 结果分类（§16.2.1 ② navigate 失败回滚用）：
+   *  - 'ok'：本请求成功回写 entries/lastFetchedPath；
+   *  - 'stale'：被更新请求取代，未回写（不动导航状态，归最新请求裁决）；
+   *  - 'error'：本请求失败且仍是最新——currentPath 等已被乐观更新，调用方需回滚。 */
+  async function fetch(path: string): Promise<FetchOutcome> {
     const descriptor = activeDescriptor();
-    if (descriptor === null) return;
+    if (descriptor === null) return 'error';
     // 路径身份修复: IPC 前最后一道校验。非法路径不发 listDirectory。
     const normPath = assertRelPath(path);
-    if (normPath === null) return;
+    if (normPath === null) return 'error';
     // 异步身份防护: 捕获本次请求 id, await 后校验是否仍为最新。
     const myId = ++fetchRequestId;
     loading.value = true;
@@ -263,7 +271,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       // 过期请求（setRoot/navigate 触发了更新的请求）→ 丢弃回写，不动 entries/state。
       if (myId !== fetchRequestId) {
         log('[fileBrowser] fetch stale, discard', { myId, latest: fetchRequestId });
-        return;
+        return 'stale';
       }
       log('[fileBrowser] listDirectory returned', result.length, 'entries');
 
@@ -273,7 +281,7 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       // 第二次 await 后再次校验（resolve 期间也可能有新请求插入）。
       if (myId !== fetchRequestId) {
         log('[fileBrowser] fetch stale (after resolve), discard', { myId, latest: fetchRequestId });
-        return;
+        return 'stale';
       }
       effectiveSortField.value = (override?.sortField as SortField) ?? sortField.value;
       effectiveSortAscending.value = override?.ascending ?? sortAscending.value;
@@ -282,11 +290,13 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
       lastFetchedPath.value = normPath;
       // browse_history 仅在 reader 真正打开时记录（useReaderActions.readNow），
       // 单纯文件夹浏览不写——避免根目录被默认加进去。
+      return 'ok';
     } catch (e) {
-      if (myId !== fetchRequestId) return; // 过期请求的错误也不回写
+      if (myId !== fetchRequestId) return 'stale'; // 过期请求的错误也不回写
       const msg = e instanceof Error ? e.message : String(e);
       log('[fileBrowser] fetch error', msg);
       error.value = { kind: 'io', message: msg };
+      return 'error';
     } finally {
       // 仅最新请求负责清 loading（过期请求不清，避免清掉新请求的 loading）。
       if (myId === fetchRequestId) {
@@ -321,9 +331,16 @@ export const useFileBrowserStore = defineStore('fileBrowser', () => {
     if (normPath === null) return;
     // spec §6.1：候选物化期间的页内导航 → 推进 epoch 并取消（迟到 ready 不提交导航）。
     invalidatePendingArchiveOnNavigate();
+    // §16.2.1 ②：乐观更新后失败需回滚——否则 currentPath 停在坏路径、entries
+    // 残留旧目录列表，面包屑与列表不一致（实机二次撞到）。
+    const prevPath = currentPath.value;
+    const prevSearch = searchQuery.value;
     currentPath.value = normPath;
     searchQuery.value = ''; // v0.1.0-module3.0.3: 换目录清空搜索 (对齐 PV)
-    await fetch(normPath);
+    if (await fetch(normPath) === 'error') {
+      currentPath.value = prevPath;
+      searchQuery.value = prevSearch;
+    }
   }
 
   async function refresh(): Promise<void> {

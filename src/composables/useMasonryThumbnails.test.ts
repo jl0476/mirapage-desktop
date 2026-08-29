@@ -59,14 +59,15 @@ function fireProgress(payload: ThumbnailProgressEvent) {
   if (h) h({ payload });
 }
 
-function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { width: number; height: number }>; entries?: MediaEntry[] }) {
+function setup(opts?: { windows?: ThumbnailWindows; sourceDims?: Map<string, { width: number; height: number }>; entries?: MediaEntry[] }) {
   const windows = opts?.windows ?? { visible: [], ahead: [], behind: [], idle: [] };
   const descriptor = ref<SourceDescriptor>(localDesc);
   const currentPath = ref(''); // 任务 5：目录身份 watch 测试需要外部驱动
   const entries = ref<readonly MediaEntry[]>(opts?.entries ?? []);
   const windowsRef = ref<ThumbnailWindows>(windows);
-  const measuredMap = ref<Map<string, { width: number; height: number }>>(
-    opts?.measured ?? new Map(),
+  // §16.2.1 ①：classify 输入只收 header 真值（原 measuredMap 参数改名 sourceDims）
+  const sourceDims = ref<Map<string, { width: number; height: number }>>(
+    opts?.sourceDims ?? new Map(),
   );
   const colWidthRef = ref(300);
   const colWidth = computed(() => colWidthRef.value);
@@ -82,7 +83,7 @@ function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { wid
         currentPath,
         entries,
         thumbnailWindows: computed(() => windowsRef.value),
-        measuredMap,
+        sourceDims,
         colWidth,
         dpr,
         quality,
@@ -94,7 +95,7 @@ function setup(opts?: { windows?: ThumbnailWindows; measured?: Map<string, { wid
   });
   const wrapper = mount(Host);
   return {
-    result, descriptor, currentPath, entries, windowsRef, measuredMap, colWidthRef, dpr, quality, scrollTop,
+    result, descriptor, currentPath, entries, windowsRef, sourceDims, colWidthRef, dpr, quality, scrollTop,
     unmount: () => wrapper.unmount(),
   };
 }
@@ -150,7 +151,7 @@ describe('useMasonryThumbnails', () => {
       ['b', { width: 1000, height: 800 }],
     ]);
     const { entries, windowsRef } = setup({
-      measured,
+      sourceDims: measured,
       windows: { visible: ['a'], ahead: ['b'], behind: [], idle: [] },
     });
     entries.value = [mkEntry('a'), mkEntry('b')];
@@ -173,7 +174,7 @@ describe('useMasonryThumbnails', () => {
 
   it('request debounce 80ms', async () => {
     const measured = new Map([['a', { width: 1000, height: 800 }]]);
-    const { entries, windowsRef } = setup({ measured, windows: { visible: ['a'], ahead: [], behind: [], idle: [] } });
+    const { entries, windowsRef } = setup({ sourceDims: measured, windows: { visible: ['a'], ahead: [], behind: [], idle: [] } });
     entries.value = [mkEntry('a')];
     windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
     requestSpy.mockResolvedValue([]);
@@ -203,7 +204,7 @@ describe('useMasonryThumbnails', () => {
 
   it('cached 响应转 asset URL', async () => {
     const measured = new Map([['a', { width: 1000, height: 800 }]]);
-    const { entries, windowsRef, result } = setup({ measured, windows: { visible: ['a'], ahead: [], behind: [], idle: [] } });
+    const { entries, windowsRef, result } = setup({ sourceDims: measured, windows: { visible: ['a'], ahead: [], behind: [], idle: [] } });
     entries.value = [mkEntry('a')];
     windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
     requestSpy.mockResolvedValue([
@@ -240,7 +241,7 @@ describe('useMasonryThumbnails', () => {
       ['a', { width: 1000, height: 800 }],
       ['b', { width: 1000, height: 800 }],
     ]);
-    const { entries, result } = setup({ measured });
+    const { entries, result } = setup({ sourceDims: measured });
     entries.value = [mkEntry('a'), mkEntry('b')];
     // 预置 b 为 cached
     result; // stateMap 初始空
@@ -262,7 +263,7 @@ describe('useMasonryThumbnails', () => {
       currentPath: ref(''),
       entries: ref<readonly MediaEntry[]>([]),
       thumbnailWindows: computed(() => ({ visible: [], ahead: [], behind: [], idle: [] })),
-      measuredMap: ref(new Map()),
+      sourceDims: ref(new Map()),
       colWidth: computed(() => 300),
       dpr: ref(1),
       quality: ref('high'),
@@ -281,7 +282,7 @@ describe('useMasonryThumbnails', () => {
       ['a', { width: 1000, height: 800 }],
       ['b', { width: 1000, height: 800 }],
     ]);
-    const { entries, windowsRef } = setup({ measured, windows: { visible: ['a'], ahead: ['b'], behind: [], idle: [] } });
+    const { entries, windowsRef } = setup({ sourceDims: measured, windows: { visible: ['a'], ahead: ['b'], behind: [], idle: [] } });
     entries.value = [mkEntry('a'), mkEntry('b')];
     windowsRef.value = { visible: ['a'], ahead: ['b'], behind: [], idle: [] };
     // 第一轮：拿到 cache key
@@ -442,7 +443,7 @@ describe('useMasonryThumbnails progress (module3.0.11)', () => {
 // 纯 debounce 会无限重置 timer → 滚多久请求延迟多久（实测快速滚动 3 秒
 // 才漏出一条请求）。修复：500ms 保底节流——滚动中最多 500ms 必发一条。
 it('连续窗口变化（模拟快速滚动）每 500ms 保底发一次请求', async () => {
-  const { entries, windowsRef } = setup({ measured: new Map([['a', { width: 1000, height: 800 }]]) });
+  const { entries, windowsRef } = setup({ sourceDims: new Map([['a', { width: 1000, height: 800 }]]) });
   entries.value = [mkEntry('a')];
   requestSpy.mockResolvedValue([]);
   // 第一条走 80ms debounce（挂载初始合并）
@@ -680,6 +681,90 @@ describe('useMasonryThumbnails load-error（任务 3）', () => {
     expect(items.map((i) => i.path)).toEqual(['a']);
     expect(items[0].priority).toBe('visible');
     expect(args[3]).toEqual([]);
+    unmount();
+  });
+});
+
+// ─── §16.2.1 修复批（2026-08-29）─────────────────────────────────────────────
+// ① classify 输入只收 header 真值：sourceDims 有值 → 透传 sourceWidth/Height；
+//   无值 → 0（Rust decide_source 对 0 尺寸强制 Generate，不误判 UseOriginal）。
+// ③ IPC reject → 置回 failed：请求未创建任务时永远没有事件终结 generating 态，
+//   catch 只 log 会让卡片永久 spinner（retryLoadFailed / retry / regenerate 三入口）。
+describe('useMasonryThumbnails §16.2.1 修复', () => {
+  it('① flushRequest 透传 sourceDims 为 sourceWidth/Height', async () => {
+    const { entries, windowsRef, unmount } = setup({
+      sourceDims: new Map([['a', { width: 1000, height: 800 }]]),
+      entries: [mkEntry('a')],
+    });
+    entries.value = [mkEntry('a')];
+    requestSpy.mockResolvedValue([]);
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    await vi.runOnlyPendingTimersAsync();
+    expect(requestSpy).toHaveBeenCalledTimes(1);
+    const items = requestSpy.mock.calls[0][1] as Array<{ path: string; sourceWidth: number; sourceHeight: number }>;
+    expect(items[0]).toMatchObject({ path: 'a', sourceWidth: 1000, sourceHeight: 800 });
+    unmount();
+  });
+
+  it("① sourceDims 无条目 → sourceWidth/Height 传 0（强制 Generate）", async () => {
+    const { entries, windowsRef, unmount } = setup({
+      sourceDims: new Map(), // header 未测/测量失败
+      entries: [mkEntry('a')],
+    });
+    entries.value = [mkEntry('a')];
+    requestSpy.mockResolvedValue([]);
+    windowsRef.value = { visible: ['a'], ahead: [], behind: [], idle: [] };
+    await vi.runOnlyPendingTimersAsync();
+    const items = requestSpy.mock.calls[0][1] as Array<{ sourceWidth: number; sourceHeight: number }>;
+    expect(items[0]).toMatchObject({ sourceWidth: 0, sourceHeight: 0 });
+    unmount();
+  });
+
+  it('③ retryLoadFailed 请求 IPC reject → 置回 failed（不卡 generating）', async () => {
+    const { result, unmount } = setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    // 种 cached 态（有 cacheKey → 走失效分支）
+    requestSpy.mockResolvedValueOnce([{ path: 'a', status: 'cached', cacheKey: 'ckA', cachePath: 'p', width: 512, height: 768 }]);
+    await vi.runOnlyPendingTimersAsync();
+    expect(result.stateMap.value.get('a')?.kind).toBe('cached');
+
+    invalidateSpy.mockResolvedValue(undefined);
+    requestSpy.mockRejectedValueOnce(new Error('ipc down'));
+    await result.retryLoadFailed('a');
+
+    expect(result.stateMap.value.get('a')).toEqual({
+      kind: 'failed', cacheKey: 'ckA', retryable: true, message: 'load-error',
+    });
+    unmount();
+  });
+
+  it('③ retry IPC reject → 置回 failed（同类锁定）', async () => {
+    const { result, unmount } = setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    result.markLoadFailed('a');
+    retrySpy.mockRejectedValueOnce(new Error('ipc down'));
+    result.retry('a');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(result.stateMap.value.get('a')?.kind).toBe('failed');
+    unmount();
+  });
+
+  it('③ regenerate IPC reject → 置回 failed（同类锁定）', async () => {
+    const { result, unmount } = setup({
+      windows: { visible: ['a'], ahead: [], behind: [], idle: [] },
+      entries: [mkEntry('a')],
+    });
+    result.markLoadFailed('a');
+    regenSpy.mockRejectedValueOnce(new Error('ipc down'));
+    result.regenerate('a');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(result.stateMap.value.get('a')?.kind).toBe('failed');
     unmount();
   });
 });

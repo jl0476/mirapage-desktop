@@ -66,6 +66,10 @@ const { containerRef, scrollTop, viewportHeight } = useVirtualList(entriesRef, {
 
 const containerWidth = ref(0);
 const measuredMap = ref<Map<string, { width: number; height: number }>>(new Map());
+// §16.2.1 ①：classify 输入专用 map（只收 header 预读真值）。measuredMap 另收
+// 缩略图 img onLoad 的 natural 尺寸（缓存命中时是 512 档位尺寸）——那只对布局
+// 比例合法；若喂给 USE_ORIGINAL 判定会把 853px 源图误判为小图直显、绕过缓存。
+const sourceDimsMap = ref<Map<string, { width: number; height: number }>>(new Map());
 
 // v0.1.0-module3.0.8 task-21: resize 视觉焦点漂移修复（spec §resize-anchor）。
 // 思路：resize 期间捕获 viewport anchor（path + ratio），layout 稳定后用 anchor 恢复
@@ -157,6 +161,7 @@ watch(
     // 路径 + mergeMeasured 不覆盖 ⇒ 污染不可自愈，语义键变化即整体重置。
     // 附带效应（无害偏好）：本地源重渲染不再重启 browsePosition。
     measuredMap.value = new Map();
+    sourceDimsMap.value = new Map();
     browsePosition.stop();
     void browsePosition.start();
   },
@@ -198,7 +203,7 @@ const { stateMap: thumbStateMap, progressSnapshots, retry: retryThumbnail, markL
   currentPath: toRef(props, 'currentPath'),
   entries: entriesRef,
   thumbnailWindows,
-  measuredMap,
+  sourceDims: sourceDimsMap,
   colWidth,
   dpr,
   quality: thumbQuality,
@@ -423,6 +428,7 @@ const browsePosition = useMasonryBrowsePosition({
 defineExpose({
   // module3.5.3 任务 A：测试观测面（后续 scrollTop 锚定补偿立项也需直读此 map）
   measuredMap,
+  sourceDimsMap,
   regenerate: regenerateThumbnail,
   regenerateBatch: regenerateBatchFn,
   retry: retryThumbnail,
@@ -437,7 +443,9 @@ defineExpose({
 /** 缩略图 natural 尺寸喂布局（2026-08-27 实机诊断修复）：缩略图保比例生成，
  *  img 已加载 = naturalWidth/Height 就是真实宽高比——直接写 measuredMap，免去
  *  已加载图再等远程 header 测量（WebDAV 目录 3:4 估算期框内大片空白的根因）。
- *  已测量不覆盖（mergeMeasured：header 真值/先到者获胜）。 */
+ *  已测量不覆盖（mergeMeasured：header 真值/先到者获胜）。
+ *  §16.2.1 ①：只写 measuredMap（布局只用比例）——不写 sourceDimsMap，
+ *  缓存命中的 natural 是缩略图档位尺寸，喂 classify 会污染 USE_ORIGINAL 判定。 */
 function onRowMeasured(entry: MediaEntry, width: number, height: number): void {
   const next = mergeMeasured(measuredMap.value, entry.path, { width, height });
   if (next !== measuredMap.value) {
@@ -463,11 +471,15 @@ async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
     const dims = await listImageDimensions(props.descriptor, fullPaths);
     if (keyAtStart !== guardKey()) return; // 目录/源身份已变：陈旧回包丢弃
     const m = new Map(measuredMap.value);
+    const sd = new Map(sourceDimsMap.value);
     for (const d of dims) {
       const rel = fullByRel.get(d.path) ?? d.path;
       m.set(rel, { width: d.width, height: d.height });
+      // header 真值同时喂 classify 输入 map（§16.2.1 ①）
+      sd.set(rel, { width: d.width, height: d.height });
     }
     measuredMap.value = m;
+    sourceDimsMap.value = sd;
   } catch (e) {
     log('[MasonryView] dimension prefetch failed', e);
   }
@@ -583,8 +595,8 @@ const loading = computed(() => {
         :state="popoverState.state"
         :snapshot="progressSnapshots.get(popoverState.path)"
         :file-name="entriesByPath(popoverState.path)?.name ?? popoverState.path"
-        :source-width="measuredMap.get(popoverState.path)?.width ?? 0"
-        :source-height="measuredMap.get(popoverState.path)?.height ?? 0"
+        :source-width="sourceDimsMap.get(popoverState.path)?.width ?? 0"
+        :source-height="sourceDimsMap.get(popoverState.path)?.height ?? 0"
         :source-bytes="entriesByPath(popoverState.path)?.size ?? 0"
         :anchor-rect="popoverState.rect"
         @close="closeProgressPopover"

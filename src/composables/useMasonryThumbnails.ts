@@ -70,7 +70,11 @@ export interface UseMasonryThumbnailsParams {
   currentPath: Ref<string>;
   entries: Ref<readonly MediaEntry[]>;
   thumbnailWindows: ComputedRef<ThumbnailWindows>;
-  measuredMap: Ref<Map<string, { width: number; height: number }>>;
+  /** §16.2.1 ①：classify 输入专用——只收 header 预读的真实源图维度。
+   *  缩略图 img 的 natural 尺寸（缓存命中时是 512 档位尺寸）不得进来，
+   *  否则 USE_ORIGINAL 判定输入失真（853px 图被判小图直显绕过缓存）。
+   *  无条目时传 0 尺寸 → Rust decide_source 强制 Generate（安全缺省）。 */
+  sourceDims: Ref<Map<string, { width: number; height: number }>>;
   colWidth: ComputedRef<number>;
   dpr: Ref<number>;
   quality: Ref<ThumbnailQuality>;
@@ -228,7 +232,7 @@ export function useMasonryThumbnails(
 
     const margin = THUMBNAIL_QUALITY_MARGIN[params.quality.value];
     const requiredWidth = Math.round(params.colWidth.value * params.dpr.value * margin);
-    const measured = params.measuredMap.value;
+    const measured = params.sourceDims.value;
     const entriesByPath = new Map(params.entries.value.map((e) => [e.path, e]));
     const fastScrolling = Date.now() - lastScrollAt < IDLE_SETTLE_MS;
 
@@ -554,7 +558,7 @@ export function useMasonryThumbnails(
   const findEntry = (path: string): { entry: MediaEntry; item: ThumbnailRequestItem } | null => {
     const entry = params.entries.value.find((e) => e.path === path);
     if (!entry) return null;
-    const m = params.measuredMap.value.get(path);
+    const m = params.sourceDims.value.get(path);
     // header 失败的图（m 为空）也允许 retry/regenerate：传 0 尺寸兜底
     const margin = THUMBNAIL_QUALITY_MARGIN[params.quality.value];
     const requiredWidth = Math.round(params.colWidth.value * params.dpr.value * margin);
@@ -587,6 +591,10 @@ export function useMasonryThumbnails(
     setState(path, { kind: 'generating', cacheKey: pathToCacheKey.value.get(path) ?? '', phase: 'queued', startedAt: Date.now(), timings: {} });
     void retryThumbnail(params.descriptor.value, found.item, epoch.value).then((r) => {
       applyResults([r], new Map([[path, found.entry]]));
+    }).catch((err) => {
+      // §16.2.1 ③ 同类：IPC reject 时任务未创建、永远没有事件终结 generating 态
+      log('[thumbnail] retry IPC error path=' + path + ' err=' + String(err));
+      setState(path, { kind: 'failed', cacheKey: pathToCacheKey.value.get(path) ?? '', retryable: true, message: 'failed' });
     });
   };
 
@@ -626,6 +634,9 @@ export function useMasonryThumbnails(
       applyResults(results, new Map([[path, found.entry]]));
     } catch (err) {
       log('[thumbnail] retryLoadFailed IPC error path=' + path + ' err=' + String(err));
+      // §16.2.1 ③：catch 只 log 会让卡片永久 spinner（请求未创建任务，永远无事件
+      // 终结 generating 态）——置回 failed 态保住 ↻ 重试入口。
+      setState(path, { kind: 'failed', cacheKey, retryable: true, message: 'load-error' });
     }
   };
 
@@ -637,6 +648,10 @@ export function useMasonryThumbnails(
     setState(path, { kind: 'generating', cacheKey: pathToCacheKey.value.get(path) ?? '', phase: 'queued', startedAt: Date.now(), timings: {} });
     void regenerateThumbnail(params.descriptor.value, found.item, epoch.value).then((r) => {
       applyResults([r], new Map([[path, found.entry]]));
+    }).catch((err) => {
+      // §16.2.1 ③ 同类：IPC reject 时任务未创建、永远没有事件终结 generating 态
+      log('[thumbnail] regenerate IPC error path=' + path + ' err=' + String(err));
+      setState(path, { kind: 'failed', cacheKey: pathToCacheKey.value.get(path) ?? '', retryable: true, message: 'failed' });
     });
   };
 

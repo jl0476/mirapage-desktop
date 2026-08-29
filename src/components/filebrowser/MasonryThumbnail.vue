@@ -22,7 +22,8 @@ const emit = defineEmits<{
   (e: 'load-error'): void;
   (e: 'show-progress', el: HTMLElement): void;
   /** img 加载完成且 natural 尺寸有效（缩略图保比例 → 即真实宽高比）。
-   *  MasonryView 拿它喂 measuredMap，免掉已加载图再等远程 header 测量。 */
+   *  MasonryView 拿它喂 measuredMap 布局比例（§16.2.1 ①：只用于布局，
+   *  不进 classify 的 sourceDims——缓存命中时 natural 是缩略图档位尺寸）。 */
   (e: 'measured', width: number, height: number): void;
 }>();
 

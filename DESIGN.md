@@ -1608,6 +1608,8 @@ export function useReaderInput() {
 ### 16.2.1 module3.5.5 实机批遗留（2026-08-28 深夜会话，建议打包 3.5.6 小件）
 
 > 来源：module3.5.5（`749277a`，SMB mediaUrl 403 / load-error 兜底 / 出队统一 / epoch 单调）实机 CDP 验证与 SDD 审查过程顺带发现，全部预存在、未随该模块修复。详见 AGENTS.md 3.5.5 行与 `.superpowers/sdd/progress.md`。
+>
+> **2026-08-29 修复批**（直推 main 未打 tag）：下列五项中前四项已修复（measuredMap 维度污染 / navigate 失败回滚 / retryLoadFailed 及 retry、regenerate 同类 catch 置回 failed / MasonryView 三处接线组件测试补齐）；第五项（WIP 内 P2）已随 32e1373 销账——本节全部清零。
 
 | 项 | 量级 | 说明与修法方向 |
 |---|---|---|

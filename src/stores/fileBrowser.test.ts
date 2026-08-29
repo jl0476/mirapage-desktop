@@ -183,6 +183,51 @@ describe('fileBrowser store — 基础', () => {
     expect(store.error?.kind).toBe('io');
   });
 
+  // ─── §16.2.1 ② (2026-08-29): navigate 失败回滚乐观更新 ───
+  // 修复前 currentPath 停在坏路径、entries 残留旧目录列表——面包屑与列表不一致。
+
+  it('navigate 失败 → currentPath 回滚到上一目录（与 entries 一致）', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    mockedList.mockResolvedValue(makeEntries('chapter1/page1.jpg'));
+    await store.navigate('chapter1');
+    expect(store.currentPath).toBe('chapter1');
+
+    mockedList.mockRejectedValueOnce(new Error('not found'));
+    await store.navigate('ghost');
+    expect(store.currentPath).toBe('chapter1'); // 回滚，不驻留坏路径
+    expect(store.error?.kind).toBe('io'); // 错误横幅仍保留给用户
+  });
+
+  it('navigate 失败 → searchQuery 一并回滚', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    store.setSearchQuery('abc');
+    mockedList.mockRejectedValueOnce(new Error('not found'));
+    await store.navigate('ghost');
+    expect(store.currentPath).toBe('');
+    expect(store.searchQuery).toBe('abc');
+  });
+
+  it('navigate 被 newer 请求取代（stale）→ 不回滚（归最新请求裁决）', async () => {
+    mockedList.mockResolvedValue(makeEntries('a'));
+    const store = useFileBrowserStore();
+    await store.setRoot('C:/comics');
+    // 第一次 navigate 挂起（不 resolve），第二次 navigate 立即成功取代它
+    let releaseA!: (v: MediaEntry[]) => void;
+    mockedList.mockImplementationOnce(() => new Promise<MediaEntry[]>((res) => { releaseA = res; }));
+    const navA = store.navigate('a');
+    mockedList.mockResolvedValue(makeEntries('b'));
+    await store.navigate('b');
+    expect(store.currentPath).toBe('b');
+    releaseA([]);
+    await navA;
+    // a 的 fetch 返回 stale，不得把 currentPath 拽回 ''
+    expect(store.currentPath).toBe('b');
+  });
+
   // ─── 路径身份修复 (2026-08-12): navigate/fetch 拒绝越界路径 ───
   // 绝对路径只允许出现在 rootPath; navigate 接收的 path 必须相对 root.
   // 校验失败不改 currentPath、不发 IPC。
