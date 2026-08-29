@@ -84,3 +84,6 @@ full.diff
 
 # zz-ai-adoption skill 快照目录（本项目禁用该 skill，防止误生成）
 .patch/
+
+# 本地工具产物目录（不入仓）
+.mimosa/
