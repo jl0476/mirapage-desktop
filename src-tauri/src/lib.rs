@@ -15,6 +15,7 @@ mod media_cache;
 mod media_protocol;
 mod source;
 pub mod thumbnail;
+mod window_bounds;
 
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -140,6 +141,38 @@ let creds = std::sync::Arc::new(credentials::KeyringStore)
             // 维护服务（v0.1.0-database-retention-and-cleanup）：历史保留防抖自动清理
             let maintenance_svc = maintenance::MaintenanceService::new(app_handle.clone());
             app.manage(maintenance_svc);
+
+            // 窗口恢复尺寸钳位（3.1.1 遗留打磨项）：window-state 插件对 SIZE 无条件
+            // set_size（POSITION 才有显示器守卫），副屏断连后大尺寸可恢复出超屏窗口。
+            // 插件 on_window_ready 恢复先于本 setup 闭包，此处做一次性事后钳位；
+            // 最大化/全屏态尺寸由系统管理，不干预。失败仅记日志不阻断启动。
+            if let Some(window) = app.get_webview_window("main") {
+                let maximized = window.is_maximized().unwrap_or(false);
+                let fullscreen = window.is_fullscreen().unwrap_or(false);
+                if !maximized && !fullscreen {
+                    if let (Ok(win_size), Ok(Some(monitor))) =
+                        (window.outer_size(), window.current_monitor())
+                    {
+                        let (w, h) = window_bounds::clamp_window_size(
+                            win_size.width,
+                            win_size.height,
+                            monitor.size().width,
+                            monitor.size().height,
+                        );
+                        if (w, h) != (win_size.width, win_size.height) {
+                            log::write_log(
+                                "INFO",
+                                "app",
+                                &format!(
+                                    "window size clamped to monitor: {}x{} -> {}x{}",
+                                    win_size.width, win_size.height, w, h
+                                ),
+                            );
+                            let _ = window.set_size(tauri::PhysicalSize::new(w, h));
+                        }
+                    }
+                }
+            }
 
             Ok(())
         })
