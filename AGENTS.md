@@ -456,12 +456,12 @@ vi.mock('@/lib/tauri', async () => {
 npm run type-check && npm test -- --run
 
 # 2. 本地 build portable exe (可选 — 验证新增组件)
-cmd.exe //C "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\tauri-build-portable.bat"
+powershell.exe -ExecutionPolicy Bypass -File "F:\\WorkSpaceCollection\\git\\mirapage-desktop\\scripts\\build-portable.ps1"
 
-# 注: tauri-build-portable.bat 自 v0.1.0-module3.0-settings 起已 fix + commit 进 git.
-#   - 自动识别 CARGO_TARGET_DIR (env 设了走 D:\compile\rust_target, 否则 src-tauri\target)
-#   - 启动时检查旧 mirapage-desktop.exe 进程, 存在则 abort
-#   - copy 失败不再静默吞错, 改 errorlevel 判断 + 明确错误
+# 注: 现行脚本是 scripts/build-portable.ps1（旧根目录 tauri-build-portable.bat 已删除，勿引用）.
+#   - 五步管线: 杀运行实例 -> npm run build -> build-tauri-inner.bat (vcvars64 + tauri build --no-bundle) -> copy exe -> MD5 校验
+#   - 会杀掉正在运行的 dev/portable 实例; 产物 mirapage-desktop-local.exe 与 dev 共享 DB
+#   - copy 3 次重试, 失败明确报错不静默
 
 # 3. commit + tag + push
 git add <files>
@@ -477,7 +477,7 @@ git push github v0.1.0-module1.NN
 - `backend.diff / full.diff`（诊断遗留）
 - `tsconfig.tsbuildinfo`（vue-tsc 缓存）
 
-> `tauri-build-portable.bat` **例外**：自 v0.1.0-module3.0-settings 起 commit 进 git（带 `CARGO_TARGET_DIR` 适配 + 旧进程检测 + 错误可见性）。早期版本曾不入仓（"临时脚本写到 D:\compile"），现已统一入仓便于跨机复用。
+> `scripts/build-portable.ps1` + `scripts/build-tauri-inner.bat` **例外**：打包脚本 commit 进 git 便于跨机复用（现行 ps1 自 v0.1.0-module3.0.1+ 起接管；旧根目录 `tauri-build-portable.bat` 已删除）。
 
 ### 6. 决策记录（用户拍板）
 
