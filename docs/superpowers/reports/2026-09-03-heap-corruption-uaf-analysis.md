@@ -1,12 +1,6 @@
-# 堆损坏闪退分析报告（rev2）：subscriber→spawn_blocking 线程风暴与 epoch 提交漏洞
+# 堆损坏闪退分析报告（rev3）：前端 500ms 重发循环 → subscriber 扇出 → blocking 线程风暴
 
-> 2026-09-03 rev2。**rev1 → rev2 重大修正**（2026-09-03 用户复审，四项代码事实与日志统计均已复核采纳）：
-> 1. 「旧 pending 在 epoch 翻转后继续出队」**不成立**——`handle_new_epoch`/`handle_cancel_all` 本就 drain pending（8 月 8 日起存在）。真实漏洞在 **`handle_submit` 不拒绝 `task.epoch < current_epoch` 的新提交**：clear 把内部 epoch bump 后，前端仍持旧 epoch 值重复提交，这些任务在 clear 之后入队并执行。
-> 2. `completion STALE` 计数是 **subscriber 扇出**（一个任务多个订阅者，每订阅者一个 `spawn_completion`），不是执行次数——「35 worker/秒」结论作废。
-> 3. 真正的瞬时风暴是 **`spawn_completion` 无条件 `spawn_blocking`**：Stale 判定在 blocking 闭包内部（`service.rs:1414`）才发生，数千个无需 DB/IO/emit 的 Stale 回包全部先进入 blocking pool 抢 DB mutex。
-> 4. progress emit 风暴**证据不足**：生成器每任务恰好 4 次 emit（`generator.rs:77/104/141/163`），701 worker ≈ 8.5 次/秒，非「几十上百」；emit 侧 epoch 过滤降级为纵深防御。
->
-> rev1 的取证过程、排除项、崩溃现场记录保留；机制链与实验设计按 rev2 重写。
+> 2026-09-03 rev2 → **rev3（2026-09-04）**。rev2 确立了后端放大器与崩溃现场；rev3 补上**前端燃料来源**（用户实时监控报告 + 代码核实）：`useMasonryThumbnails` 的保底节流使**全窗口（含 cached/generating 项）每 ~500ms 重发一次**，且生成回包自身喂养下一轮重发（自持循环）；配套新增线程动态实测（39-89 → 475）、孤儿 WebP 发现（5,348 个 / 467.7MB），修复清单按新证据重排优先级。rev2 的取证过程、排除项、崩溃现场记录保留。
 
 ---
 
@@ -19,17 +13,17 @@
 | 3 | 09-03 ~18:11 | CDP 驱动深冷区翻页（快扫 + clear + 跳滚混合，uptime ~38min） | 0xc0000374 | 无（该实例未挂调试器） |
 | 4 | 09-03 18:42:51 | CDP 驱动严格逐屏扫描 sweep-2（clear 后 ~6.7s 崩溃点见 §4.2，uptime 1600s） | 0xC0000005（调试器下） | **339MB 全量已抓** |
 
-共同点：全部发生在 260901（3736 图）瀑布流 + 缩略图生成活跃期，且全部伴随 **`clear_thumbnail_cache` / 目录切换 / 反复进出（= epoch 翻转 + 前端旧 epoch 重提交）**。
-反例：实例 B 的 sweep-1（518 屏全扫、~700 worker、**无 clear**）跑完 17 分钟**不崩**——纯风暴不崩，**epoch 翻转 × 前端重提交**才崩。
+共同点：全部发生在 260901（3736 图）瀑布流 + 缩略图生成活跃期。反例：实例 B 的 sweep-1（518 屏全扫、~700 worker、无 clear）跑完 17 分钟**不崩**——风暴本身可承受，**放大器叠加**（epoch 翻转 × 重发循环 × 扇出）才崩。
 
 环境注记：同窗口期 Wow.exe 多次 0xc0000005（游戏侧独立问题）、shawl.exe 每次关机 0xc0000409（独立工具）、Explorer 一次 0xc0000374。除 Explorer 外与本专案无关。
 
 ## 2. 取证过程与排除项
 
-1. **内存诊断（mdsched）**：两遍无错误（事件 1101/1201，09-03 17:14）。内存条排除。注：报告员任务 `RunFullMemoryDiagnostic` 曾被禁用致首轮结果静默丢弃，已启用；快速启动下「关机」跳过排定测试，须用「重启」。
+1. **内存诊断（mdsched）**：两遍无错误（事件 1101/1201，09-03 17:14）。内存条排除。
 2. **崩溃普查修正**：近 3 天真 0xc0000374 只有 mirapage ×2 + Explorer ×1；Wow ×5 为 0xc0000005（非堆损坏）。「三进程同签名 → 机器级」定性作废。
 3. **WER 绕过发现**：本进程 fast-fail 型崩溃不落 WER；procdump `-e -x` 挂调试器后第 4 次崩溃当场抓获。
-4. **已排除**：libwebp 编码管线（堆栈无关）、RDP softbuffer（旧定性已作废）、WebView2 渲染进程（崩的是 Rust 宿主主线程）、内存条。
+4. **已排除**：libwebp 编码管线（堆栈无关）、RDP softbuffer、WebView2 渲染进程、内存条。
+5. **rev3 新增排除**：非「图片太多」或 JS heap 泄漏——是请求重复放大形成的 blocking 线程与事件回调风暴（§4）。
 
 ## 3. 崩溃现场
 
@@ -44,56 +38,67 @@ Thread 0 (main, crashed):
 版本：tao 0.35.3 / tauri 2.11.5 / tauri-runtime-wry 2.11.4 / wry 0.55.1
 ```
 
-**rev2 定性修正**：`0xfeeefeee` 证明程序读取了已释放堆内存，受害对象是 tao 的事件处理闭包——但这**只证明崩溃发生在 tao handler 析构/访问处，不能证明 tao 是最初破坏堆的组件**。栈扫描帧（含 `Mutex<tauri::EventLoop>::lock`）不可靠。候选肇因：极端线程/资源压力下暴露的竞态（tao 或 tauri 内部）、此前某次 native 写坏堆（libwebp 等尚未完全排除）、tao 自身 double-drop——**区分手段是 Page Heap（§5 E6）**。
-（rev1 引用的 tauri#10987 降级为弱旁证：其为 Tauri 1.7/tao 0.16 的 unsafe-precondition panic、无复现代码、closed not planned，与本次 Tauri 2.11 的释放后访问不同签名。）
+**定性**：`0xfeeefeee` 证明读取已释放堆内存，受害对象是 tao 事件处理闭包——这只证明崩溃发生在 tao handler 析构/访问处，**不能证明 tao 是最初破坏堆的组件**。rev3 定性：tao UAF **很可能是线程/事件风暴诱发的最终崩溃点**（线程动态实测与 dump 规模吻合，§4.2）；第一处非法释放仍需 Page Heap 定夺（§5）。tauri#10987 为弱旁证（1.7 时代 panic 签名不符）。
 
-## 4. 自身逻辑分析（rev2 重写）
+## 4. 完整因果链（rev3 重构：前端源头 → 后端放大 → 崩溃形态）
 
-### 4.1 已证实的缺陷链
+### 4.1 前端源头：500ms 全窗口重发自持循环（rev3 新确立）
 
-**缺陷 A：`handle_submit` 不拒绝旧 epoch 提交**（`scheduler.rs:309`）
+代码事实（均已核实）：
 
-调度器在 epoch 翻转上有三层既有防护：`handle_new_epoch` 拒绝回退通知（:385 `<=` 单调守卫）、new_epoch/cancel_all drain 全部旧 pending（:398/:444）。**但 `handle_submit` 入口没有 `task.epoch < current_epoch` 检查**。
+1. **保底节流即 ~500ms 全量重发**——`useMasonryThumbnails.ts:200-212` `scheduleRequest`：距上次发出 ≥500ms 即**立即**发（注释原话「连续滚动中每 500ms 必有一条请求覆盖途中的可见区」）。
+2. **重发不过滤已请求项**——`useMasonryThumbnails.ts:224` 起 `flushRequest` 遍历整个 `prioMap`（可见 + 预读全窗口）构建 items，循环内只滤 idle（快速滚动时）/ 非图片 / 路径校验失败，**没有「已 cached / 已 generating / 本 epoch 已请求」任何过滤**——cached 项也整批进 IPC。
+3. **自持循环**——`useMasonryThumbnails.ts:340` `watch(thumbnailWindows)`：生成回包 → measuredMap/状态更新 → windows computed 重算出新数组引用 → watch 触发 → scheduleRequest → 500ms 保底直发。**生成活动自身喂养重发**。
+4. **无变化也替换响应式 Map**——`applyResults`（`useMasonryThumbnails.ts:333` 区段）对 `cached→cached` 等无变化结果也整体替换 `state` Map → 卡片持续无意义重渲染。
 
-后果链：`clear_thumbnail_cache` → `cancel_all` 把内部 epoch 从 `1788430634243` bump 到 `1788430634244` → 前端 epoch 分配器仍持旧值 `…243` 继续提交 → 这些**在 clear 之后新提交的旧 epoch 任务**通过 handle_submit 正常入队/执行 → 完成时被 epoch 映射成 Stale。日志实证（最后 6.7 秒，两轮独立统计一致）：`cancel_all` ×1、drained pending=402、aborted inflight=6、**scheduler start ×13-15、worker DONE ×13-15、completion STALE ×2937-2972**——崩溃前确实有一批 clear 后重提交的旧 epoch 任务被执行。
+用户实测：同一组 ~69 张图每 ~500ms 重发一次（含 cached/generating）。
 
-**缺陷 B：Stale 回包也走完整 `spawn_blocking` 路径**（`service.rs:1325` → :1414）
+### 4.2 后端放大器（rev2 确立，保留）
 
-`spawn_completion` 收到任何 Outcome 后**无条件** `tokio::task::spawn_blocking` 并先取 DB mutex，直到 blocking 闭包内部（:1414）才判断是 Stale。Stale 分支零副作用（不写索引/不删文件/不 emit），却照样消耗一个 blocking 线程 + 一次 DB 锁竞争。
+1. **`handle_submit` 无 epoch 门禁**（`scheduler.rs:309`）——`clear_thumbnail_cache` bump 内部 epoch 后，前端持旧 epoch 值的重提交照常入队执行（崩溃前 6.7s 实测 13-15 个 start/DONE）。
+2. **DEDUP 挂订阅者**（`scheduler.rs:309` 起两分支）——同 cache_key 的重复请求不重复执行，但**每请求追加一个 subscriber**。
+3. **每 subscriber 一次完整副作用**（`scheduler.rs:508` / `service.rs:1325→1414`）——完成时对所有 subscriber 各发 Outcome，各起一个 `spawn_completion`：无条件 `spawn_blocking` + DB upsert + LRU 检查 + emit 状态事件（Stale 判定在 blocking 闭包内才发生）。
 
-**缺陷 C：subscriber 扇出放大**（`scheduler.rs` drain/completion 路径）
+### 4.3 风暴形态与崩溃
 
-同 cache_key 的重复提交在 DEDUP_PENDING/DEDUP_INFLIGHT 处只挂订阅者不重复执行——worker 只跑一次，但 drain 与完成时**对每个 subscriber 各发一次 Outcome**，每个 subscriber 各自起一个 `spawn_completion`。5.5 分钟窗口：scheduler start 707 / worker DONE 701 / **completion STALE 9262** / ENQUEUE 1767 / DEDUP_PENDING 7462——STALE 计数 ≈ 订阅者数，非执行数。
+- **线程动态实测（用户监控，rev3 新证据）**：线程数从常态 **39-89 瞬间升至 475**、句柄增至 **1,169**，随后排空回落——与历史崩溃 dump 的 **552 线程**（集中在 spawn_completion/blocking pool）规模吻合。Tokio blocking pool 默认上限 512。
+- 本次未崩是峰值在触发 native 崩溃前及时排空——**时序随机性**解释「有时崩有时不崩」。
+- 日志量化（崩溃 #4 前 6.7 秒）：cancel_all ×1、drained 402、aborted 6、worker DONE ×13-15、**completion STALE ×2937-2972**（subscriber 扇出）；5.5 分钟窗口：worker DONE 701 vs completion STALE 9262、DEDUP_PENDING 7462（≈22/秒，燃料即 §4.1 的重发循环）。
 
-**三缺陷叠加的崩溃形态**：clear 后 6.7 秒内 ~2940 个 spawn_completion 全部涌进 `spawn_blocking` → Tokio blocking pool（默认上限 512 线程）瞬间膨胀（**转储实测 552 线程**，与上限+主线程+runtime 线程的规模吻合）→ 数千 blocking 任务抢同一把 DB mutex → 极端并发/资源压力下，tao 事件处理闭包成为最终 UAF 崩溃点。
+**链条总述**：前端 500ms 全窗口重发（cached/generating 也发）→ 后端 DEDUP 挂订阅者 → 完成时每订阅者各起 spawn_blocking 抢 DB mutex → blocking pool 膨胀（实测 475 / dump 552）+ 前端重复事件引发持续 Map 替换重渲染 → 极端时序下 tao 事件闭包 UAF 崩溃。
 
-### 4.2 量化数据（两轮独立统计互证）
+### 4.4 附带发现：孤儿缓存文件（rev3 新）
 
-| 窗口 | scheduler start | worker DONE | completion STALE | 其他 |
-|---|---:|---:|---:|---|
-| 崩溃前 5.5 分钟 | 707 | 701 | 9262 | ENQUEUE 1767 / DEDUP_PENDING 7462 / DEDUP_INFLIGHT 46 |
-| **最后 6.7 秒**（cancel_all → 崩溃） | 13-15 | 13-15 | **2937-2972** | cancel_all ×1 / drained 402 / aborted 6 |
+UI 清空缩略图缓存只删索引内文件、不扫描实际缓存目录——实测遗留**孤儿 WebP 5,348 个 / 467.7 MB**（用户于缓存目录实测，修复时复验）。
 
-progress emit 实际量级：每任务恰 4 次（generator.rs:77/104/141/163；queued 态是前端侧无 Rust emit）→ 701 worker ≈ 2804 次/330 秒 ≈ **8.5 次/秒**。rev1 的「几十到上百次/秒」高估，**progress emit 作为主要诱因的假设证据不足，当前数据反对**。
-
-### 4.3 置信度表
+### 4.5 置信度表
 
 | 主张 | 状态 |
 |---|---|
-| 旧 epoch 任务在 clear 后重新进入 worker（handle_submit 漏洞） | **已证实** |
-| subscriber → spawn_blocking 线程风暴（6.7s × ~2940） | **已证实** |
-| tao handler 是最终 UAF 受害点 | **已证实** |
-| progress emit 是主要诱因 | 证据不足，数据反对 |
+| 前端 500ms 全窗口重发自持循环（不过滤 cached/generating） | **已证实**（代码核实 + 用户实测） |
+| 旧 epoch 任务 clear 后重进 worker（handle_submit 漏洞） | **已证实** |
+| subscriber → spawn_blocking 线程风暴 | **已证实**（动态 475 + dump 552 双证） |
+| 无变化状态替换 Map 致持续重渲染 | 已证实（代码 + cached→cached 日志） |
+| 清理遗漏孤儿文件 5,348 个 | 用户实测（修复时复验） |
+| tao handler 是最终 UAF 受害点 | 已证实 |
 | tao 自身是最初内存破坏源 | 未证实，需 Page Heap |
 
-## 5. 验证实验与修复设计（rev2 重写，按优先级）
+## 5. 修复优先级（rev3 合并重排）
 
-1. **E1 提交门禁**：`handle_submit` 开头拒绝 `task.epoch < self.current_epoch` 的提交（直接回 `Outcome::Stale` 给 reply，不入队）；`find_admissible` 再放一道 `< current_epoch` 防御。注意**必须是 `<` 而非 `<=`**——`<=` 会拒绝当前合法 epoch 的全部提交。
-2. **E2 Stale 短路**：`spawn_completion` 在进 `spawn_blocking` **之前**判断 `Outcome::Stale` 直接返回（Stale 分支零副作用，无需 DB/IO；仅清理保护集合等必要动作）。
-3. **E3 前端 epoch 同步**：clear 后前端同步 bump 本地 epoch 分配器，否则卡片会先收 queued 再静默 stale，表现为永久 spinner。
-4. **E4 subscriber 副作用去重**：同 cache_key 的 DB upsert / LRU 驱逐 / state emit 只执行一次（首个订阅者路径），其余订阅者只等结果。
-5. **E5 三组 A/B 实验**区分「事件队列压力」vs「blocking pool 线程风暴」：① 只关 progress emit ② 只短路 Stale spawn_blocking ③ 两者都做——预期 ② 单独即可消除崩溃，① 单独不消除。
-6. **E6 Page Heap 定肇因**：`gflags /p /enable mirapage-desktop.exe /full` 复跑，在**首次**非法写/释放处中断（而非最终受害点）——确认 tao / libwebp / 其他 native 谁先破坏堆的关键证据。测毕必须 `gflags /p /disable mirapage-desktop.exe /full`（full page heap 内存代价大，不可常开）。
+**P0（止血——消灭风暴燃料与放大）**
+1. **前端增量请求**：按 `epoch + path + priority` 做增量提交——相同或更低优先级不重复提交；已 cached / generating 项不再重发（`flushRequest` 过滤 + watch 触发条件收敛）。
+2. **后端副作用去重**：每个 cache_key 的 DB upsert / LRU 检查 / completion emit **只执行一次**（首个订阅者路径）；subscriber 只接收结果，不各自重复副作用。
+
+**P1（配套治理）**
+3. cached→cached 等无变化状态不替换前端 Map（applyResults 判等跳过）。
+4. `handle_submit` 拒绝 `task.epoch < current_epoch` 的提交（注意 `<` 不是 `<=`）；`find_admissible` 再放一道防御。
+5. `spawn_completion` 对 `Outcome::Stale` 在进 spawn_blocking **前**短路（零副作用无需 DB/IO）。
+6. clear 后前端同步 bump epoch 分配器（否则卡片先 queued 后静默 stale → 永久 spinner）。
+7. 缓存清空同时扫描实际缓存目录，删除索引外孤儿文件（附带回收 467.7MB 类存量）。
+
+**P2（验证与定谳）**
+8. 三组 A/B 实验：①只修前端增量 ②只修后端扇出 ③都修——复现装置（procdump + 260901 扫描）对照线程峰值（目标：常态 <100，不再出现 400+）。
+9. Page Heap（`gflags /p /enable mirapage-desktop.exe /full`，测毕必关）捕获**第一处**非法写/释放——确定最初破坏者是 tao、tokio 线程压力还是其他 native 组件。
 
 ## 6. 工具链附录（复用）
 
@@ -107,7 +112,7 @@ WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=9222" \
 dump_syms -s /d/compile/tools/symbols /d/compile/rust_target/debug/mirapage_desktop.pdb
 minidump-stackwalk --symbols-path /d/compile/tools/symbols <dump 路径>
 
-# Page Heap（E6，管理员）
+# Page Heap（P2-9，管理员）
 gflags /p /enable mirapage-desktop.exe /full
 gflags /p /disable mirapage-desktop.exe /full   # 测毕必关
 ```
