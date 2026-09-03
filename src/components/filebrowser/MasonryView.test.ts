@@ -80,7 +80,7 @@ describe('MasonryView.vue 集成守卫', () => {
 import { mount, flushPromises } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import { createI18n } from 'vue-i18n';
-import { computed, nextTick } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import zhCN from '@/locales/zh-CN';
 import MasonryView from './MasonryView.vue';
 import type { MediaEntry } from '@/lib/sourceDescriptor';
@@ -122,12 +122,25 @@ vi.mock('@/lib/tauri', async () => {
   };
 });
 
-/** 测试用 layout map：null 表示空（让 layout map 为空），Map 表示预填。 */
-const fakeLayoutMap = { current: new Map<string, MasonryItem>() };
+/** 测试用 layout map：ref 背衬使 mocked layout computed 响应翻转（§16.2 G 测量锚定
+ * 用例需要在组件运行中把布局从「批前」翻到「批后」）；`.current` API 保持既有用例零改动。 */
+const fakeLayoutMapRef = ref(new Map<string, MasonryItem>());
+const fakeLayoutMap = {
+  get current() { return fakeLayoutMapRef.value; },
+  set current(m: Map<string, MasonryItem>) { fakeLayoutMapRef.value = m; },
+};
 
-// module3.5.3 任务 A：dimensionPrefetchPaths 改 hoisted 可控——默认空数组保持既有
-// describe 行为不变，陈旧尺寸守卫用例按需注入 paths 触发真实 IPC 预读链。
-const prefetchPathsMock = vi.hoisted(() => ({ current: [] as string[] }));
+// module3.5.3 任务 A：dimensionPrefetchPaths 可控注入——默认空数组保持既有 describe
+// 行为不变，陈旧尺寸守卫/测量锚定用例按需注入 paths 触发真实 IPC 预读链。
+// §16.2 G（rev4 补丁④）：ref 背衬 + `.current` shim——普通对象不建响应依赖，挂载后改
+// `.current` 时 watch(dimensionPrefetchPaths) 永不触发。普通顶层 ref 即可（mock 工厂只
+// 创建 computed 闭包不解引用，真正读取在组件挂载期，模块初始化早已完成；vi.hoisted 内
+// 引用静态导入的 ref 反而会在 ESM 绑定初始化前 TDZ 报错）。
+const prefetchPathsRef = ref<string[]>([]);
+const prefetchPathsMock = {
+  get current() { return prefetchPathsRef.value; },
+  set current(paths: string[]) { prefetchPathsRef.value = paths; },
+};
 
 // module3.0.11：mock 缩略图 composable，stateMap/progressSnapshots 由测试注入
 const thumbnailsMock = vi.hoisted(() => ({
@@ -961,6 +974,67 @@ describe('MasonryView load-error/retry 接线（§16.2.1 ④）', () => {
     await w.find('[data-test="thumb-popover"] .retry-btn').trigger('click');
     await flushPromises();
     expect(thumbSpies.retryLoadFailed).toHaveBeenCalledWith('a.jpg');
+    w.unmount();
+  });
+});
+
+// ─── §16.2 G 项兑现（2026-09-03 实机跳屏）— 测量批次 scrollTop 锚定补偿 ────────
+// 机制：提交 measuredMap 前按批前 layout 捕「穿过顶线的图+ratio」（gap 位置走 loose），
+// 布局重算后恢复——视口内容钉住。单列口径造数保证数值可手算。
+// 复用文件既有 MasonryRow import（hoisted）与 FakeResizeObserver 基建（task-21 块）。
+describe('MasonryView 测量批次锚定补偿 (§16.2 G)', () => {
+  function col(items: { path: string; top: number; height: number }[]): Map<string, MasonryItem> {
+    const m = new Map<string, MasonryItem>();
+    for (const it of items) m.set(it.path, { path: it.path, col: 0, left: 0, top: it.top, height: it.height, width: 200 });
+    return m;
+  }
+  function mountView() {
+    return mount(MasonryView, {
+      props: baseProps,
+      global: { plugins: [createPinia(), i18n] },
+      attachTo: document.body,
+    });
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    fakeLayoutMap.current = new Map<string, MasonryItem>();
+    prefetchPathsMock.current = [];
+  });
+  // 审核建议：stub 清理放 afterEach——断言失败时不跳过，防泄漏到后续用例
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('视口上方 item 长高（row-measured 单条）→ scrollTop 补偿到同图同 ratio', async () => {
+    // 批前布局 v1：a.jpg top0 h100；b.jpg top100 h900（顶线 50 落在 a 内，ratio 0.5）
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+
+    containerEl.scrollTop = 50;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    // 触发单条测量提交（同步）：锚点捕获自 v1（a.jpg, ratio .5）
+    const rows = w.findAllComponents(MasonryRow);
+    expect(rows.length).toBeGreaterThan(0);
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    // 同步翻布局到 v2（模拟真实时序：measuredMap 提交 → layout 派生重算 → a.jpg 长高到 224）
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 224 },
+      { path: 'b.jpg', top: 224, height: 776 },
+    ]);
+    await nextTick();
+
+    // 锚定恢复：target = a.top + a.height × 0.5 = 112；未补偿则停留 50
+    expect(containerEl.scrollTop).toBe(112);
     w.unmount();
   });
 });

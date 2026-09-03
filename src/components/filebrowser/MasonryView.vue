@@ -10,6 +10,7 @@ import {
   useMasonryLayout,
   toRootRelativePath,
   captureMasonryViewportAnchor,
+  captureMasonryViewportAnchorLoose,
   restoreMasonryViewportAnchor,
   computeAtBottom,
   mergeMeasured,
@@ -108,6 +109,55 @@ function scheduleResizeAnchorRelease(): void {
   }, 150);
 }
 
+// ── §16.2 G 项兑现（2026-09-03 实机跳屏）：测量批次到达的 scrollTop 锚定补偿 ──
+// 根因：3:4 估算 vs 竖屏截图真实比（856×1920 高 ~68%）使每批测量把视口上方内容下推
+// 300-500px（CDP 探针 4s/8 跳）。机制同 resize anchor（task-21）：批内首次提交按批前
+// layout 捕锚（严格版 + loose fallback），布局重算后恢复——视口内容钉住；列重排
+// （非线性 top 变化）也覆盖（delta 累加法不覆盖，applyMeasuredBatch 已删）。
+// 批次状态闭包化：anchor/key/seq 捕进回调局部变量，回调先验 seq 再动共享态（仅
+// measurePending）——旧批次回调不可能偷清新批次。
+// 时序：必须先写 measuredMap 再注册 nextTick——Vue 无 pending flush 时 nextTick 挂已
+// resolved Promise，先注册会让恢复跑在 measuredMap 触发的 flush（含目录 watcher/prop
+// 更新）之前，守卫空转。先写后挂，恢复才真正发生在布局重算与失效判定之后。
+// resize 让位：resizeAnchor 活跃期间测量不捕自己的锚，复用 resize 锚重触发恢复——
+// 单一恢复源，两套锚不互踩（两者不变量一致但捕获时刻不同，后者不保证正确）。
+let measureSeq = 0;
+let measurePending = false;
+
+function commitMeasuredMap(next: Map<string, { width: number; height: number }>): void {
+  if (resizeAnchor) {
+    measuredMap.value = next;
+    void restoreResizeAnchor(resizeSeq);
+    return;
+  }
+  if (measurePending) {
+    measuredMap.value = next;
+    return;
+  }
+  measurePending = true;
+  const seq = ++measureSeq;
+  const key = guardKey();
+  const anchor = captureMasonryViewportAnchorLoose(
+    layout.value.map,
+    props.entries,
+    containerRef.value?.scrollTop ?? scrollTop.value,
+  );
+  measuredMap.value = next; // 先触发 flush（布局失效 + watcher 排队）
+  void nextTick(() => {     // 再挂该 flush 之后——恢复在重算与失效判定之后执行
+    if (seq !== measureSeq) return; // 旧批次：不动共享状态（新批次可能已开启）
+    measurePending = false;
+    if (key !== guardKey() || !anchor || !containerRef.value) return;
+    const target = restoreMasonryViewportAnchor(anchor, layout.value.map);
+    if (target == null) return;
+    const maxScrollTop = Math.max(0, layout.value.totalHeight - containerRef.value.clientHeight);
+    const nextScrollTop = Math.max(0, Math.min(target, maxScrollTop));
+    if (Math.abs(nextScrollTop - containerRef.value.scrollTop) > 0.5) {
+      containerRef.value.scrollTop = nextScrollTop;
+      scrollTop.value = nextScrollTop;
+    }
+  });
+}
+
 // ResizeObserver 拿 containerWidth + 触发 viewport anchor 恢复
 let ro: ResizeObserver | null = null;
 onMounted(async () => {
@@ -119,6 +169,9 @@ onMounted(async () => {
     const nextWidth = el.clientWidth;
     if (nextWidth === containerWidth.value) return;
     beginResizeAnchor();
+    // 测量批让位（§16.2 G）：resize 开始即失效 pending 测量批——单一恢复源的反向时序
+    measureSeq += 1;
+    measurePending = false;
     const seq = ++resizeSeq;
     containerWidth.value = nextWidth;
     void restoreResizeAnchor(seq);
@@ -162,6 +215,17 @@ watch(
     // 附带效应（无害偏好）：本地源重渲染不再重启 browsePosition。
     measuredMap.value = new Map();
     sourceDimsMap.value = new Map();
+    // 测量锚定失效（§16.2 G）：seq 越过所有在途回调；pending 复位让新目录立即开新批
+    measureSeq += 1;
+    measurePending = false;
+    // resize 锚一并失效：seq 使在途 restoreResizeAnchor 作废，锚与释放定时器同清——
+    // 防旧目录 resize 锚经让位分支命中新目录同名文件
+    resizeSeq += 1;
+    resizeAnchor = null;
+    if (resizeEndTimer) {
+      clearTimeout(resizeEndTimer);
+      resizeEndTimer = null;
+    }
     browsePosition.stop();
     void browsePosition.start();
   },
@@ -449,7 +513,7 @@ defineExpose({
 function onRowMeasured(entry: MediaEntry, width: number, height: number): void {
   const next = mergeMeasured(measuredMap.value, entry.path, { width, height });
   if (next !== measuredMap.value) {
-    measuredMap.value = next as Map<string, { width: number; height: number }>;
+    commitMeasuredMap(next as Map<string, { width: number; height: number }>);
   }
 }
 
@@ -478,7 +542,7 @@ async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
       // header 真值同时喂 classify 输入 map（§16.2.1 ①）
       sd.set(rel, { width: d.width, height: d.height });
     }
-    measuredMap.value = m;
+    commitMeasuredMap(m);
     sourceDimsMap.value = sd;
   } catch (e) {
     log('[MasonryView] dimension prefetch failed', e);
