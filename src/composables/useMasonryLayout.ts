@@ -173,6 +173,9 @@ export interface MasonryViewportAnchor {
   path: string;
   /** 视口顶线在图片内的相对位置（0=顶边，1=底边） */
   ratio: number;
+  /** loose 捕获专用：顶线在该图下边缘之下的超出距离（px）。与 ratio 互斥——
+   * restore 见到此字段时忽略 ratio。严格路径（resize）恒不设置，行为不变。 */
+  belowOffset?: number;
 }
 
 /**
@@ -213,7 +216,33 @@ export function restoreMasonryViewportAnchor(
 ): number | null {
   const item = layout.get(anchor.path);
   if (!item) return null;
+  if (anchor.belowOffset !== undefined) return item.top + item.height + anchor.belowOffset;
   return item.top + item.height * anchor.ratio;
+}
+
+/**
+ * 测量锚定专用（§16.2 G）：顶线无相交图（落入所有列的纵向 gap / 短内容之下）时
+ * fallback 到「下边缘最大且 ≤ 顶线」的图（多列下 top 最大 ≠ 下边缘最近，按 bottom 比），
+ * 记 belowOffset（顶线超出其下边缘的绝对距离）——顶线上方内容长高时下边缘同幅下移，
+ * 补偿语义与相交路径一致。上方无任何图返回 null。resize 路径仍用严格版。
+ */
+export function captureMasonryViewportAnchorLoose(
+  layout: Map<string, MasonryItem>,
+  entries: readonly { path: string }[],
+  scrollTop: number,
+): MasonryViewportAnchor | null {
+  const strict = captureMasonryViewportAnchor(layout, entries, scrollTop);
+  if (strict) return strict;
+  let nearest: MasonryItem | null = null;
+  let nearestBottom = -Infinity;
+  for (const entry of entries) {
+    const item = layout.get(entry.path);
+    if (!item) continue;
+    const bottom = item.top + item.height;
+    if (bottom <= scrollTop && bottom > nearestBottom) { nearest = item; nearestBottom = bottom; }
+  }
+  if (!nearest) return null;
+  return { path: nearest.path, ratio: 1, belowOffset: scrollTop - (nearest.top + nearest.height) };
 }
 
 // ─── 像素窗口（缩略图生成需求，§5.1）────────────────────────────────────

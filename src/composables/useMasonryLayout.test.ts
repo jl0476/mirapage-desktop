@@ -3,6 +3,7 @@ import { ref, type Ref } from 'vue';
 import {
   applyMeasuredBatch,
   captureMasonryViewportAnchor,
+  captureMasonryViewportAnchorLoose,
   computeColWidth,
   DEFAULT_ASPECT_RATIO,
   estimateHeight,
@@ -258,6 +259,49 @@ describe('captureMasonryViewportAnchor / restoreMasonryViewportAnchor (resize �
       50,
     );
     expect(anchor).toBeNull();
+  });
+});
+
+describe('captureMasonryViewportAnchorLoose (§16.2 G 测量锚定：顶线落 gap fallback)', () => {
+  // 双列造数：col0 a(0,10)、col1 b(0,8)，顶线 15 落在两列内容之下——严格版返回 null 的位置
+  const layout = new Map<string, MasonryItem>([
+    ['a.jpg', { path: 'a.jpg', width: 100, height: 10, top: 0, left: 0, col: 0 }],
+    ['b.jpg', { path: 'b.jpg', width: 100, height: 8, top: 0, left: 108, col: 1 }],
+  ]);
+  const entries = [{ path: 'a.jpg' }, { path: 'b.jpg' }];
+
+  it('顶线无相交图 → fallback 下边缘最大的上方图 + belowOffset（绝对偏移）', () => {
+    const anchor = captureMasonryViewportAnchorLoose(layout, entries, 15);
+    expect(anchor).toEqual({ path: 'a.jpg', ratio: 1, belowOffset: 5 }); // a bottom=10（> b 的 8），超出 5
+  });
+
+  it('多列「top 最大」≠「下边缘最近」时按 max-bottom 选（rev3 P2-4 判别）', () => {
+    // x：top 4 h1（bottom 5）；y：top 0 h9（bottom 9）——top-max 会错选 x，bottom-max 选 y
+    const m = new Map<string, MasonryItem>([
+      ['x.jpg', { path: 'x.jpg', width: 100, height: 1, top: 4, left: 0, col: 0 }],
+      ['y.jpg', { path: 'y.jpg', width: 100, height: 9, top: 0, left: 108, col: 1 }],
+    ]);
+    const es = [{ path: 'x.jpg' }, { path: 'y.jpg' }];
+    const anchor = captureMasonryViewportAnchorLoose(m, es, 15);
+    expect(anchor).toEqual({ path: 'y.jpg', ratio: 1, belowOffset: 6 }); // bottom 9 距顶线 15 最近
+  });
+
+  it('有相交图时与严格版一致（belowOffset 不出现）', () => {
+    const anchor = captureMasonryViewportAnchorLoose(layout, entries, 5); // 5 落在 a(0..10) 内
+    expect(anchor).toEqual({ path: 'a.jpg', ratio: 0.5 });
+  });
+
+  it('restore：belowOffset 锚按「新下边缘 + 偏移」精确补偿（图自身长高不放大误差）', () => {
+    const anchor = captureMasonryViewportAnchorLoose(layout, entries, 15)!;
+    const grown = new Map(layout);
+    grown.set('a.jpg', { ...layout.get('a.jpg')!, height: 22.4 }); // 10 → 22.4
+    expect(restoreMasonryViewportAnchor(anchor, grown)).toBeCloseTo(27.4, 5); // 0+22.4+5
+  });
+
+  it('空 layout / 顶线上方无任何图 → null', () => {
+    expect(captureMasonryViewportAnchorLoose(new Map(), [], 15)).toBeNull();
+    // 注：scrollTop=0 且有图时严格捕获必命中首行（图从 top 0 开始），null 分支只在
+    // 「上方无内容」时可达——空 layout 即该语义。
   });
 });
 
