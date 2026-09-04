@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ref, type Ref } from 'vue';
 import {
-  applyMeasuredBatch,
   captureMasonryViewportAnchor,
   captureMasonryViewportAnchorLoose,
   computeColWidth,
@@ -124,59 +123,6 @@ describe('estimateHeight (未测量占位)', () => {
   });
 });
 
-describe('applyMeasuredBatch (滚动锚定补偿)', () => {
-  function mkItem(path: string, top: number, height: number): MasonryItem {
-    return { path, width: 100, height, top, left: 0, col: 0 };
-  }
-
-  it('上方 item 高度变化 → 补偿正量', () => {
-    // item.top=20 < scrollTop=50, oldH=100 newH=150 → delta=+50
-    const compensation = applyMeasuredBatch({
-      oldLayout: new Map([['a', mkItem('a', 20, 100)]]),
-      scrollTop: 50,
-      changedPaths: ['a'],
-      oldHeights: { a: 100 },
-      newHeights: { a: 150 },
-    });
-    expect(compensation).toBe(50);
-  });
-
-  it('item 在视口下方 (top > scrollTop) → 不补偿', () => {
-    const compensation = applyMeasuredBatch({
-      oldLayout: new Map([['a', mkItem('a', 500, 100)]]),
-      scrollTop: 50,
-      changedPaths: ['a'],
-      oldHeights: { a: 100 },
-      newHeights: { a: 150 },
-    });
-    expect(compensation).toBe(0);
-  });
-
-  it('多个上方 item → delta 累加', () => {
-    const compensation = applyMeasuredBatch({
-      oldLayout: new Map([
-        ['a', mkItem('a', 10, 100)],
-        ['b', mkItem('b', 30, 200)],
-      ]),
-      scrollTop: 500,
-      changedPaths: ['a', 'b'],
-      oldHeights: { a: 100, b: 200 },
-      newHeights: { a: 120, b: 180 }, // a +20, b -20 → 净 0
-    });
-    expect(compensation).toBe(0);
-  });
-
-  it('changedPath 不在 layout → 跳过', () => {
-    const compensation = applyMeasuredBatch({
-      oldLayout: new Map(),
-      scrollTop: 50,
-      changedPaths: ['missing'],
-      oldHeights: {},
-      newHeights: {},
-    });
-    expect(compensation).toBe(0);
-  });
-});
 
 describe('captureMasonryViewportAnchor / restoreMasonryViewportAnchor (resize 焦点漂移修复)', () => {
   function mkItem(path: string, top: number, height: number): MasonryItem {

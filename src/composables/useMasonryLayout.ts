@@ -135,34 +135,6 @@ export function mergeMeasured(
   return next;
 }
 
-export interface AnchorParams {
-  oldLayout: Map<string, MasonryItem>;
-  scrollTop: number;
-  changedPaths: string[];
-  oldHeights: Record<string, number>;
-  newHeights: Record<string, number>;
-}
-
-/**
- * 尺寸到达后，对 changedPaths 的 item 计算 scrollTop 补偿量。
- * 仅累加"在当前 scrollTop 上方"（item.top < scrollTop）的 item 高度差（newH - oldH）。
- * 返回值 > 0 表示内容下移了，应把 scrollTop 往下加；< 0 表示往上减；0 表示无影响。
- * 下方 item（top >= scrollTop）不补偿（不影响视口）。
- */
-export function applyMeasuredBatch(params: AnchorParams): number {
-  let compensation = 0;
-  for (const path of params.changedPaths) {
-    const item = params.oldLayout.get(path);
-    if (!item) continue;
-    if (item.top < params.scrollTop) {
-      const oldH = params.oldHeights[path] ?? item.height;
-      const newH = params.newHeights[path] ?? item.height;
-      compensation += newH - oldH;
-    }
-  }
-  return compensation;
-}
-
 /**
  * viewport anchor：resize 后保持视觉焦点不漂移（spec v0.1.0-module3.0.8 task-21）。
  * - 捕获：旧 layout + scrollTop → 找出穿过顶线且 top 最大的图片，记录 (path, ratio)。

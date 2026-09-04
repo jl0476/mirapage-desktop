@@ -551,8 +551,8 @@ async function triggerDimensionPrefetch(relPaths: string[]): Promise<void> {
 // v0.1.0-module3.0.8 fix: watch 像素窗口中心的 dimensionPrefetchPaths（替代 needPrefetch 翻转触发）。
 // immediate 挂载即触发首次预读；flush:'post' 确保 layout 重排后触发。返回深处时第一批
 // 请求就是视口附近，真实尺寸到达后卡片从错误占位收敛为正确比例。
-// 尺寸收敛期间的视觉跳动不在锚定覆盖范围内（resize anchor 只挂在 ResizeObserver 上）；
-// 测量批次到达的渐进收敛是预期表现，视口补偿属后续独立模块（DESIGN §16.2 G 项）。
+// 尺寸收敛期间的视口稳定由 commitMeasuredMap 锚定补偿保证（§16.2 G 项，2026-09-03）：
+// 估算→真实的占位收敛仍会发生（卡片内部变高变矮），但视口顶线内容不再被推走。
 watch(
   dimensionPrefetchPaths,
   (paths) => {

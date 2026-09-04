@@ -4,7 +4,7 @@
  * 核心断言：MasonryView 不再构造脱离 DOM 的原图 `new Image()` 预读（缩略图队列取代）。
  * 通过读取源码字符串守卫，防止以后重新引入大图预解码（卡顿根因）。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -172,7 +172,10 @@ vi.mock('@/composables/useMasonryThumbnails', () => ({
 
 /** 测试捕获 useMasonryLayout 收到的 params（断言布局输入契约）。 */
 const layoutParams = vi.hoisted(() => ({
-  current: null as { entries: { value: readonly unknown[] } } | null,
+  current: null as {
+    entries: { value: readonly unknown[] };
+    measuredMap: { value: Map<string, { width: number; height: number }> };
+  } | null,
 }));
 
 vi.mock('@/composables/useMasonryLayout', async () => {
