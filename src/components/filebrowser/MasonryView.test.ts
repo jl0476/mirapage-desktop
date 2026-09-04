@@ -181,10 +181,27 @@ vi.mock('@/composables/useMasonryLayout', async () => {
   );
   return {
     ...actual,
-    useMasonryLayout: (params: { entries: { value: readonly unknown[] } }) => {
+    useMasonryLayout: (params: {
+      entries: { value: readonly unknown[] };
+      measuredMap: { value: Map<string, { width: number; height: number }> };
+    }) => {
       layoutParams.current = params;
       return {
-        layout: computed(() => ({ map: fakeLayoutMap.current, totalHeight: 1000 })),
+        // §16.2 G 混合派生：fakeLayoutMap 非空 → 沿用静态预填（resize/scrollToEntry 等
+        // 既有用例零改动）；为空 → 从 measuredMap 派生单列布局（真实语义：提交
+        // measuredMap → layout 响应失效），header 异步批用例靠它免去「手动翻布局卡
+        // capture/restore 之间」——微任务泵下手动翻不进那个窗口（flush 会先跑 restore）。
+        layout: computed(() => {
+          if (fakeLayoutMap.current.size > 0) return { map: fakeLayoutMap.current, totalHeight: 1000 };
+          const derived = new Map<string, MasonryItem>();
+          let top = 0;
+          for (const e of params.entries.value as readonly { path: string }[]) {
+            const h = params.measuredMap.value.get(e.path)?.height ?? 100;
+            derived.set(e.path, { path: e.path, width: 200, height: h, top, left: 0, col: 0 });
+            top += h;
+          }
+          return { map: derived, totalHeight: Math.max(1000, top) };
+        }),
         visibleRange: computed(() => ({ start: 0, end: 2 })),
         dimensionPrefetchPaths: computed(() => prefetchPathsMock.current),
         colWidth: computed(() => 200),
@@ -281,7 +298,7 @@ describe('MasonryView.settings 闭环', () => {
     // 直接改 ref（settings 初始默认 true）；不走 update() 避免触发 Tauri invoke
     settings.recordBrowsePosition = false;
 
-    mount(MasonryView, {
+    const w = mount(MasonryView, {
       props: baseProps,
       global: { plugins: [pinia, i18n] },
       attachTo: document.body,
@@ -291,6 +308,7 @@ describe('MasonryView.settings 闭环', () => {
 
     expect(browsePositionParams.current).not.toBeNull();
     expect(browsePositionParams.current!.enabled.value).toBe(false);
+    w.unmount(); // §16.2 G：残留实例的 prefetch watcher 会跨用例消费 mock（响应化后激活）
     // restoreBrowsePositionOnEnter 没动 → 仍 true
     expect(browsePositionParams.current!.autoRestoreOnMount.value).toBe(true);
   });
@@ -300,7 +318,7 @@ describe('MasonryView.settings 闭环', () => {
     const settings = useSettingsStore(pinia);
     settings.restoreBrowsePositionOnEnter = false;
 
-    mount(MasonryView, {
+    const w = mount(MasonryView, {
       props: baseProps,
       global: { plugins: [pinia, i18n] },
       attachTo: document.body,
@@ -310,6 +328,7 @@ describe('MasonryView.settings 闭环', () => {
 
     expect(browsePositionParams.current).not.toBeNull();
     expect(browsePositionParams.current!.autoRestoreOnMount.value).toBe(false);
+    w.unmount(); // §16.2 G：同上
     // recordBrowsePosition 没动 → 仍 true
     expect(browsePositionParams.current!.enabled.value).toBe(true);
   });
@@ -751,7 +770,7 @@ describe('MasonryView 混排占位', () => {
   });
 
   it('布局输入含全部 entries（不因 isImage 截断——占位参与瀑布流）', async () => {
-    mount(MasonryView, {
+    const w = mount(MasonryView, {
       props: mixedProps,
       global: { plugins: [createPinia(), i18n] },
       attachTo: document.body,
@@ -760,6 +779,7 @@ describe('MasonryView 混排占位', () => {
     await nextTick();
     expect(layoutParams.current).not.toBeNull();
     expect(layoutParams.current!.entries.value.length).toBe(3);
+    w.unmount(); // §16.2 G：同上
   });
 
   it('窗口全为非图片时 loading 不永挂（占位卡即内容，无需测量）', async () => {
@@ -1000,6 +1020,12 @@ describe('MasonryView 测量批次锚定补偿 (§16.2 G)', () => {
     setActivePinia(createPinia());
     fakeLayoutMap.current = new Map<string, MasonryItem>();
     prefetchPathsMock.current = [];
+    // mock 卫生（对齐 measuredMap 陈旧守卫 describe 的既有模式）：reset 清 Once 队列 +
+    // 回填默认 []。文件历史上有 mount 不 unmount 的泄漏用例（已修 3 处），残留实例的
+    // prefetch watcher 会在本 describe 设 paths 时一并触发并消费 IPC——reset 保证
+    // mockImplementationOnce 一定落在本用例自己的调用上。
+    vi.mocked(listImageDimensions).mockReset();
+    vi.mocked(listImageDimensions).mockResolvedValue([]);
   });
   // 审核建议：stub 清理放 afterEach——断言失败时不跳过，防泄漏到后续用例
   afterEach(() => {
@@ -1034,6 +1060,39 @@ describe('MasonryView 测量批次锚定补偿 (§16.2 G)', () => {
     await nextTick();
 
     // 锚定恢复：target = a.top + a.height × 0.5 = 112；未补偿则停留 50
+    expect(containerEl.scrollTop).toBe(112);
+    w.unmount();
+  });
+
+  it('header 批回包（listImageDimensions 异步）→ 同图同 ratio 补偿', async () => {
+    // 派生模式：不设 fakeLayoutMap——layout 从 measuredMap 派生（a/b 初始 h100），
+    // 回包写入 a=224 后布局自动重算，无需手动翻（微任务泵下手动翻不进 capture/restore 窗口）
+    let resolveDims: (v: { path: string; width: number; height: number }[]) => void = () => {};
+    vi.mocked(listImageDimensions).mockImplementationOnce(
+      () => new Promise((r) => { resolveDims = r; }) as Promise<{ path: string; width: number; height: number }[]>,
+    );
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    containerEl.scrollTop = 50; // 顶线落在派生 a(0..100) 内，ratio 0.5
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    // 触发 header 预读（watch(dimensionPrefetchPaths) flush post）
+    prefetchPathsMock.current = ['a.jpg'];
+    await nextTick();
+
+    // 回包到达：提交在微任务里发生（锚点按批前派生布局捕获），泵微任务直到提交完成
+    resolveDims([{ path: 'vol02/a.jpg', width: 100, height: 224 }]);
+    for (let i = 0; i < 50 && !(layoutParams.current as { measuredMap: { value: Map<string, unknown> } }).measuredMap.value.has('a.jpg'); i++) {
+      await Promise.resolve();
+    }
+    await nextTick();
+    await nextTick();
+
+    // 派生布局 a h224 → restore target = 0 + 224×0.5 = 112；未补偿则停留 50
     expect(containerEl.scrollTop).toBe(112);
     w.unmount();
   });
