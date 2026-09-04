@@ -1272,4 +1272,105 @@ describe('MasonryView 测量批次锚定补偿 (§16.2 G)', () => {
     expect(containerEl.scrollTop).toBeCloseTo(224 / 3, 5);
     w.unmount();
   });
+
+  it('空锚（entries 无对应图项）→ 不写 scrollTop（header 驱动，不经 MasonryRow）', async () => {
+    // fakeLayoutMap 填「无关路径」：混合派生走静态分支，entries 无 item 可捕 → null
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['zzz.jpg', { path: 'zzz.jpg', width: 200, height: 100, top: 0, left: 0, col: 0 }],
+    ]);
+    let resolveDims: (v: { path: string; width: number; height: number }[]) => void = () => {};
+    vi.mocked(listImageDimensions).mockImplementationOnce(
+      () => new Promise((r) => { resolveDims = r; }) as Promise<{ path: string; width: number; height: number }[]>,
+    );
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    containerEl.scrollTop = 30;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    prefetchPathsMock.current = ['a.jpg'];
+    await nextTick();
+    resolveDims([{ path: 'vol02/a.jpg', width: 100, height: 224 }]);
+    for (let i = 0; i < 50 && !(layoutParams.current as { measuredMap: { value: Map<string, unknown> } }).measuredMap.value.has('a.jpg'); i++) {
+      await Promise.resolve();
+    }
+    await nextTick();
+    await nextTick();
+
+    expect(containerEl.scrollTop).toBe(30); // loose/严格捕获均 null → 跳过恢复
+    w.unmount();
+  });
+
+  it('顶线落入所有列 gap（无相交图）→ loose 锚按「下边缘+偏移」补偿', async () => {
+    // 双列：col0 a(0,h10)、col1 b(0,h8)——单列造数无法产生 gap（列内连续）
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['a.jpg', { path: 'a.jpg', width: 200, height: 10, top: 0, left: 0, col: 0 }],
+      ['b.jpg', { path: 'b.jpg', width: 200, height: 8, top: 0, left: 208, col: 1 }],
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    containerEl.scrollTop = 15; // 顶线在两列内容之下（a 止于 10、b 止于 8）
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    const rows = w.findAllComponents(MasonryRow);
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    // a.jpg 长高 10 → 22.4（真实时序翻布局）
+    fakeLayoutMap.current = new Map<string, MasonryItem>([
+      ['a.jpg', { path: 'a.jpg', width: 200, height: 22.4, top: 0, left: 0, col: 0 }],
+      ['b.jpg', { path: 'b.jpg', width: 200, height: 8, top: 0, left: 208, col: 1 }],
+    ]);
+    await nextTick();
+
+    // loose：anchor={a, belowOffset:5} → target = 0+22.4+5 = 27.4；未补偿停留 15
+    expect(containerEl.scrollTop).toBeCloseTo(27.4, 5);
+    w.unmount();
+  });
+
+  it('resize 进行中测量提交让位——复用 resize 锚恢复（正向时序判别）', async () => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    clearResizeCbs();
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    Object.defineProperty(containerEl, 'clientWidth', { configurable: true, value: 900 });
+    containerEl.scrollTop = 50; // resize 锚捕获基线：{a, .5}
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    fireResize(); // beginResizeAnchor 捕 {a,.5}@v1 + 调度 resize 恢复（nextTick）
+    // 先翻布局 v2（a h224），再提交测量——若测量自捕锚（v2 + scrollTop 50 → ratio 50/224
+    // → 恢复 50 = 无补偿），让位实现复用 resize 锚 {a,.5} → 112
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 224 },
+      { path: 'b.jpg', top: 224, height: 776 },
+    ]);
+    const rows = w.findAllComponents(MasonryRow);
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    await nextTick();
+    await nextTick();
+
+    expect(containerEl.scrollTop).toBe(112);
+    w.unmount();
+  });
+
+  it('两条测量提交路径均收口 commitMeasuredMap（接线断言）', () => {
+    const source = readFileSync(resolve(__dirname, './MasonryView.vue'), 'utf-8');
+    const onRow = source.slice(source.indexOf('function onRowMeasured'));
+    expect(onRow.slice(0, onRow.indexOf('function triggerDimensionPrefetch'))).toContain('commitMeasuredMap(');
+    const prefetch = source.slice(source.indexOf('async function triggerDimensionPrefetch'));
+    expect(prefetch.slice(0, prefetch.indexOf('watch('))).toContain('commitMeasuredMap(');
+  });
 });
