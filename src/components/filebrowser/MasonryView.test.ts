@@ -1096,4 +1096,180 @@ describe('MasonryView 测量批次锚定补偿 (§16.2 G)', () => {
     expect(containerEl.scrollTop).toBe(112);
     w.unmount();
   });
+
+  it('同批多次提交共享首个锚点（不按批中布局重捕）', async () => {
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    containerEl.scrollTop = 50;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    const rows = w.findAllComponents(MasonryRow);
+    // 提交 1（a）：捕获锚点自 v1（a.jpg, ratio .5）
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    // 翻布局 v2 后同批再提交 2（b）：若实现错误地在批中重捕（v2 + scrollTop 50 →
+    // ratio 50/224 → 恢复 50 = 无补偿），正确则仍用首锚 → 恢复 112
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 224 },
+      { path: 'b.jpg', top: 224, height: 776 },
+    ]);
+    rows[1].vm.$emit('row-measured', baseProps.entries[1], 856, 1920);
+    await nextTick();
+
+    expect(containerEl.scrollTop).toBe(112);
+    w.unmount();
+  });
+
+  it('提交后、恢复前切目录且新目录有同名文件 → 不写 scrollTop（竞态守卫）', async () => {
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    containerEl.scrollTop = 50;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    // 提交（锚 a.jpg@v1 入闭包），随后切目录：watcher 失效（seq 越过 + pending 复位）
+    const rows = w.findAllComponents(MasonryRow);
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    await w.setProps({ currentPath: 'vol03' });
+    // 新目录同名单图、更长（若无守卫，旧锚 a.jpg 命中 → scrollTop 被改写 112）
+    fakeLayoutMap.current = col([{ path: 'a.jpg', top: 0, height: 224 }]);
+    await nextTick();
+    await nextTick();
+
+    expect(containerEl.scrollTop).toBe(50); // 守卫生效：恢复被丢弃
+    w.unmount();
+  });
+
+  it('旧批失效 → 新批已开启 → 旧回调不清掉新批（闭包批次判别）', async () => {
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    containerEl.scrollTop = 50;
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    const rows = w.findAllComponents(MasonryRow);
+    // 批 A（vol02）：闭包锚 {a, .5}
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    // 切目录 → 批 A 失效（seq 越过）；新目录同构布局，scrollTop 仍 50
+    await w.setProps({ currentPath: 'vol03' });
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    // 批 B（vol03）：pending 已复位 → 开新批，闭包锚 {a, .5}
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    // 布局长高（a → 224）。若旧 A 回调先清共享锚再查 seq（共享态实现），B 无锚可恢复 → 50；
+    // 闭包实现：A 的回调 seq 不符直接 return，B 恢复 → 112
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 224 },
+      { path: 'b.jpg', top: 224, height: 776 },
+    ]);
+    await nextTick();
+    await nextTick();
+
+    expect(containerEl.scrollTop).toBe(112);
+    w.unmount();
+  });
+
+  it('resize 活跃 → 切目录 → 新目录同名文件测量 → 不恢复旧 scrollTop（resize 锚跨目录判别）', async () => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    clearResizeCbs();
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    Object.defineProperty(containerEl, 'clientWidth', { configurable: true, value: 900 });
+    containerEl.scrollTop = 50; // resize 锚捕获基线：{a, .5}
+    containerEl.dispatchEvent(new Event('scroll'));
+    await nextTick();
+
+    fireResize(); // resizeAnchor 活跃（150ms 释放窗内）
+    // 切目录：watcher 失效测量 + resize 两套锚；若无 resize 失效，新目录测量的
+    // 让位分支会复用旧 resize 锚 {a,.5} → 恢复 112（错）
+    await w.setProps({ currentPath: 'vol03' });
+    fakeLayoutMap.current = col([{ path: 'a.jpg', top: 0, height: 224 }]); // 新目录同名更长
+    const rows = w.findAllComponents(MasonryRow);
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    await nextTick();
+    await nextTick();
+
+    // 正确路径：resize 锚已失效 → 走测量自捕（v2 a 高 224，scrollTop 50 → ratio 50/224
+    // → 恢复目标恰 50，无写）；旧锚未失效则 112
+    expect(containerEl.scrollTop).toBe(50);
+    w.unmount();
+  });
+
+  it('测量批 pending → resize 开始 → 测量回调让位（写次数=1 锁单一写入者）', async () => {
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    clearResizeCbs();
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 100 },
+      { path: 'b.jpg', top: 100, height: 900 },
+    ]);
+    const w = mountView();
+    await flushPromises();
+    await nextTick();
+    const containerEl = w.element.querySelector('.masonry-container') as HTMLElement;
+    Object.defineProperty(containerEl, 'clientHeight', { configurable: true, value: 800 });
+    Object.defineProperty(containerEl, 'clientWidth', { configurable: true, value: 900 });
+    // scrollTop 用 get/set 背衬计数——两个恢复都经 containerEl.scrollTop 写入，次数即写入者数
+    const backing = { v: 50, writes: 0 };
+    Object.defineProperty(containerEl, 'scrollTop', {
+      configurable: true,
+      get: () => backing.v,
+      set: (x: number) => { backing.v = x; backing.writes += 1; },
+    });
+    containerEl.dispatchEvent(new Event('scroll')); // 同步 useVirtualList scrollTop.value=50
+    await nextTick();
+
+    // 批 A（测量）：闭包锚 {a, .5}@v1（50 落在 a(0..100) 内）
+    const rows = w.findAllComponents(MasonryRow);
+    rows[0].vm.$emit('row-measured', baseProps.entries[0], 856, 1920);
+    // 翻中间布局 v_mid（a h150）再开 resize——resize 锚自 v_mid 捕（{a, 1/3}），
+    // 与测量锚不同值，确保两写入者的目标可区分
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 150 },
+      { path: 'b.jpg', top: 150, height: 850 },
+    ]);
+    fireResize(); // RO：beginResizeAnchor({a,1/3}@v_mid) + 失效测量批（seq 越过）+ 调度 resize 恢复
+    // 终布局 v2（a h224）
+    fakeLayoutMap.current = col([
+      { path: 'a.jpg', top: 0, height: 224 },
+      { path: 'b.jpg', top: 224, height: 776 },
+    ]);
+    await nextTick();
+    await nextTick();
+
+    // 单一写入者：仅 resize 恢复（0 + 224×1/3 ≈ 74.67）；测量回调 seq 不符让位。
+    // 若无 RO 失效：测量先写 112（其锚 .5×224）再被 resize 覆盖 → writes=2
+    expect(backing.writes).toBe(1);
+    expect(containerEl.scrollTop).toBeCloseTo(224 / 3, 5);
+    w.unmount();
+  });
 });
